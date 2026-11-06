@@ -198,12 +198,17 @@ impl PrefixCache {
         }
     }
 
-    fn find_child(&self, parent: usize, tokens: &[i64]) -> Option<usize> {
+    /// The child of `parent` that holds `tokens` *under the chain hash `hash`*. Two identities (a deployment salt, a request's
+    /// `cache_salt`) can hold the same tokens at the same place of the tree; they are different blocks and must stay apart, so the tokens
+    /// alone are not the key.
+    fn find_child(&self, parent: usize, tokens: &[i64], hash: u64) -> Option<usize> {
         self.nodes[parent]
             .as_ref()?
             .children
             .iter()
-            .find(|(page, _)| page == tokens)
+            .find(|(page, child)| {
+                page == tokens && self.nodes[*child].as_ref().is_some_and(|node| node.chain_hash == Some(hash))
+            })
             .map(|(_, child)| *child)
     }
 
@@ -237,16 +242,13 @@ impl PrefixCache {
         let mut node_index = 0;
         let mut matched = 0;
         for (chain_hash, tokens) in hashes.iter().zip(tokens_per_block) {
-            let Some(child_index) = self.find_child(node_index, tokens) else {
+            let Some(child_index) = self.find_child(node_index, tokens, *chain_hash) else {
                 break;
             };
             let child = self.nodes[child_index].as_ref().expect("child node");
-            let (Some(block_id), Some(stored_hash)) = (child.block_id, child.chain_hash) else {
+            let (Some(block_id), Some(_)) = (child.block_id, child.chain_hash) else {
                 break;
             };
-            if stored_hash != *chain_hash {
-                break;
-            }
             claim(block_id)?;
             if self.blocks.contains_key(chain_hash) {
                 self.touch(*chain_hash);
@@ -263,7 +265,19 @@ impl PrefixCache {
         claim_ref: &mut dyn FnMut(i64) -> Result<(), PrefixCacheError>,
         release_ref: &mut dyn FnMut(i64) -> Result<(), PrefixCacheError>,
     ) -> Result<(), PrefixCacheError> {
-        let mut previous_hash = 0u64;
+        self.insert_path_from(0, entries, claim_ref, release_ref)
+    }
+
+    /// `insert_path` for a chain whose first hash starts from `root` (the identity of the request: the deployment seed xor the
+    /// request's salt; `0` for the default identity).
+    pub fn insert_path_from(
+        &mut self,
+        root: u64,
+        entries: &[PrefixEntry],
+        claim_ref: &mut dyn FnMut(i64) -> Result<(), PrefixCacheError>,
+        release_ref: &mut dyn FnMut(i64) -> Result<(), PrefixCacheError>,
+    ) -> Result<(), PrefixCacheError> {
+        let mut previous_hash = root;
         for entry in entries {
             let expected = Self::hash_chain(previous_hash, &entry.tokens);
             if entry.chain_hash != expected {
@@ -276,7 +290,7 @@ impl PrefixCache {
 
         let mut node_index = 0;
         for entry in entries {
-            let existing = self.find_child(node_index, &entry.tokens);
+            let existing = self.find_child(node_index, &entry.tokens, entry.chain_hash);
             let child_index = if let Some(index) = existing {
                 index
             } else {
@@ -330,13 +344,7 @@ impl PrefixCache {
         claim_ref: &mut dyn FnMut(i64) -> Result<(), PrefixCacheError>,
         release_ref: &mut dyn FnMut(i64) -> Result<(), PrefixCacheError>,
     ) -> Result<(), PrefixCacheError> {
-        if let Some(child_index) = self.find_child(0, &tokens) {
-            let child = self.nodes[child_index].as_ref().expect("root child");
-            if child.chain_hash != Some(chain_hash) {
-                return Err(PrefixCacheError::Runtime(
-                    "root token page already has a different prefix hash".to_owned(),
-                ));
-            }
+        if self.find_child(0, &tokens, chain_hash).is_some() {
             if self.blocks.contains_key(&chain_hash) {
                 self.touch(chain_hash);
             }
@@ -374,7 +382,6 @@ impl PrefixCache {
                 "only radix leaves can be removed".to_owned(),
             ));
         }
-        let tokens = node.tokens.clone().expect("leaf token page");
         let chain_hash = node.chain_hash;
         let block_id = node.block_id;
         let parent_index = node.parent.expect("leaf parent");
@@ -382,7 +389,7 @@ impl PrefixCache {
             .as_mut()
             .expect("parent node")
             .children
-            .retain(|(page, _)| *page != tokens);
+            .retain(|(_, child)| *child != node_index);
         if let Some(hash) = chain_hash {
             self.remove_block(hash);
             self.by_hash.remove(&hash);
@@ -633,5 +640,34 @@ mod tests {
         assert!(
             matches!(cache.clear(&mut release_no_ref), Err(PrefixCacheError::Runtime(message)) if message == "owning cache requires release_ref to clear")
         );
+    }
+
+    #[test]
+    fn two_identities_with_the_same_tokens_stay_two_blocks_and_leave_one_another_alone() {
+        // the same tokens at the same place of the tree under two different roots (two salts): each lookup finds its own block only
+        let mut cache = PrefixCache::new(0, false, false).unwrap();
+        let tokens = [1, 2, 3, 4];
+        let (root_a, root_b) = (111u64, 222u64);
+        let a = entry(root_a, 10, &tokens);
+        let b = entry(root_b, 20, &tokens);
+        assert_ne!(a.chain_hash, b.chain_hash);
+        let mut claim = |_block_id| Ok(());
+        let mut release = |_block_id| Ok(());
+        cache.insert_path_from(root_a, std::slice::from_ref(&a), &mut claim, &mut release).unwrap();
+        cache.insert_path_from(root_b, std::slice::from_ref(&b), &mut claim, &mut release).unwrap();
+        assert_eq!(cache.len(), 2, "the second identity was folded into the node of the first");
+        let page = vec![tokens.to_vec()];
+        let mut got = Vec::new();
+        assert_eq!(cache.match_blocks(&[a.chain_hash], &page, &mut |block| { got.push(block); Ok(()) }).unwrap(), 1);
+        assert_eq!(cache.match_blocks(&[b.chain_hash], &page, &mut |block| { got.push(block); Ok(()) }).unwrap(), 1);
+        assert_eq!(got, vec![10, 20], "each identity gets its own block");
+        // a hash of a third identity finds neither
+        assert_eq!(cache.match_blocks(&[PrefixCache::hash_chain(333, &tokens)], &page, &mut |_| Ok(())).unwrap(), 0);
+        // evicting one of them leaves the other in place
+        let mut may_free = |_block_id: i64| Ok(true);
+        assert_eq!(cache.evict_oldest(&mut may_free).unwrap(), 1);
+        assert_eq!(cache.len(), 1);
+        let left = if cache.contains(a.chain_hash) { &a } else { &b };
+        assert_eq!(cache.match_blocks(&[left.chain_hash], &page, &mut |_| Ok(())).unwrap(), 1, "the block that was not evicted is gone too");
     }
 }

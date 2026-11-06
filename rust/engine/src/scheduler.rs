@@ -739,7 +739,7 @@ impl Scheduler {
                 .dec_ref(bid)
                 .map_err(PrefixCacheError::from)
         };
-        pc.insert_path(&entries, &mut claim, &mut release)?;
+        pc.insert_path_from(prefix_seed(), &entries, &mut claim, &mut release)?;
         Ok(true)
     }
 
@@ -892,6 +892,8 @@ impl Scheduler {
             (s.tokens.clone(), s.num_computed)
         };
         let full = num_computed / self.cfg.block_size;
+        // the chain starts where the lookup in `try_admit` starts: at the deployment seed xor the salt of the request
+        let (root, salt) = (prefix_seed() ^ self.sequences[&sid].prefix_salt, self.sequences[&sid].prefix_salt);
         let table = self.bm.get_table(sid)?;
         let mut entries = vec![];
         {
@@ -904,7 +906,7 @@ impl Scheduler {
                 let prev = if b > 0 {
                     seq.block_hashes[b - 1]
                 } else {
-                    Some(0)
+                    Some(root)
                 };
                 let Some(prev) = prev else { break };
                 let h = seq.block_hashes[b].unwrap_or_else(|| PrefixCache::hash_chain(prev, &seg));
@@ -933,12 +935,15 @@ impl Scheduler {
             };
             pc.as_mut()
                 .unwrap()
-                .insert_path(&entries, &mut claim, &mut release)?;
-            // (own hash, parent hash, block, tokens) — the parent is what makes a chain rebuildable later
-            let mut parent = 0u64;
-            for entry in &entries {
-                self.pending_spills.push((entry.chain_hash, parent, entry.block_id, entry.tokens.clone()));
-                parent = entry.chain_hash;
+                .insert_path_from(root, &entries, &mut claim, &mut release)?;
+            // (own hash, parent hash, block, tokens) — the parent is what makes a chain rebuildable later. Only the blocks of requests
+            // without a `cache_salt` go to the disk tier: the salt of a request is not known when the server starts again.
+            if salt == 0 {
+                let mut parent = prefix_seed();
+                for entry in &entries {
+                    self.pending_spills.push((entry.chain_hash, parent, entry.block_id, entry.tokens.clone()));
+                    parent = entry.chain_hash;
+                }
             }
         }
         Ok(())

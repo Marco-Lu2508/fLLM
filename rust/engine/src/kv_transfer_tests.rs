@@ -242,3 +242,71 @@ fn the_blocks_filled_while_generating_serve_the_next_turn() {
     let reusable = (first.len() + answer.len()) / block * block;
     assert_eq!(cached, reusable, "the second turn reused {cached} tokens of {reusable} that were computed in the first");
 }
+
+/// Runs one request under `salt` and returns how many prompt tokens came from the cache.
+fn cached_under_salt(rt: &mut InferenceRuntime, id: &str, prompt: &[i64], salt: u64) -> usize {
+    rt.submit_with_sampling(id.into(), prompt.to_vec(), 2, SamplingParams::default()).unwrap();
+    rt.set_request_prefix_salt(id, salt);
+    let mut cached = 0;
+    while rt.active_requests() > 0 {
+        for event in rt.step().unwrap() {
+            cached = cached.max(event.cached_prompt_tokens);
+        }
+    }
+    cached
+}
+
+/// A request with a `cache_salt` must find the blocks that an earlier request with the same salt left, and nobody else's. The chain of
+/// hashes starts at `seed ^ salt` when a prompt is looked up; it has to start there when the blocks are registered, too.
+#[test]
+fn a_salted_request_reuses_the_blocks_of_its_own_salt_and_of_nobody_else() {
+    let mut rt = runtime();
+    let block = rt.scheduler.cfg.block_size;
+    let long = prompt(4 * block + 3);
+    assert_eq!(cached_under_salt(&mut rt, "a1", &long, 77), 0, "nothing is cached yet");
+    assert_eq!(cached_under_salt(&mut rt, "a2", &long, 77), 4 * block, "the same salt reuses its own blocks");
+    assert_eq!(cached_under_salt(&mut rt, "b1", &long, 78), 0, "another salt must not see them");
+    assert_eq!(cached_under_salt(&mut rt, "n1", &long, 0), 0, "nor the requests without a salt");
+    assert_eq!(cached_under_salt(&mut rt, "n2", &long, 0), 4 * block, "and those reuse their own");
+}
+
+/// The other direction of the isolation: what a salted request left behind must not be visible to a request without a salt either.
+#[test]
+fn what_a_salted_request_left_is_not_served_to_an_unsalted_one() {
+    let mut rt = runtime();
+    let block = rt.scheduler.cfg.block_size;
+    let long = prompt(4 * block + 3);
+    assert_eq!(cached_under_salt(&mut rt, "s1", &long, 77), 0);
+    assert_eq!(cached_under_salt(&mut rt, "u1", &long, 0), 0, "an unsalted request was served the blocks of a salted one");
+}
+
+/// The disk tier is read back by a server that does not know the salt of a request, so the blocks of a salted request stay out of it
+/// (they would be written under a chain that no unsalted lookup can ever reach, and take room from blocks that can be read back).
+#[test]
+fn the_blocks_of_a_salted_request_do_not_go_to_the_disk_tier() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-salt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut rt = runtime_with_disk_tier(&dir);
+    let block = rt.scheduler.cfg.block_size;
+    let long = prompt(3 * block + 3);
+    assert_eq!(cached_under_salt(&mut rt, "salted", &long, 5), 0);
+    for _ in 0..40 {
+        rt.spill_pending();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(rt.kv_tier.entries().is_empty(), "{} blocks of a salted request reached the disk", rt.kv_tier.entries().len());
+    // the control: the same prompt without a salt is written
+    let mut other = prompt(3 * block + 3);
+    other[0] += 1;
+    generate(&mut rt, "plain", &other, 2);
+    for _ in 0..200 {
+        rt.spill_pending();
+        if !rt.kv_tier.entries().is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(!rt.kv_tier.entries().is_empty(), "the control wrote nothing, so the test above proves nothing");
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1543,7 +1543,8 @@ impl InferenceRuntime {
             list.sort_by_key(|block| block.hash);
         }
         let mut registered = 0usize;
-        let mut roots: Vec<u64> = children.keys().copied().filter(|parent| *parent == 0).collect();
+        let seed = crate::scheduler::prefix_seed();
+        let mut roots: Vec<u64> = children.keys().copied().filter(|parent| *parent == seed).collect();
         if roots.is_empty() {
             // a tier that only holds a middle of a chain cannot be rebuilt: without the root the hash chain is unverifiable
             return Ok(0);
