@@ -145,3 +145,70 @@ fn nothing_is_exported_for_a_prompt_that_was_not_prefilled() {
     let chain = rt.kv_export_prompt(&prompt(40)).unwrap();
     assert!(chain.blocks.is_empty());
 }
+
+/// A runtime whose disk tier is the given directory (the tier is read from the environment at construction; a test must not change the
+/// environment of the process, other tests run beside it).
+fn runtime_with_disk_tier(dir: &std::path::Path) -> InferenceRuntime {
+    let mut rt = runtime();
+    let tier = std::sync::Arc::new(crate::mem::kv_tier::KvTier::at(dir, 64 << 20));
+    rt.spill_tx = spawn_spill_writer(std::sync::Arc::clone(&tier));
+    rt.kv_tier = tier;
+    rt
+}
+
+/// The disk tier across a restart: a second runtime that finds the blocks of the first one on disk must serve the shared prefix from
+/// them (a prefix-cache hit on the first request) and give exactly the tokens a runtime without any tier computes. A wrong block would
+/// show up as different tokens. The same thing was measured on a real model: 1408 of 1414 prompt tokens from disk, 7.7 s -> 0.6 s.
+#[test]
+fn a_restarted_runtime_serves_the_prefix_from_the_disk_tier_and_gives_the_same_tokens() {
+    let long = prompt(60);
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-disk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let mut first = runtime_with_disk_tier(&dir);
+    let block = first.scheduler.cfg.block_size;
+    let reference = generate(&mut first, "one", &long, 8);
+    // the spill writer is a thread behind a queue: wait for the blocks of the prompt
+    let want = long.len() / block;
+    for _ in 0..200 {
+        first.spill_pending();
+        if first.kv_tier.entries().len() >= want {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(first.kv_tier.entries().len() >= want, "{} of {want} blocks reached the disk", first.kv_tier.entries().len());
+    drop(first);
+
+    let mut second = runtime_with_disk_tier(&dir);
+    assert_eq!(second.warm_prefix_cache(128).unwrap(), want, "every block of the chain is read back");
+    second.kv_warmed = true;
+    let hits = second.scheduler.prefix_cache_hits;
+    let tokens = generate(&mut second, "two", &long, 8);
+    assert_eq!(tokens, reference, "generation from blocks read back from disk differs from a local prefill");
+    assert_eq!(second.scheduler.prefix_cache_hits, hits + 1, "the request did not use the blocks read back from disk");
+
+    // a control without a tier computes the same tokens and has no hit
+    let mut control = runtime();
+    assert_eq!(generate(&mut control, "ctl", &long, 8), reference);
+    assert_eq!(control.scheduler.prefix_cache_hits, 0);
+
+    // a block whose file was damaged is not read back as KV: the chain stops before it and the request still gives the right tokens
+    let damaged = {
+        let mut third = runtime_with_disk_tier(&dir);
+        let entries = third.kv_tier.entries();
+        // the second block of the chain is the one whose parent is the root block
+        let root = entries.iter().find(|e| e.parent == 0).expect("the root block").hash;
+        let victim = entries.iter().find(|e| e.parent == root).expect("a second block").hash;
+        let path = dir.join(format!("{victim:016x}.kv"));
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.truncate(bytes.len() - 5);
+        std::fs::write(&path, bytes).unwrap();
+        third.warm_prefix_cache(128).unwrap();
+        third.kv_warmed = true;
+        assert_eq!(generate(&mut third, "three", &long, 8), reference, "a truncated block changed the output");
+        third
+    };
+    drop(damaged);
+    let _ = std::fs::remove_dir_all(&dir);
+}

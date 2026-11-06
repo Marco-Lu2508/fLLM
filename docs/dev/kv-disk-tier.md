@@ -87,4 +87,19 @@ scheduling call and not, say, at the end of the request.
 Seven tests in `mem/kv_tier.rs`: roundtrip, miss without a file, foreign file ignored and removed, truncated payload
 refused, LRU budget drops the oldest, a block larger than the budget is not written, and "no directory means no tier".
 
+`runtime/kv_transfer_tests.rs` adds the end-to-end check on the tiny model: a restarted runtime reads every block of the chain
+back, serves the first request from them (a prefix-cache hit) and gives exactly the tokens of a runtime without any tier; a
+runtime without a tier has no hit; a block file shortened by five bytes is not read as KV and the output stays the same. With the
+read-back switched off the test fails on "every block of the chain is read back".
+
+**On a real model** (Qwen2.5-0.5B Q8_0, CPU, one process killed and a second one started on the same directory, output cache off):
+
+```
+process 1 (cold):     7.7 s, prompt 1414 tokens, cached 0,    88 files on disk
+process 2 (restart):  0.6 s, prompt 1414 tokens, cached 1408
+text equal: True      "warmed 88 prefix blocks from the disk tier"
+```
+
+13 times faster for the first request after a restart, and the same text.
+
 Nothing in this document needs a GPU.

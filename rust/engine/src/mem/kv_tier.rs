@@ -83,7 +83,7 @@ impl KvTier {
         parse(&buffer, hash).map(|stored| stored.0)
     }
 
-    /// Every block on disk, cheapest first (by chain depth, so a prefix can be rebuilt in order).
+    /// Every block on disk, in no particular order. A chain is put together from the `parent` hashes (`Runtime::warm_prefix_cache`).
     pub fn entries(&self) -> Vec<Stored> {
         let Some(dir) = self.dir.as_ref() else { return Vec::new() };
         let mut found: Vec<Stored> = Vec::new();
@@ -100,7 +100,6 @@ impl KvTier {
                 found.push(stored);
             }
         }
-        found.sort_by_key(|stored| stored.depth);
         found
     }
 
@@ -237,8 +236,6 @@ pub struct Stored {
     pub hash: u64,
     pub parent: u64,
     pub tokens: Vec<i64>,
-    /// How many blocks precede this one; 0 for a block that starts a prompt.
-    pub depth: u32,
 }
 
 /// Checks the header and returns the metadata plus the KV payload.
@@ -262,7 +259,7 @@ fn parse(buffer: &[u8], hash: u64) -> Option<(Stored, &[u8])> {
         let start = HEADER + i * 8;
         tokens.push(i64::from_le_bytes(buffer[start..start + 8].try_into().ok()?));
     }
-    Some((Stored { hash, parent, tokens, depth: 0 }, &buffer[tokens_end..]))
+    Some((Stored { hash, parent, tokens }, &buffer[tokens_end..]))
 }
 
 fn dir_size(dir: &Path) -> u64 {
