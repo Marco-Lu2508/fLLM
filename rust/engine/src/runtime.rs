@@ -72,6 +72,8 @@ pub struct PinOutcome {
 /// Blocks the reload reads back per scheduling round while sequences run, and while none does.
 const RELOAD_BUSY_BLOCKS: usize = 256;
 const RELOAD_IDLE_BLOCKS: usize = 16_384;
+/// Blocks per waiting prompt that are queued for the prefetch thread at once.
+const PREFETCH_BLOCKS: usize = 4_096;
 
 /// `(chain hash, tokens, block the prefix cache holds)` for each full block of a prompt.
 type PromptChain = Vec<(u64, Vec<i64>, Option<i64>)>;
@@ -117,6 +119,8 @@ pub struct InferenceRuntime {
     kv_reloaded: u64,
     /// Writes for the disk tier, off the step path: file I/O must never delay a token.
     spill_tx: Option<std::sync::mpsc::SyncSender<SpillJob>>,
+    /// Pokes the prefetch thread (see `spawn_prefetcher`).
+    prefetch_tx: Option<std::sync::mpsc::SyncSender<()>>,
     kv_warmed: bool,
     /// The suffix cache on disk (`FLLM_SUFFIX_DIR`): the file of this model and the state of the last write.
     suffix_file: Option<SuffixFile>,
@@ -213,6 +217,7 @@ impl InferenceRuntime {
         // the disk tier writes on its own thread: file I/O must never sit between two tokens
         let kv_tier = std::sync::Arc::new(crate::mem::kv_tier::KvTier::from_env());
         let spill_tx = spawn_spill_writer(std::sync::Arc::clone(&kv_tier));
+        let prefetch_tx = spawn_prefetcher(std::sync::Arc::clone(&kv_tier));
         Ok(Self {
             model,
             scheduler,
@@ -247,6 +252,7 @@ impl InferenceRuntime {
             kv_tier,
             kv_reloaded: 0,
             spill_tx,
+            prefetch_tx,
             kv_warmed: false,
             suffix_file: None,
             swap_store: Default::default(),
@@ -1648,6 +1654,7 @@ impl InferenceRuntime {
         let identity = format!("{weights}|{}", self.kv_fingerprint());
         let tier = std::sync::Arc::new(tier.with_identity(&identity));
         self.spill_tx = spawn_spill_writer(std::sync::Arc::clone(&tier));
+        self.prefetch_tx = spawn_prefetcher(std::sync::Arc::clone(&tier));
         self.kv_tier = tier;
     }
 
@@ -1741,6 +1748,37 @@ impl InferenceRuntime {
     /// when it is registered, so a dropped block is still there as long as the disk budget keeps it.) Only chains without a `cache_salt` are
     /// on disk. At most 256 blocks a round, and never so many that the free pool is used up: a block the cache holds can be evicted again,
     /// one a running sequence needs cannot. The read happens on the worker thread, between two rounds.
+    /// For the requests that wait behind the first one: the blocks of their prompts that the cache dropped and the disk has are queued for
+    /// the prefetch thread, which moves them into memory while the worker computes. When the request is admitted, the reload then finds
+    /// them in memory instead of reading the disk. Returns how many blocks were queued.
+    fn prefetch_for_waiting(&mut self) -> usize {
+        if self.prefetch_tx.is_none() || !self.scheduler.cfg.prefix_cache || self.scheduler.waiting.is_empty() {
+            return 0;
+        }
+        let waiting: Vec<i64> = self.scheduler.waiting.iter().copied().collect();
+        let mut hashes = Vec::new();
+        for sid in waiting {
+            let Some(sequence) = self.scheduler.sequences.get(&sid) else { continue };
+            if sequence.prefix_salt != 0 || sequence.has_media {
+                continue;
+            }
+            let tokens = sequence.tokens.clone();
+            let full = tokens.len().saturating_sub(1) / self.scheduler.cfg.block_size;
+            let chain = self.chain_of(&tokens, full);
+            // what the cache holds is not needed; the rest of the chain is, from the first block it lacks
+            if let Some(first) = chain.iter().position(|(_, _, block)| block.is_none()) {
+                hashes.extend(chain[first..].iter().map(|(hash, _, _)| *hash).take(PREFETCH_BLOCKS));
+            }
+        }
+        let queued = self.kv_tier.request_prefetch(&hashes);
+        if queued > 0 {
+            if let Some(tx) = &self.prefetch_tx {
+                let _ = tx.try_send(());
+            }
+        }
+        queued
+    }
+
     fn reload_for_waiting(&mut self) {
         // While sequences run, a long read would hold up their next token; with nobody running there is nobody to hold up, and a
         // long prefix (a whole codebase) should come back in one go.
@@ -2000,6 +2038,7 @@ impl InferenceRuntime {
                 count => tracing::info!("pinned {count} prefix blocks again, as before the restart"),
             }
         }
+        self.prefetch_for_waiting();
         self.reload_for_waiting();
         self.image_embeddings
             .retain(|sid, _| self.scheduler.sequences.contains_key(sid));
@@ -3096,6 +3135,25 @@ struct SpillJob {
 
 /// Starts the writer thread and returns the sending half. The queue is small on purpose: a block that cannot be queued is
 /// dropped, because a cache entry is worth less than a token.
+/// The thread that moves blocks from the disk into memory ahead of the request that will want them (`KvTier::request_prefetch`). It sleeps
+/// until the worker pokes it and works through the queue, so the worker never waits for the disk while sequences run. Without a memory tier
+/// and a folder there is nothing to do and no thread.
+fn spawn_prefetcher(tier: std::sync::Arc<crate::mem::kv_tier::KvTier>) -> Option<std::sync::mpsc::SyncSender<()>> {
+    if !tier.prefetch_possible() {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
+    std::thread::Builder::new()
+        .name("fllm-kv-prefetch".into())
+        .spawn(move || {
+            for () in rx {
+                while tier.prefetch_next() {}
+            }
+        })
+        .ok()?;
+    Some(tx)
+}
+
 fn spawn_spill_writer(tier: std::sync::Arc<crate::mem::kv_tier::KvTier>) -> Option<std::sync::mpsc::SyncSender<SpillJob>> {
     if !tier.enabled() {
         return None;

@@ -878,3 +878,100 @@ fn a_restart_gives_back_every_chain_and_the_shared_start_once() {
     assert_eq!((cached_a, cached_b), (4 * 16, 4 * 16), "a chain was not given back");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// While the worker is busy with one request, the blocks of the one behind it are moved from the disk into memory by the prefetch thread,
+/// so that its reload finds them there. Disk and memory together; the memory tier is emptied after the blocks were written (the pool has
+/// dropped them as well), which is the state of a server that has been busy for a while.
+#[test]
+fn a_waiting_prompt_is_prefetched_into_memory_before_its_reload() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-prefetch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut rt = runtime();
+    rt.use_tier_for(crate::mem::kv_tier::KvTier::at(&dir, 64 << 20).with_ram(64 << 20), "tiny");
+    rt.kv_warmed = true;
+    let block = rt.scheduler.cfg.block_size;
+    let a = prompt(4 * block + 3);
+    let reference = generate(&mut rt, "a", &a, 2);
+    let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
+    wait_for_the_disk(&mut rt, 4);
+    push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    rt.kv_tier.forget_memory();
+    assert_eq!(rt.kv_tier.stats()["ram_blocks"], 0);
+    // the request waits: the worker looks ahead
+    rt.submit_with_sampling("again".into(), a.clone(), 2, SamplingParams::default()).unwrap();
+    assert_eq!(rt.prefetch_for_waiting(), 4, "the four blocks of the waiting prompt are queued");
+    for _ in 0..400 {
+        if rt.kv_tier.stats()["prefetched_blocks"].as_u64().unwrap() >= 4 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(rt.kv_tier.stats()["prefetched_blocks"], 4, "the prefetch thread did not move the blocks");
+    // the four blocks of the waiting prompt are in memory (other prompts' blocks were written there by the traffic before)
+    let chain = rt.scheduler.cached_prompt_chain(&a);
+    assert_eq!(chain.len(), 4);
+    for (hash, _, _) in &chain {
+        assert!(rt.kv_tier.has_in_memory(*hash), "a block of the waiting prompt is not in memory");
+    }
+    // the reload now reads memory, not the disk
+    let ram_before = rt.kv_tier.stats()["ram_hits"].as_u64().unwrap();
+    rt.reload_for_waiting();
+    assert_eq!(rt.kv_tier.stats()["ram_hits"].as_u64().unwrap() - ram_before, 4, "the reload went to the disk");
+    let mut tokens = Vec::new();
+    let mut cached = 0;
+    while rt.active_requests() > 0 {
+        for event in rt.step().unwrap() {
+            tokens.push(event.token_id);
+            cached = cached.max(event.cached_prompt_tokens);
+        }
+    }
+    assert_eq!(tokens, reference);
+    assert_eq!(cached, 4 * block);
+    // a salted request is not looked ahead for
+    let salted = {
+        let mut p = prompt(4 * block + 3);
+        p[0] = 15;
+        p
+    };
+    rt.submit_with_sampling("salted".into(), salted, 2, SamplingParams::default()).unwrap();
+    rt.set_request_prefix_salt("salted", 9);
+    assert_eq!(rt.prefetch_for_waiting(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The look-ahead belongs to the scheduling round itself: with a request running and another waiting, a plain `step()` queues the blocks of
+/// the one that waits, and the prefetch thread moves them, without anybody calling the look-ahead by hand.
+#[test]
+fn a_scheduling_round_looks_ahead_at_the_requests_that_wait() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-prefetch-step-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut rt = runtime();
+    rt.use_tier_for(crate::mem::kv_tier::KvTier::at(&dir, 64 << 20).with_ram(64 << 20), "tiny");
+    rt.kv_warmed = true;
+    let block = rt.scheduler.cfg.block_size;
+    let a = prompt(4 * block + 3);
+    generate(&mut rt, "a", &a, 2);
+    let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
+    wait_for_the_disk(&mut rt, 4);
+    push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    rt.kv_tier.forget_memory();
+    // one request fills every slot (a single sequence is allowed), the next waits
+    rt.scheduler.cfg.max_num_seqs = 1;
+    let mut busy = prompt(2 * block + 3);
+    busy[0] = 31;
+    rt.submit_with_sampling("busy".into(), busy, 8, SamplingParams::default()).unwrap();
+    rt.submit_with_sampling("waits".into(), a.clone(), 2, SamplingParams::default()).unwrap();
+    rt.step().unwrap();
+    assert_eq!(rt.scheduler.waiting.len(), 1, "the second request must be waiting for the test to mean anything");
+    for _ in 0..400 {
+        if rt.kv_tier.stats()["prefetched_blocks"].as_u64().unwrap() >= 4 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(rt.kv_tier.stats()["prefetched_blocks"], 4, "a scheduling round did not look ahead");
+    while rt.active_requests() > 0 {
+        rt.step().unwrap();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -31,6 +31,9 @@ pub struct KvTier {
     ram_max: u64,
     ram: Mutex<Ram>,
     ram_hits: AtomicU64,
+    /// Blocks the prefetch thread moved from the disk into memory, and the hashes it was asked for that are not done yet.
+    prefetched: AtomicU64,
+    prefetch_queue: Mutex<std::collections::VecDeque<u64>>,
     /// Serialises writes and the budget check: two threads must not both believe there is room.
     guard: Mutex<()>,
 }
@@ -48,6 +51,8 @@ impl KvTier {
             ram_max,
             ram: Mutex::new(Ram::default()),
             ram_hits: AtomicU64::new(0),
+            prefetched: AtomicU64::new(0),
+            prefetch_queue: Mutex::new(std::collections::VecDeque::new()),
             guard: Mutex::new(()),
         }
     }
@@ -117,6 +122,45 @@ impl KvTier {
         let mut buffer = Vec::new();
         fs::File::open(&path).and_then(|mut file| file.read_to_end(&mut buffer)).ok()?;
         parse(&buffer, hash).map(|stored| stored.0)
+    }
+
+    /// Whether a prefetch thread has anything to work with: a memory tier to put blocks into and a folder to take them from.
+    pub fn prefetch_possible(&self) -> bool {
+        self.ram_max > 0 && self.dir.is_some()
+    }
+
+    /// Asks for the blocks with these hashes to be moved from the disk into memory, in this order, by whoever calls `prefetch_next` (a
+    /// thread of its own, so that the worker does not wait for the disk). Hashes that are in memory already, or not on disk, are skipped.
+    /// Returns how many were queued. Without a memory tier there is nowhere to put them: nothing is queued.
+    pub fn request_prefetch(&self, hashes: &[u64]) -> usize {
+        if self.ram_max == 0 || self.dir.is_none() {
+            return 0;
+        }
+        let mut queue = self.prefetch_queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut queued = 0;
+        for hash in hashes {
+            if !self.ram_has(*hash) && !queue.contains(hash) && self.file(*hash).is_some_and(|path| path.exists()) {
+                queue.push_back(*hash);
+                queued += 1;
+            }
+        }
+        queued
+    }
+
+    /// Moves the next requested block from the disk into memory (reading it and keeping it there). `false` when nothing is queued.
+    /// A block that cannot be read is dropped from the queue; the request that wanted it will read the disk itself.
+    pub fn prefetch_next(&self) -> bool {
+        let next = self.prefetch_queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).pop_front();
+        let Some(hash) = next else { return false };
+        if !self.ram_has(hash) && self.read_disk_into_memory(hash) {
+            self.prefetched.fetch_add(1, Ordering::Relaxed);
+        }
+        true
+    }
+
+    /// How many blocks wait to be moved.
+    pub fn prefetch_pending(&self) -> usize {
+        self.prefetch_queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len()
     }
 
     /// The file that keeps the pins across a restart: the hash of the last pinned block of every pinned chain, one per line. The chain
@@ -226,6 +270,17 @@ impl KvTier {
         self.read(hash, Some(tokens))
     }
 
+    /// Reads the file of `hash` and puts the block into memory, without counting a hit (nobody asked for the block yet).
+    fn read_disk_into_memory(&self, hash: u64) -> bool {
+        let Some(path) = self.file(hash) else { return false };
+        let mut buffer = Vec::new();
+        if fs::File::open(&path).and_then(|mut file| file.read_to_end(&mut buffer)).is_err() {
+            return false;
+        }
+        let Some((stored, payload)) = parse(&buffer, hash) else { return false };
+        self.ram_put(hash, stored.parent, &stored.tokens, payload)
+    }
+
     fn read(&self, hash: u64, tokens: Option<&[i64]>) -> Option<Vec<u8>> {
         if let Some(payload) = self.ram_get(hash, tokens) {
             self.ram_hits.fetch_add(1, Ordering::Relaxed);
@@ -326,6 +381,8 @@ impl KvTier {
             "ram_used_bytes": self.ram_used(),
             "ram_blocks": self.ram_blocks(),
             "ram_hits": self.ram_hits.load(Ordering::Relaxed),
+            "prefetched_blocks": self.prefetched.load(Ordering::Relaxed),
+            "prefetch_pending": self.prefetch_pending(),
         })
     }
 }
@@ -381,6 +438,18 @@ impl KvTier {
 
     fn ram_has(&self, hash: u64) -> bool {
         self.ram_max > 0 && self.ram_lock().blocks.contains_key(&hash)
+    }
+
+    /// Whether the memory tier holds this block, for tests.
+    #[cfg(test)]
+    pub(crate) fn has_in_memory(&self, hash: u64) -> bool {
+        self.ram_has(hash)
+    }
+
+    /// Empties the memory tier only, the disk keeps its blocks: the state of a server whose memory budget has turned over, for tests.
+    #[cfg(test)]
+    pub(crate) fn forget_memory(&self) -> usize {
+        self.ram_clear()
     }
 
     fn ram_clear(&self) -> usize {
@@ -691,5 +760,43 @@ mod tests {
         assert!(tier.enabled());
         assert!(tier.spill(1, 0, &[1], b"x"));
         assert_eq!(tier.load(1).as_deref(), Some(&b"x"[..]));
+    }
+
+    #[test]
+    fn the_prefetch_moves_blocks_from_the_disk_into_memory_and_skips_what_it_must() {
+        let dir = temporary("prefetch");
+        let tier = KvTier::at(&dir, 1 << 20).with_ram(1 << 20);
+        assert!(tier.prefetch_possible());
+        for (hash, parent) in [(1u64, 0u64), (2, 1), (3, 2)] {
+            assert!(tier.spill(hash, parent, &[hash as i64], b"kv bytes"));
+        }
+        // the memory tier forgets them (a restart, or the budget): the disk still has them
+        assert_eq!(tier.ram_clear(), 3);
+        assert_eq!(tier.stats()["ram_blocks"], 0);
+        // 9 is on no disk and 2 is asked for twice: queued are 1, 2 and 3
+        assert_eq!(tier.request_prefetch(&[1, 2, 2, 9, 3]), 3);
+        assert_eq!(tier.prefetch_pending(), 3);
+        assert!(tier.prefetch_next() && tier.prefetch_next() && tier.prefetch_next());
+        assert!(!tier.prefetch_next(), "nothing is queued any more");
+        assert_eq!(tier.stats()["ram_blocks"], 3);
+        assert_eq!(tier.stats()["prefetched_blocks"], 3);
+        // a read now comes from memory, and the prefetch did not count as a hit
+        assert_eq!(tier.stats()["hits"], 0);
+        assert_eq!(tier.load(2).as_deref(), Some(&b"kv bytes"[..]));
+        assert_eq!(tier.stats()["ram_hits"], 1);
+        // what is in memory is not queued again
+        assert_eq!(tier.request_prefetch(&[1, 2, 3]), 0);
+    }
+
+    #[test]
+    fn a_tier_without_memory_or_without_a_folder_has_nothing_to_prefetch() {
+        let disk_only = KvTier::at(temporary("prefetch-disk"), 1 << 20);
+        assert!(!disk_only.prefetch_possible());
+        assert!(disk_only.spill(1, 0, &[1], b"x"));
+        assert_eq!(disk_only.request_prefetch(&[1]), 0, "no memory to put the block into");
+        let ram_only = KvTier::ram_only(1 << 20);
+        assert!(!ram_only.prefetch_possible());
+        assert_eq!(ram_only.request_prefetch(&[1]), 0, "no folder to read from");
+        assert!(!ram_only.prefetch_next());
     }
 }

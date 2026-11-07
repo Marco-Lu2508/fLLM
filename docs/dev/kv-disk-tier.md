@@ -131,6 +131,16 @@ disk tier answered in 0.44 s with 560 of 568 prompt tokens from the cache (35 bl
 tier needed 4.18 s with 0 cached (the cold request took 3.6-3.7 s). The disk was this host's SSD with the files in the page cache, so a
 slower disk reads more slowly. Not measured: a busy server with many requests at once, and a GPU (the KV import then copies to the device).
 
+## Looking ahead: the prefetch thread
+
+With a memory tier and a folder, each scheduling round looks at the requests that wait: the blocks of their prompts that the cache dropped
+and the disk has are queued, and a thread of its own (`fllm-kv-prefetch`) moves them from the disk into memory while the worker computes.
+When the request is admitted, its reload finds the blocks in memory and does not wait for the disk. The prefetch does not count as a hit
+(`prefetched_blocks` and `prefetch_pending` in `GET /admin/kv-tier` count it), skips blocks that are in memory already, never touches
+requests with a `cache_salt` or with images, and does nothing without both tiers. It is the part of SGLang's HiCache (prefetch from the
+lower tier while the request waits) that does not need a GPU. What is not built: loading layer by layer in parallel with the computation
+(the copy from host memory to the GPU overlaps with layer N while layer N+1 loads), which needs a GPU to be written or measured.
+
 ## Which model a block belongs to
 
 A block on disk is named after the hash of its tokens, and that hash knows nothing about the weights: the KV values of the same tokens are
