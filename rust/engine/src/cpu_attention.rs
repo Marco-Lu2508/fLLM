@@ -301,6 +301,26 @@ pub fn attention_with(
         }
         for kb in (lo + seg * span..end).step_by(64) {
             let nk = (end - kb).min(64);
+            // f16 keys: the scores of two key rows at once (one load of a query serves both); the other positions work as before
+            if !key.q8 {
+                let mut half_rows = [&[][..]; 16];
+                for (r, row) in half_rows.iter_mut().take(nr).enumerate() {
+                    let b = tile.first + r / g;
+                    let h = kh * g + r % g;
+                    *row = &q[(b * heads + h) * dim..][..dim];
+                }
+                let slot_of = |t: usize| tables[tile.first * stride + t / block_size] as usize * block_size + t % block_size;
+                for j in (0..nk - nk % 2).step_by(2) {
+                    let (ta, tb) = (kb + j, kb + j + 1);
+                    let (sa, sb) = (slot_of(ta), slot_of(tb));
+                    let mut pair = [0.0f32; 16 * 2];
+                    score_half_pair(&half_rows[..nr], key.half_row(sa, kh), key.half_row(sb, kh), &mut pair, 2, scale, path);
+                    for r in 0..nr {
+                        scores[r * 64 + j] = pair[r * 2];
+                        scores[r * 64 + j + 1] = pair[r * 2 + 1];
+                    }
+                }
+            }
             for j in 0..nk {
                 let t = kb + j;
                 let slot = tables[tile.first * stride + t / block_size] as usize * block_size
@@ -312,8 +332,8 @@ pub fn attention_with(
                 };
                 if key.q8 {
                     score_q8_tile(&query_rows[..nr], kq, ks, &mut scores[j..], scale, path);
-                } else {
-                    // the f16 key row is converted once for every query of the tile (positions a row does not see are masked below)
+                } else if j >= nk - nk % 2 {
+                    // the odd last key row of the block (the pairs above did the others); positions a row does not see are masked below
                     let mut half_rows = [&[][..]; 16];
                     for (r, row) in half_rows.iter_mut().take(nr).enumerate() {
                         let b = tile.first + r / g;
@@ -504,6 +524,24 @@ fn score_half_tile(queries: &[&[f32]], k: &[u16], out: &mut [f32], stride: usize
     for (r, q) in queries.iter().enumerate() {
         out[r * stride] = score_half(q, k, path) * scale;
     }
+}
+/// `score_half_tile` for two key rows: `out[r * stride]` is the score of query `r` against `key_a`, `out[r * stride + 1]` against `key_b`.
+/// The same bits as two calls of `score_half_tile`; the AVX2 path shares the loads of the queries between the two rows.
+fn score_half_pair(queries: &[&[f32]], key_a: &[u16], key_b: &[u16], out: &mut [f32], stride: usize, scale: f32, path: Path) {
+    #[cfg(target_arch = "x86_64")]
+    if matches!(path, Path::Avx2 | Path::AvxVnni)
+        && key_a.len() == key_b.len()
+        && key_a.len().is_multiple_of(8)
+        && key_a.len() <= 256
+        && queries.len() <= 16
+        && queries.iter().all(|q| q.len() == key_a.len())
+    {
+        // SAFETY: `Path::detect` returned an AVX2 path, so AVX2, FMA and F16C are present; the lengths are checked above.
+        unsafe { x86::score_half_pair(queries, key_a, key_b, out, stride, scale) };
+        return;
+    }
+    score_half_tile(queries, key_a, out, stride, scale, path);
+    score_half_tile(queries, key_b, &mut out[1..], stride, scale, path);
 }
 /// Largest value of a row of scores (`f32::NEG_INFINITY` for an empty row). A maximum does not depend on the order of the comparisons, so
 /// the vector kernel gives the value of the scalar fold; scores are finite or minus infinity (masked positions), never NaN.
@@ -851,6 +889,52 @@ mod x86 {
         }
         for i in 0..N {
             out[i * stride] = hsum(acc[i]) * scale;
+        }
+    }
+    /// `score_block` for two key rows at once: one load of a query serves both rows, so the loads per FMA drop from 8/7 to 9/14 (the single-row
+    /// kernel is bound by loads, not by FMAs). Every (query, key) pair keeps its own accumulator and walks the values in the same order, so each
+    /// score has the bits of `score_half`. At most 6 queries: 12 accumulators, 2 key vectors and 1 query vector fill the 16 registers.
+    #[inline]
+    #[target_feature(enable = "avx2,fma,f16c")]
+    unsafe fn score_block2<const N: usize>(queries: &[&[f32]], key_a: *const f32, key_b: *const f32, len: usize, out: &mut [f32], stride: usize, scale: f32) {
+        let mut acc_a = [_mm256_setzero_ps(); N];
+        let mut acc_b = [_mm256_setzero_ps(); N];
+        for j in (0..len).step_by(8) {
+            let ka = _mm256_loadu_ps(key_a.add(j));
+            let kb = _mm256_loadu_ps(key_b.add(j));
+            for i in 0..N {
+                let q = _mm256_loadu_ps(queries[i].as_ptr().add(j));
+                acc_a[i] = _mm256_fmadd_ps(q, ka, acc_a[i]);
+                acc_b[i] = _mm256_fmadd_ps(q, kb, acc_b[i]);
+            }
+        }
+        for i in 0..N {
+            out[i * stride] = hsum(acc_a[i]) * scale;
+            out[i * stride + 1] = hsum(acc_b[i]) * scale;
+        }
+    }
+    /// Scores of every query against two key rows: `out[r * stride]` for `key_a`, `out[r * stride + 1]` for `key_b`.
+    #[target_feature(enable = "avx2,fma,f16c")]
+    pub(super) unsafe fn score_half_pair(queries: &[&[f32]], key_a: &[u16], key_b: &[u16], out: &mut [f32], stride: usize, scale: f32) {
+        let mut a = std::mem::MaybeUninit::<[f32; 256]>::uninit();
+        let mut b = std::mem::MaybeUninit::<[f32; 256]>::uninit();
+        let (a, b) = (a.as_mut_ptr().cast::<f32>(), b.as_mut_ptr().cast::<f32>());
+        for j in (0..key_a.len()).step_by(8) {
+            _mm256_storeu_ps(a.add(j), _mm256_cvtph_ps(_mm_loadu_si128(key_a.as_ptr().add(j).cast())));
+            _mm256_storeu_ps(b.add(j), _mm256_cvtph_ps(_mm_loadu_si128(key_b.as_ptr().add(j).cast())));
+        }
+        let mut r = 0;
+        while r < queries.len() {
+            let left = queries.len() - r;
+            let n = if left >= 6 { 6 } else if left >= 4 { 4 } else if left >= 2 { 2 } else { 1 };
+            let out = &mut out[r * stride..];
+            match n {
+                6 => score_block2::<6>(&queries[r..], a, b, key_a.len(), out, stride, scale),
+                4 => score_block2::<4>(&queries[r..], a, b, key_a.len(), out, stride, scale),
+                2 => score_block2::<2>(&queries[r..], a, b, key_a.len(), out, stride, scale),
+                _ => score_block2::<1>(&queries[r..], a, b, key_a.len(), out, stride, scale),
+            }
+            r += n;
         }
     }
     #[target_feature(enable = "avx2,fma,f16c")]
@@ -1213,6 +1297,54 @@ mod window_tests {
 
     /// A row must get the same bits whatever else is in the call: alone (plain decoding), next to the rows of a verification pass or
     /// next to other sequences. The split of the key range into segments used to depend on the number of tiles of the call.
+    /// The whole attention against a plain reference, for lengths with an even and an odd number of keys in the last block of 64: no key
+    /// may be left without a score, and none may be scored twice. (The pair kernel handles keys two at a time; an odd last key is left to the
+    /// single kernel.)
+    #[test]
+    fn every_key_gets_its_score_whatever_the_length() {
+        let (heads, kv_heads, dim, block_size) = (4usize, 2usize, 32usize, 16usize);
+        let slots = 512;
+        let mut state = 17u32;
+        let mut rnd = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 9) as f32 / (1u32 << 23) as f32) - 1.0
+        };
+        let key_words: Vec<u16> = (0..slots * kv_heads * dim).map(|_| f16::from_f32(rnd()).to_bits()).collect();
+        let value_words: Vec<u16> = (0..slots * kv_heads * dim).map(|_| f16::from_f32(rnd()).to_bits()).collect();
+        let stride = slots / block_size;
+        let table: Vec<i64> = (0..stride as i64).collect();
+        let key = Cache { data: &key_words, slots, kv_heads, dim, q8: false };
+        let value = Cache { data: &value_words, ..key };
+        for length in [1usize, 2, 3, 63, 64, 65, 66, 127, 128, 129, 191, 200, 255] {
+            let q: Vec<f32> = (0..heads * dim).map(|_| rnd()).collect();
+            let got = attention_with(&q, key, value, &table, &[length as i64], heads, block_size, stride, &Options::default()).unwrap();
+            let g = heads / kv_heads;
+            for h in 0..heads {
+                let kh = h / g;
+                let scale = (dim as f32).sqrt().recip();
+                let scores: Vec<f64> = (0..length)
+                    .map(|t| {
+                        let slot = table[t / block_size] as usize * block_size + t % block_size;
+                        (0..dim).map(|d| f64::from(q[h * dim + d]) * f64::from(f16::from_bits(key.half_row(slot, kh)[d]).to_f32())).sum::<f64>() * f64::from(scale)
+                    })
+                    .collect();
+                let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let weights: Vec<f64> = scores.iter().map(|s| (s - max).exp()).collect();
+                let total: f64 = weights.iter().sum();
+                for d in 0..dim {
+                    let want: f64 = (0..length)
+                        .map(|t| {
+                            let slot = table[t / block_size] as usize * block_size + t % block_size;
+                            weights[t] / total * f64::from(f16::from_bits(value.half_row(slot, kh)[d]).to_f32())
+                        })
+                        .sum();
+                    let have = f64::from(got[h * dim + d]);
+                    assert!((have - want).abs() < 1e-4 * (1.0 + want.abs()), "length {length}, head {h}, value {d}: {have} against {want}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_row_gets_the_same_bits_alone_and_next_to_other_rows() {
         let (heads, kv_heads, dim, block_size) = (14, 2, 64, 16);
@@ -1237,7 +1369,8 @@ mod window_tests {
             let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
             pool.install(|| {
                 // a verification pass: seven consecutive positions of one sequence; and three unrelated sequences
-                for lengths in [vec![1494i64, 1495, 1496, 1497, 1498, 1499, 1500], vec![1500, 900, 1200], vec![1500, 1501]] {
+                // (lengths whose last 64-key block has an odd number of keys: 1501 = 23 * 64 + 29, 897 = 14 * 64 + 1, 1203 = 18 * 64 + 51)
+                for lengths in [vec![1494i64, 1495, 1496, 1497, 1498, 1499, 1500], vec![1500, 900, 1200], vec![1500, 1501], vec![1501], vec![897, 1203, 77]] {
                     let q: Vec<f32> = (0..lengths.len() * row).map(|_| rnd()).collect();
                     let together = run(&lengths, &q);
                     for (b, &length) in lengths.iter().enumerate() {
@@ -1289,6 +1422,34 @@ mod score_tile_tests {
 
     /// The tile kernel converts the key row once for all queries. Each query must still get the bit pattern `score_half` gives it alone:
     /// this compares them directly, for every head size the tile path takes and for one to sixteen queries.
+    #[test]
+    fn the_pair_score_has_the_bits_of_the_single_score() {
+        let mut state = 7u32;
+        let mut rnd = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 9) as f32 / (1u32 << 23) as f32) - 1.0
+        };
+        let path = Path::detect();
+        for dim in [32usize, 64, 96, 128, 256] {
+            for queries in [1usize, 2, 3, 5, 6, 7, 12, 14, 16] {
+                let key_a: Vec<u16> = (0..dim).map(|_| f16::from_f32(rnd() * 2.0).to_bits()).collect();
+                let key_b: Vec<u16> = (0..dim).map(|_| f16::from_f32(rnd() * 2.0).to_bits()).collect();
+                let q: Vec<Vec<f32>> = (0..queries).map(|_| (0..dim).map(|_| rnd() * 3.0).collect()).collect();
+                let rows: Vec<&[f32]> = q.iter().map(Vec::as_slice).collect();
+                for scale in [0.125f32, 1.0, 0.3] {
+                    let mut out = vec![f32::NAN; queries * 2];
+                    super::score_half_pair(&rows, &key_a, &key_b, &mut out, 2, scale, path);
+                    for (r, row) in rows.iter().enumerate() {
+                        let a = score_half(row, &key_a, path) * scale;
+                        let b = score_half(row, &key_b, path) * scale;
+                        assert_eq!(out[r * 2].to_bits(), a.to_bits(), "dim {dim}, {queries} queries, query {r}, key a, scale {scale}");
+                        assert_eq!(out[r * 2 + 1].to_bits(), b.to_bits(), "dim {dim}, {queries} queries, query {r}, key b, scale {scale}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_tile_score_has_the_bits_of_the_single_score() {
         let mut state = 3u32;
