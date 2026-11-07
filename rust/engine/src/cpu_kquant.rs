@@ -973,6 +973,73 @@ fn q3_scales(raw: &[u8]) -> [i32; 16] {
     scales
 }
 
+/// Byte selectors that turn the sixteen 16-bit Q3_K scales (eight in a 128-bit half, the half broadcast to both lanes) into the words
+/// `madd` wants for pair `p` of 32-value groups: the 64-bit lanes are scale `4p`, `4p + 2`, `4p + 1`, `4p + 3`, each four times (the layout of
+/// four `pair_scale` words put together by `_mm256_set_epi64x`).
+const fn q3_selectors() -> [[u8; 32]; 4] {
+    let mut out = [[0u8; 32]; 4];
+    let mut p = 0;
+    while p < 4 {
+        let mut lane = 0;
+        while lane < 2 {
+            let mut slot = 0;
+            while slot < 8 {
+                let k = if lane == 0 {
+                    if slot < 4 { 0 } else { 2 }
+                } else if slot < 4 {
+                    1
+                } else {
+                    3
+                };
+                let word = (4 * p + k) % 8;
+                out[p][lane * 16 + slot * 2] = (2 * word) as u8;
+                out[p][lane * 16 + slot * 2 + 1] = (2 * word + 1) as u8;
+                slot += 1;
+            }
+            lane += 1;
+        }
+        p += 1;
+    }
+    out
+}
+static Q3_SELECTORS: [[u8; 32]; 4] = q3_selectors();
+
+/// The sixteen signed 6-bit Q3_K scales of a block as the four vectors the dot wants, one per pair of 32-value groups. The same words as
+/// `q3_scales` + `pair_scale` + `_mm256_set_epi64x` give, without sixteen scalar unpacks and sixteen multiplications per row and block:
+/// the 12 bytes become 16 with four 32-bit operations each (the way llama.cpp does it), then 16-bit words are shuffled out of them.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn q3_scale_vectors(raw: &[u8]) -> [__m256i; 4] {
+    let word = |at: usize| u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
+    let (hi, lo, packed) = (word(96), word(100), word(104));
+    let low4 = 0x0f0f_0f0f_u32;
+    let two = 0x0303_0303_u32;
+    let bytes = _mm_set_epi32(
+        (((lo >> 4) & low4) | (((packed >> 6) & two) << 4)) as i32,
+        (((hi >> 4) & low4) | (((packed >> 4) & two) << 4)) as i32,
+        ((lo & low4) | (((packed >> 2) & two) << 4)) as i32,
+        ((hi & low4) | ((packed & two) << 4)) as i32,
+    );
+    let words = _mm256_cvtepi8_epi16(_mm_sub_epi8(bytes, _mm_set1_epi8(32)));
+    let from_low = _mm256_broadcastsi128_si256(_mm256_castsi256_si128(words));
+    let from_high = _mm256_broadcastsi128_si256(_mm256_extracti128_si256::<1>(words));
+    std::array::from_fn(|pair| {
+        let source = if pair < 2 { from_low } else { from_high };
+        _mm256_shuffle_epi8(source, _mm256_loadu_si256(Q3_SELECTORS[pair].as_ptr().cast()))
+    })
+}
+
+/// The 3-bit values of one 32-value Q3_K group as `low | high << 2` in 0..8 (the signed value plus 4), without its scales.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn q3_values(raw: &[u8], group: usize) -> __m256i {
+    let low = _mm256_loadu_si256(raw.as_ptr().add(32 + group / 4 * 32).cast());
+    let low = _mm256_and_si256(_mm256_srl_epi16(low, _mm_cvtsi32_si128((2 * (group % 4)) as i32)), _mm256_set1_epi8(3));
+    let high = _mm256_loadu_si256(raw.as_ptr().cast());
+    let high = _mm256_and_si256(_mm256_srl_epi16(high, _mm_cvtsi32_si128(group as i32)), _mm256_set1_epi8(1));
+    _mm256_or_si256(low, _mm256_slli_epi16(high, 2))
+}
+
 /// One 32-value Q3_K group as `low | high << 2` in 0..8, i.e. the signed value plus 4: Q3_K
 /// subtracts 4 where the `hmask` bit is clear.
 #[inline]
@@ -1161,22 +1228,14 @@ macro_rules! kernel_extra {
                         }
                     } else {
                         d = half(raw, if KIND == Q2K { 80 } else { 108 });
-                        let q3 = if KIND == Q3K { q3_scales(raw) } else { [0; 16] };
+                        let q3_scales = if KIND == Q3K { q3_scale_vectors(raw) } else { [zero; 4] };
                         for pair in 0..4usize {
-                            let ((q1, a0, a1), (q2, b0, b1)) = if KIND == Q2K {
-                                (q2_group(raw, 2 * pair), q2_group(raw, 2 * pair + 1))
+                            let (q1, q2, scales) = if KIND == Q2K {
+                                let ((q1, a0, a1), (q2, b0, b1)) = (q2_group(raw, 2 * pair), q2_group(raw, 2 * pair + 1));
+                                (q1, q2, _mm256_set_epi64x(pair_scale(b1), pair_scale(a1), pair_scale(b0), pair_scale(a0)))
                             } else {
-                                (
-                                    q3_group(raw, 2 * pair, &q3),
-                                    q3_group(raw, 2 * pair + 1, &q3),
-                                )
+                                (q3_values(raw, 2 * pair), q3_values(raw, 2 * pair + 1), q3_scales[pair])
                             };
-                            let scales = _mm256_set_epi64x(
-                                pair_scale(b1),
-                                pair_scale(a1),
-                                pair_scale(b0),
-                                pair_scale(a0),
-                            );
                             for t in 0..T {
                                 let x1 = _mm256_load_si256(xs[t][2 * pair].q.as_ptr().cast());
                                 let x2 = _mm256_load_si256(xs[t][2 * pair + 1].q.as_ptr().cast());
@@ -2095,6 +2154,67 @@ macro_rules! r8_kernel {
 
 r8_kernel!(r8_vnni, r8_body_vnni, "avx2,fma,f16c,avxvnni", dot_vnni);
 r8_kernel!(r8_avx2, r8_body_avx2, "avx2,fma,f16c", dot_avx2);
+
+#[cfg(test)]
+mod q3_scale_tests {
+    use super::*;
+
+    /// The vector unpack of the Q3_K scales gives the words the scalar unpack + `pair_scale` + `set_epi64x` gave, for random blocks (all
+    /// 6-bit values, so the minus 32 and the packing of the high bits are both covered).
+    #[test]
+    fn the_q3_scale_vectors_are_the_words_of_the_scalar_unpack() {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut state = 0x1234_5678_u64;
+        let mut next = || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u8
+        };
+        for _ in 0..2000 {
+            let raw: Vec<u8> = (0..110).map(|_| next()).collect();
+            let scales = q3_scales(&raw);
+            // SAFETY: AVX2 was detected above; `raw` is one 110-byte block.
+            let have = unsafe { q3_scale_vectors(&raw) };
+            for pair in 0..4 {
+                let (a0, a1, b0, b1) = (scales[4 * pair], scales[4 * pair + 1], scales[4 * pair + 2], scales[4 * pair + 3]);
+                let want = unsafe { _mm256_set_epi64x(pair_scale(b1), pair_scale(a1), pair_scale(b0), pair_scale(a0)) };
+                let (mut h, mut w) = ([0u8; 32], [0u8; 32]);
+                unsafe {
+                    _mm256_storeu_si256(h.as_mut_ptr().cast(), have[pair]);
+                    _mm256_storeu_si256(w.as_mut_ptr().cast(), want);
+                }
+                assert_eq!(h, w, "pair {pair}");
+            }
+        }
+    }
+
+    /// The group values without scales are the values `q3_group` returned.
+    #[test]
+    fn the_q3_values_are_the_values_of_the_group_with_scales() {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut state = 99u64;
+        let mut next = || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u8
+        };
+        for _ in 0..500 {
+            let raw: Vec<u8> = (0..110).map(|_| next()).collect();
+            let scales = q3_scales(&raw);
+            for group in 0..8 {
+                let (mut a, mut b) = ([0u8; 32], [0u8; 32]);
+                // SAFETY: AVX2 was detected above; `raw` is one 110-byte block.
+                unsafe {
+                    _mm256_storeu_si256(a.as_mut_ptr().cast(), q3_values(&raw, group));
+                    _mm256_storeu_si256(b.as_mut_ptr().cast(), q3_group(&raw, group, &scales).0);
+                }
+                assert_eq!(a, b, "group {group}");
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
