@@ -237,7 +237,7 @@ fn cost_of_the_invariant_kernels_in_a_verification_pass() {
     let mut rng = Lcg(77);
     let cols = 4096usize;
     println!("COST isa {} threads {}, projections of 320 MB x {cols} columns (more than the cache of the build host)", crate::cpu_kernels::isa(), rayon::current_num_threads());
-    for kind in [12u32, 14, 11, 10, 23, 8, 18, 0, 30] {
+    for kind in [12u32, 14, 11, 10, 23, 8, 6, 2, 18, 0, 30] {
         let probe = if matches!(kind, 0 | 1 | 30) { float_bytes(kind, 4 * cols, &mut rng) } else { random_weights(kind, 4, cols, &mut rng) };
         let rows = 320_000_000 / (probe.len() / 4) / 8 * 8;
         let weights = if matches!(kind, 0 | 1 | 30) { float_bytes(kind, rows * cols, &mut rng) } else { random_weights(kind, rows, cols, &mut rng) };
