@@ -344,13 +344,13 @@ impl InferenceRuntime {
     }
 
     /// Sets the per-request prefix salt (`cache_salt`): requests with different salts never share KV blocks.
-    pub fn set_request_prefix_salt(&mut self, request_id: &str, salt: u64) {
-        if salt == 0 {
+    pub fn set_request_prefix_salt(&mut self, request_id: &str, namespace: u64) {
+        if namespace == 0 {
             return;
         }
         for sequence in self.scheduler.sequences.values_mut() {
             if sequence.req_id == request_id {
-                sequence.prefix_salt = salt;
+                sequence.prefix_salt = namespace;
             }
         }
     }

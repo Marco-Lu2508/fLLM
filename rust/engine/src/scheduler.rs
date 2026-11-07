@@ -665,11 +665,11 @@ impl Scheduler {
     /// Keeps the cached blocks of the start of `tokens` out of eviction (the chain as `try_admit` looks it up, from `seed ^ salt`), or
     /// lets them go again. Returns how many blocks of the chain the cache holds and that were pinned (or unpinned): the chain stops at the
     /// first block the cache does not hold. Pinned blocks are not free memory: a pool that is pinned full makes new requests wait.
-    pub fn pin_prompt(&mut self, tokens: &[i64], salt: u64, pin: bool) -> (usize, bool) {
+    pub fn pin_prompt(&mut self, tokens: &[i64], namespace: u64, pin: bool) -> (usize, bool) {
         let size = self.cfg.block_size;
         let limit = self.pin_limit_blocks();
         let Some(pc) = self.pc.as_mut() else { return (0, false) };
-        let mut prev = prefix_seed() ^ salt;
+        let mut prev = prefix_seed() ^ namespace;
         let mut done = 0;
         for b in 0..tokens.len() / size {
             prev = PrefixCache::hash_chain(prev, &tokens[b * size..(b + 1) * size]);
@@ -1122,12 +1122,12 @@ pub fn prefix_seed() -> u64 {
 }
 
 /// FNV-1a over the salt; an empty salt keeps the historical seed of `0`, so a single-user setup is unchanged.
-fn seed_of(salt: &str) -> u64 {
-    if salt.is_empty() {
+fn seed_of(namespace: &str) -> u64 {
+    if namespace.is_empty() {
         return 0;
     }
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in salt.as_bytes() {
+    for byte in namespace.as_bytes() {
         hash ^= *byte as u64;
         hash = hash.wrapping_mul(0x100_0000_01b3);
     }

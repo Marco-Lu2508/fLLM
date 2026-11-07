@@ -442,8 +442,8 @@ fn continues(old: &[i64], tokens: &[i64]) -> bool {
     tokens.len() >= n && tokens[n.saturating_sub(8)..n] == old[n.saturating_sub(8)..]
 }
 
-fn context_hash(salt: u64, tokens: &[i64]) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325u64 ^ salt.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+fn context_hash(namespace: u64, tokens: &[i64]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64 ^ namespace.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     for &t in tokens {
         h ^= t as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
@@ -468,7 +468,7 @@ impl SuffixCache {
     }
 
     /// [`observe`](Self::observe) in the namespace `salt`: what is generated under one salt never drafts for another.
-    pub fn observe_salted(&mut self, owner: i64, salt: u64, tokens: &[i64]) {
+    pub fn observe_salted(&mut self, owner: i64, namespace: u64, tokens: &[i64]) {
         let id = match self.by_owner.get(&owner) {
             Some(&id) if self.docs.get(&id).is_some_and(|d| continues(&d.tokens, tokens)) => id,
             _ => {
@@ -477,7 +477,7 @@ impl SuffixCache {
                 }
                 let id = self.next_doc;
                 self.next_doc += 1;
-                self.docs.insert(id, Doc { tokens: Vec::new(), indexed: 0, live: true, salt });
+                self.docs.insert(id, Doc { tokens: Vec::new(), indexed: 0, live: true, salt: namespace });
                 self.by_owner.insert(owner, id);
                 id
             }
@@ -589,7 +589,7 @@ impl SuffixCache {
     }
 
     /// [`propose`](Self::propose) among the documents of the namespace `salt` only.
-    pub fn propose_salted(&self, owner: i64, salt: u64, context: &[i64], max_tokens: usize) -> Vec<i64> {
+    pub fn propose_salted(&self, owner: i64, namespace: u64, context: &[i64], max_tokens: usize) -> Vec<i64> {
         if max_tokens == 0 || context.len() < self.cfg.min_match {
             return Vec::new();
         }
@@ -598,13 +598,13 @@ impl SuffixCache {
             if order < self.cfg.min_match || context.len() < order {
                 continue;
             }
-            let key = (slot as u8, context_hash(salt, &context[context.len() - order..]));
+            let key = (slot as u8, context_hash(namespace, &context[context.len() - order..]));
             let Some(list) = self.index.get(&key) else { continue };
             // most recent occurrences first
             let mut continuations: Vec<&[i64]> = Vec::new();
             for &(doc_id, pos) in list.iter().rev() {
                 let Some(doc) = self.docs.get(&doc_id) else { continue };
-                if doc.salt != salt {
+                if doc.salt != namespace {
                     continue;
                 }
                 let pos = pos as usize;

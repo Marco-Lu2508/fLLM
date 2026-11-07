@@ -57,10 +57,10 @@ pub struct Fingerprint {
 
 impl Fingerprint {
     /// The cache key for one prompt. `salt` is the tenant namespace (empty for `Scope::Global`).
-    pub fn key(&self, prompt: &[i64], salt: &str) -> [u8; 32] {
+    pub fn key(&self, prompt: &[i64], namespace: &str) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"fllm-output-cache-v1\0");
-        hasher.update(salt.as_bytes());
+        hasher.update(namespace.as_bytes());
         hasher.update(b"\0model\0");
         hasher.update(self.model.as_bytes());
         hasher.update(b"\0template\0");

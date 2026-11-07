@@ -244,9 +244,9 @@ fn the_blocks_filled_while_generating_serve_the_next_turn() {
 }
 
 /// Runs one request under `salt` and returns how many prompt tokens came from the cache.
-fn cached_under_salt(rt: &mut InferenceRuntime, id: &str, prompt: &[i64], salt: u64) -> usize {
+fn cached_under_salt(rt: &mut InferenceRuntime, id: &str, prompt: &[i64], namespace: u64) -> usize {
     rt.submit_with_sampling(id.into(), prompt.to_vec(), 2, SamplingParams::default()).unwrap();
-    rt.set_request_prefix_salt(id, salt);
+    rt.set_request_prefix_salt(id, namespace);
     let mut cached = 0;
     while rt.active_requests() > 0 {
         for event in rt.step().unwrap() {
