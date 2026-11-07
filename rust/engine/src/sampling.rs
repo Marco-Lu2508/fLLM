@@ -388,7 +388,7 @@ pub fn processed_distribution(
         candidates.select_nth_unstable_by(params.top_k - 1, by_probability);
         candidates.truncate(params.top_k);
     }
-    candidates.sort_unstable_by(by_probability);
+    sort_by_probability(&mut candidates);
     if candidates.is_empty() {
         return vec![(argmax(logits), 1.0)];
     }
@@ -480,6 +480,49 @@ pub fn processed_distribution(
     candidates
 }
 
+/// Sorts `(token, probability)` pairs by probability, largest first, equal probabilities by lower token id: the order
+/// `b.1.total_cmp(&a.1).then(a.0.cmp(&b.0))` gives. Over a whole vocabulary (150 000 entries, no top-k) a comparison sort costs about
+/// 3.5 ms per sampled token, as much as the output head of a small model; the probabilities are non-negative, so the bit patterns of
+/// the floats order like the floats, and a stable least-significant-digit radix sort on them (three passes of eleven bits) gives the same
+/// order in about a tenth of the time. It needs the ids to arrive in ascending order (they do when no top-k selection reordered them) and
+/// no negative or NaN probability; anything else takes the comparison sort.
+fn sort_by_probability(candidates: &mut Vec<(usize, f32)>) {
+    const RADIX_FROM: usize = 2048;
+    let by_probability = |a: &(usize, f32), b: &(usize, f32)| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0));
+    if candidates.len() < RADIX_FROM
+        || candidates.len() > u32::MAX as usize
+        || !candidates.iter().all(|c| c.1.is_sign_positive() && !c.1.is_nan())
+        || !candidates.windows(2).all(|w| w[0].0 < w[1].0)
+    {
+        candidates.sort_unstable_by(by_probability);
+        return;
+    }
+    // keys: larger probability first = smaller inverted bit pattern first; the index in the (ascending-id) input is the payload
+    let mut keyed: Vec<(u32, u32)> = candidates.iter().enumerate().map(|(i, c)| (!c.1.to_bits(), i as u32)).collect();
+    let mut spare = vec![(0u32, 0u32); keyed.len()];
+    for pass in 0..3 {
+        let shift = 11 * pass;
+        let mut counts = [0usize; 2048];
+        for &(key, _) in &keyed {
+            counts[((key >> shift) & 0x7ff) as usize] += 1;
+        }
+        let mut at = 0;
+        for count in counts.iter_mut() {
+            let n = *count;
+            *count = at;
+            at += n;
+        }
+        for &item in &keyed {
+            let bucket = ((item.0 >> shift) & 0x7ff) as usize;
+            spare[counts[bucket]] = item;
+            counts[bucket] += 1;
+        }
+        std::mem::swap(&mut keyed, &mut spare);
+    }
+    let sorted: Vec<(usize, f32)> = keyed.iter().map(|&(_, i)| candidates[i as usize]).collect();
+    *candidates = sorted;
+}
+
 pub fn argmax(logits: &[f32]) -> usize {
     if logits.is_empty() {
         return 0;
@@ -566,6 +609,147 @@ pub fn sample_token(
     *rng_state = state.rng;
     result
 }
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+
+    fn reference(mut v: Vec<(usize, f32)>) -> Vec<(usize, f32)> {
+        v.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        v
+    }
+
+    /// Ascending ids, many equal probabilities (quantized values, zeros, a few huge ones): the radix order is the comparison order.
+    #[test]
+    fn the_radix_order_is_the_comparison_order() {
+        let mut state = 0x1234_5678_9abc_def0u64;
+        for len in [2047usize, 2048, 2049, 5000, 151_936] {
+            for levels in [4u32, 300, 1_000_000] {
+                let input: Vec<(usize, f32)> = (0..len)
+                    .map(|i| {
+                        let r = (xorshift64(&mut state) >> 33) as u32 % levels;
+                        let v = if r == 0 { 0.0 } else { (r as f32) / (levels as f32) };
+                        (i * 3, if i % 4999 == 7 { 1.0 } else { v })
+                    })
+                    .collect();
+                let mut have = input.clone();
+                sort_by_probability(&mut have);
+                assert_eq!(have, reference(input), "len {len}, {levels} levels");
+            }
+        }
+    }
+
+    /// Ids out of order (what a top-k selection leaves), a negative probability and a NaN take the comparison sort and give its order.
+    #[test]
+    fn inputs_the_radix_sort_cannot_take_keep_the_comparison_order() {
+        let base: Vec<(usize, f32)> = (0..3000usize).map(|i| (i, ((i * 7919) % 100) as f32 / 100.0)).collect();
+        let mut shuffled = base.clone();
+        shuffled.reverse();
+        let mut negative = base.clone();
+        negative[10].1 = -0.5;
+        let mut nan = base.clone();
+        nan[20].1 = f32::NAN;
+        for input in [shuffled, negative, nan] {
+            let mut have = input.clone();
+            sort_by_probability(&mut have);
+            let want = reference(input);
+            assert_eq!(have.len(), want.len());
+            for (h, w) in have.iter().zip(&want) {
+                assert_eq!(h.0, w.0);
+                assert_eq!(h.1.to_bits(), w.1.to_bits());
+            }
+        }
+    }
+
+    /// The processed distribution of a full vocabulary is what it was with the comparison sort: sorted, normalized, ties by id.
+    #[test]
+    fn a_full_vocabulary_distribution_is_sorted_and_normalized() {
+        let mut state = 99u64;
+        let logits: Vec<f32> = (0..50_000).map(|_| (rand_f32(&mut state) * 8.0).floor() / 2.0).collect();
+        let params = SamplingParams { temperature: 0.7, ..Default::default() };
+        let dist = processed_distribution(&logits, &[], &params, 0.0);
+        assert_eq!(dist.len(), logits.len());
+        assert!(dist.windows(2).all(|w| w[0].1 > w[1].1 || (w[0].1 == w[1].1 && w[0].0 < w[1].0)));
+        let sum: f32 = dist.iter().map(|x| x.1).sum();
+        assert!((sum - 1.0).abs() < 1e-3, "sum {sum}");
+    }
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::*;
+
+    /// 151 936 logits (the vocabulary of Qwen2.5) with a long tail and a few dominant tokens, from a fixed generator.
+    fn logits() -> Vec<f32> {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        (0..151_936)
+            .map(|i| {
+                let u = rand_f32(&mut state);
+                let v = rand_f32(&mut state);
+                let normal = (-2.0 * (u.max(1e-7)).ln()).sqrt() * (std::f32::consts::TAU * v).cos();
+                normal * 2.5 + if i % 9973 == 0 { 9.0 } else { 0.0 }
+            })
+            .collect()
+    }
+
+    fn best_ms(mut run: impl FnMut()) -> f64 {
+        let mut best = f64::MAX;
+        for _ in 0..30 {
+            let started = std::time::Instant::now();
+            run();
+            best = best.min(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        best
+    }
+
+    /// What the sampler costs per token over a full vocabulary, stage by stage and for the usual settings. Prints; asserts nothing.
+    #[test]
+    #[ignore = "timing, run with --ignored --nocapture"]
+    fn cost_of_sampling_a_token() {
+        let logits = logits();
+        let history: Vec<i64> = (0..200).map(|i| (i * 37 % 1000) as i64).collect();
+        let mut state = SamplingState::new(&SamplingParams { seed: Some(7), temperature: 0.8, ..Default::default() }, 1);
+        let mut with = |name: &str, params: SamplingParams| {
+            let ms = best_ms(|| {
+                std::hint::black_box(sample_with_state(&logits, &history, &params, &mut state));
+            });
+            println!("COST sample {name}: {ms:.3} ms");
+        };
+        with("greedy", SamplingParams::default());
+        let t = SamplingParams { temperature: 0.8, ..Default::default() };
+        with("T=0.8", t.clone());
+        with("T=0.8 top_p=0.9", SamplingParams { top_p: 0.9, ..t.clone() });
+        with("T=0.8 top_k=40", SamplingParams { top_k: 40, ..t.clone() });
+        with("T=0.8 min_p=0.05", SamplingParams { min_p: 0.05, ..t.clone() });
+        with("T=0.8 top_p=0.9 top_k=40 min_p=0.05", SamplingParams { top_p: 0.9, top_k: 40, min_p: 0.05, ..t.clone() });
+        with("T=0.8 repeat_penalty=1.1", SamplingParams { repetition_penalty: 1.1, ..t.clone() });
+        with("T=0.8 presence=0.5", SamplingParams { presence_penalty: 0.5, ..t.clone() });
+        // the stages of the plain T=0.8 path
+        let copy = best_ms(|| {
+            std::hint::black_box(logits.to_vec());
+        });
+        let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let exp = best_ms(|| {
+            let c: Vec<(usize, f32)> = logits.iter().enumerate().filter(|(_, v)| v.is_finite()).map(|(i, v)| (i, ((*v - max) * 1.25).exp())).collect();
+            std::hint::black_box(c);
+        });
+        let mut base: Vec<(usize, f32)> = logits.iter().enumerate().map(|(i, v)| (i, ((*v - max) * 1.25).exp())).collect();
+        let by = |a: &(usize, f32), b: &(usize, f32)| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0));
+        let sort = best_ms(|| {
+            let mut c = base.clone();
+            c.sort_unstable_by(by);
+            std::hint::black_box(c);
+        });
+        let clone = best_ms(|| {
+            std::hint::black_box(base.clone());
+        });
+        base.sort_unstable_by(by);
+        let sum = best_ms(|| {
+            std::hint::black_box(base.iter().map(|x| x.1).sum::<f32>());
+        });
+        println!("COST stages: copy {copy:.3} ms, collect+exp {exp:.3} ms, sort {:.3} ms (clone {clone:.3}, sort alone {:.3}), sum {sum:.3} ms", sort, sort - clone);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
