@@ -131,6 +131,20 @@ disk tier answered in 0.44 s with 560 of 568 prompt tokens from the cache (35 bl
 tier needed 4.18 s with 0 cached (the cold request took 3.6-3.7 s). The disk was this host's SSD with the files in the page cache, so a
 slower disk reads more slowly. Not measured: a busy server with many requests at once, and a GPU (the KV import then copies to the device).
 
+## Which model a block belongs to
+
+A block on disk is named after the hash of its tokens, and that hash knows nothing about the weights: the KV values of the same tokens are
+different for a Q8_0 and a Q4_K_M file of one model, for a model with an adapter, and for another KV cache type. The tier therefore keeps
+one subfolder per identity below `FLLM_KV_DISK_DIR` (the name is a hash of the model file digest, the adapters with their scales, and the KV
+geometry: architecture, layers, heads, head and value size, block size, key and value type). Servers with the same identity share their blocks
+(a restart finds them); others cannot read, list or delete each other's files, and the byte budget counts the subfolder of the server. The
+memory tier is per process and needs no identity.
+
+Measured with `scripts/kv-quants.py` on Qwen2.5-0.5B (Q8_0 and Q4_K_M, one folder, a 568-token prompt): before, the Q4_K_M server read 36 Q8_0
+blocks (560 of 568 tokens cached, 0.91 s against 3.43 s for the control with an empty folder: a wrong gain); after, it reads none (0 cached,
+2.90 s) and the Q8_0 blocks sit in their own subfolder. Blocks written by versions before this change lie in the folder itself and are
+never read again.
+
 ## A memory tier in front of the disk
 
 `FLLM_KV_RAM_BYTES` (Settings > Engine: *Keep the most recent ones in memory*) adds host memory in front of the disk, inside the same
@@ -156,6 +170,22 @@ back in 0.66 s with 560 tokens cached (35 blocks read back, same text); the cont
 took 0.44 s because its files were in the page cache of this host; the difference between the two figures is noise of this machine, not an
 advantage of the disk. Not measured: the copy between GPU memory and host memory (this host has no GPU; the import goes through the same
 `kv_import_block` the disk read uses) and a busy server.
+
+## A changed word
+
+The cache finds a prompt by the chain of its blocks (16 tokens each), so a change leaves everything before the block it falls in and loses
+everything after it. Measured on Qwen2.5-0.5B with a 568-token prompt (`scripts/kv-quants.py`, the same on Q8_0 and Q4_K_M): the word changed
+in the first section, 0 of 568 tokens cached; in the middle, 256; near the end, 496; the original again, 560 (a block is only reused whole,
+and the last token is always computed). This is why a shared prefix has to come first and byte-identical, and what changes per user or per
+task after it. Where in a prompt a changed word sits decides how much of it is computed again; nothing is lost permanently: the original
+prompt is still cached afterwards.
+
+## Cache types and quantizations
+
+Every KV cache type (`f16, bf16, fp8_e4m3, fp8_e5m2, int8, q8_0, q5_0, q5_1, q4_0, q4_1, iq4_nl, f32`) was run through disk tier and back with
+the tiny model on the CPU: a restarted runtime reads the blocks and generates the tokens of a full prefill. `nvfp4` could not be run on the
+CPU with that model, so it is not covered. The weights' quantization does not matter for the cache logic: the blocks are KV values, whatever
+the weights are, as long as the identity above keeps different weights apart.
 
 ## A codebase in the cache
 

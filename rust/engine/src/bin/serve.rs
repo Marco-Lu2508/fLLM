@@ -1218,6 +1218,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             model.set_pool_blocks(former_default);
         }
     }
+    // what changes the weights after loading belongs to the identity of the KV blocks
+    let lora_identity = lora_paths.clone();
     for (adapter, scale) in lora_paths {
         let count = model.apply_lora(&adapter, scale)?;
         tracing::info!("Merged LoRA {adapter} at scale {scale}: {count} F32 projections");
@@ -1565,6 +1567,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         speculative_lookup,
         speculative_window,
     )?;
+    {
+        // the blocks on the KV tiers are valid for these weights only: the model file, and the adapters applied on top of it
+        let mut weights = facts.digest.clone();
+        for (adapter, scale) in &lora_identity {
+            weights.push_str(&format!("|{adapter}@{scale}"));
+        }
+        runtime.set_cache_identity(&weights);
+    }
     {
         let cfg = runtime.scheduler_config_mut();
         cfg.policy = scheduling_policy;

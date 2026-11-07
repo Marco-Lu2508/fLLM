@@ -709,3 +709,80 @@ fn the_blocks_the_restart_read_put_into_the_cache_can_be_evicted_and_cleared() {
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Another quantization (other weights, so other KV values) on the same disk folder must not be served the blocks of the first one.
+/// `set_cache_identity` reads the environment, so the test hands the tier to the function it calls (no `set_var`: the tests of
+/// a run are threads of one process).
+#[test]
+fn a_runtime_with_other_weights_on_the_same_folder_does_not_read_the_blocks_of_the_first() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-identity-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let build = |weights: &str| {
+        let mut rt = runtime();
+        rt.use_tier_for(crate::mem::kv_tier::KvTier::at(&dir, 64 << 20), weights);
+        rt
+    };
+    let a = prompt(4 * 16 + 3);
+    {
+        let mut first = build("digest-of-q8");
+        first.kv_warmed = true;
+        generate(&mut first, "a", &a, 2);
+        wait_for_the_disk(&mut first, 4);
+    }
+    // the same weights find the blocks again after a restart
+    let mut same = build("digest-of-q8");
+    assert_eq!(same.warm_prefix_cache(128).unwrap(), 4, "the same weights did not find their own blocks");
+    // other weights on the same folder: nothing to read
+    let mut other = build("digest-of-q4");
+    assert_eq!(other.warm_prefix_cache(128).unwrap(), 0, "other weights were given the blocks of the first");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The KV cache type decides how a block is stored (f16, fp8, int8, the q-types, nvfp4, f32). The tiers move whole blocks, so every type
+/// has to give back exactly what it stored: for each of the 13 types a restarted runtime reads the blocks of the first back and generates
+/// the same tokens as a runtime that computed the prompt itself. A type that this build cannot run on the CPU is reported, not skipped silently.
+#[test]
+fn every_kv_cache_type_survives_the_trip_through_the_disk_tier() {
+    use crate::kv_format::KvFormat;
+    let mut ran = Vec::new();
+    let mut unsupported = Vec::new();
+    for (index, format) in KvFormat::ALL.iter().copied().enumerate() {
+        let dir = std::env::temp_dir().join(format!("fllm-kvt-fmt-{}-{index}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let build = |tier: Option<&std::path::Path>| -> Result<InferenceRuntime, String> {
+            let mut model = GgufModel::load(gguf().to_str().unwrap(), 128, 8, 2)?;
+            model.set_kv_formats(format, format);
+            let mut rt = InferenceRuntime::with_speculative(model, 8, 128, Vec::new(), 0, 8)?;
+            rt.attach_compute("cpu")?;
+            if let Some(dir) = tier {
+                rt.use_tier_for(crate::mem::kv_tier::KvTier::at(dir, 64 << 20), "tiny");
+            }
+            Ok(rt)
+        };
+        let prompt_tokens = prompt(4 * 16 + 3);
+        let Ok(mut reference) = build(None) else {
+            unsupported.push(format.name());
+            continue;
+        };
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| generate(&mut reference, "ref", &prompt_tokens, 6)));
+        let Ok(expected) = attempt else {
+            unsupported.push(format.name());
+            continue;
+        };
+        let mut first = build(Some(&dir)).unwrap();
+        first.kv_warmed = true;
+        generate(&mut first, "one", &prompt_tokens, 6);
+        wait_for_the_disk(&mut first, 4);
+        drop(first);
+        let mut second = build(Some(&dir)).unwrap();
+        assert_eq!(second.warm_prefix_cache(128).unwrap(), 4, "{}: the blocks were not read back", format.name());
+        second.kv_warmed = true;
+        let (tokens, cached) = ask(&mut second, "two", &prompt_tokens, 6);
+        assert_eq!(cached, 4 * 16, "{}: the request did not use the blocks read back", format.name());
+        assert_eq!(tokens, expected, "{}: generation from blocks read back differs from a full prefill", format.name());
+        ran.push(format.name());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    eprintln!("KV TYPES run: {ran:?}; not runnable on the CPU with the tiny model: {unsupported:?}");
+    assert!(ran.len() >= 8, "only {ran:?} ran; unsupported: {unsupported:?}");
+}

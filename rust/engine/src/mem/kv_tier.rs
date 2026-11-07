@@ -81,6 +81,22 @@ impl KvTier {
         KvTier::new(None, 0, 0, max_bytes)
     }
 
+    /// The same tier for one model identity: the blocks of the disk go into a folder of their own below the configured one, named after
+    /// the identity. KV values depend on the weights (another quantization, another adapter), on the KV cache format and on the block
+    /// size, and the chain hash of a block knows only the tokens: without this a server with another quantization that uses the same
+    /// folder would read KV values that its own weights never produced. The memory tier needs nothing: it lives in one process.
+    pub fn with_identity(mut self, identity: &str) -> KvTier {
+        use sha2::{Digest, Sha256};
+        if let Some(dir) = self.dir.take() {
+            let name: String = Sha256::digest(identity.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect();
+            let dir = dir.join(name);
+            let _ = fs::create_dir_all(&dir);
+            self.used = AtomicU64::new(dir_size(&dir));
+            self.dir = Some(dir);
+        }
+        self
+    }
+
     /// The same tier with a memory tier of `ram_max` bytes in front of it.
     pub fn with_ram(mut self, ram_max: u64) -> KvTier {
         self.ram_max = ram_max;
@@ -618,5 +634,37 @@ mod tests {
         assert!(!off.spill(1, 0, &[1], b"x"));
         assert!(!off.has(1));
         assert!(off.load(1).is_none());
+    }
+
+    #[test]
+    fn two_identities_on_one_folder_do_not_see_each_other_and_one_identity_finds_its_own_again() {
+        let dir = temporary("identity");
+        let q8 = KvTier::at(&dir, 1 << 20).with_identity("model-digest|q8_0|f16");
+        let q4 = KvTier::at(&dir, 1 << 20).with_identity("model-digest|q4_k_m|f16");
+        assert!(q8.spill(0x10, 0, &[1, 2], b"values of the q8 weights"));
+        assert!(!q4.has(0x10), "a server with other weights saw a block it did not write");
+        assert!(q4.load(0x10).is_none());
+        assert!(q4.entries().is_empty(), "and the restart read of that server listed it");
+        assert!(q4.spill(0x10, 0, &[1, 2], b"values of the q4 weights"), "the same hash can exist once per identity");
+        assert_eq!(q8.load(0x10).as_deref(), Some(&b"values of the q8 weights"[..]));
+        assert_eq!(q4.load(0x10).as_deref(), Some(&b"values of the q4 weights"[..]));
+        // the same identity started again finds what it wrote
+        let again = KvTier::at(&dir, 1 << 20).with_identity("model-digest|q8_0|f16");
+        assert!(again.has(0x10));
+        assert_eq!(again.entries().len(), 1);
+        // deleting the blocks of one identity leaves the other's
+        assert_eq!(q4.clear(), 1);
+        assert!(again.has(0x10), "clearing one identity removed the files of another");
+        // the budget is counted per identity folder
+        assert!(again.stats()["used_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(q4.stats()["used_bytes"], 0);
+    }
+
+    #[test]
+    fn an_identity_does_not_change_a_tier_without_a_folder() {
+        let tier = KvTier::ram_only(1 << 20).with_identity("anything");
+        assert!(tier.enabled());
+        assert!(tier.spill(1, 0, &[1], b"x"));
+        assert_eq!(tier.load(1).as_deref(), Some(&b"x"[..]));
     }
 }

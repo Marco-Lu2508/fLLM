@@ -1623,6 +1623,26 @@ impl InferenceRuntime {
         Ok(registered)
     }
 
+    /// Tells the KV tiers which model they hold blocks for. `weights` names what the weights are (the digest of the model file, plus
+    /// whatever changes them after loading, like adapters); the KV cache format and the block size are added here. Blocks on disk then
+    /// go into a folder of that identity, so a server with another quantization on the same folder neither reads nor deletes them.
+    /// Call it before the first step.
+    pub fn set_cache_identity(&mut self, weights: &str) {
+        if !self.kv_tier.enabled() {
+            return;
+        }
+        let tier = crate::mem::kv_tier::KvTier::from_env();
+        self.use_tier_for(tier, weights);
+    }
+
+    /// Makes `tier` the KV tier of this runtime, for the identity of these weights and this runtime's KV cache format and block size.
+    fn use_tier_for(&mut self, tier: crate::mem::kv_tier::KvTier, weights: &str) {
+        let identity = format!("{weights}|{}", self.kv_fingerprint());
+        let tier = std::sync::Arc::new(tier.with_identity(&identity));
+        self.spill_tx = spawn_spill_writer(std::sync::Arc::clone(&tier));
+        self.kv_tier = tier;
+    }
+
     /// Geometry of this server's KV cache: a chain exported by another server is only taken when this matches.
     pub fn kv_fingerprint(&self) -> String {
         let (key_format, value_format) = self.model.kv_formats();
