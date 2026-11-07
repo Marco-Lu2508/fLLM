@@ -101,6 +101,7 @@ static KSIGNS64: [u64; 128] = {
 };
 
 /// One decoded group of 32 values.
+#[cfg(any(test, all(target_arch = "aarch64", target_endian = "little")))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Group {
     /// Lattice bytes in value order (little-endian words of 8 bytes).
@@ -111,10 +112,12 @@ pub(crate) struct Group {
     pub(crate) scale: [i32; 2],
 }
 
+#[cfg(any(test, all(target_arch = "aarch64", target_endian = "little")))]
 fn le16(raw: &[u8], at: usize) -> usize {
     usize::from(u16::from_le_bytes([raw[at], raw[at + 1]]))
 }
 
+#[cfg(any(test, all(target_arch = "aarch64", target_endian = "little")))]
 fn le32(raw: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]])
 }
@@ -126,6 +129,7 @@ pub(crate) fn head(kind: u32, raw: &[u8]) -> f32 {
 
 /// Group `g` (0..8) of the block `raw` (`block_bytes(KIND)` bytes) of format `KIND`.
 #[inline(always)]
+#[cfg(any(test, all(target_arch = "aarch64", target_endian = "little")))]
 pub(crate) fn group<const KIND: u32>(raw: &[u8], g: usize) -> Group {
     let mut out = Group::default();
     match KIND {
@@ -185,7 +189,7 @@ pub(crate) fn group<const KIND: u32>(raw: &[u8], g: usize) -> Group {
 
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod x86 {
-    use super::{block_bytes, group, head, Group, GROUPS, TILE};
+    use super::{block_bytes, head, GROUPS, TILE};
     use crate::cpu_quantized::X;
     use crate::cpu_schedule::Rows;
     use std::arch::x86_64::*;
@@ -253,9 +257,10 @@ pub(crate) mod x86 {
         scale: __m256i,
     }
 
+    #[cfg(test)]
     #[inline]
     #[target_feature(enable = "avx2")]
-    unsafe fn vectors(g: &Group) -> Vectors {
+    unsafe fn vectors(g: &super::Group) -> Vectors {
         let words = |w: &[u64; 4]| {
             _mm256_set_epi64x(w[3] as i64, w[2] as i64, w[1] as i64, w[0] as i64)
         };
@@ -269,24 +274,70 @@ pub(crate) mod x86 {
         }
     }
 
-    /// Group `g` of an IQ3_XXS block with two gathers instead of twelve scalar table reads: the eight lattice indices of a group
-    /// are eight bytes and eight 32-bit entries of the lattice table are exactly its 32 lattice bytes in order; the four 7-bit sign
-    /// indices are cut out of one 32-bit word with a variable shift and select four 64-bit sign words. Same bytes as
-    /// `vectors(&group::<18>(raw, g))`.
+    /// Group `g` of a block of any grid format with two gathers instead of scalar table reads (twelve for IQ3_XXS, up to sixteen for
+    /// the others) and a `set_epi64x` per vector. The lattice indices of a group are cut out of the packed bytes with widening and
+    /// variable shifts, the lattice entries and the four sign words are gathered, the scales are broadcast. Same bytes as
+    /// `vectors(&group::<KIND>(raw, g))`.
     #[inline]
     #[target_feature(enable = "avx2")]
-    unsafe fn vectors_iq3_xxs(raw: &[u8], g: usize) -> Vectors {
-        assert!(raw.len() >= block_bytes(super::IQ3_XXS) && g < GROUPS);
+    unsafe fn vectors_gather<const KIND: u32>(raw: &[u8], g: usize) -> Vectors {
+        assert!(raw.len() >= block_bytes(KIND) && g < GROUPS);
         let at = raw.as_ptr();
-        let index = _mm256_cvtepu8_epi32(_mm_loadl_epi64(at.add(2 + g * 8).cast()));
-        let grid = _mm256_i32gather_epi32::<4>(super::IQ3XXS_GRID.as_ptr().cast(), index);
-        let signs = std::ptr::read_unaligned(at.add(66 + g * 4).cast::<u32>());
-        let sign_index = _mm_and_si128(
-            _mm_srlv_epi32(_mm_set1_epi32(signs as i32), _mm_setr_epi32(0, 7, 14, 21)),
-            _mm_set1_epi32(0x7f),
-        );
-        let sign = _mm256_i32gather_epi64::<8>(super::KSIGNS64.as_ptr().cast(), sign_index);
-        Vectors { grid, sign, scale: _mm256_set1_epi16((2 * (signs >> 28) + 1) as i16) }
+        let word = |offset: usize| std::ptr::read_unaligned(at.add(offset).cast::<u32>());
+        let four = |offset: usize| _mm_cvtepu8_epi32(_mm_cvtsi32_si128(word(offset) as i32));
+        // 7-bit sign indices of IQ2_XXS and IQ3_XXS: four of them in one 32-bit word, 28 bits, the scale in the top four.
+        let ksign = |packed: u32| {
+            let index = _mm_and_si128(
+                _mm_srlv_epi32(_mm_set1_epi32(packed as i32), _mm_setr_epi32(0, 7, 14, 21)),
+                _mm_set1_epi32(0x7f),
+            );
+            _mm256_i32gather_epi64::<8>(super::KSIGNS64.as_ptr().cast(), index)
+        };
+        let two = |low: i32, high: i32| _mm256_set_m128i(_mm_set1_epi16(high as i16), _mm_set1_epi16(low as i16));
+        match KIND {
+            super::IQ2_XXS => {
+                let hi = word(2 + g * 8 + 4);
+                let grid = _mm256_i32gather_epi64::<8>(super::IQ2XXS_GRID.as_ptr().cast(), four(2 + g * 8));
+                let scale = (2 * (hi >> 28) + 1) as i32;
+                Vectors { grid, sign: ksign(hi), scale: two(scale, scale) }
+            }
+            super::IQ2_XS => {
+                let q = _mm_cvtepu16_epi32(_mm_loadl_epi64(at.add(2 + g * 8).cast()));
+                let grid = _mm256_i32gather_epi64::<8>(super::IQ2XS_GRID.as_ptr().cast(), _mm_and_si128(q, _mm_set1_epi32(0x1ff)));
+                let sign = _mm256_i32gather_epi64::<8>(super::KSIGNS64.as_ptr().cast(), _mm_srli_epi32::<9>(q));
+                let s = i32::from(raw[66 + g]);
+                Vectors { grid, sign, scale: two(2 * (s & 15) + 1, 2 * (s >> 4) + 1) }
+            }
+            super::IQ2_S => {
+                let qh = _mm_set1_epi32(i32::from(raw[66 + g]));
+                let high = _mm_slli_epi32::<8>(_mm_and_si128(_mm_srlv_epi32(qh, _mm_setr_epi32(0, 2, 4, 6)), _mm_set1_epi32(3)));
+                let grid = _mm256_i32gather_epi64::<8>(super::IQ2S_GRID.as_ptr().cast(), _mm_or_si128(four(2 + g * 4), high));
+                let sign = _mm256_i32gather_epi64::<8>(super::SIGNS64.as_ptr().cast(), four(34 + g * 4));
+                let s = i32::from(raw[74 + g]);
+                Vectors { grid, sign, scale: two(2 * (s & 15) + 1, 2 * (s >> 4) + 1) }
+            }
+            super::IQ3_XXS => {
+                let signs = word(66 + g * 4);
+                let index = _mm256_cvtepu8_epi32(_mm_loadl_epi64(at.add(2 + g * 8).cast()));
+                let grid = _mm256_i32gather_epi32::<4>(super::IQ3XXS_GRID.as_ptr().cast(), index);
+                let scale = (2 * (signs >> 28) + 1) as i32;
+                Vectors { grid, sign: ksign(signs), scale: two(scale, scale) }
+            }
+            _ => {
+                // IQ3_S: the ninth bit of each of the eight indices is bit k of the byte at 66 + g.
+                let qh = _mm256_set1_epi32(i32::from(raw[66 + g]));
+                let high = _mm256_slli_epi32::<8>(_mm256_and_si256(
+                    _mm256_srlv_epi32(qh, _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7)),
+                    _mm256_set1_epi32(1),
+                ));
+                let index = _mm256_or_si256(_mm256_cvtepu8_epi32(_mm_loadl_epi64(at.add(2 + g * 8).cast())), high);
+                let grid = _mm256_i32gather_epi32::<4>(super::IQ3S_GRID.as_ptr().cast(), index);
+                let sign = _mm256_i32gather_epi64::<8>(super::SIGNS64.as_ptr().cast(), four(74 + g * 4));
+                let pair = raw[106 + g / 2];
+                let nibble = i32::from(if g.is_multiple_of(2) { pair & 15 } else { pair >> 4 });
+                Vectors { grid, sign, scale: two(1 + 2 * nibble, 1 + 2 * nibble) }
+            }
+        }
     }
 
     /// Eight 32-bit lanes of `sum scale * lattice * sign * q` over one group.
@@ -315,13 +366,7 @@ pub(crate) mod x86 {
         for block in 0..blocks {
             let raw = &row[block * width..][..width];
             let d = head(KIND, raw);
-            let decoded: [Vectors; GROUPS] = std::array::from_fn(|g| {
-                if KIND == super::IQ3_XXS {
-                    vectors_iq3_xxs(raw, g)
-                } else {
-                    vectors(&group::<KIND>(raw, g))
-                }
-            });
+            let decoded: [Vectors; GROUPS] = std::array::from_fn(|g| vectors_gather::<KIND>(raw, g));
             for (t, lanes) in acc.iter_mut().enumerate().take(tokens) {
                 let records = &x[t * nb + block * GROUPS..][..GROUPS];
                 let mut sum = _mm256_setzero_si256();
@@ -345,6 +390,7 @@ pub(crate) mod x86 {
 
     #[cfg(test)]
     mod tests {
+        use super::super::group;
         use super::*;
         use crate::cpu_selftest::{random_weights, Lcg};
 
@@ -355,25 +401,33 @@ pub(crate) mod x86 {
             out
         }
 
-        /// The gathered group is the group of the scalar decoder, byte for byte (lattice, signs and scales), for random blocks.
+        /// The gathered group is the group of the scalar decoder, byte for byte (lattice, signs and scales), for random blocks of every
+        /// grid format.
         #[test]
-        fn the_gathered_iq3_xxs_group_is_the_group_of_the_scalar_decoder() {
+        fn the_gathered_group_is_the_group_of_the_scalar_decoder() {
             if !std::arch::is_x86_feature_detected!("avx2") {
                 return;
             }
-            let mut rng = Lcg(5);
-            let weights = random_weights(super::super::IQ3_XXS, 64, 1024, &mut rng);
-            let width = block_bytes(super::super::IQ3_XXS);
-            for at in (0..weights.len()).step_by(width) {
-                let raw = &weights[at..at + width];
-                for g in 0..GROUPS {
-                    // SAFETY: AVX2 was detected above; `raw` is one whole block.
-                    let (want, have) = unsafe { (vectors(&group::<18>(raw, g)), vectors_iq3_xxs(raw, g)) };
-                    assert_eq!(bytes(have.grid), bytes(want.grid), "lattice of group {g}");
-                    assert_eq!(bytes(have.sign), bytes(want.sign), "signs of group {g}");
-                    assert_eq!(bytes(have.scale), bytes(want.scale), "scales of group {g}");
+            fn check<const KIND: u32>(rng: &mut Lcg) {
+                let width = block_bytes(KIND);
+                let weights = random_weights(KIND, 64, 1024, rng);
+                for at in (0..weights.len()).step_by(width) {
+                    let raw = &weights[at..at + width];
+                    for g in 0..GROUPS {
+                        // SAFETY: AVX2 was detected by the caller; `raw` is one whole block.
+                        let (want, have) = unsafe { (vectors(&group::<KIND>(raw, g)), vectors_gather::<KIND>(raw, g)) };
+                        assert_eq!(bytes(have.grid), bytes(want.grid), "lattice of kind {KIND} group {g}");
+                        assert_eq!(bytes(have.sign), bytes(want.sign), "signs of kind {KIND} group {g}");
+                        assert_eq!(bytes(have.scale), bytes(want.scale), "scales of kind {KIND} group {g}");
+                    }
                 }
             }
+            let mut rng = Lcg(5);
+            check::<16>(&mut rng);
+            check::<17>(&mut rng);
+            check::<18>(&mut rng);
+            check::<21>(&mut rng);
+            check::<22>(&mut rng);
         }
     }
 }
