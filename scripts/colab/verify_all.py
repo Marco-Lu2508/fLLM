@@ -395,6 +395,44 @@ def complete(prompt, max_tokens, ignore_eos=True, temperature=0, timeout=600):
     return choices[0].get("text", "")
 
 
+def complete_detailed(prompt, max_tokens, timeout=600):
+    """Like `complete`, plus the chosen token and its five best candidates (log probabilities) for every generated token."""
+    body = {"prompt": prompt, "max_tokens": max_tokens, "temperature": 0, "ignore_eos": True,
+            "stream": False, "logprobs": 5}
+    data = http_post("/v1/completions", body, timeout=timeout)
+    choices = data.get("choices") or []
+    if not choices:
+        raise StepFailed("completion returned no choices: %s" % json.dumps(data)[:200])
+    lp = choices[0].get("logprobs") or {}
+    return choices[0].get("text", ""), {"tokens": lp.get("tokens") or [], "tops": lp.get("top_logprobs") or []}
+
+
+# two devices that disagree on a token whose two best candidates are closer than this (in nats) on BOTH devices are not a defect:
+# a different summation order or activation rounding moves the logits by about this much, and which of the two wins is then arbitrary.
+# Measured on an L4 (Llama-3.2-3B Q4_K_M, "The capital of France is"): the candidates were 0.06 (CPU) and 0.11 (CUDA) apart, an f32
+# reference put them 0.08 apart, and the CUDA values were the nearer ones.
+TIE_NATS = 0.25
+LAST_DETAIL = {}
+
+
+def near_tie(detail_a, detail_b):
+    """None when the first differing token is not a near tie on both devices, else a sentence that says what was found."""
+    ta, tb = detail_a["tokens"], detail_b["tokens"]
+    n = next((i for i, (x, y) in enumerate(zip(ta, tb)) if x != y), None)
+    if n is None or n >= len(detail_a["tops"]) or n >= len(detail_b["tops"]):
+        return None
+    gaps = []
+    for detail, other in ((detail_a, tb[n]), (detail_b, ta[n])):
+        top = detail["tops"][n] or {}
+        if other not in top:
+            return None  # the other device's token is not even among the five best here: a real difference
+        gaps.append(max(top.values()) - top[other])
+    if max(gaps) > TIE_NATS:
+        return None
+    return ("token %d: %r on one device, %r on the other, %.3f and %.3f nats apart on the two devices (limit %.2f): "
+            "a near tie, not a defect" % (n, ta[n], tb[n], gaps[0], gaps[1], TIE_NATS))
+
+
 def stream_prompt(prompt, max_tokens, timeout=900):
     """Stream one completion; returns (prompt_seconds, decode_tps, events)."""
     body = json.dumps({"prompt": prompt, "max_tokens": max_tokens, "temperature": 0,
@@ -665,12 +703,13 @@ def equality_pair(model, device_a, device_b, prompt, gen_tokens, tag_a="gpu", ta
     """Run the same greedy request on two devices; returns (text_a, text_b, logfile_a)."""
     start_server(model, device=device_a, extra_args=extra_a, env_extra=env_a,
                  tag=tag_a, timeout=timeout)
-    text_a = complete(prompt, gen_tokens, timeout=timeout)
+    text_a, detail_a = complete_detailed(prompt, gen_tokens, timeout=timeout)
     logfile_a = os.path.join(RUN_DIR, "server-%s.log" % tag_a)
     start_server(model, device=device_b, extra_args=extra_b, env_extra=env_b,
                  tag=tag_b, timeout=timeout)
-    text_b = complete(prompt, gen_tokens, timeout=timeout)
+    text_b, detail_b = complete_detailed(prompt, gen_tokens, timeout=timeout)
     stop_servers()
+    LAST_DETAIL["a"], LAST_DETAIL["b"] = detail_a, detail_b
     return text_a, text_b, logfile_a
 
 
@@ -682,7 +721,12 @@ def step_dense():
     CACHE["dense_cpu_text"] = cpu_text
     CACHE["dense_gpu_text"] = gpu_text
     if gpu_text != cpu_text:
-        raise StepFailed("GPU and CPU greedily diverge: " + first_diff(cpu_text, gpu_text))
+        tie = near_tie(LAST_DETAIL["a"], LAST_DETAIL["b"])
+        if tie is None:
+            raise StepFailed("GPU and CPU greedily diverge: " + first_diff(cpu_text, gpu_text))
+        return {"detail": "greedy text differs at a near tie (%s); cuda: %r, cpu: %r" % (
+            tie, gpu_text[:60], cpu_text[:60]),
+            "data": {"text": gpu_text, "text_cpu": cpu_text, "near_tie": tie}}
     return {"detail": "identical greedy text on cuda and cpu (%d tokens): %r" % (
         EQUALITY_GEN_TOKENS, gpu_text[:60]),
         "data": {"text": gpu_text, "text_cpu": cpu_text}}
@@ -694,7 +738,11 @@ def step_moe():
     gpu_text, cpu_text, _ = equality_pair(path, "cuda", "cpu", MOE_PROMPT,
                                           EQUALITY_GEN_TOKENS, tag_a="moe-gpu", tag_b="moe-cpu")
     if gpu_text != cpu_text:
-        raise StepFailed("GPU and CPU greedily diverge: " + first_diff(cpu_text, gpu_text))
+        tie = near_tie(LAST_DETAIL["a"], LAST_DETAIL["b"])
+        if tie is None:
+            raise StepFailed("GPU and CPU greedily diverge: " + first_diff(cpu_text, gpu_text))
+        return {"detail": "greedy text differs at a near tie (%s); cuda: %r, cpu: %r" % (
+            tie, gpu_text[:60], cpu_text[:60]), "data": {"text": gpu_text, "near_tie": tie}}
     return {"detail": "identical greedy text on cuda and cpu (%d tokens): %r" % (
         EQUALITY_GEN_TOKENS, gpu_text[:60]), "data": {"text": gpu_text}}
 
@@ -1158,6 +1206,21 @@ def acquire_from_source():
     if shutil.which("apt-get") and os.geteuid() == 0:
         sh(["bash", "-lc", "apt-get update -qq && apt-get install -y -qq --no-install-recommends"
             " cmake clang pkg-config build-essential >/dev/null 2>&1 || true"], timeout=900)
+    # CUTLASS and FlashInfer are header-only dependencies that the release build clones too (scripts/release/build-linux-cuda.sh, same tags).
+    # Without them build.rs builds the slower fallback attention and selftest-gpu skips every `hattn` check, so a build from source
+    # without them is not the binary the release has.
+    for name, repo, tag, marker in (
+            ("cutlass", "NVIDIA/cutlass", "v4.8.0", "include/cutlass/cutlass.h"),
+            ("flashinfer", "flashinfer-ai/flashinfer", "v0.6.5", "include/flashinfer/attention/prefill.cuh")):
+        target = os.path.join(src, "third_party", name)
+        if not os.path.exists(os.path.join(target, marker)):
+            log("    fetching %s %s" % (name, tag))
+            shutil.rmtree(target, ignore_errors=True)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            sh(["git", "clone", "-q", "--depth", "1", "--branch", tag,
+                "https://github.com/%s.git" % repo, target], timeout=600)
+            if not os.path.exists(os.path.join(target, marker)):
+                log("    WARNING: could not fetch %s: the binary is built without it (slower attention, fewer checks)" % name)
     cc = CACHE.get("cc")
     archs = ("%d" % cc) if cc else "75;80;86;89;90;100;120"
     env = dict(os.environ)

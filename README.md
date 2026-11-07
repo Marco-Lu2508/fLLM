@@ -429,6 +429,7 @@ The code and `--help` are authoritative where a page and the program disagree.
 cargo build --release --locked -p fllm-engine --features rust-gpu --bin fllm-rs           # CPU + wgpu
 cargo build --release --locked -p fllm-engine --features "rust-gpu,cuda" --bin fllm-rs    # plus CUDA, needs nvcc
 FLLM_CUDA_ARCHS=120 cargo build --release --locked -p fllm-engine --features cuda          # one GPU generation, faster
+FLLM_CUDA_JOBS=4 cargo build --release --locked -p fllm-engine --features cuda            # nvcc calls at once (default: one per core, fewer if memory is short)
 ./install.sh --build                                                                       # build and install into ~/.local/bin
 ```
 

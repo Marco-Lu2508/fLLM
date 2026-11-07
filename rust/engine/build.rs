@@ -520,6 +520,9 @@ fn cuda_kernels() {
     }
     let sources = ["api.cu", "kda.cu", "sampling.cu", "attn_tree.cu", "comm_kernels.cu", "moe.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "tc_gemm.cu", "qgemm4k.cu", "attention3.cu", "qgemm6k.cu", "qgemm5k.cu", "qgemm8.cu", "qgemm_leg.cu", "attention4.cu", "mmvq.cu", "nvfp4.cu", "nvfp4_cutlass.cu", "flashinfer_prefill.cu", "marlin_q4k.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "dsa.cu", "block_sparse.cu", "inkling.cu", "hc.cu", "qwen4.cu", "v4.cu", "mla.cu", "mamba2.cu", "shortconv.cu", "mamba1.cu", "fused.cu", "attn_encoder.cu", "act_narrow.cu", "exl.cu", "mlx_affine.cu", "rwkv.cu", "scan.cu"];
     let mut objects = Vec::new();
+    // Every nvcc call of this build goes into one queue and runs on several threads (`run_nvcc_jobs`): the files are independent, and
+    // one after the other a build on a 12 core Colab VM was still running after 44 minutes with the cores idle (7 min 23 s in parallel).
+    let mut jobs: Vec<NvccJob> = Vec::new();
     for source in sources {
         if source == "nvfp4_cutlass.cu" && (cutlass.is_none() || plan.fp4_sm120.is_empty()) {
             continue;
@@ -573,16 +576,7 @@ fn cuda_kernels() {
             .arg("-o")
             .arg(&object)
             .arg(PathBuf::from("cuda").join(source));
-        let output = command.output().unwrap_or_else(|e| panic!("cannot run {}: {e} (set CUDA_HOME)", nvcc.display()));
-        if !output.status.success() {
-            eprintln!("nvcc failed on {source} (host_flags={host_flags}):
-command: {command:?}
-stdout:
-{}
-stderr:
-{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-            panic!("nvcc failed on {source}");
-        }
+        jobs.push(NvccJob::new(command, source.to_string(), &PathBuf::from("cuda").join(source), flashinfer_build || fp4));
         objects.push(object);
     }
     // Kernel files of the Hopper / Blackwell work (EXTRA_SOURCES), compiled when the file exists. Their targets and headers follow from the
@@ -654,16 +648,9 @@ stderr:
         for dir in &includes {
             command.arg(format!("-I{}", dir.display()));
         }
-        let status = command
-            .args(&target_flags)
-            .args(&defines)
-            .args(&extra)
-            .arg("-o")
-            .arg(&object)
-            .arg(&path)
-            .status()
-            .unwrap_or_else(|e| panic!("cannot run {}: {e} (set CUDA_HOME)", nvcc.display()));
-        assert!(status.success(), "nvcc failed on {source}");
+        command.args(&target_flags).args(&defines).args(&extra).arg("-o").arg(&object).arg(&path);
+        let heavy = with_cutlass || *flavor != Flavor::Generic;
+        jobs.push(NvccJob::new(command, source.to_string(), &path, heavy));
         // a file built as a stub (no headers / architecture) does not count as a feature of this binary
         let stub = defines.iter().any(|d| d.starts_with("-DFLLM_NO_")) || (*flavor == Flavor::FlashInfer && flashinfer.is_none());
         if !stub {
@@ -684,7 +671,8 @@ stderr:
         report.push_str(&format!("/files={}", built.join("+")));
         let source = "arch_report.cu";
         let object = out.join(target.object_name(source));
-        let status = Command::new(&nvcc)
+        let mut command = Command::new(&nvcc);
+        command
             .args(["-c", "-O2", "--std=c++17", "-Xcompiler", &host_flags])
             .args(&ccbin)
             .args(&flags)
@@ -692,10 +680,8 @@ stderr:
             .args(&extra)
             .arg("-o")
             .arg(&object)
-            .arg(PathBuf::from("cuda").join(source))
-            .status()
-            .unwrap_or_else(|e| panic!("cannot run {}: {e} (set CUDA_HOME)", nvcc.display()));
-        assert!(status.success(), "nvcc failed on {source}");
+            .arg(PathBuf::from("cuda").join(source));
+        jobs.push(NvccJob::new(command, source.to_string(), &PathBuf::from("cuda").join(source), false));
         objects.push(object);
     }
     // vLLM's Marlin GEMM for 4-bit AWQ / GPTQ weights (cuda/marlin_vllm): many template instantiations, so compiled in parallel,
@@ -732,39 +718,23 @@ stderr:
     let bf16_newest = bf16_archs.last().copied().unwrap_or("80");
     bf16_flags.push("-gencode".into());
     bf16_flags.push(format!("arch=compute_{bf16_newest},code=compute_{bf16_newest}"));
-    let jobs = std::thread::available_parallelism().map_or(4, |n| n.get()).min(12);
-    let queue = std::sync::Mutex::new(marlin_sources.clone());
     let marlin_objects: Vec<PathBuf> = marlin_sources
         .iter()
         .map(|s| out.join(target.object_name(&format!("marlin_{}.cu", s.file_stem().expect("file name").to_string_lossy()))))
         .collect();
-    std::thread::scope(|scope| {
-        for _ in 0..jobs {
-            scope.spawn(|| loop {
-                let Some(source) = queue.lock().expect("queue").pop() else { return };
-                let object = out.join(target.object_name(&format!("marlin_{}.cu", source.file_stem().expect("file name").to_string_lossy())));
-                let mut cmd = Command::new(&nvcc);
-                cmd.args(["-c", "-O3", "--std=c++17", "-lineinfo", "--use_fast_math", "--expt-relaxed-constexpr", "-Xcompiler", &host_flags])
-                    .args(&ccbin)
-                    .arg(format!("-I{}", marlin_dir.display()))
-                    .args(if source.file_name().is_some_and(|n| n.to_string_lossy().contains("bfloat16")) { &bf16_flags } else { &marlin_flags })
-                    .args(&extra)
-                    .arg("-o")
-                    .arg(&object)
-                    .arg(&source);
-                let output = cmd.output().unwrap_or_else(|e| panic!("cannot run {}: {e} (set CUDA_HOME)", nvcc.display()));
-                if !output.status.success() {
-                    eprintln!("nvcc failed on {} (host_flags={host_flags}):
-command: {cmd:?}
-stdout:
-{}
-stderr:
-{}", source.display(), String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-                    panic!("nvcc failed on {}", source.display());
-                }
-            });
-        }
-    });
+    for (source, object) in marlin_sources.iter().zip(&marlin_objects) {
+        let mut cmd = Command::new(&nvcc);
+        cmd.args(["-c", "-O3", "--std=c++17", "-lineinfo", "--use_fast_math", "--expt-relaxed-constexpr", "-Xcompiler", &host_flags])
+            .args(&ccbin)
+            .arg(format!("-I{}", marlin_dir.display()))
+            .args(if source.file_name().is_some_and(|n| n.to_string_lossy().contains("bfloat16")) { &bf16_flags } else { &marlin_flags })
+            .args(&extra)
+            .arg("-o")
+            .arg(object)
+            .arg(source);
+        jobs.push(NvccJob::new(cmd, source.display().to_string(), source, false));
+    }
+    run_nvcc_jobs(jobs, &host_flags, &nvcc);
     objects.extend(marlin_objects);
     let library = out.join(target.library_name("fllmcuda"));
     archive(&target, &library, &objects);
@@ -782,6 +752,77 @@ stderr:
         for lib in ["dl", "rt", "pthread", "stdc++"] {
             println!("cargo:rustc-link-lib={lib}");
         }
+    }
+}
+
+/// One nvcc call of the CUDA build.
+struct NvccJob {
+    command: Command,
+    /// What is compiled, for the error text.
+    source: String,
+    /// Scheduling weight: bigger and template heavy files start first, so that the longest one does not start last.
+    weight: u64,
+}
+
+impl NvccJob {
+    fn new(command: Command, source: String, path: &Path, heavy: bool) -> Self {
+        let size = std::fs::metadata(path).map_or(0, |m| m.len());
+        NvccJob { command, source, weight: size.saturating_mul(if heavy { 40 } else { 1 }) }
+    }
+}
+
+/// How many nvcc calls run at once: `FLLM_CUDA_JOBS`, else one per core (at most 16), fewer when the free memory is short
+/// (a call takes up to about 3 GiB, the CUTLASS / FlashInfer files the most).
+fn nvcc_parallelism() -> usize {
+    if let Some(n) = std::env::var("FLLM_CUDA_JOBS").ok().and_then(|v| v.trim().parse::<usize>().ok()).filter(|n| *n > 0) {
+        return n;
+    }
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16);
+    let available_kib = std::fs::read_to_string("/proc/meminfo").ok().and_then(|t| {
+        t.lines().find_map(|l| l.strip_prefix("MemAvailable:")?.split_whitespace().next()?.parse::<u64>().ok())
+    });
+    match available_kib {
+        Some(kib) => cores.min(((kib / (3 * 1024 * 1024)) as usize).max(1)),
+        None => cores,
+    }
+}
+
+/// Runs the nvcc calls on `nvcc_parallelism()` threads, the heaviest first. The first failure stops the queue and panics with the
+/// output of the call that failed (the other running calls finish first).
+fn run_nvcc_jobs(mut jobs: Vec<NvccJob>, host_flags: &str, nvcc: &Path) {
+    jobs.sort_by_key(|j| j.weight); // `pop` takes from the end: the heaviest
+    let threads = nvcc_parallelism().min(jobs.len().max(1));
+    println!("cargo:warning=fllmcuda: {} nvcc calls on {} threads", jobs.len(), threads);
+    let queue = std::sync::Mutex::new(jobs);
+    let failure: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                if failure.lock().expect("failure").is_some() {
+                    return;
+                }
+                let Some(mut job) = queue.lock().expect("queue").pop() else { return };
+                let message = match job.command.output() {
+                    Err(e) => Some(format!("cannot run {}: {e} (set CUDA_HOME)", nvcc.display())),
+                    Ok(out) if out.status.success() => None,
+                    Ok(out) => Some(format!(
+                        "nvcc failed on {} (host_flags={host_flags}):\ncommand: {:?}\nstdout:\n{}\nstderr:\n{}",
+                        job.source,
+                        job.command,
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    )),
+                };
+                if let Some(m) = message {
+                    failure.lock().expect("failure").get_or_insert(m);
+                    return;
+                }
+            });
+        }
+    });
+    if let Some(m) = failure.into_inner().expect("failure") {
+        eprintln!("{m}");
+        panic!("nvcc failed (details above)");
     }
 }
 

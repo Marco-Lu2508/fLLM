@@ -9,7 +9,7 @@ python3 scripts/colab/verify_all.py --dry-run     # print the plan, download not
 python3 scripts/colab/verify_all.py --cpu-only    # CPU checks only, any machine
 ```
 
-**Do not use `--build-from-source` on Colab unless you have an hour to spare**: the CUDA build there takes close to an hour. The default (no flag) downloads the release binary (`fllm-linux-x86_64-cuda.tar.gz`, built for every architecture from Pascal to Blackwell) and starts checking after about a minute.
+`--build-from-source` builds `main` on the VM: with the CUDA kernels compiled in parallel (one nvcc per core) that took 7 min 23 s on a 12-core L4 VM, 5 min 22 s for the engine alone once the dependencies were built (measured 2026-11-07; before the change a build was still running after 44 minutes). It also clones CUTLASS and FlashInfer like the release build, which the attention checks need. The default (no flag) downloads the release binary (`fllm-linux-x86_64-cuda.tar.gz`, built for every architecture from Pascal to Blackwell) and starts checking after about a minute.
 
 Useful options: `--binary PATH` (verify a binary you built), `--build-from-source`
 (slow, builds `main` with the CUDA kernels for the detected card), `--version TAG`
@@ -31,7 +31,7 @@ run - the table shows what passed, failed or was skipped.
 | Devices | compiled backends (`cuda` must be in the list) |
 | selftest-gpu | full run: ok/fail counts and the failing checks |
 | selftest-cpu | full run (CPU-only mode) |
-| Dense | greedy text GPU vs CPU, Llama-3.2-3B-Instruct Q4_K_M |
+| Dense | greedy text GPU vs CPU, Llama-3.2-3B-Instruct Q4_K_M; a difference at a token whose two best candidates are within 0.25 nats on both devices passes and says so (`test_near_tie.py`), any other difference fails |
 | MoE | greedy text GPU vs CPU, OLMoE-1B-7B-0924-Instruct Q4_K_M |
 | GPTQ import | Qwen2.5-1.5B-Instruct-GPTQ-Int4 converted and compared GPU vs CPU |
 | NVFP4 import | runs only on sm_120 and with `FLLM_VERIFY_NVFP4_MODEL` set (no small public NVFP4 checkpoint) |
