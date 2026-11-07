@@ -710,8 +710,10 @@ fn linear_x86(
     let (block, block_bytes) = layout(kind).expect("validated");
     let width = cols / block * block_bytes;
     if batch == 1 {
-        // The Q2_0 decode kernels take at most four rows whatever the vector width.
-        let size = if wide.is_some() && kind != 42 { 8 } else { 4 };
+        // The Q2_0 decode kernels take at most four rows whatever the vector width. The classic formats take eight on AVX2 too: eight
+        // independent accumulators hide the latency of the FMA chain and the activation record is loaded once for eight rows (one row of
+        // Q4_0/Q5_0 decode, 320 MB of weights, alternated runs: Q5_0 14.6 -> 12.4 ms, Q4_0 15.9 -> 12.9 ms, 6 of 6 pairs).
+        let size = if (wide.is_some() && kind != 42) || matches!(kind, 2 | 3 | 6 | 7) { 8 } else { 4 };
         crate::cpu_schedule::row_panels(
             &mut output,
             &rows,
@@ -2030,6 +2032,10 @@ mod x86 {
                             2 => $body::<$kind, 2>(w, x, first, out),
                             3 => $body::<$kind, 3>(w, x, first, out),
                             4 => $body::<$kind, 4>(w, x, first, out),
+                            5 => $body::<$kind, 5>(w, x, first, out),
+                            6 => $body::<$kind, 6>(w, x, first, out),
+                            7 => $body::<$kind, 7>(w, x, first, out),
+                            8 => $body::<$kind, 8>(w, x, first, out),
                             _ => unreachable!(),
                         }
                     };
@@ -2058,8 +2064,8 @@ mod x86 {
                 };
                 let blocks = x.len();
                 let stride = blocks * width;
-                let mut a = [_mm256_setzero_ps(); 4];
-                let mut offsets = [0.0_f32; 4];
+                let mut a = [_mm256_setzero_ps(); ROWS];
+                let mut offsets = [0.0_f32; ROWS];
                 for (block, xr) in x.iter().enumerate() {
                     // Raw unsigned nibbles go straight into the integer dot; the offset of the
                     // symmetric formats enters as the dot's initial value.
@@ -3506,7 +3512,7 @@ mod tests {
                     .map(|i| ((i * 19 % 255) as f32 - 127.0) / 37.0)
                     .collect::<Vec<_>>();
                 let packed = prepare(&input, cols, kind);
-                let mut weights = (0..7 * blocks * width)
+                let mut weights = (0..11 * blocks * width)
                     .map(|i| (i * 37 + 11) as u8)
                     .collect::<Vec<_>>();
                 for (i, raw) in weights.chunks_mut(width).enumerate() {
@@ -3518,7 +3524,7 @@ mod tests {
                         );
                     }
                 }
-                for rows in 1..=4 {
+                for rows in 1..=8 {
                     let first = 2;
                     let mut output = vec![0.0; rows];
                     // SAFETY: guarded by the scalar check at the top of the test.
