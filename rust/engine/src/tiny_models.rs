@@ -83,9 +83,29 @@ pub(crate) fn scratch(label: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let p = std::env::temp_dir().join(format!("fllm-tiny-{label}-{}-{n}", std::process::id()));
+    let p = scratch_path(label, n);
     fs::create_dir_all(&p).unwrap();
     p
+}
+
+/// The directory name for `label` at clock reading `nanos`. The clock alone is not unique: macOS reads it in microseconds, so two tests
+/// of one binary that ask for the same label in the same microsecond (the Gemma tests share their fixture names) got the same directory,
+/// and the `Drop` of one deleted the files of the other. The counter makes every call distinct within the process.
+fn scratch_path(label: &str, nanos: u128) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("fllm-tiny-{label}-{}-{nanos}-{count}", std::process::id()))
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    /// Two requests for one label at one and the same clock reading get two directories.
+    #[test]
+    fn the_same_label_at_the_same_instant_gets_two_directories() {
+        let a = super::scratch_path("same", 1_000);
+        let b = super::scratch_path("same", 1_000);
+        assert_ne!(a, b);
+    }
 }
 
 struct Rng(u64);
