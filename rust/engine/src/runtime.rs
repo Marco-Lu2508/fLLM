@@ -119,8 +119,12 @@ pub struct InferenceRuntime {
     kv_reloaded: u64,
     /// Writes for the disk tier, off the step path: file I/O must never delay a token.
     spill_tx: Option<std::sync::mpsc::SyncSender<SpillJob>>,
+    /// Blocks handed to the spill thread since the tier was set; with `KvTier::spills` and the drops it says when all of them were written.
+    spill_sent: u64,
     /// Pokes the prefetch thread (see `spawn_prefetcher`).
     prefetch_tx: Option<std::sync::mpsc::SyncSender<()>>,
+    /// Set for the duration of one reload round while sequences run and the prefetch thread exists: only blocks in memory are read.
+    reload_memory_only: bool,
     kv_warmed: bool,
     /// The suffix cache on disk (`FLLM_SUFFIX_DIR`): the file of this model and the state of the last write.
     suffix_file: Option<SuffixFile>,
@@ -253,6 +257,8 @@ impl InferenceRuntime {
             kv_reloaded: 0,
             spill_tx,
             prefetch_tx,
+            spill_sent: 0,
+            reload_memory_only: false,
             kv_warmed: false,
             suffix_file: None,
             swap_store: Default::default(),
@@ -1655,6 +1661,7 @@ impl InferenceRuntime {
         let tier = std::sync::Arc::new(tier.with_identity(&identity));
         self.spill_tx = spawn_spill_writer(std::sync::Arc::clone(&tier));
         self.prefetch_tx = spawn_prefetcher(std::sync::Arc::clone(&tier));
+        self.spill_sent = 0;
         self.kv_tier = tier;
     }
 
@@ -1788,12 +1795,17 @@ impl InferenceRuntime {
         }
         let waiting: Vec<i64> = self.scheduler.waiting.iter().copied().collect();
         let mut budget = per_round;
+        // While sequences run, the disk belongs to the prefetch thread: the worker takes what is in memory already and leaves the rest
+        // to be moved there, so a slow disk never sits between two tokens. Without a prefetch thread (no memory tier) the worker reads the
+        // disk itself, as it did before; with nobody running there is nobody to hold up either.
+        self.reload_memory_only = !self.scheduler.running.is_empty() && self.prefetch_tx.is_some();
         for sid in waiting {
             if budget == 0 {
                 break;
             }
             budget -= self.reload_prompt(sid, budget);
         }
+        self.reload_memory_only = false;
     }
 
     /// Returns how many blocks of the prompt of `sid` were taken from the disk tier.
@@ -1822,12 +1834,18 @@ impl InferenceRuntime {
     }
 
     /// Reads the blocks of the first `full` blocks of `tokens` that the prefix cache dropped back from the tiers. Returns how many.
+    /// With `reload_memory_only` only the blocks that are in memory are taken (the chain stops at the first that is not).
     fn reload_tokens(&mut self, tokens: &[i64], full: usize, budget: usize) -> usize {
         let mut chain = self.chain_of(tokens, full);
         // the cache is a tree, so what is missing is the end of the chain; its first missing block has a cached parent
         let Some(first) = chain.iter().position(|(_, _, block)| block.is_none()) else { return 0 };
         // how many blocks from there the disk really has: a prompt the server has never seen has none, and then nothing may be touched
-        let on_disk = chain[first..].iter().take(budget).take_while(|(hash, _, _)| self.kv_tier.has(*hash)).count();
+        let memory_only = self.reload_memory_only;
+        let on_disk = chain[first..]
+            .iter()
+            .take(budget)
+            .take_while(|(hash, _, _)| if memory_only { self.kv_tier.has_in_memory(*hash) } else { self.kv_tier.has(*hash) })
+            .count();
         if on_disk == 0 {
             return 0;
         }
@@ -1879,6 +1897,12 @@ impl InferenceRuntime {
         }
     }
 
+    /// Whether every block handed to the spill thread has been written (to memory and, with a folder, to disk). Used by the tests to know
+    /// when the tier is at rest; the server never waits for it.
+    pub fn spills_settled(&self) -> bool {
+        self.kv_tier.writes_done() >= self.spill_sent && self.kv_tier.writes_in_flight() == 0
+    }
+
     /// Keeps the prefix cache's blocks of the start of `tokens` out of eviction (`pin`), or lets them go. A pin first reads back what the
     /// cache dropped from the tiers, so a prefix that was written to memory or disk before can be pinned again after a restart. Returns
     /// `(blocks pinned or unpinned, full blocks of the prompt)`; the chain stops at the first block that is nowhere. Only requests
@@ -1889,6 +1913,7 @@ impl InferenceRuntime {
         }
         let full = tokens.len() / self.scheduler.cfg.block_size;
         if pin && self.kv_tier.enabled() {
+            self.reload_memory_only = false;
             let mut budget = RELOAD_IDLE_BLOCKS;
             while budget > 0 {
                 let read = self.reload_tokens(tokens, full, budget);
@@ -1942,7 +1967,9 @@ impl InferenceRuntime {
                 }
             };
             // a full queue drops the block: losing a cache entry is better than delaying a token
-            let _ = tx.try_send(SpillJob { hash, parent, tokens, bytes });
+            if tx.try_send(SpillJob { hash, parent, tokens, bytes }).is_ok() {
+                self.spill_sent += 1;
+            }
         }
     }
 

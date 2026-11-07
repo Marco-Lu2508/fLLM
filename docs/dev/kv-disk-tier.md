@@ -138,7 +138,10 @@ and the disk has are queued, and a thread of its own (`fllm-kv-prefetch`) moves 
 When the request is admitted, its reload finds the blocks in memory and does not wait for the disk. The prefetch does not count as a hit
 (`prefetched_blocks` and `prefetch_pending` in `GET /admin/kv-tier` count it), skips blocks that are in memory already, never touches
 requests with a `cache_salt` or with images, and does nothing without both tiers. It is the part of SGLang's HiCache (prefetch from the
-lower tier while the request waits) that does not need a GPU. What is not built: loading layer by layer in parallel with the computation
+lower tier while the request waits) that does not need a GPU. While other sequences run, the worker reads no disk for a waiting request: it
+takes what is in memory and leaves the rest to the thread, so that a slow disk never sits between two tokens (and the worker and the thread
+do not race for the same blocks). With nobody running, or on a server with a disk and no memory tier (no thread), the worker reads the
+disk itself. What is not built: loading layer by layer in parallel with the computation
 (the copy from host memory to the GPU overlaps with layer N while layer N+1 loads), which needs a GPU to be written or measured.
 
 ## Which model a block belongs to

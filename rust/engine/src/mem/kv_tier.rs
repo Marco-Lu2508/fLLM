@@ -31,6 +31,9 @@ pub struct KvTier {
     ram_max: u64,
     ram: Mutex<Ram>,
     ram_hits: AtomicU64,
+    /// Writes that were handed to `spill` and have not returned yet (the spill thread is in the middle of one).
+    spilling: AtomicU64,
+    written: AtomicU64,
     /// Blocks the prefetch thread moved from the disk into memory, and the hashes it was asked for that are not done yet.
     prefetched: AtomicU64,
     prefetch_queue: Mutex<std::collections::VecDeque<u64>>,
@@ -51,6 +54,8 @@ impl KvTier {
             ram_max,
             ram: Mutex::new(Ram::default()),
             ram_hits: AtomicU64::new(0),
+            spilling: AtomicU64::new(0),
+            written: AtomicU64::new(0),
             prefetched: AtomicU64::new(0),
             prefetch_queue: Mutex::new(std::collections::VecDeque::new()),
             guard: Mutex::new(()),
@@ -210,8 +215,11 @@ impl KvTier {
 
     /// Writes one block. A block that does not fit into the budget is not written at all — half a block is worthless.
     pub fn spill(&self, hash: u64, parent: u64, tokens: &[i64], payload: &[u8]) -> bool {
+        self.spilling.fetch_add(1, Ordering::SeqCst);
         let in_memory = self.ram_put(hash, parent, tokens, payload);
         let on_disk = self.spill_disk(hash, parent, tokens, payload);
+        self.spilling.fetch_sub(1, Ordering::SeqCst);
+        self.written.fetch_add(1, Ordering::SeqCst);
         if in_memory && !on_disk {
             // `spills` counts blocks written to either tier once; the disk path counted its own
             self.spills.fetch_add(1, Ordering::Relaxed);
@@ -440,9 +448,18 @@ impl KvTier {
         self.ram_max > 0 && self.ram_lock().blocks.contains_key(&hash)
     }
 
-    /// Whether the memory tier holds this block, for tests.
-    #[cfg(test)]
-    pub(crate) fn has_in_memory(&self, hash: u64) -> bool {
+    /// How many writes `spill` has finished (also those that wrote nothing).
+    pub fn writes_done(&self) -> u64 {
+        self.written.load(Ordering::SeqCst)
+    }
+
+    /// Writes that are being done right now. `0` and an empty queue of the spill thread mean that everything handed over has been written.
+    pub fn writes_in_flight(&self) -> u64 {
+        self.spilling.load(Ordering::SeqCst)
+    }
+
+    /// Whether the memory tier holds this block (reading it then costs no disk access).
+    pub fn has_in_memory(&self, hash: u64) -> bool {
         self.ram_has(hash)
     }
 

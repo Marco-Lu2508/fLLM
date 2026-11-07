@@ -328,12 +328,27 @@ fn push_out_of_the_cache(rt: &mut InferenceRuntime, first: u64, length: usize) {
 fn wait_for_the_disk(rt: &mut InferenceRuntime, blocks: usize) {
     for _ in 0..400 {
         rt.spill_pending();
-        if rt.kv_tier.entries().len() >= blocks {
+        // the blocks are on the disk AND the spill thread has nothing left to write: a later `forget_memory` or a read of the disk must not
+        // race with a block that is still on its way into memory
+        if rt.kv_tier.entries().len() >= blocks && rt.spills_settled() {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     panic!("{} of {blocks} blocks reached the disk", rt.kv_tier.entries().len());
+}
+
+/// Waits until the spill thread has written everything that was handed to it, so that a test that empties or counts the memory tier
+/// afterwards does not race with a block that is still on its way there (the traffic of `push_out_of_the_cache` leaves many).
+fn settle_the_tiers(rt: &mut InferenceRuntime) {
+    for _ in 0..800 {
+        rt.spill_pending();
+        if rt.spills_settled() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("the spill thread did not settle");
 }
 
 fn ask(rt: &mut InferenceRuntime, id: &str, prompt: &[i64], max_tokens: usize) -> (Vec<i64>, usize) {
@@ -895,6 +910,7 @@ fn a_waiting_prompt_is_prefetched_into_memory_before_its_reload() {
     let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
     wait_for_the_disk(&mut rt, 4);
     push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    settle_the_tiers(&mut rt);
     rt.kv_tier.forget_memory();
     assert_eq!(rt.kv_tier.stats()["ram_blocks"], 0);
     // the request waits: the worker looks ahead
@@ -954,12 +970,16 @@ fn a_scheduling_round_looks_ahead_at_the_requests_that_wait() {
     let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
     wait_for_the_disk(&mut rt, 4);
     push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    settle_the_tiers(&mut rt);
     rt.kv_tier.forget_memory();
     // one request fills every slot (a single sequence is allowed), the next waits
     rt.scheduler.cfg.max_num_seqs = 1;
     let mut busy = prompt(2 * block + 3);
     busy[0] = 31;
     rt.submit_with_sampling("busy".into(), busy, 8, SamplingParams::default()).unwrap();
+    rt.step().unwrap();
+    assert!(!rt.scheduler.running.is_empty(), "the busy request must be running");
+    // now the one that waits arrives; the next round looks ahead (nobody has looked at it before)
     rt.submit_with_sampling("waits".into(), a.clone(), 2, SamplingParams::default()).unwrap();
     rt.step().unwrap();
     assert_eq!(rt.scheduler.waiting.len(), 1, "the second request must be waiting for the test to mean anything");
@@ -973,5 +993,100 @@ fn a_scheduling_round_looks_ahead_at_the_requests_that_wait() {
     while rt.active_requests() > 0 {
         rt.step().unwrap();
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// While other sequences run, the worker reads no disk for a waiting request: it takes what is in memory and leaves the rest to the
+/// prefetch thread, so a slow disk never sits between two tokens. (Before this rule the worker and the thread raced for the same blocks,
+/// and which of them read them differed from run to run.) Without anybody running the worker reads the disk itself.
+#[test]
+fn the_worker_leaves_the_disk_to_the_prefetch_thread_while_others_run() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-memonly-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut rt = runtime();
+    rt.use_tier_for(crate::mem::kv_tier::KvTier::at(&dir, 64 << 20).with_ram(64 << 20), "tiny");
+    rt.kv_warmed = true;
+    let block = rt.scheduler.cfg.block_size;
+    let a = prompt(4 * block + 3);
+    generate(&mut rt, "a", &a, 2);
+    let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
+    wait_for_the_disk(&mut rt, 4);
+    push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    settle_the_tiers(&mut rt);
+    rt.kv_tier.forget_memory();
+    // someone runs, `a` waits
+    rt.scheduler.cfg.max_num_seqs = 1;
+    let mut busy = prompt(2 * block + 3);
+    busy[0] = 31;
+    rt.submit_with_sampling("busy".into(), busy, 8, SamplingParams::default()).unwrap();
+    rt.step().unwrap();
+    assert!(!rt.scheduler.running.is_empty());
+    rt.submit_with_sampling("waits".into(), a.clone(), 2, SamplingParams::default()).unwrap();
+    let before = rt.kv_reloaded;
+    rt.reload_for_waiting();
+    assert_eq!(rt.kv_reloaded - before, 0, "the worker read the disk although others run");
+    assert_eq!(rt.kv_tier.stats()["hits"].as_u64().unwrap(), 0, "and the disk was read");
+    // the prefetch thread moves the blocks into memory; then the worker takes them
+    assert_eq!(rt.prefetch_for_waiting(), 4);
+    for _ in 0..400 {
+        if rt.kv_tier.stats()["prefetched_blocks"].as_u64().unwrap() >= 4 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    rt.reload_for_waiting();
+    assert_eq!(rt.kv_reloaded - before, 4, "the blocks in memory were not taken");
+    // nobody running: the worker reads the disk itself
+    while rt.active_requests() > 0 {
+        rt.step().unwrap();
+    }
+    rt.kv_tier.forget_memory();
+    push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    rt.submit_with_sampling("alone".into(), a.clone(), 2, SamplingParams::default()).unwrap();
+    assert!(rt.scheduler.running.is_empty());
+    let before = rt.kv_reloaded;
+    rt.reload_for_waiting();
+    assert_eq!(rt.kv_reloaded - before, 4, "nobody runs, so the worker should read the disk itself");
+    while rt.active_requests() > 0 {
+        rt.step().unwrap();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A server with a disk folder and no memory tier has no prefetch thread. The rule "while others run, leave the disk to the thread" must
+/// not apply there, or such a server would read nothing back at all while it is busy.
+#[test]
+fn a_server_with_only_a_disk_still_reads_it_while_others_run() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-diskonly-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut rt = runtime_with_disk_tier(&dir);
+    rt.kv_warmed = true;
+    assert!(rt.prefetch_tx.is_none(), "no memory tier, so no prefetch thread");
+    let block = rt.scheduler.cfg.block_size;
+    let a = prompt(4 * block + 3);
+    let reference = generate(&mut rt, "a", &a, 2);
+    let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
+    wait_for_the_disk(&mut rt, 4);
+    push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    settle_the_tiers(&mut rt);
+    rt.scheduler.cfg.max_num_seqs = 1;
+    let mut busy = prompt(2 * block + 3);
+    busy[0] = 31;
+    rt.submit_with_sampling("busy".into(), busy, 8, SamplingParams::default()).unwrap();
+    rt.step().unwrap();
+    assert!(!rt.scheduler.running.is_empty());
+    rt.submit_with_sampling("waits".into(), a.clone(), 2, SamplingParams::default()).unwrap();
+    let before = rt.kv_reloaded;
+    rt.reload_for_waiting();
+    assert_eq!(rt.kv_reloaded - before, 4, "a disk-only server read nothing while others run");
+    let mut tokens = Vec::new();
+    while rt.active_requests() > 0 {
+        for event in rt.step().unwrap() {
+            if event.request_id == "waits" {
+                tokens.push(event.token_id);
+            }
+        }
+    }
+    assert_eq!(tokens, reference);
     let _ = std::fs::remove_dir_all(&dir);
 }
