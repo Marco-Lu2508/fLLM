@@ -2165,6 +2165,40 @@ pub(crate) mod x86 {
 
 #[cfg(test)]
 mod tests {
+
+    /// What the Q8_0 prompt projections cost: the gate and the up projection of Qwen2.5-0.5B (896 -> 4864) for 512 prompt rows, the way the
+    /// prefill sends them (one grouped call). Prints the best of several runs and the rate in GOP/s of int8 multiply-adds; nothing is asserted.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn cost_of_the_q8_prompt_projections() {
+        use crate::cpu_selftest::{random_weights, Lcg};
+        if isa() == "scalar" {
+            return;
+        }
+        let (rows, cols, batch) = (4864usize, 896usize, 512usize);
+        let mut rng = Lcg(77);
+        let gate = random_weights(8, rows, cols, &mut rng);
+        let up = random_weights(8, rows, cols, &mut rng);
+        let x = rng.vector(cols * batch, 2.0);
+        let mut input = Q8Input::default();
+        input.prepare(&x, cols);
+        let projections = [
+            Q8Projection { weights: &gate, rows, bias: None },
+            Q8Projection { weights: &up, rows, bias: None },
+        ];
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let mut best = f64::MAX;
+        pool.install(|| {
+            for _ in 0..7 {
+                let started = std::time::Instant::now();
+                let out = q8_linear_group(&projections, &input).unwrap();
+                best = best.min(started.elapsed().as_secs_f64());
+                std::hint::black_box(out);
+            }
+        });
+        let ops = 2.0 * (2 * rows * cols * batch) as f64;
+        println!("COST q8 prompt projections: gate+up, {batch} rows: {:.1} ms = {:.0} GOP/s ({})", best * 1000.0, ops / best / 1e9, isa());
+    }
     // Every AVX-512 Q8_0 kernel against the f64 reference: odd block counts (the odd final
     // block runs with a zero upper half), every row count of a decode panel at a nonzero row
     // offset, odd token counts in the prompt tile, and weights including -128.
