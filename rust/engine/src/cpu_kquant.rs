@@ -1020,13 +1020,35 @@ unsafe fn q3_scale_vectors(raw: &[u8]) -> [__m256i; 4] {
         ((lo & low4) | (((packed >> 2) & two) << 4)) as i32,
         ((hi & low4) | ((packed & two) << 4)) as i32,
     );
-    let words = _mm256_cvtepi8_epi16(_mm_sub_epi8(bytes, _mm_set1_epi8(32)));
+    scale_pair_vectors(_mm256_cvtepi8_epi16(_mm_sub_epi8(bytes, _mm_set1_epi8(32))))
+}
+
+/// The sixteen 4-bit Q2_K scales of a block as the same four vectors (the scales are the low nibbles of the first 16 bytes).
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn q2_scale_vectors(raw: &[u8]) -> [__m256i; 4] {
+    let bytes = _mm_and_si128(_mm_loadu_si128(raw.as_ptr().cast()), _mm_set1_epi8(15));
+    scale_pair_vectors(_mm256_cvtepu8_epi16(bytes))
+}
+
+/// Sixteen 16-bit scales in block order to the four vectors of 64-bit lanes (4p, 4p + 2, 4p + 1, 4p + 3, each four times) for pair `p`.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn scale_pair_vectors(words: __m256i) -> [__m256i; 4] {
     let from_low = _mm256_broadcastsi128_si256(_mm256_castsi256_si128(words));
     let from_high = _mm256_broadcastsi128_si256(_mm256_extracti128_si256::<1>(words));
     std::array::from_fn(|pair| {
         let source = if pair < 2 { from_low } else { from_high };
         _mm256_shuffle_epi8(source, _mm256_loadu_si256(Q3_SELECTORS[pair].as_ptr().cast()))
     })
+}
+
+/// The 2-bit values of one 32-value Q2_K group, without scales.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn q2_values(raw: &[u8], group: usize) -> __m256i {
+    let q = _mm256_loadu_si256(raw.as_ptr().add(16 + group / 4 * 32).cast());
+    _mm256_and_si256(_mm256_srl_epi16(q, _mm_cvtsi32_si128((2 * (group % 4)) as i32)), _mm256_set1_epi8(3))
 }
 
 /// The 3-bit values of one 32-value Q3_K group as `low | high << 2` in 0..8 (the signed value plus 4), without its scales.
@@ -1228,14 +1250,14 @@ macro_rules! kernel_extra {
                         }
                     } else {
                         d = half(raw, if KIND == Q2K { 80 } else { 108 });
-                        let q3_scales = if KIND == Q3K { q3_scale_vectors(raw) } else { [zero; 4] };
+                        let block_scales = if KIND == Q3K { q3_scale_vectors(raw) } else { q2_scale_vectors(raw) };
                         for pair in 0..4usize {
-                            let (q1, q2, scales) = if KIND == Q2K {
-                                let ((q1, a0, a1), (q2, b0, b1)) = (q2_group(raw, 2 * pair), q2_group(raw, 2 * pair + 1));
-                                (q1, q2, _mm256_set_epi64x(pair_scale(b1), pair_scale(a1), pair_scale(b0), pair_scale(a0)))
+                            let (q1, q2) = if KIND == Q2K {
+                                (q2_values(raw, 2 * pair), q2_values(raw, 2 * pair + 1))
                             } else {
-                                (q3_values(raw, 2 * pair), q3_values(raw, 2 * pair + 1), q3_scales[pair])
+                                (q3_values(raw, 2 * pair), q3_values(raw, 2 * pair + 1))
                             };
+                            let scales = block_scales[pair];
                             for t in 0..T {
                                 let x1 = _mm256_load_si256(xs[t][2 * pair].q.as_ptr().cast());
                                 let x2 = _mm256_load_si256(xs[t][2 * pair + 1].q.as_ptr().cast());
@@ -2185,6 +2207,42 @@ mod q3_scale_tests {
                     _mm256_storeu_si256(w.as_mut_ptr().cast(), want);
                 }
                 assert_eq!(h, w, "pair {pair}");
+            }
+        }
+    }
+
+    /// The Q2_K scale vectors are the words the scalar nibbles + `pair_scale` + `set_epi64x` gave, and the values the values of `q2_group`.
+    #[test]
+    fn the_q2_scale_vectors_and_values_are_those_of_the_scalar_group() {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut state = 4242u64;
+        let mut next = || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u8
+        };
+        for _ in 0..1000 {
+            let raw: Vec<u8> = (0..84).map(|_| next()).collect();
+            // SAFETY: AVX2 was detected above; `raw` is one 84-byte block.
+            let have = unsafe { q2_scale_vectors(&raw) };
+            for (pair, have) in have.iter().enumerate() {
+                let ((q1, a0, a1), (q2, b0, b1)) = unsafe { (q2_group(&raw, 2 * pair), q2_group(&raw, 2 * pair + 1)) };
+                let want = unsafe { _mm256_set_epi64x(pair_scale(b1), pair_scale(a1), pair_scale(b0), pair_scale(a0)) };
+                let (mut h, mut w) = ([0u8; 32], [0u8; 32]);
+                unsafe {
+                    _mm256_storeu_si256(h.as_mut_ptr().cast(), *have);
+                    _mm256_storeu_si256(w.as_mut_ptr().cast(), want);
+                }
+                assert_eq!(h, w, "scales of pair {pair}");
+                for (group, want) in [(2 * pair, q1), (2 * pair + 1, q2)] {
+                    let (mut a, mut b) = ([0u8; 32], [0u8; 32]);
+                    unsafe {
+                        _mm256_storeu_si256(a.as_mut_ptr().cast(), q2_values(&raw, group));
+                        _mm256_storeu_si256(b.as_mut_ptr().cast(), want);
+                    }
+                    assert_eq!(a, b, "values of group {group}");
+                }
             }
         }
     }
