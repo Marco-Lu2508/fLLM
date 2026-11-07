@@ -269,6 +269,26 @@ pub(crate) mod x86 {
         }
     }
 
+    /// Group `g` of an IQ3_XXS block with two gathers instead of twelve scalar table reads: the eight lattice indices of a group
+    /// are eight bytes and eight 32-bit entries of the lattice table are exactly its 32 lattice bytes in order; the four 7-bit sign
+    /// indices are cut out of one 32-bit word with a variable shift and select four 64-bit sign words. Same bytes as
+    /// `vectors(&group::<18>(raw, g))`.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn vectors_iq3_xxs(raw: &[u8], g: usize) -> Vectors {
+        assert!(raw.len() >= block_bytes(super::IQ3_XXS) && g < GROUPS);
+        let at = raw.as_ptr();
+        let index = _mm256_cvtepu8_epi32(_mm_loadl_epi64(at.add(2 + g * 8).cast()));
+        let grid = _mm256_i32gather_epi32::<4>(super::IQ3XXS_GRID.as_ptr().cast(), index);
+        let signs = std::ptr::read_unaligned(at.add(66 + g * 4).cast::<u32>());
+        let sign_index = _mm_and_si128(
+            _mm_srlv_epi32(_mm_set1_epi32(signs as i32), _mm_setr_epi32(0, 7, 14, 21)),
+            _mm_set1_epi32(0x7f),
+        );
+        let sign = _mm256_i32gather_epi64::<8>(super::KSIGNS64.as_ptr().cast(), sign_index);
+        Vectors { grid, sign, scale: _mm256_set1_epi16((2 * (signs >> 28) + 1) as i16) }
+    }
+
     /// Eight 32-bit lanes of `sum scale * lattice * sign * q` over one group.
     #[inline]
     #[target_feature(enable = "avx2")]
@@ -295,7 +315,13 @@ pub(crate) mod x86 {
         for block in 0..blocks {
             let raw = &row[block * width..][..width];
             let d = head(KIND, raw);
-            let decoded: [Vectors; GROUPS] = std::array::from_fn(|g| vectors(&group::<KIND>(raw, g)));
+            let decoded: [Vectors; GROUPS] = std::array::from_fn(|g| {
+                if KIND == super::IQ3_XXS {
+                    vectors_iq3_xxs(raw, g)
+                } else {
+                    vectors(&group::<KIND>(raw, g))
+                }
+            });
             for (t, lanes) in acc.iter_mut().enumerate().take(tokens) {
                 let records = &x[t * nb + block * GROUPS..][..GROUPS];
                 let mut sum = _mm256_setzero_si256();
@@ -315,6 +341,40 @@ pub(crate) mod x86 {
         let s = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps::<1>(v));
         let s = _mm_add_ps(s, _mm_movehl_ps(s, s));
         _mm_cvtss_f32(_mm_add_ss(s, _mm_shuffle_ps::<1>(s, s)))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::cpu_selftest::{random_weights, Lcg};
+
+        fn bytes(v: __m256i) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            // SAFETY: `out` is 32 bytes; AVX is part of the AVX2 the test checks for.
+            unsafe { _mm256_storeu_si256(out.as_mut_ptr().cast(), v) };
+            out
+        }
+
+        /// The gathered group is the group of the scalar decoder, byte for byte (lattice, signs and scales), for random blocks.
+        #[test]
+        fn the_gathered_iq3_xxs_group_is_the_group_of_the_scalar_decoder() {
+            if !std::arch::is_x86_feature_detected!("avx2") {
+                return;
+            }
+            let mut rng = Lcg(5);
+            let weights = random_weights(super::super::IQ3_XXS, 64, 1024, &mut rng);
+            let width = block_bytes(super::super::IQ3_XXS);
+            for at in (0..weights.len()).step_by(width) {
+                let raw = &weights[at..at + width];
+                for g in 0..GROUPS {
+                    // SAFETY: AVX2 was detected above; `raw` is one whole block.
+                    let (want, have) = unsafe { (vectors(&group::<18>(raw, g)), vectors_iq3_xxs(raw, g)) };
+                    assert_eq!(bytes(have.grid), bytes(want.grid), "lattice of group {g}");
+                    assert_eq!(bytes(have.sign), bytes(want.sign), "signs of group {g}");
+                    assert_eq!(bytes(have.scale), bytes(want.scale), "scales of group {g}");
+                }
+            }
+        }
     }
 }
 
