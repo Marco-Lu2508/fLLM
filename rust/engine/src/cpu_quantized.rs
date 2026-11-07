@@ -1856,7 +1856,7 @@ mod x86 {
     // permit one maddubs/madd dot without signed-weight conversion or a W panel.
     #[inline]
     #[target_feature(enable = "avx2,f16c")]
-    unsafe fn decode_classic_group(b: &[u8], kind: u32) -> (__m256i, f32, f32) {
+    pub(super) unsafe fn decode_classic_group(b: &[u8], kind: u32) -> (__m256i, f32, f32) {
         let affine = matches!(kind, 3 | 7);
         let five = matches!(kind, 6 | 7);
         let off = if affine { 4 } else { 2 };
@@ -3435,6 +3435,58 @@ mod tests {
         assert!(groupable(&[10, 11, 12, 13, 14, 23]));
         assert!(groupable(&[3, 3]));
     }
+    /// The raw unsigned values and the scale/minimum `decode_classic_group` returns are those of the format definition (ggml's Q4_0, Q4_1,
+    /// Q5_0, Q5_1), computed here one value at a time. The other tests take `unpack_avx2` as reference, which uses the same decoder.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn classic_group_decode_matches_the_format_definition() {
+        if !is_x86_feature_detected!("avx2") || !is_x86_feature_detected!("f16c") {
+            return;
+        }
+        let mut state = 0xC0FFEE_u64;
+        let mut next = || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u8
+        };
+        for kind in [2u32, 3, 6, 7] {
+            let width = match kind {
+                2 => 18,
+                3 => 20,
+                6 => 22,
+                _ => 24,
+            };
+            for _ in 0..3000 {
+                let mut raw: Vec<u8> = (0..width).map(|_| next()).collect();
+                // finite scales: the fp16 patterns of small numbers
+                raw[..2].copy_from_slice(&f16::from_f32(f32::from(next() % 64) / 32.0 - 1.0).to_le_bytes());
+                if kind == 3 || kind == 7 {
+                    raw[2..4].copy_from_slice(&f16::from_f32(f32::from(next() % 64) / 64.0 - 0.5).to_le_bytes());
+                }
+                let affine = kind == 3 || kind == 7;
+                let five = kind == 6 || kind == 7;
+                let at = if affine { 4 } else { 2 };
+                let high = if five { u32::from_le_bytes(raw[at..at + 4].try_into().unwrap()) } else { 0 };
+                let qs = &raw[at + if five { 4 } else { 0 }..][..16];
+                let mut want = [0u8; 32];
+                for j in 0..16 {
+                    want[j] = (qs[j] & 15) | if five { (((high >> j) & 1) as u8) << 4 } else { 0 };
+                    want[j + 16] = (qs[j] >> 4) | if five { (((high >> (j + 16)) & 1) as u8) << 4 } else { 0 };
+                }
+                let mut have = [0u8; 32];
+                // SAFETY: AVX2 and F16C were detected above; `raw` is one whole block of `kind`.
+                let (d, m) = unsafe {
+                    let (q, d, m) = x86::decode_classic_group(&raw, kind);
+                    std::arch::x86_64::_mm256_storeu_si256(have.as_mut_ptr().cast(), q);
+                    (d, m)
+                };
+                assert_eq!(have, want, "values of kind {kind}");
+                assert_eq!(d.to_bits(), f16::from_le_bytes([raw[0], raw[1]]).to_f32().to_bits(), "scale of kind {kind}");
+                let want_m = if affine { f16::from_le_bytes([raw[2], raw[3]]).to_f32() } else { 0.0 };
+                assert_eq!(m.to_bits(), want_m.to_bits(), "minimum of kind {kind}");
+            }
+        }
+    }
+
     #[test]
     fn classic_direct_decode_preserves_integer_lanes_and_fma_order() {
         if crate::cpu_kernels::isa() == "scalar" {
