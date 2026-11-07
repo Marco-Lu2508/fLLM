@@ -119,6 +119,31 @@ impl KvTier {
         parse(&buffer, hash).map(|stored| stored.0)
     }
 
+    /// The file that keeps the pins across a restart: the hash of the last pinned block of every pinned chain, one per line. The chain
+    /// back to its root is on disk as well (every block names its parent), so these hashes are enough to pin a chain again.
+    fn pins_file(&self) -> Option<PathBuf> {
+        self.dir.as_ref().map(|dir| dir.join("pins.txt"))
+    }
+
+    /// Replaces the saved pins. The file is written under a temporary name and renamed, like a block.
+    pub fn save_pins(&self, heads: &[u64]) -> bool {
+        let Some(path) = self.pins_file() else { return false };
+        let text: String = heads.iter().map(|hash| format!("{hash:016x}\n")).collect();
+        let temporary = path.with_extension("txt.part");
+        if fs::write(&temporary, text).is_err() {
+            let _ = fs::remove_file(&temporary);
+            return false;
+        }
+        fs::rename(&temporary, &path).is_ok()
+    }
+
+    /// The saved pins (a line that is not a hash is ignored).
+    pub fn load_pins(&self) -> Vec<u64> {
+        let Some(path) = self.pins_file() else { return Vec::new() };
+        let Ok(text) = fs::read_to_string(path) else { return Vec::new() };
+        text.lines().filter_map(|line| u64::from_str_radix(line.trim(), 16).ok()).collect()
+    }
+
     /// Every block on disk, in no particular order. A chain is put together from the `parent` hashes (`Runtime::warm_prefix_cache`).
     pub fn entries(&self) -> Vec<Stored> {
         let Some(dir) = self.dir.as_ref() else { return Vec::new() };

@@ -608,8 +608,8 @@ fn a_pinned_prefix_survives_traffic_that_drops_an_unpinned_one() {
     generate(&mut rt, "lost", &lost, 2);
     let kept_first = rt.scheduler.cached_prompt_chain(&kept)[0].0;
     let lost_first = rt.scheduler.cached_prompt_chain(&lost)[0].0;
-    let (done, full) = rt.pin_prefix(&kept, true).unwrap();
-    assert_eq!((done, full), (4, 4));
+    let outcome = rt.pin_prefix(&kept, true).unwrap();
+    assert_eq!((outcome.blocks, outcome.full_blocks, outcome.limited), (4, 4, false));
     assert_eq!(rt.pinned_blocks(), 4);
     // traffic: other prompts until the unpinned one is dropped
     push_out_of_the_cache(&mut rt, lost_first, 4 * block + 3);
@@ -617,7 +617,7 @@ fn a_pinned_prefix_survives_traffic_that_drops_an_unpinned_one() {
     let (_, cached) = ask(&mut rt, "again", &kept, 2);
     assert_eq!(cached, 4 * block, "the pinned prefix was not served");
     // unpinned, it can go
-    assert_eq!(rt.pin_prefix(&kept, false).unwrap().0, 4);
+    assert_eq!(rt.pin_prefix(&kept, false).unwrap().blocks, 4);
     assert_eq!(rt.pinned_blocks(), 0);
 }
 
@@ -631,14 +631,14 @@ fn pinning_reads_a_dropped_prefix_back_from_the_tiers() {
     let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
     wait_for_the_tier(&mut rt, 4);
     push_out_of_the_cache(&mut rt, first, 4 * block + 3);
-    let (done, full) = rt.pin_prefix(&a, true).unwrap();
-    assert_eq!((done, full), (4, 4), "the dropped prefix was not read back for the pin");
+    let outcome = rt.pin_prefix(&a, true).unwrap();
+    assert_eq!((outcome.blocks, outcome.full_blocks), (4, 4), "the dropped prefix was not read back for the pin");
     assert!(rt.scheduler.prefix_block_of(first).is_some());
     let mut never = prompt(4 * block + 3);
     never[0] = 97;
     never[1] = 96;
-    let (done, full) = rt.pin_prefix(&never, true).unwrap();
-    assert_eq!((done, full), (0, 4), "a prefix nobody ever cached was pinned");
+    let outcome = rt.pin_prefix(&never, true).unwrap();
+    assert_eq!((outcome.blocks, outcome.full_blocks), (0, 4), "a prefix nobody ever cached was pinned");
 }
 
 /// The pinned prefix does not make the pool unusable: a request that needs more than what is left waits or is served, it is not stuck for
@@ -785,4 +785,96 @@ fn every_kv_cache_type_survives_the_trip_through_the_disk_tier() {
     }
     eprintln!("KV TYPES run: {ran:?}; not runnable on the CPU with the tiny model: {unsupported:?}");
     assert!(ran.len() >= 8, "only {ran:?} ran; unsupported: {unsupported:?}");
+}
+
+/// At most `pin_max_percent` of the pool can be pinned; the rest of a prompt that does not fit is reported, not pinned silently.
+#[test]
+fn the_pinned_share_of_the_pool_is_limited_and_the_cut_is_reported() {
+    let mut rt = runtime();
+    rt.kv_warmed = true;
+    let block = rt.scheduler.cfg.block_size;
+    let a = prompt(4 * block + 3);
+    generate(&mut rt, "a", &a, 2);
+    // a pool of 64 blocks (63 usable): 5 % is 3 blocks
+    rt.scheduler.cfg.pin_max_percent = 5;
+    assert_eq!(rt.scheduler.pin_limit_blocks(), 3);
+    let outcome = rt.pin_prefix(&a, true).unwrap();
+    assert_eq!((outcome.blocks, outcome.full_blocks, outcome.limited, outcome.limit_blocks), (3, 4, true, 3));
+    assert_eq!(rt.pinned_blocks(), 3);
+    // the first three blocks are the ones that are pinned: the start of the prompt, which is what a prefix cache serves
+    let first = rt.scheduler.cached_prompt_chain(&a);
+    for (_, _, cached) in first.iter().take(3) {
+        assert!(cached.is_some());
+    }
+    // 0 switches pinning off
+    rt.scheduler.cfg.pin_max_percent = 0;
+    assert_eq!(rt.pin_prefix(&a, true).unwrap().blocks, 3, "blocks that are pinned already stay counted");
+    rt.pin_prefix(&a, false).unwrap();
+    assert_eq!(rt.pinned_blocks(), 0);
+    let off = rt.pin_prefix(&a, true).unwrap();
+    assert_eq!((off.blocks, off.limited), (0, true));
+}
+
+/// The pins survive a restart: the chains that were pinned are pinned again after the blocks were read back.
+#[test]
+fn the_pins_come_back_after_a_restart() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-pins-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let a = prompt(4 * 16 + 3);
+    let other = {
+        let mut p = prompt(4 * 16 + 3);
+        p[0] = 12;
+        p
+    };
+    {
+        let mut first = runtime_with_disk_tier(&dir);
+        first.kv_warmed = true;
+        generate(&mut first, "a", &a, 2);
+        generate(&mut first, "o", &other, 2);
+        wait_for_the_disk(&mut first, 8);
+        assert_eq!(first.pin_prefix(&a, true).unwrap().blocks, 4);
+    }
+    let mut second = runtime_with_disk_tier(&dir);
+    assert_eq!(second.warm_prefix_cache(256).unwrap(), 8, "both chains are read back: the cache is a tree");
+    assert_eq!(second.pinned_blocks(), 0, "nothing is pinned before the pins are restored");
+    assert_eq!(second.restore_pins(), 4);
+    assert_eq!(second.pinned_blocks(), 4);
+    // only the chain of `a` is pinned: the other one can go
+    let a_first = second.scheduler.cached_prompt_chain(&a)[0].0;
+    let o_first = second.scheduler.cached_prompt_chain(&other)[0].0;
+    second.kv_warmed = true;
+    push_out_of_the_cache(&mut second, o_first, 4 * 16 + 3);
+    assert!(second.scheduler.prefix_block_of(a_first).is_some(), "the pinned chain was dropped");
+    // unpinning is saved as well: a third start pins nothing
+    second.pin_prefix(&a, false).unwrap();
+    drop(second);
+    let mut third = runtime_with_disk_tier(&dir);
+    third.warm_prefix_cache(256).unwrap();
+    assert_eq!(third.restore_pins(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A restart reads back every chain on the tier, not one: prompts that share a start share its blocks, and each leaf is a prompt.
+#[test]
+fn a_restart_gives_back_every_chain_and_the_shared_start_once() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-tree-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let base = prompt(4 * 16 + 3);
+    let mut variant = base.clone();
+    variant[2 * 16 + 4] += 1; // the third block differs: two blocks are shared, two chains of 4 blocks
+    {
+        let mut first = runtime_with_disk_tier(&dir);
+        first.kv_warmed = true;
+        generate(&mut first, "a", &base, 2);
+        generate(&mut first, "b", &variant, 2);
+        wait_for_the_disk(&mut first, 6);
+    }
+    let mut second = runtime_with_disk_tier(&dir);
+    let read = second.warm_prefix_cache(256).unwrap();
+    assert_eq!(read, 6, "2 shared + 2 + 2 blocks, the shared start only once");
+    second.kv_warmed = true;
+    let (_, cached_a) = ask(&mut second, "a2", &base, 2);
+    let (_, cached_b) = ask(&mut second, "b2", &variant, 2);
+    assert_eq!((cached_a, cached_b), (4 * 16, 4 * 16), "a chain was not given back");
+    let _ = std::fs::remove_dir_all(&dir);
 }

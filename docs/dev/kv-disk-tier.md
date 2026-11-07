@@ -201,9 +201,15 @@ blocks of 16 tokens):
   prompt out of eviction (`"pin": false` lets them go; `GET /admin/prefix-cache` shows `pinned`). The prompt is rendered like a request's, so
   the blocks that are pinned are the ones the next request looks for. A pin first reads back from the memory and disk tiers what the cache
   dropped, so the same call after a restart brings the prefix back. The answer says how many blocks were pinned and whether that is the whole
-  prompt (`complete`). Pinned blocks are not free memory: a pool that is pinned full makes new requests wait, so pin the shared start and
-  not everything. Requests with a `cache_salt` have blocks of their own that this route does not name.
-* **It comes back whole.** The reload reads at most 256 blocks per round while sequences run (a long read would hold up their next token)
+  prompt (`complete`). Pinned blocks are not free memory: a pool that is pinned full makes new requests wait. At most 50 % of the pool can
+  be pinned (`FLLM_PIN_MAX_PERCENT`, 0 switches pinning off); a prompt that does not fit is pinned from its start as far as the share
+  allows and the answer says `"limited": true` with `limit_blocks`. Requests with a `cache_salt` have blocks of their own that this route
+  does not name.
+* **Pins survive a restart.** With a disk folder the pinned chains are saved (`pins.txt` in the folder of the model: the hash of the last
+  block of every pinned chain, written on every pin, unpin and clear). The next start reads the blocks back and pins those chains again
+  (`pinned N prefix blocks again` in the log); a chain whose blocks are gone is skipped, and a limit that is smaller now cuts it the same way.
+* **It comes back whole, and all of it.** The restart read used to follow one chain from one root; it now reads every chain on the tier (the
+  cache is a tree, a leaf is a prompt, the shared start is read once). The reload reads at most 256 blocks per round while sequences run (a long read would hold up their next token)
   and up to 16 384 (262 144 tokens) per round when none runs; a longer prefix continues in the next round. The restart read is bounded by the
   free pool (minus an eighth for the first requests) and no longer by 128 blocks.
 * **Making room is cheap.** The eviction used to walk the whole use order to find the oldest block without children: 6.3 s for 500

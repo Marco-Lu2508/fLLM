@@ -222,6 +222,55 @@ impl PrefixCache {
         self.pinned.len()
     }
 
+    /// The pinned blocks that have no pinned child: one per pinned chain. Pinning the path from each of them back to the root gives the
+    /// pinned set again, so this is what is saved across a restart.
+    pub fn pinned_heads(&self) -> Vec<u64> {
+        let mut heads: Vec<u64> = self
+            .pinned
+            .iter()
+            .copied()
+            .filter(|hash| {
+                let Some(node) = self.by_hash.get(hash).and_then(|index| self.nodes[*index].as_ref()) else { return false };
+                node.children.iter().all(|(_, child)| {
+                    self.nodes[*child].as_ref().and_then(|node| node.chain_hash).is_none_or(|hash| !self.pinned.contains(&hash))
+                })
+            })
+            .collect();
+        heads.sort_unstable();
+        heads
+    }
+
+    /// Pins `hash` and every block on the way to the root, as far as `limit` pinned blocks allow. Returns how many it pinned newly.
+    /// `0` when the cache does not hold `hash`.
+    pub fn pin_to_root(&mut self, hash: u64, limit: usize) -> usize {
+        let mut path = Vec::new();
+        let mut index = match self.by_hash.get(&hash) {
+            Some(index) => *index,
+            None => return 0,
+        };
+        while let Some(node) = self.nodes[index].as_ref() {
+            if let Some(hash) = node.chain_hash {
+                path.push(hash);
+            }
+            match node.parent {
+                Some(parent) => index = parent,
+                None => break,
+            }
+        }
+        let mut added = 0;
+        // from the root down, so that a limit that cuts the path keeps the start of the chain
+        for hash in path.into_iter().rev() {
+            if !self.pinned.contains(&hash) {
+                if self.pinned.len() >= limit || !self.blocks.contains_key(&hash) {
+                    break;
+                }
+                self.pinned.insert(hash);
+                added += 1;
+            }
+        }
+        added
+    }
+
     pub fn tree_snapshot(&self) -> Value {
         self.snapshot_node(0)
     }
@@ -910,5 +959,44 @@ mod tests {
         assert_eq!(asked, 500, "one question per eviction: the only leaf");
         cache.check_bookkeeping();
         assert_eq!(cache.len(), n - 500);
+    }
+
+    #[test]
+    fn a_pinned_chain_is_saved_as_one_head_and_pins_back_from_it() {
+        let mut cache = PrefixCache::new(0, false, false).unwrap();
+        let (mut claim, mut release) = no_refs();
+        let a = chain(0, 0, &[&[1], &[2], &[3]]);
+        let b = chain(a[1].chain_hash, 10, &[&[7], &[8]]); // branches off after the second block of `a`
+        cache.insert_path(&a, &mut claim, &mut release).unwrap();
+        cache.insert_path(&[a[0].clone(), a[1].clone(), b[0].clone(), b[1].clone()], &mut claim, &mut release).unwrap();
+        for e in &a {
+            cache.pin(e.chain_hash);
+        }
+        assert_eq!(cache.pinned_heads(), vec![a[2].chain_hash], "one chain, one head: not every pinned block");
+        for e in &b {
+            cache.pin(e.chain_hash);
+        }
+        let mut heads = cache.pinned_heads();
+        heads.sort_unstable();
+        let mut expected = vec![a[2].chain_hash, b[1].chain_hash];
+        expected.sort_unstable();
+        assert_eq!(heads, expected, "two branches, two heads (the shared start is behind both)");
+        // pinning back from the heads gives the same set
+        let before = cache.pinned_len();
+        for e in a.iter().chain(&b) {
+            cache.unpin(e.chain_hash);
+        }
+        assert_eq!(cache.pinned_len(), 0);
+        for head in &heads {
+            cache.pin_to_root(*head, 100);
+        }
+        assert_eq!(cache.pinned_len(), before);
+        cache.check_bookkeeping();
+        // a limit that cuts the path keeps the start of the chain
+        for e in a.iter().chain(&b) {
+            cache.unpin(e.chain_hash);
+        }
+        assert_eq!(cache.pin_to_root(a[2].chain_hash, 2), 2);
+        assert!(cache.is_pinned(a[0].chain_hash) && cache.is_pinned(a[1].chain_hash) && !cache.is_pinned(a[2].chain_hash));
     }
 }

@@ -185,6 +185,9 @@ pub struct SchedulerConfig {
     /// Decode steps the runtime may run per scheduler round while the batch does not change (`--multi-step`, 1 = off).
     /// The scheduler itself ignores it; `InferenceRuntime::step` reads it.
     pub multi_step: usize,
+    /// At most this share of the KV pool (percent) may be pinned (`FLLM_PIN_MAX_PERCENT`, default 50; 0 switches pinning off). A pool
+    /// that is pinned full leaves nothing for the requests that run.
+    pub pin_max_percent: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +228,7 @@ impl Default for SchedulerConfig {
             swap_blocks: 0,
             decode_first: false,
             multi_step: 1,
+            pin_max_percent: 50,
         }
     }
 }
@@ -661,20 +665,39 @@ impl Scheduler {
     /// Keeps the cached blocks of the start of `tokens` out of eviction (the chain as `try_admit` looks it up, from `seed ^ salt`), or
     /// lets them go again. Returns how many blocks of the chain the cache holds and that were pinned (or unpinned): the chain stops at the
     /// first block the cache does not hold. Pinned blocks are not free memory: a pool that is pinned full makes new requests wait.
-    pub fn pin_prompt(&mut self, tokens: &[i64], salt: u64, pin: bool) -> usize {
+    pub fn pin_prompt(&mut self, tokens: &[i64], salt: u64, pin: bool) -> (usize, bool) {
         let size = self.cfg.block_size;
-        let Some(pc) = self.pc.as_mut() else { return 0 };
+        let limit = self.pin_limit_blocks();
+        let Some(pc) = self.pc.as_mut() else { return (0, false) };
         let mut prev = prefix_seed() ^ salt;
         let mut done = 0;
         for b in 0..tokens.len() / size {
             prev = PrefixCache::hash_chain(prev, &tokens[b * size..(b + 1) * size]);
+            if pin && !pc.is_pinned(prev) && pc.pinned_len() >= limit {
+                return (done, true);
+            }
             let changed = if pin { pc.pin(prev) } else { pc.unpin(prev) };
             if !changed && !(pin && pc.is_pinned(prev)) {
                 break;
             }
             done += 1;
         }
-        done
+        (done, false)
+    }
+
+    /// How many blocks may be pinned: `pin_max_percent` of the pool (the null block does not count).
+    pub fn pin_limit_blocks(&self) -> usize {
+        self.bm.allocator.num_blocks.saturating_sub(1) * self.cfg.pin_max_percent.min(100) / 100
+    }
+
+    /// The last pinned block of every pinned chain (saved across a restart).
+    pub fn pinned_heads(&self) -> Vec<u64> {
+        self.pc.as_ref().map_or_else(Vec::new, PrefixCache::pinned_heads)
+    }
+
+    /// Pins the block with this hash and the way to the root, within `limit` pinned blocks. Returns how many were pinned newly.
+    pub fn pin_chain_of(&mut self, head: u64, limit: usize) -> usize {
+        self.pc.as_mut().map_or(0, |pc| pc.pin_to_root(head, limit))
     }
 
     /// How many blocks of the pool are pinned.

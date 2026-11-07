@@ -59,6 +59,16 @@ struct BatchRow {
 /// Scheduler-driven inference over the memory-mapped GGUF model.
 /// One shared paged KV pool backs every active sequence; each scheduler step is
 /// evaluated as one ragged batch by the Rust decoder.
+/// What a pin or an unpin did: how many blocks of the prompt it applied to, of how many full blocks the prompt has, whether the share of the
+/// pool that may be pinned (`FLLM_PIN_MAX_PERCENT`) cut it short, and what that share is in blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinOutcome {
+    pub blocks: usize,
+    pub full_blocks: usize,
+    pub limited: bool,
+    pub limit_blocks: usize,
+}
+
 /// Blocks the reload reads back per scheduling round while sequences run, and while none does.
 const RELOAD_BUSY_BLOCKS: usize = 256;
 const RELOAD_IDLE_BLOCKS: usize = 16_384;
@@ -193,6 +203,8 @@ impl InferenceRuntime {
                 speculative_window
             },
             speculative_adaptive: !matches!(std::env::var("FLLM_SPEC_ADAPTIVE").as_deref(), Ok("0")),
+            // the share of the pool that may be pinned (percent); 0 switches pinning off
+            pin_max_percent: std::env::var("FLLM_PIN_MAX_PERCENT").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(50, |v| v.min(100)),
             ..SchedulerConfig::default()
         };
         let scheduler = Scheduler::new(config, bm, Some(pc), model.max_context());
@@ -1001,7 +1013,9 @@ impl InferenceRuntime {
     /// Sequences preempted so far, and the KV blocks swapped out to and back in from host memory.
     /// Empties the prefix cache; returns how many entries it held.
     pub fn clear_prefix_cache(&mut self) -> Result<usize, String> {
-        self.scheduler.clear_prefix_cache().map_err(|e| e.to_string())
+        let dropped = self.scheduler.clear_prefix_cache().map_err(|e| e.to_string())?;
+        self.save_pins();
+        Ok(dropped)
     }
 
     /// What the prefix cache holds, for `GET /admin/prefix-cache`.
@@ -1547,77 +1561,71 @@ impl InferenceRuntime {
             return Ok(0);
         }
         let stored = self.kv_tier.entries();
-        // children by parent, so a chain can be walked from its root
-        let mut children: std::collections::HashMap<u64, Vec<crate::mem::kv_tier::Stored>> = std::collections::HashMap::new();
+        // every stored block by its hash, and which hashes are the parent of another block: the leaves are the ones that are not
+        let mut by_hash: std::collections::HashMap<u64, crate::mem::kv_tier::Stored> = std::collections::HashMap::new();
+        let mut has_child: std::collections::HashSet<u64> = std::collections::HashSet::new();
         for block in stored {
-            children.entry(block.parent).or_default().push(block);
+            has_child.insert(block.parent);
+            by_hash.insert(block.hash, block);
         }
-        for list in children.values_mut() {
-            list.sort_by_key(|block| block.hash);
-        }
-        let mut registered = 0usize;
         let seed = crate::scheduler::prefix_seed();
-        let mut roots: Vec<u64> = children.keys().copied().filter(|parent| *parent == seed).collect();
-        if roots.is_empty() {
-            // a tier that only holds a middle of a chain cannot be rebuilt: without the root the hash chain is unverifiable
-            return Ok(0);
-        }
-        roots.sort_unstable();
-        for root in roots {
-            let mut chain: Vec<crate::mem::kv_tier::Stored> = Vec::new();
-            let mut cursor = root;
-            while let Some(next) = children.get(&cursor).and_then(|list| list.first()).cloned() {
-                chain.push(next.clone());
-                cursor = next.hash;
-                if chain.len() >= limit {
-                    break;
-                }
-            }
-            if chain.is_empty() {
-                continue;
-            }
-            // blocks first: a block has to hold its KV before the tree may point at it
-            let mut blocks: Vec<(u64, Vec<i64>, i64)> = Vec::new();
-            let mut failed = false;
-            for block in &chain {
-                let Some(bytes) = self.kv_tier.load(block.hash) else {
-                    failed = true;
-                    break;
-                };
-                let Ok(bid) = self.scheduler.alloc_free_block() else {
-                    failed = true;
-                    break;
-                };
-                if self.kv_import_block(bid as usize, &bytes).is_err() {
-                    self.scheduler.free_block(bid);
-                    failed = true;
-                    break;
-                }
-                blocks.push((block.hash, block.tokens.clone(), bid));
-            }
-            if failed || blocks.is_empty() {
-                for (_, _, bid) in &blocks {
-                    self.scheduler.free_block(*bid);
-                }
-                continue;
-            }
-            match self.scheduler.register_prefix_chain(&blocks) {
-                Ok(true) => {
-                    registered += blocks.len();
-                    // the cache took its own reference on every block it registered; give back the one from the allocation, or the cache
-                    // can neither evict these blocks nor clear them and the pool a restart warmed is lost for good
-                    for (_, _, bid) in &blocks {
-                        self.scheduler.free_block(*bid);
-                    }
-                }
-                _ => {
-                    for (_, _, bid) in &blocks {
-                        self.scheduler.free_block(*bid);
-                    }
-                }
-            }
+        let mut leaves: Vec<u64> = by_hash.keys().copied().filter(|hash| !has_child.contains(hash)).collect();
+        leaves.sort_unstable();
+        let mut registered = 0usize;
+        // Every path from the root to a leaf is read back (the cache is a tree: prompts that share a start share its blocks, and a block
+        // that is in the cache already is not read again). It used to follow one single path, so a restart gave back one chain only.
+        for leaf in leaves {
             if registered >= limit {
                 break;
+            }
+            let mut path: Vec<&crate::mem::kv_tier::Stored> = Vec::new();
+            let mut cursor = leaf;
+            let rooted = loop {
+                let Some(block) = by_hash.get(&cursor) else { break false };
+                path.push(block);
+                if block.parent == seed {
+                    break true;
+                }
+                cursor = block.parent;
+                if path.len() > by_hash.len() {
+                    break false; // a loop in damaged files
+                }
+            };
+            // a chain whose start is not on the tier cannot be verified: without the root the hash chain is unverifiable
+            if !rooted {
+                continue;
+            }
+            path.reverse();
+            let Some(first) = path.iter().position(|block| self.scheduler.prefix_block_of(block.hash).is_none()) else { continue };
+            // blocks first: a block has to hold its KV before the tree may point at it
+            let room = limit - registered;
+            let mut taken: Vec<i64> = Vec::new();
+            for block in &path[first..] {
+                if taken.len() >= room {
+                    break;
+                }
+                let Some(bytes) = self.kv_tier.load_for(block.hash, &block.tokens) else { break };
+                let Ok(bid) = self.scheduler.alloc_free_block() else { break };
+                if self.kv_import_block(bid as usize, &bytes).is_err() {
+                    self.scheduler.free_block(bid);
+                    break;
+                }
+                taken.push(bid);
+            }
+            if taken.is_empty() {
+                continue;
+            }
+            let mut entries: Vec<(u64, Vec<i64>, i64)> =
+                path[..first].iter().filter_map(|block| self.scheduler.prefix_block_of(block.hash).map(|bid| (block.hash, block.tokens.clone(), bid))).collect();
+            entries.extend(taken.iter().zip(&path[first..]).map(|(bid, block)| (block.hash, block.tokens.clone(), *bid)));
+            let registered_now = matches!(self.scheduler.extend_prefix_chain(&entries), Ok(true));
+            // the cache took its own reference on every block it registered; give back the one from the allocation, or the cache can
+            // neither evict these blocks nor clear them and the pool a restart warmed is lost for good
+            for bid in &taken {
+                self.scheduler.free_block(*bid);
+            }
+            if registered_now {
+                registered += taken.len();
             }
         }
         Ok(registered)
@@ -1837,7 +1845,7 @@ impl InferenceRuntime {
     /// cache dropped from the tiers, so a prefix that was written to memory or disk before can be pinned again after a restart. Returns
     /// `(blocks pinned or unpinned, full blocks of the prompt)`; the chain stops at the first block that is nowhere. Only requests
     /// without a `cache_salt` can be pinned: their blocks are the ones that are shared.
-    pub fn pin_prefix(&mut self, tokens: &[i64], pin: bool) -> Result<(usize, usize), String> {
+    pub fn pin_prefix(&mut self, tokens: &[i64], pin: bool) -> Result<PinOutcome, String> {
         if !self.scheduler.cfg.prefix_cache {
             return Err("this server runs without a prefix cache; there is nothing to pin".into());
         }
@@ -1852,8 +1860,23 @@ impl InferenceRuntime {
                 budget = budget.saturating_sub(read);
             }
         }
-        let done = self.scheduler.pin_prompt(tokens, 0, pin);
-        Ok((done, full))
+        let (done, limited) = self.scheduler.pin_prompt(tokens, 0, pin);
+        self.save_pins();
+        Ok(PinOutcome { blocks: done, full_blocks: full, limited, limit_blocks: self.scheduler.pin_limit_blocks() })
+    }
+
+    /// Writes the pinned chains to the tier, so that a restart pins them again (`restore_pins`).
+    fn save_pins(&self) {
+        if self.kv_tier.enabled() {
+            self.kv_tier.save_pins(&self.scheduler.pinned_heads());
+        }
+    }
+
+    /// Pins again what was pinned before the restart. The blocks were read back by `warm_prefix_cache`; a chain that is not in the cache
+    /// (it did not fit, or its files are gone) is skipped. Returns how many blocks were pinned.
+    fn restore_pins(&mut self) -> usize {
+        let limit = self.scheduler.pin_limit_blocks();
+        self.kv_tier.load_pins().into_iter().map(|head| self.scheduler.pin_chain_of(head, limit)).sum()
     }
 
     /// How many blocks of the prefix cache are pinned.
@@ -1971,6 +1994,10 @@ impl InferenceRuntime {
                 Ok(0) => {}
                 Ok(count) => tracing::info!("warmed {count} prefix blocks from the disk tier"),
                 Err(error) => tracing::warn!("could not warm the prefix cache from disk: {error}"),
+            }
+            match self.restore_pins() {
+                0 => {}
+                count => tracing::info!("pinned {count} prefix blocks again, as before the restart"),
             }
         }
         self.reload_for_waiting();

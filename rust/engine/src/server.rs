@@ -170,7 +170,7 @@ enum WorkerCommand {
     PinPrefix {
         tokens: Vec<i64>,
         pin: bool,
-        output: tokio::sync::oneshot::Sender<Result<(usize, usize), String>>,
+        output: tokio::sync::oneshot::Sender<Result<crate::runtime::PinOutcome, String>>,
     },
     /// `GET /admin/kv-tier`: the disk tier's counters.
     KvTierStats {
@@ -1786,7 +1786,12 @@ async fn admin_prefix_pin(State(state): State<Arc<AppState>>, Json(body): Json<V
         return api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker is not running");
     }
     match answer.await {
-        Ok(Ok((blocks, full))) => Json(json!({"pinned": pin, "blocks": blocks, "full_blocks": full, "prompt_tokens": total, "complete": blocks == full})).into_response(),
+        Ok(Ok(outcome)) => Json(json!({
+            "pinned": pin, "blocks": outcome.blocks, "full_blocks": outcome.full_blocks, "prompt_tokens": total,
+            "complete": outcome.blocks == outcome.full_blocks,
+            // the share of the pool that may be pinned was reached: the rest of the prompt is not pinned
+            "limited": outcome.limited, "limit_blocks": outcome.limit_blocks,
+        })).into_response(),
         Ok(Err(error)) => api_error(StatusCode::CONFLICT, &error),
         Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker did not answer"),
     }
