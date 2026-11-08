@@ -98,6 +98,117 @@ fn panel_disabled() -> bool {
     })
 }
 
+/// Tokens `token..` of one four-row panel through [`x86::tile_tokens`], dispatched on the row and token
+/// counts the panel and batch actually have.
+///
+/// # Safety
+/// AVX2, FMA and F16C must be available; `w` holds `first + valid` rows of `cols` elements and `x`
+/// holds `batch` tokens of `cols` values.
+#[cfg(target_arch = "x86_64")]
+unsafe fn panel_tokens<const KIND: u32>(
+    w: &[u8],
+    x: &[f32],
+    first: usize,
+    cols: usize,
+    valid: usize,
+    batch: usize,
+    out: &mut crate::cpu_schedule::Rows<'_>,
+) {
+    let mut token = 0;
+    while token < batch {
+        let take = (batch - token).min(6);
+        match (valid, take) {
+            (1, 1) => x86::tile_tokens::<KIND, 1, 1>(w, x, first, cols, token, out),
+            (1, 2) => x86::tile_tokens::<KIND, 1, 2>(w, x, first, cols, token, out),
+            (1, 3) => x86::tile_tokens::<KIND, 1, 3>(w, x, first, cols, token, out),
+            (1, 4) => x86::tile_tokens::<KIND, 1, 4>(w, x, first, cols, token, out),
+            (1, 5) => x86::tile_tokens::<KIND, 1, 5>(w, x, first, cols, token, out),
+            (1, 6) => x86::tile_tokens::<KIND, 1, 6>(w, x, first, cols, token, out),
+            (2, 1) => x86::tile_tokens::<KIND, 2, 1>(w, x, first, cols, token, out),
+            (2, 2) => x86::tile_tokens::<KIND, 2, 2>(w, x, first, cols, token, out),
+            (2, 3) => x86::tile_tokens::<KIND, 2, 3>(w, x, first, cols, token, out),
+            (2, 4) => x86::tile_tokens::<KIND, 2, 4>(w, x, first, cols, token, out),
+            (2, 5) => x86::tile_tokens::<KIND, 2, 5>(w, x, first, cols, token, out),
+            (2, 6) => x86::tile_tokens::<KIND, 2, 6>(w, x, first, cols, token, out),
+            (3, 1) => x86::tile_tokens::<KIND, 3, 1>(w, x, first, cols, token, out),
+            (3, 2) => x86::tile_tokens::<KIND, 3, 2>(w, x, first, cols, token, out),
+            (3, 3) => x86::tile_tokens::<KIND, 3, 3>(w, x, first, cols, token, out),
+            (3, 4) => x86::tile_tokens::<KIND, 3, 4>(w, x, first, cols, token, out),
+            (3, 5) => x86::tile_tokens::<KIND, 3, 5>(w, x, first, cols, token, out),
+            (3, 6) => x86::tile_tokens::<KIND, 3, 6>(w, x, first, cols, token, out),
+            (4, 1) => x86::tile_tokens::<KIND, 4, 1>(w, x, first, cols, token, out),
+            (4, 2) => x86::tile_tokens::<KIND, 4, 2>(w, x, first, cols, token, out),
+            (4, 3) => x86::tile_tokens::<KIND, 4, 3>(w, x, first, cols, token, out),
+            (4, 4) => x86::tile_tokens::<KIND, 4, 4>(w, x, first, cols, token, out),
+            (4, 5) => x86::tile_tokens::<KIND, 4, 5>(w, x, first, cols, token, out),
+            (4, 6) => x86::tile_tokens::<KIND, 4, 6>(w, x, first, cols, token, out),
+            _ => unreachable!(),
+        }
+        token += take;
+    }
+}
+
+/// The exact verification pass as one dispatch for the whole call: every token runs the batch-one tile
+/// kernel inside its four-row panel, and each loaded weight vector serves all tokens, so the weights are
+/// read once per eight columns instead of once per token. Rows are independent and the order of the sums
+/// of a token does not change, so the bits are the batch-one bits. `None` when this CPU has no such
+/// kernel or the shapes do not fit; the caller then blocks the rows or goes token by token.
+///
+/// Only F32: it decodes with a plain load, so the reduced traffic is what the pass waits for (34.0 ->
+/// 25.0 ms for seven rows here). F16 and BF16 spend their time in the conversion of every 16-bit value,
+/// where sharing the load bought nothing (BF16 40.7 -> 42.7 ms), so they keep the row blocks.
+#[cfg(target_arch = "x86_64")]
+fn exact_panels(
+    projections: &[Projection<'_>],
+    kind: u32,
+    input: &[f32],
+    cols: usize,
+    batch: usize,
+) -> Option<Vec<Vec<f32>>> {
+    if kind != 0 || cols == 0 || crate::cpu_kernels::isa() == "scalar" {
+        return None;
+    }
+    let width = if kind == 0 { 4 } else { 2 };
+    if input.len() != batch * cols
+        || projections.is_empty()
+        || projections.iter().any(|p| {
+            p.rows == 0 || p.weights.len() != p.rows * cols * width || p.bias.is_some_and(|b| b.len() != p.rows)
+        })
+    {
+        return None;
+    }
+    let x: Cow<'_, [f32]> = if kind == 0 { Cow::Borrowed(input) } else { Cow::Owned(rounded_input(input, kind)) };
+    let rows = projections.iter().map(|p| p.rows).collect::<Vec<_>>();
+    let mut output = rows.iter().map(|&r| vec![0.0; batch * r]).collect::<Vec<_>>();
+    crate::cpu_schedule::row_panels(
+        &mut output,
+        &rows,
+        batch,
+        4,
+        || (),
+        |_, member, first, out| {
+            let p = &projections[member];
+            let valid = (p.rows - first).min(4);
+            // SAFETY: `isa()` confirmed AVX2/FMA/F16C and the shapes were checked above.
+            unsafe {
+                match kind {
+                    0 => panel_tokens::<0>(p.weights, &x, first, cols, valid, batch, out),
+                    1 => panel_tokens::<1>(p.weights, &x, first, cols, valid, batch, out),
+                    _ => panel_tokens::<30>(p.weights, &x, first, cols, valid, batch, out),
+                }
+            }
+            if let Some(bias) = p.bias {
+                for token in 0..batch {
+                    for (r, y) in out.row(token).iter_mut().enumerate() {
+                        *y += bias[first + r];
+                    }
+                }
+            }
+        },
+    );
+    Some(output)
+}
+
 /// The exact verification pass with blocks of rows outside and the tokens inside (see `cpu_quantized::exact_by_row_blocks`): every
 /// row still goes through the batch-one kernel, so the bits stay, and tokens two to seven find the block of weights in the cache.
 /// `None` when the weights are too small for blocking to help; the caller then runs token by token.
@@ -151,6 +262,10 @@ pub fn linear_group(
     // panels and the NEON kernels all combine tokens
     let batch = input.len().checked_div(cols).unwrap_or(0);
     if batch > 1 && matches!(kind, 0 | 1 | 30) && crate::cpu_kernels::batch_invariant() {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(output) = exact_panels(projections, kind, input, cols, batch) {
+            return Some(output);
+        }
         if let Some(output) = exact_by_row_blocks(projections, kind, input, cols, batch) {
             return Some(output);
         }
@@ -291,6 +406,44 @@ pub fn linear_group(
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
+
+    // One dispatch over four-row panels must give every token the bits of a single-token call, including
+    // a column count that is not a multiple of eight (the scalar tail) and a row tail in the last panel.
+    #[test]
+    fn batched_float_panels_give_each_token_the_single_token_bits() {
+        use crate::cpu_selftest::{Lcg};
+        use crate::cpu_kernels::BatchInvariant;
+        if crate::cpu_kernels::isa() == "scalar" {
+            return;
+        }
+        let _guard = BatchInvariant::enter();
+        let mut rng = Lcg(0x3b17);
+        for kind in [0u32, 1, 30] {
+            for (rows, cols) in [(13usize, 519usize), (37, 1003), (64, 2076)] {
+                let weights = crate::spec_exact_tests::float_bytes(kind, rows * cols, &mut rng);
+                let bias: Vec<f32> = (0..rows).map(|r| (r as f32 - 3.0) / 7.0).collect();
+                for use_bias in [false, true] {
+                    let p = Projection { weights: &weights, rows, bias: use_bias.then_some(bias.as_slice()) };
+                    let run = |x: &[f32]| linear_group(std::slice::from_ref(&p), kind, x, cols).unwrap().pop().unwrap();
+                    let xs: Vec<Vec<f32>> = (0..7).map(|_| rng.vector(cols, 1.0)).collect();
+                    let mut batch = Vec::with_capacity(7 * cols);
+                    for x in &xs {
+                        batch.extend_from_slice(x);
+                    }
+                    let got = run(&batch);
+                    for (token, x) in xs.iter().enumerate() {
+                        let want = run(x);
+                        let have = &got[token * rows..(token + 1) * rows];
+                        assert_eq!(
+                            have.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            "kind {kind} rows {rows} cols {cols} bias {use_bias} token {token}"
+                        );
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn half_rounding_and_cache_encoding_preserve_ties_and_tails() {
         let mut input = (0..1031)
@@ -771,6 +924,46 @@ mod x86 {
                     }
                     out.row(b + j)[r] = sum;
                 }
+            }
+        }
+    }
+
+    /// `T` tokens against one panel of up to four rows, in [`tile`]'s accumulation order: one eight-lane
+    /// accumulator per row over ascending `k`, reduced once, then the scalar tail. Each loaded weight
+    /// vector serves all `T` tokens, so the weights of a row are read once per eight columns instead of
+    /// once per token, and the bits stay the batch-one bits.
+    ///
+    /// # Safety
+    /// AVX2, FMA and F16C must be available; `w` holds `first + ROWS` rows of `cols` elements and `x`
+    /// holds `token + T` tokens of `cols` values.
+    #[allow(clippy::too_many_arguments)]
+    #[target_feature(enable = "avx2,fma,f16c")]
+    pub(super) unsafe fn tile_tokens<const KIND: u32, const ROWS: usize, const T: usize>(
+        w: &[u8],
+        x: &[f32],
+        first: usize,
+        cols: usize,
+        token: usize,
+        out: &mut crate::cpu_schedule::Rows<'_>,
+    ) {
+        let end = cols / 8 * 8;
+        for r in 0..ROWS {
+            let mut acc = [_mm256_setzero_ps(); T];
+            for k in (0..end).step_by(8) {
+                let v = load::<KIND>(w, (first + r) * cols + k);
+                for (t, lane) in acc.iter_mut().enumerate() {
+                    let x0 = _mm256_loadu_ps(x.as_ptr().add((token + t) * cols + k));
+                    *lane = _mm256_fmadd_ps(v, x0, *lane);
+                }
+            }
+            for (t, &lane) in acc.iter().enumerate() {
+                let h = _mm_add_ps(_mm256_castps256_ps128(lane), _mm256_extractf128_ps(lane, 1));
+                let h = _mm_add_ps(h, _mm_movehl_ps(h, h));
+                let mut sum = _mm_cvtss_f32(_mm_add_ss(h, _mm_shuffle_ps(h, h, 0x55)));
+                for k in end..cols {
+                    sum += element::<KIND>(w, (first + r) * cols + k) * x[(token + t) * cols + k];
+                }
+                out.row(token + t)[r] = sum;
             }
         }
     }

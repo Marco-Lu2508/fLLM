@@ -116,7 +116,30 @@ Cost of a 7-row verification pass in units of a 1-row step (one 4096-column proj
 host, so the spread is about 30 %): Q4_K 2.1 before and 3.5 after, Q6_K 3.2 and 3.4, Q3_K 2.9 and 3.0, Q2_K 3.4 and 3.7, IQ3_XXS 2.5 and
 2.6, F32 1.7 and 1.3, BF16 2.2 and 2.1. Only Q4_K on a CPU without AVX-VNNI pays visibly (the batch-one kernel runs per token). On
 CPUs with AVX-VNNI or AVX-512 the batch-one and the streaming kernels are the same code, so no cost is expected there; that was not measured.
-Nothing was measured end to end with speculation on a real model.
+
+An F32 verification pass now runs as one dispatch over four-row panels: every token still goes through the batch-one tile kernel, in
+the same order of sums, but each loaded weight vector serves all tokens of the call instead of one, so the weights of a row are read
+once per eight columns. On an AVX-VNNI host, seven rows of the 320 MB projection: 34.0 -> 25.0 ms (3.86x -> 2.80x of a one-row step).
+F16 and BF16 keep the row blocks: their time goes into converting every 16-bit value, so sharing the load bought nothing there
+(BF16 40.7 -> 42.7 ms, measured twice). `batched_float_panels_give_each_token_the_single_token_bits` compares the raw `f32` bits of
+every token against a single-token call, including a column count that is not a multiple of eight and a row tail, and its three
+mutations (fma replaced by mul+add, another reduction lane, fma in the scalar tail) each fail it.
+
+End to end with speculation, Qwen2.5-0.5B-Instruct converted to F32 GGUF (`fllm-rs convert --outtype f32`), CPU, 2 threads,
+`--speculative suffix`, exact pass on, three alternating rounds of the old and the new binary over three prompts (plain decoding of
+both binaries is identical code, and its spread of 7.8 to 10.2 tokens/s shows the host noise):
+
+| Binary | Plain, tokens/s (median) | Speculative, tokens/s (median) | Speculative / plain |
+|---|---:|---:|---:|
+| before | 8.3 | 16.0 | 1.86 |
+| with the F32 panels | 9.7 | 24.0 | 2.50 |
+
+The greedy text of the two modes was equal in all 18 runs. The median ratio is the figure to quote (the absolute numbers moved with a
+plain baseline that drifted by 17 % between the rounds); in the round whose plain baseline matched (9.5 to 9.8 tokens/s for both
+binaries), speculative decoding went 18.3/16.9/14.5 -> 23.7/24.9/23.4 tokens/s.
+
+Nothing was measured end to end with speculation on a real model in F16, BF16 or a quantized format; those keep the row blocks.
+
 
 What this does not prove:
 

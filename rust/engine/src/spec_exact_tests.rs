@@ -22,7 +22,7 @@ fn differing_tokens(run: &dyn Fn(&[f32]) -> Option<Vec<f32>>, rows: usize, cols:
     Some(bad)
 }
 
-fn float_bytes(kind: u32, count: usize, rng: &mut Lcg) -> Vec<u8> {
+pub(crate) fn float_bytes(kind: u32, count: usize, rng: &mut Lcg) -> Vec<u8> {
     let values = rng.vector(count, 0.3);
     match kind {
         0 => values.iter().flat_map(|v| v.to_le_bytes()).collect(),
