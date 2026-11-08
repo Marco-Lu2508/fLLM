@@ -1273,11 +1273,12 @@ fn k_avx2_decode_rows_for_id(vendor: [u32; 3], signature: u32) -> usize {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(unused_unsafe)] // `__cpuid` is an unsafe function on 1.89 and a safe one on newer toolchains
 fn k_avx2_decode_panel_rows() -> usize {
     static ROWS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *ROWS.get_or_init(|| {
-        // CPUID leaves 0 and 1 exist on x86-64; no optional vector instruction is issued here.
-        let (vendor, signature) = (std::arch::x86_64::__cpuid(0), std::arch::x86_64::__cpuid(1));
+        // SAFETY: leaves 0 and 1 exist on every x86-64 CPU; no optional vector instruction is issued.
+        let (vendor, signature) = unsafe { (std::arch::x86_64::__cpuid(0), std::arch::x86_64::__cpuid(1)) };
         k_avx2_decode_rows_for_id([vendor.ebx, vendor.edx, vendor.ecx], signature.eax)
     })
 }
