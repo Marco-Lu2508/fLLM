@@ -75,10 +75,36 @@ version number, so the script also works with older releases.
 First results on an L4, an A100, an RTX PRO 6000 Blackwell, a T4 and two CPUs (fLLM against llama.cpp and ik_llama.cpp, a quant matrix of eleven models) and the gaps they showed: [docs/colab-comparison-2026-11.md](../../docs/colab-comparison-2026-11.md). `--cpu --threads N` runs the three engines that read GGUF on the processor; `--models` takes the quant keys listed in `--help`.
 
 `compare.py` serves the same models with fLLM and the other engines on the Colab GPU: GGUF files with fLLM, llama.cpp (built with
-CUDA) and Ollama; AWQ 4-bit checkpoints with vLLM, SGLang and fLLM (converted from the same checkpoint). It measures prompts of 100,
-500 and 2000 tokens with 1, 4 and 16 simultaneous users (total tokens per second, time to the first token, speed per user):
+CUDA) and Ollama; AWQ 4-bit checkpoints with vLLM, SGLang and fLLM (converted from the same checkpoint). It measures approximate prompt
+sizes of 100, 500 and 2000 with 1, 4 and 16 simultaneous users (aggregate and per-user end-to-end tokens/s, first output delta latency):
 
 ```sh
 git clone -q https://github.com/Marco-Lu2508/fLLM && python3 fLLM/scripts/colab/compare.py                       # release binary
 python3 fLLM/scripts/colab/compare.py --build-from-source --models llama8b-awq,qwen3b-awq,gemma4 --users 1,8,32   # newest main
+```
+
+Measurement contract (`compare_result.json`, `schema_version: 2`; per-user rates changed meaning from the older chunk-based files):
+
+* Every stream requests `stream_options.include_usage=true`. fLLM supports a final usage-only event (`choices: []`) before `[DONE]`.
+  `requests` retains each request's `prompt_tokens`, `completion_tokens`, `cached_tokens` (from
+  `usage.prompt_tokens_details.cached_tokens`) and seed. Missing counts stay `null`, not zero.
+  `prompt` is still the requested **approximate** size; `actual_prompt_tokens` lists server-tokenized lengths including the chat template.
+* `total_tok_s` is summed completion usage divided by batch wall time. `each_tok_s` is now the mean per-request **end-to-end** rate
+  (completion usage / request duration, including prefill and TTFT), identified by `each_tok_s_basis`. A post-first-token rate cannot
+  be recovered reliably from SSE: a single delta may contain multiple tokens. `first_s` measures the first nonempty content/reasoning
+  delta, not an empty role event, and is `null` if any request emits none.
+* `token_source` is `usage`, `sse_chunks_unverified` or `mixed`. Without valid completion usage for **every** request, both tok/s fields
+  are `null` (table: `-` plus a warning). `chunks` / `total_chunks_s` are explicitly unverified output-delta counts/rates, never token
+  counts/rates. Stream errors, malformed JSON and missing `[DONE]` invalidate the request/batch rather than reporting partial success.
+* The fLLM control always sets `FLLM_PREFIX_CACHE=off`, `FLLM_OUTPUT_CACHE=off`, `FLLM_SPECULATIVE_DEFAULT=off` and `--speculative off`;
+  these settings are recorded under `fllm_control`. Speculation overrides in `--fllm-args` are rejected. Other engines retain their own
+  cache defaults; inspect reported cached counts when comparing. This is not a cache/speculation speedup test.
+* `--seed N` (default `0`) gives identical prompt nonces and sampler seeds across engines and A/B runs, independent of thread order.
+  Nonces differ within each batch; warm-up and answer-probe requests are separate. Equal seeds do not guarantee cross-engine text equality.
+
+Offline regression and in-memory mutation checks (no token server or Colab needed):
+
+```sh
+python3 -B scripts/colab/test_compare_measure.py -v
+python3 -B scripts/colab/test_compare_measure.py --mutations
 ```

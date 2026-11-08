@@ -51,6 +51,11 @@ What it says: on the **A100** fLLM leads on all four measures, most in prefill (
 
 ## Where fLLM is behind (real gaps, not noise)
 
+These are the gaps in the original single-run matrix. The later
+[paired kernel follow-up](colab-kernel-fixes-2026-11.md) records fixes and uses exact
+server token counts rather than counting SSE messages. Do not combine the two methods
+into one performance ranking.
+
 1. **Gemma 4 E4B** (all cards): decode 0.46 to 0.87x of llama.cpp, many users 0.06 to 0.35x. The first cause, a step that failed at 16 users, is fixed (below); with the fix
    16 short requests reach 0.35x (L4), 0.28x (A100) and 0.25x (RTX PRO 6000) of llama.cpp, decode did not change. The rest is not explained. CUDA graphs are off for this
    model, and decode does not scale with the batch.

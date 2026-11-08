@@ -570,6 +570,15 @@ fn linear_x86(
         // otherwise four rows, two tokens per pass.
         let eight = wide.is_some() && batch == 1 && kinds.iter().all(|&k| eight_row_kind(k));
         let size = if eight { 8 } else { 4 };
+        // EPYC family 17h/model 31h: measured one-row AVX2 decode is faster than the four-row instantiation, with the same bits.
+        // Keep other processors, VNNI kernels and batched/prompt paths unchanged.
+        let size =
+            if !vnni && wide.is_none() && batch == 1 && kinds.iter().all(|&k| matches!(k, 12..=14))
+            {
+                k_avx2_decode_panel_rows()
+            } else {
+                size
+            };
         // Prompts: a worker decodes its four-row panel once and every token pair reuses it.
         // The AVX-512 tier keeps its own streaming kernels.
         let predecode = batch >= PREDECODE_MIN_BATCH
@@ -1238,6 +1247,39 @@ fn experts_prompt_stream(
         },
     );
     Some(output)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn k_avx2_decode_rows_for_id(vendor: [u32; 3], signature: u32) -> usize {
+    let family_base = (signature >> 8) & 15;
+    let family = family_base
+        + if family_base == 15 {
+            (signature >> 20) & 255
+        } else {
+            0
+        };
+    let model = ((signature >> 4) & 15)
+        | if matches!(family_base, 6 | 15) {
+            (signature >> 12) & 240
+        } else {
+            0
+        };
+    // Only the measured Rome-class EPYC identity gets this policy; the general AVX2 policy stays at four rows.
+    if vendor == [0x6874_7541, 0x6974_6e65, 0x444d_4163] && family == 0x17 && model == 0x31 {
+        1
+    } else {
+        4
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn k_avx2_decode_panel_rows() -> usize {
+    static ROWS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *ROWS.get_or_init(|| {
+        // CPUID leaves 0 and 1 exist on x86-64; no optional vector instruction is issued here.
+        let (vendor, signature) = (std::arch::x86_64::__cpuid(0), std::arch::x86_64::__cpuid(1));
+        k_avx2_decode_rows_for_id([vendor.ebx, vendor.edx, vendor.ecx], signature.eax)
+    })
 }
 
 /// One streaming K-format panel (`valid` rows from `first`, every token of `x`) on the widest
@@ -2985,6 +3027,24 @@ mod neon {
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avx2_decode_panel_policy_only_changes_the_measured_epyc_identity() {
+        let amd = [0x6874_7541, 0x6974_6e65, 0x444d_4163];
+        let intel = [0x756e_6547, 0x4965_6e69, 0x6c65_746e];
+        let id = |family: u32, model: u32, stepping: u32| {
+            let base = family.min(15);
+            (family - base) << 20 | base << 8 | (model & 15) << 4 | (model >> 4) << 16 | stepping
+        };
+        for stepping in [0, 1, 15] {
+            assert_eq!(k_avx2_decode_rows_for_id(amd, id(0x17, 0x31, stepping)), 1);
+        }
+        for (family, model) in [(0x17, 0x30), (0x17, 0x71), (0x19, 0x31), (6, 0x31), (0, 0)] {
+            assert_eq!(k_avx2_decode_rows_for_id(amd, id(family, model, 0)), 4);
+        }
+        assert_eq!(k_avx2_decode_rows_for_id(intel, id(0x17, 0x31, 0)), 4);
+        assert_eq!(k_avx2_decode_rows_for_id([0; 3], id(0x17, 0x31, 0)), 4);
+    }
     use crate::cpu_selftest::{compare, random_weights, reference_packed, Lcg};
 
     fn has_avx512() -> bool {

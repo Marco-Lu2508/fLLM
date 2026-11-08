@@ -1,4 +1,4 @@
-// fLLM CUDA backend: integer dot-product kernel for narrow batches (1..4 tokens) of the formats decoded by iq_decode.cuh
+// fLLM CUDA backend: integer dot-product kernel for narrow batches (1..16 tokens) of the formats decoded by iq_decode.cuh
 // (Q2_K, Q3_K, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S). Included at the end of mmvq.cu, which owns the int8
 // activation layout (`quantize_x8_kernel`).
 //
@@ -183,14 +183,28 @@ static int mmvq_x_run(cudaStream_t s, const uint8_t *W, const int8_t *xq, const 
         case 1: mmvq_x_kernel<KIND, 1><<<grid, block, 0, s>>>(W, xq, xs, Y, bias, rows, cols, batch); break;
         case 2: mmvq_x_kernel<KIND, 2><<<grid, block, 0, s>>>(W, xq, xs, Y, bias, rows, cols, batch); break;
         case 3: mmvq_x_kernel<KIND, 3><<<grid, block, 0, s>>>(W, xq, xs, Y, bias, rows, cols, batch); break;
-        default: mmvq_x_kernel<KIND, 4><<<grid, block, 0, s>>>(W, xq, xs, Y, bias, rows, cols, batch); break;
+        case 4: mmvq_x_kernel<KIND, 4><<<grid, block, 0, s>>>(W, xq, xs, Y, bias, rows, cols, batch); break;
+        // 5..16 tokens (several users decoding together): the run is decoded once per lane and used for every token, instead of the
+        // generic kernels that decode it again for every group of four tokens or go through FP16 tiles
+        case 5: case 6: case 7: case 8: mmvq_x_kernel<KIND, 8><<<grid, block, 0, s>>>(W, xq, xs, Y, bias, rows, cols, batch); break;
+        default: mmvq_x_kernel<KIND, 16><<<grid, block, 0, s>>>(W, xq, xs, Y, bias, rows, cols, batch); break;
     }
     return 1;
 }
 
+// Widest batch the kernel above takes: FLLM_CUDA_MMVQX_MAXB (1..16, default 16).
+int fllm_mmvq_x_maxb() {
+    static const int v = [] {
+        const char *e = getenv("FLLM_CUDA_MMVQX_MAXB");
+        const int n = e ? atoi(e) : 16;
+        return n < 1 ? 1 : n > 16 ? 16 : n;
+    }();
+    return v;
+}
+
 int fllm_mmvq_x_try(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias, int rows, int cols,
                     int batch, void *scratch, size_t scratch_bytes) {
-    if (batch < 1 || batch > 4 || (cols & 255) != 0 || !kind_is_iq_or_kextra(kind)) return 0;
+    if (batch < 1 || batch > fllm_mmvq_x_maxb() || (cols & 255) != 0 || !kind_is_iq_or_kextra(kind)) return 0;
     const size_t xq_bytes = ((size_t)batch * cols + 255) & ~size_t(255);
     const size_t need = xq_bytes + (size_t)batch * (cols / 32) * sizeof(float2);
     if ((reinterpret_cast<uintptr_t>(X) & 15) != 0 || (reinterpret_cast<uintptr_t>(W) & 3) != 0 || need > scratch_bytes) return 0;

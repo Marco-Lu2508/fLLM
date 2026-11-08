@@ -20,10 +20,11 @@ Steps (each is skipped with a reason when it cannot run, none stops the others):
      ik_llama.cpp  the same build of ikawrakow's fork (10-30 minutes with CUDA; --no-ik skips it)
   5. Ollama     the official Linux install (a few minutes; --no-ollama skips it), started on a private port and model folder
   6. models     --models, default llama8b (GGUF), llama8b-awq (AWQ) and qwen2b (GGUF)
-  7. measure    every engine serves the model through /v1/chat/completions with streaming; for each prompt length (100, 500, 2000
-                tokens) and number of simultaneous users (1, 4, 16) all requests start at once, every prompt is different (no cache
-                reuse), and the answer is 64 tokens long. Reported: generated tokens per second of all users together, the
-                average time to the first token, and the speed one user sees after its first token.
+  7. measure    every engine serves the model through /v1/chat/completions with streaming; for each approximate prompt size
+                (100, 500, 2000) and number of simultaneous users (1, 4, 16) requests start together with distinct, reproducible
+                prompt nonces and seeds. Generate up to 64 tokens. Server usage supplies actual token counts, never SSE chunks.
+                Report aggregate and per-user end-to-end tok/s and time to first nonempty output delta. Without usage, tok/s
+                is unavailable. fLLM runs with prefix/output caches and speculation explicitly disabled as a control.
 
 The result is a table per model on stdout and compare_result.json in the work directory (default /content/fllm_compare).
 Only the Python standard library is used; the network is used for the downloads.
@@ -35,6 +36,7 @@ import json
 import os
 import random
 import shutil
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -228,63 +230,149 @@ class Server:
 
 # ---- load test -----------------------------------------------------------------------------------------------------------
 
+def sse_data(response):
+    """Decode SSE framing (including comments, CRLF and multi-line data)."""
+    data = []
+    for line in response:
+        line = line.rstrip(b"\r\n")
+        if not line:
+            if data:
+                yield b"\n".join(data)
+                data = []
+        elif line.startswith(b"data:"):
+            data.append(line[5:].removeprefix(b" "))
+    if data:
+        yield b"\n".join(data)
+
+
+def usage_count(usage, name):
+    value = usage.get(name)
+    if value is not None and (type(value) is not int or value < 0):
+        raise ValueError(f"invalid usage count: {name}")
+    return value
+
+
 def one_request(url, model, size, tokens, extra, out, seed=None):
+    seed = 0 if seed is None else seed
     text = SENTENCE * max(1, size // 10)
     body = {"model": model, "stream": True, "max_tokens": tokens, "temperature": 0,
-            "messages": [{"role": "user", "content": f"Run {random.randint(0, 10**9) if seed is None else seed}: count the words of this text and then count to twenty. {text}"}]}
+            "messages": [{"role": "user", "content": f"Run {seed}: count the words of this text and then count to twenty. {text}"}]}
     body.update(extra)
+    # These instrument settings must not be accidentally replaced by engine extras.
+    body["seed"] = seed
+    body["stream"] = True
+    body["stream_options"] = {**body.get("stream_options", {}), "include_usage": True}
     req = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json"})
-    t = time.time()
-    first, chunks, sample = None, 0, ""
+    t = time.perf_counter()
+    first, chunks, sample, usage, done = None, 0, "", {}, False
     try:
         with urllib.request.urlopen(req, timeout=1800) as r:
-            for line in r:
-                if not line.startswith(b"data:"):
-                    continue
-                d = line[5:].strip()
-                if d == b"[DONE]":
+            for data in sse_data(r):
+                if data.strip() == b"[DONE]":
+                    done = True
                     break
-                if b'"content":"' in d or b'"reasoning_content":"' in d or b'"reasoning":"' in d:
-                    first = first or time.time() - t
-                    chunks += 1
-                    if len(sample) < 160:
-                        try:
-                            delta = json.loads(d)["choices"][0]["delta"]
-                            sample += delta.get("content") or delta.get("reasoning_content") or delta.get("reasoning") or ""
-                        except Exception:
-                            pass
-        out.append({"first": first or 0.0, "total": time.time() - t, "chunks": chunks, "sample": sample[:160]})
+                event = json.loads(data)
+                if "error" in event:
+                    raise ValueError(f"SSE error: {event['error']}")
+                if isinstance(event.get("usage"), dict):
+                    # Usage is cumulative, not a per-event increment; the final counts win.
+                    usage.update(event["usage"])
+                for choice in event.get("choices", []):
+                    delta = choice.get("delta") or {}
+                    parts = [delta.get(k) for k in ("content", "reasoning_content", "reasoning")]
+                    visible = "".join(p for p in parts if isinstance(p, str) and p)
+                    if visible:
+                        if first is None:
+                            first = time.perf_counter() - t
+                        chunks += 1  # output-bearing deltas, NOT tokenizer tokens
+                        sample = (sample + visible)[:160]
+        if not done:
+            raise ValueError("incomplete SSE stream: missing [DONE]")
+        prompt = usage_count(usage, "prompt_tokens")
+        completion = usage_count(usage, "completion_tokens")
+        details = usage.get("prompt_tokens_details") or {}
+        cached = usage_count(details, "cached_tokens")
+        if cached is not None and prompt is not None and cached > prompt:
+            raise ValueError("cached_tokens exceeds prompt_tokens")
+        result = {"first": first, "total": time.perf_counter() - t, "chunks": chunks, "sample": sample,
+                  "seed": seed, "prompt_tokens": prompt, "completion_tokens": completion, "cached_tokens": cached,
+                  "token_source": "usage" if completion is not None else "sse_chunks_unverified"}
+        if completion is None:
+            result["measurement_warning"] = "No completion usage: chunks are not tokens; tok/s unavailable."
+        out.append(result)
     except Exception as ex:
-        out.append({"error": str(ex)[:120]})
+        out.append({"error": str(ex)[:120], "seed": seed})
 
 
-def measure(server, port, sizes, users, tokens, extra):
+def request_seed(seed, size, users, index):
+    """Stable, engine-independent prompt nonce AND sampler seed, unique within a batch."""
+    key = f"{seed}:{size}:{users}".encode()
+    base = int.from_bytes(hashlib.sha256(key).digest()[:4], "big")
+    return (base + index) % (2**31)
+
+
+def summarize_requests(size, users, out, wall):
+    # Preserve legacy JSON keys, but never populate tok/s with a chunk estimate.
+    out = sorted(out, key=lambda o: o["seed"])
+    row = {"prompt": size, "users": users, "requests": out}
+    if len(out) != users or users < 1:
+        row["error"] = f"received {len(out)} request results for {users} users"
+        return row
+    errors = [o["error"] for o in out if "error" in o]
+    if errors:
+        row["error"] = errors[0]
+        return row
+    sources = {o["token_source"] for o in out}
+    measured = sources == {"usage"}
+    row["token_source"] = next(iter(sources)) if len(sources) == 1 else "mixed"
+    for name in ("prompt_tokens", "completion_tokens", "cached_tokens"):
+        values = [o[name] for o in out]
+        row[name] = sum(values) if all(v is not None for v in values) else None
+    row["actual_prompt_tokens"] = [o["prompt_tokens"] for o in out]
+    row["total_tok_s"] = round(row["completion_tokens"] / wall, 1) if measured and wall > 0 else None
+    # The first delta can contain multiple tokens. (completion - 1)/(total - first)
+    # would still invent a decode rate. Report the honest per-user E2E rate instead.
+    each = [o["completion_tokens"] / o["total"] for o in out if measured and o["total"] > 0]
+    row["each_tok_s"] = round(sum(each) / len(each), 1) if len(each) == len(out) else None
+    row["each_tok_s_basis"] = "end_to_end_including_ttft"
+    row["first_s"] = round(sum(o["first"] for o in out) / len(out), 2) if all(o["first"] is not None for o in out) else None
+    row["chunks"] = sum(o["chunks"] for o in out)
+    row["total_chunks_s"] = round(row["chunks"] / wall, 1) if wall > 0 else None
+    if not measured:
+        row["measurement_warning"] = "Missing completion usage for at least one request: tok/s unavailable; total_chunks_s is not tok/s."
+    return row
+
+
+def measure(server, port, sizes, users, tokens, extra, seed=0):
     url = f"http://127.0.0.1:{port}/v1/chat/completions"
     warm = []
-    one_request(url, server.model, 50, 8, extra, warm)
+    one_request(url, server.model, 50, 8, extra, warm, seed=request_seed(seed, 50, 0, 0))
     fixed = []
-    one_request(url, server.model, 100, 40, extra, fixed, seed=7)  # the same request on every engine: the answers can be compared
-    rows = [{"prompt": 100, "users": 0, "sample": (fixed[0].get("sample") or fixed[0].get("error", ""))}]
+    one_request(url, server.model, 100, 40, extra, fixed, seed=7)  # same answer probe on every engine
+    rows = [{"prompt": 100, "users": 0, **fixed[0]}]
     for size in sizes:
         for n in users:
             out = []
-            threads = [threading.Thread(target=one_request, args=(url, server.model, size, tokens, extra, out)) for _ in range(n)]
-            t = time.time()
+            threads = [threading.Thread(target=one_request, args=(url, server.model, size, tokens, extra, out,
+                        request_seed(seed, size, n, i))) for i in range(n)]
+            t = time.perf_counter()
             for th in threads:
                 th.start()
             for th in threads:
                 th.join()
-            wall = time.time() - t
-            errors = [o["error"] for o in out if "error" in o]
-            if errors:
-                rows.append({"prompt": size, "users": n, "error": errors[0]})
-                continue
-            made = sum(o["chunks"] for o in out)
-            each = [(o["chunks"] - 1) / (o["total"] - o["first"]) for o in out if o["chunks"] > 1 and o["total"] > o["first"]]
-            rows.append({"prompt": size, "users": n, "total_tok_s": round(made / wall, 1), "first_s": round(sum(o["first"] for o in out) / len(out), 2),
-                         "each_tok_s": round(sum(each) / max(1, len(each)), 1)})
-            log(f"  prompt {size:5} users {n}: {rows[-1]}")
+            wall = time.perf_counter() - t
+            rows.append(summarize_requests(size, n, out, wall))
+            log(f"  prompt {size:5} users {n}: " + str({k: v for k, v in rows[-1].items() if k != "requests"}))
     return rows
+
+
+def fllm_control_options(extra_args):
+    """The plain-decoding control must not silently enable a different workload."""
+    args = shlex.split(extra_args)
+    if any(a.startswith(("--speculative", "--num-speculative-tokens")) or a in ("-sp", "-sw") for a in args):
+        raise ValueError("--fllm-args cannot override speculation in the control measurement")
+    return args + ["--speculative", "off"], {"FLLM_PREFIX_CACHE": "off", "FLLM_OUTPUT_CACHE": "off",
+                                             "FLLM_SPECULATIVE_DEFAULT": "off"}
 
 
 # ---- main ----------------------------------------------------------------------------------------------------------------
@@ -298,6 +386,7 @@ def main():
     ap.add_argument("--sizes", default="100,500,2000")
     ap.add_argument("--users", default="1,4,16")
     ap.add_argument("--tokens", type=int, default=64)
+    ap.add_argument("--seed", type=int, default=0, help="reproducible prompt nonces and request seeds, identical across engines/A-B runs")
     ap.add_argument("--cpu", action="store_true", help="CPU only: fLLM, llama.cpp and ik_llama.cpp on the processor (no GPU needed; GGUF models only)")
     ap.add_argument("--threads", type=int, default=0, help="CPU threads for --cpu (default: all cores)")
     ap.add_argument("--no-ik", action="store_true", help="skip ik_llama.cpp")
@@ -308,13 +397,20 @@ def main():
     ap.add_argument("--fllm-args", default="", help="extra arguments for fllm-rs serve, e.g. \"--chunked-prefill-policy prefill-first\"")
     ap.add_argument("--only", help="comma-separated engines to measure (the others are still installed if needed), e.g. fllm")
     args = ap.parse_args()
+    try:
+        control_args, control_env = fllm_control_options(args.fllm_args)
+    except ValueError as ex:
+        ap.error(str(ex))
     os.makedirs(args.work, exist_ok=True)
     os.chdir(args.work)
     sizes = [int(x) for x in args.sizes.split(",")]
     users = [int(x) for x in args.users.split(",")]
     maxu = max(users)
     ctx = (max(sizes) + args.tokens + 400) * maxu
-    result = {"started": time.strftime("%Y-%m-%d %H:%M:%S")}
+    result = {"schema_version": 2, "started": time.strftime("%Y-%m-%d %H:%M:%S"), "seed": args.seed,
+              "measurement": {"tokens": "server_usage_only", "first_s": "first_nonempty_output_delta",
+                              "each_tok_s": "end_to_end_including_ttft"},
+              "fllm_control": {"env": control_env, "args": control_args}}
     if args.cpu:
         cpu_name = sh("lscpu | grep 'Model name' | head -1")[1].split(":", 1)[-1].strip()
         gpu, vram = "CPU: " + cpu_name, 10**9
@@ -379,10 +475,11 @@ def main():
             port = random.randint(20000, 30000)
             log(f"== {label} on {name}")
             server = None
+            extra = {}
             if name == "fllm":
                 device = ["--device", "cpu", "--threads", str(args.threads)] if args.cpu else ["--device", "cuda"]
-                server = Server([binary, "serve", "--model", path] + device + ["--port", str(port), "--ctx", str(ctx), "--max-seqs", str(maxu), "--model-name", "m"] + args.fllm_args.split(),
-                                f"http://127.0.0.1:{port}/health", "m", logfile=f"fllm-{key}.log")
+                server = Server([binary, "serve", "--model", path] + device + ["--port", str(port), "--ctx", str(ctx), "--max-seqs", str(maxu), "--model-name", "m"] + control_args,
+                                f"http://127.0.0.1:{port}/health", "m", env=control_env, logfile=f"fllm-{key}.log")
                 extra = no_think
             elif name in ("llama.cpp", "ik_llama.cpp"):
                 gpu_flags = ["-t", str(args.threads), "-ngl", "0"] if args.cpu else ["-ngl", "99"]
@@ -420,7 +517,7 @@ def main():
                     server.stop()
                 continue
             try:
-                per[name] = measure(server, port, sizes, users, args.tokens, extra)
+                per[name] = measure(server, port, sizes, users, args.tokens, extra, seed=args.seed)
             except Exception as ex:
                 per[name] = {"error": str(ex)[:200]}
             if server.proc.poll() is not None or any("error" in r or r.get("each_tok_s") == 0.0 for r in per[name] if isinstance(r, dict)):
@@ -434,7 +531,7 @@ def main():
 
     print("\n=== RESULT ===")
     for label, per in result["models"].items():
-        print(f"\n{label}  (total tok/s of all users | average first token in s | tok/s one user sees)")
+        print(f"\n{label}  (usage tok/s all users | first output delta in s | per-user E2E tok/s; '-' = unavailable)")
         names = [n for n in per if isinstance(per[n], list)]
         print(f"{'prompt':>6} {'users':>5}  " + "  ".join(f"{n:>24}" for n in names))
         table = {n: [r for r in per[n] if r.get("users")] for n in names}
@@ -442,7 +539,10 @@ def main():
             cells = []
             for n in names:
                 r = table[n][i] if i < len(table[n]) else {}
-                cells.append(f"{r.get('total_tok_s', '-'):>7} | {r.get('first_s', '-'):>6} | {r.get('each_tok_s', '-'):>5}" if "error" not in r else f"{'error':>24}")
+                values = ["-" if r.get(k) is None else r[k] for k in ("total_tok_s", "first_s", "each_tok_s")]
+                cells.append(f"{values[0]:>7} | {values[1]:>6} | {values[2]:>5}" if "error" not in r else f"{'error':>24}")
+                if r.get("measurement_warning"):
+                    print(f"  warning {n}, prompt {r['prompt']}, users {r['users']}: {r['measurement_warning']}")
             print(f"{row['prompt']:>6} {row['users']:>5}  " + "  ".join(f"{c:>24}" for c in cells))
         for n in per:
             if isinstance(per[n], dict) and "error" in per[n]:

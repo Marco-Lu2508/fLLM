@@ -202,6 +202,11 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
 
 ### Hardware and performance
 
+Paired CUDA follow-up measurements (L4 Q2_K concurrency, exact server token counts,
+cache/speculation controls, numerical limits): [Colab kernel follow-up](docs/colab-kernel-fixes-2026-11.md).
+The earlier [multi-card comparison](docs/colab-comparison-2026-11.md) is exploratory,
+not a repeated benchmark or an AMD/multi-GPU result.
+
 - **Backends.** CPU (runtime-selected AVX2, AVX-VNNI, AVX-512, NEON dotprod/i8mm kernels), CUDA, wgpu
   (Vulkan, Metal, DirectX 12), and optional native Vulkan, Metal, ROCm/HIP, SYCL, Intel NPU (OpenVINO) and
   TPU backends, and `--device opengl` as the last resort for graphics cards without a Vulkan/DirectX 12/Metal driver. `--device auto` takes the first GPU of CUDA, ROCm, Metal, Vulkan, DX12, OpenGL, SYCL, else the

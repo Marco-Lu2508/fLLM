@@ -187,7 +187,7 @@ static int launch_kind(cudaStream_t s, const uint8_t *W, const float *X, float *
                          KIND == KIND_Q8_0) &&
         batch <= 4 && !fllm_exact_math() && fllm_mmvq_leg_try(s, W, KIND, X, Y, bias, rows, cols, batch, x16, x16_bytes))
         return fllm_check_launch("linear");
-    if (kind_is_iq_or_kextra(KIND) && KIND != KIND_IQ1_M && batch <= 4 && !fllm_exact_math() &&
+    if (kind_is_iq_or_kextra(KIND) && KIND != KIND_IQ1_M && batch <= fllm_mmvq_x_maxb() && !fllm_exact_math() &&
         fllm_mmvq_x_try(s, W, KIND, X, Y, bias, rows, cols, batch, x16, x16_bytes))
         return fllm_check_launch("linear");
     static const bool mmvq1 = getenv("FLLM_CUDA_NO_MMVQ1") == nullptr && getenv("FLLM_CUDA_NO_MMVQ") == nullptr;

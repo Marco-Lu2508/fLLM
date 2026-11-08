@@ -55,6 +55,7 @@ extern thread_local bool fllm_x16_reuse, fllm_x16_filled;
 // The same for the int8 activations of the integer dot-product kernels (mmvq.cu), which live in the same scratch.
 extern thread_local bool fllm_x8_reuse, fllm_x8_filled;
 int fllm_mmvq_maxb();
+int fllm_mmvq_x_maxb();
 // Q2_K, Q3_K and IQ1_S .. IQ3_S with int8 activations (mmvq_x.cuh)
 int fllm_mmvq_x_try(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias, int rows, int cols,
                     int batch, void *scratch, size_t scratch_bytes);

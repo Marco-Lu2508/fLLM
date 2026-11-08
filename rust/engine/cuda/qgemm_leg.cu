@@ -227,6 +227,10 @@ static int leg_dispatch(cudaStream_t s, const uint8_t *w, const __half *x16, flo
                         int batch, float *part, size_t part_bytes) {
     if (batch <= 16) return leg_launch<KIND, 8, 64, 16, 4, 1, 4>(s, w, x16, Y, bias, rows, cols, batch, part, part_bytes);
     if (batch <= 32) return leg_launch<KIND, 8, 64, 32, 4, 1, 3>(s, w, x16, Y, bias, rows, cols, batch, part, part_bytes);
+    // The 64- and 128-token tiles need more than 64 KiB even with two stages. Turing has only 64 KiB, so these tiles declined
+    // prompts and silently sent IQ4_NL / IQ4_XS and the legacy formats to the generic decoder. Four K blocks and 64 tokens fit (52..60 KiB).
+    if (fllm_smem_limit() <= 64 * 1024)
+        return leg_launch<KIND, 4, 128, 64, 8, 1, 2>(s, w, x16, Y, bias, rows, cols, batch, part, part_bytes);
     if (batch <= 64) return leg_launch<KIND, 8, 64, 64, 4, 1, 2>(s, w, x16, Y, bias, rows, cols, batch, part, part_bytes);
     return leg_launch<KIND, 4, 128, 128, 8, 1, 2>(s, w, x16, Y, bias, rows, cols, batch, part, part_bytes);
 }

@@ -1337,7 +1337,8 @@ impl<'a> Tester<'a> {
         // widths that are multiples of 256 take the aligned device layouts; batches select the single-token,
         // integer dot-product, small-tile and (auto-tuned) large-tile kernels
         for kind in self.kinds(&[2u32, 3, 6, 7, 8, 12, 13, 14, 20, 23, 39, 42, 10, 11, 16, 17, 18, 19, 21, 22, 29]) {
-            for batch in [1usize, 2, 3, 4, 5, 8, 16, 40, 129, 356] {
+            // 12: a partly filled 16-token integer-dot kernel (mmvq_x.cuh)
+            for batch in [1usize, 2, 3, 4, 5, 8, 12, 16, 40, 129, 356] {
                 let with_bias = batch == 3 || batch == 129;
                 let r = self.linear(kind, 259, 1024, batch, with_bias).map(|mut o| {
                     o.tol = o.tol.max(Self::FAST_TOL);

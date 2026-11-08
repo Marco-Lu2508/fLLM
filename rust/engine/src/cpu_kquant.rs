@@ -2403,6 +2403,64 @@ mod tests {
         }
     }
 
+    // The row count changes only independent outputs, not the sequence of reductions for a token.
+    #[test]
+    fn batch_one_avx2_panel_sizes_have_identical_bits() {
+        use crate::cpu_selftest::{random_weights, Lcg};
+        if !(std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("fma")
+            && std::arch::is_x86_feature_detected!("f16c"))
+        {
+            return;
+        }
+        let mut rng = Lcg(472);
+        for kind in [12u32, 13, 14] {
+            for blocks in [1, 3, 17, 64] {
+                let (cols, rows) = (blocks * 256, 13usize);
+                let weights = random_weights(kind, rows, cols, &mut rng);
+                let packed = prepare(&rng.vector(cols, 3.0), cols, kind);
+                let run = |size| {
+                    let mut output = vec![vec![0.0f32; rows]];
+                    crate::cpu_schedule::row_panels(
+                        &mut output,
+                        &[rows],
+                        1,
+                        size,
+                        || (),
+                        |_, _, first, out| {
+                            let valid = (rows - first).min(size);
+                            // SAFETY: features detected above; every input/weight row is complete.
+                            unsafe {
+                                super::gemv_avx2(
+                                    &weights,
+                                    kind,
+                                    first,
+                                    valid,
+                                    &packed,
+                                    cols / 32,
+                                    out,
+                                )
+                            };
+                        },
+                    );
+                    output
+                        .remove(0)
+                        .into_iter()
+                        .map(f32::to_bits)
+                        .collect::<Vec<_>>()
+                };
+                let original = run(4);
+                for size in [1, 2, 3] {
+                    assert_eq!(
+                        run(size),
+                        original,
+                        "kind {kind}, blocks {blocks}, panel {size}"
+                    );
+                }
+            }
+        }
+    }
+
     // The predecoded kernels (decode a panel once, then dot) against the f64 reference and
     // against the streaming kernels they replace for prompts: every panel row count, one and
     // three blocks, token counts around the pair boundaries.
