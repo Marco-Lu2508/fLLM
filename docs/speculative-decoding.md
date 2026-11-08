@@ -119,7 +119,8 @@ CPUs with AVX-VNNI or AVX-512 the batch-one and the streaming kernels are the sa
 
 An F32 verification pass now runs as one dispatch over four-row panels: every token still goes through the batch-one tile kernel, in
 the same order of sums, but each loaded weight vector serves all tokens of the call instead of one, so the weights of a row are read
-once per eight columns. On an AVX-VNNI host, seven rows of the 320 MB projection: 34.0 -> 25.0 ms (3.86x -> 2.80x of a one-row step).
+once per eight columns. This needs the four-row AVX2 tile to be the single-token path, so it applies to hosts without a 512-bit float
+kernel; with AVX-512 BW (or BF16 dot) the single-token call takes the wide kernel and the pass keeps the row blocks. On an AVX-VNNI host, seven rows of the 320 MB projection: 34.0 -> 25.0 ms (3.86x -> 2.80x of a one-row step).
 F16 and BF16 keep the row blocks: their time goes into converting every 16-bit value, so sharing the load bought nothing there
 (BF16 40.7 -> 42.7 ms, measured twice). `batched_float_panels_give_each_token_the_single_token_bits` compares the raw `f32` bits of
 every token against a single-token call, including a column count that is not a multiple of eight and a row tail, and its three

@@ -168,6 +168,12 @@ fn exact_panels(
     if kind != 0 || cols == 0 || crate::cpu_kernels::isa() == "scalar" {
         return None;
     }
+    // The single-token call this pass has to match goes through the 512-bit kernels on a host that has
+    // them, which sum in another order; the four-row tile is only the batch-one kernel elsewhere.
+    #[cfg(feature = "avx512")]
+    if crate::cpu_avx512::float::wide(kind).is_some() {
+        return None;
+    }
     let width = if kind == 0 { 4 } else { 2 };
     if input.len() != batch * cols
         || projections.is_empty()
@@ -419,6 +425,12 @@ mod tests {
         let _guard = BatchInvariant::enter();
         let mut rng = Lcg(0x3b17);
         for kind in [0u32, 1, 30] {
+            // Same condition as the guard in `exact_panels`: with a 512-bit float kernel the single-token
+            // call is not the four-row tile, so the panel path is off and there is nothing to compare.
+            if cfg!(feature = "avx512") && crate::cpu_avx512::float::wide(kind).is_some() {
+                println!("kind {kind}: the 512-bit float kernel is the single-token path here, no four-row panel");
+                continue;
+            }
             for (rows, cols) in [(13usize, 519usize), (37, 1003), (64, 2076)] {
                 let weights = crate::spec_exact_tests::float_bytes(kind, rows * cols, &mut rng);
                 let bias: Vec<f32> = (0..rows).map(|r| (r as f32 - 3.0) / 7.0).collect();
