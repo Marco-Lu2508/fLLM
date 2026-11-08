@@ -2067,10 +2067,12 @@ impl Drop for CudaStream {
 
 impl CudaStream {
     /// Copies host bytes to the device. The weights of a host-streamed layer are page-locked piece by piece (`pin`): a tensor whose first or last page
-    /// belongs to its neighbour is covered by several registered pieces. CUDA copies across pieces; the HSA runtime of ROCm refuses it ("invalid argument",
-    /// seen on a Radeon 840M with MoE experts), so with the `hip` feature such a copy is done piece by piece.
+    /// belongs to its neighbour is covered by several registered pieces. Neither runtime copies across pieces: the HSA runtime of ROCm refuses it
+    /// ("invalid argument", seen on a Radeon 840M with MoE experts) and so does CUDA 13 (driver 580, measured on a T4 and an L4 with a Q8_0 model and a
+    /// Qwen3-30B-A3B whose feed-forward weights stayed in host memory: every prompt step failed with "upload: invalid argument"; the same run with
+    /// `FLLM_NO_HOST_PIN=1` was fine). A copy that touches a registered piece is therefore done piece by piece on every backend.
     fn upload_host(&mut self, dst: *mut u8, src: &[u8]) -> Result<(), BackendError> {
-        if !cfg!(feature = "hip") || self.pinned.is_empty() || src.is_empty() {
+        if self.pinned.is_empty() || src.is_empty() {
             // SAFETY: the callers sized `dst` for `src`.
             return check(unsafe { fllm_cuda_upload(self.raw, dst.cast(), src.as_ptr().cast(), src.len()) });
         }

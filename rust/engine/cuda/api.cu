@@ -668,7 +668,10 @@ int fllm_cuda_linear(FllmStream *st, const void *w, int kind, const float *x, fl
         if (int e = flush_glu(st)) return e;
     }
     // activations as FP16 (256-byte aligned) plus room for split-K partials of narrow batches
-    const size_t need = (((size_t)batch * pad256(cols) * 2 + 255) & ~size_t(255)) + (batch <= 64 ? (size_t)4 << 20 : (size_t)16 << 20);
+    // (kind 41, the Marlin Q4_K GEMM, also keeps split-K partials of 32 KiB per 256 output rows and the locks of its tiles here: 4 MiB held 128 of
+    // them, and a tall projection such as the output head of a 262k vocabulary made it decline)
+    const size_t marlin_room = kind == 41 ? (size_t)(rows / 256) * ((size_t)32 << 10) + ((size_t)(rows / 256) * 64 + 255) : 0;
+    const size_t need = (((size_t)batch * pad256(cols) * 2 + 255) & ~size_t(255)) + (batch <= 64 ? (size_t)4 << 20 : (size_t)16 << 20) + marlin_room;
     if (need > st->x16_bytes && !fllm_exact_math()) {
         CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
         cudaFree(st->x16);

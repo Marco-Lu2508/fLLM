@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare fLLM with vLLM, SGLang, llama.cpp and Ollama on the same Colab GPU, with one and with several users.
+"""Compare fLLM with vLLM, SGLang, llama.cpp, ik_llama.cpp and Ollama on the same Colab GPU (or, with --cpu, on the processor), with one and with several users.
 
 Run it in a Colab cell on a GPU runtime (T4, L4, A100, H100, G4), from a checkout of the repository:
 
@@ -17,6 +17,7 @@ Steps (each is skipped with a reason when it cannot run, none stops the others):
   2. vLLM       installed into its own environment (10+ minutes; --no-vllm skips it)
   3. SGLang     installed into its own environment (10+ minutes; --no-sglang skips it)
   4. llama.cpp  built from source with CUDA (llama-server, 5-15 minutes; --no-llama skips it)
+     ik_llama.cpp  the same build of ikawrakow's fork (10-30 minutes with CUDA; --no-ik skips it)
   5. Ollama     the official Linux install (a few minutes; --no-ollama skips it), started on a private port and model folder
   6. models     --models, default llama8b (GGUF), llama8b-awq (AWQ) and qwen2b (GGUF)
   7. measure    every engine serves the model through /v1/chat/completions with streaming; for each prompt length (100, 500, 2000
@@ -49,8 +50,19 @@ MODELS = {
     "qwen2b": ("Qwen3.5-2B Q4_K_M (GGUF)", "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf", 3000),
     "qwen3b-awq": ("Qwen2.5-3B-Instruct AWQ", "Qwen/Qwen2.5-3B-Instruct-AWQ", 4000),
     "gemma4": ("Gemma 4 E4B Q4_K_M (GGUF)", "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf", 7000),
+    # the quant matrix: one model, every common GGUF quant (llama.cpp, ik_llama.cpp and fLLM read the same file)
+    "llama8b-q2k": ("Llama-3.1-8B-Instruct Q2_K (GGUF)", "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q2_K.gguf", 5500),
+    "llama8b-iq4xs": ("Llama-3.1-8B-Instruct IQ4_XS (GGUF)", "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-IQ4_XS.gguf", 7000),
+    "llama8b-q5km": ("Llama-3.1-8B-Instruct Q5_K_M (GGUF)", "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q5_K_M.gguf", 8500),
+    "llama8b-q6k": ("Llama-3.1-8B-Instruct Q6_K (GGUF)", "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q6_K.gguf", 9500),
+    "llama8b-q8": ("Llama-3.1-8B-Instruct Q8_0 (GGUF)", "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q8_0.gguf", 12000),
+    "qwen3-8b": ("Qwen3-8B Q4_K_M (GGUF)", "https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf", 8000),
+    "qwen3-8b-q8": ("Qwen3-8B Q8_0 (GGUF)", "https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q8_0.gguf", 13000),
+    "llama3b": ("Llama-3.2-3B-Instruct Q4_K_M (GGUF)", "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf", 4000),
+    "llama3b-q8": ("Llama-3.2-3B-Instruct Q8_0 (GGUF)", "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q8_0.gguf", 5500),
+    "qwen3-30b-a3b": ("Qwen3-30B-A3B Q4_K_M (GGUF, MoE)", "https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf", 22000),
 }
-GGUF_ENGINES = ("fllm", "llama.cpp", "ollama")
+GGUF_ENGINES = ("fllm", "llama.cpp", "ik_llama.cpp", "ollama")
 HF_ENGINES = ("fllm", "vllm", "sglang")
 SENTENCE = "The quick brown fox jumps over the lazy dog. "  # about 10 tokens
 T0 = time.time()
@@ -123,14 +135,21 @@ def get_fllm(args, work):
     return None
 
 
-def get_llama(work):
-    binary = os.path.join(work, "llama.cpp/build/bin/llama-server")
+def get_llama(work, cpu=False, fork="llama.cpp"):
+    """llama-server of llama.cpp (fork="llama.cpp") or of ik_llama.cpp (fork="ik_llama.cpp"), built with CUDA for this card or CPU only."""
+    url = {"llama.cpp": "https://github.com/ggml-org/llama.cpp", "ik_llama.cpp": "https://github.com/ikawrakow/ik_llama.cpp"}[fork]
+    tag = "cpu" if cpu else "cuda"
+    src = os.path.join(work, f"{fork}-{tag}")
+    binary = os.path.join(src, "build/bin/llama-server")
     if os.path.exists(binary):
         return binary
-    log("building llama.cpp with CUDA ...")
-    sh(f"git clone -q --depth 1 https://github.com/ggml-org/llama.cpp {work}/llama.cpp")
-    rc, out = sh(f"cd {work}/llama.cpp && cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release > /dev/null "
-                 f"&& cmake --build build --config Release -j {os.cpu_count() or 4} --target llama-server 2>&1 | tail -3", timeout=3600)
+    log(f"building {fork} ({tag}) ...")
+    sh(f"git clone -q --depth 1 {url} {src}")
+    flags = "-DGGML_CUDA=OFF" if cpu else "-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native"
+    rc, out = sh(f"cd {src} && cmake -B build {flags} -DGGML_NATIVE=ON -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release > /dev/null "
+                 f"&& cmake --build build --config Release -j {os.cpu_count() or 4} --target llama-server 2>&1 | tail -3", timeout=3 * 3600)
+    if not os.path.exists(binary):
+        log(f"{fork} did not build: " + out[-300:].replace("\n", " | "))
     return binary if os.path.exists(binary) else None
 
 
@@ -209,14 +228,14 @@ class Server:
 
 # ---- load test -----------------------------------------------------------------------------------------------------------
 
-def one_request(url, model, size, tokens, extra, out):
+def one_request(url, model, size, tokens, extra, out, seed=None):
     text = SENTENCE * max(1, size // 10)
     body = {"model": model, "stream": True, "max_tokens": tokens, "temperature": 0,
-            "messages": [{"role": "user", "content": f"Run {random.randint(0, 10**9)}: count the words of this text and then count to twenty. {text}"}]}
+            "messages": [{"role": "user", "content": f"Run {random.randint(0, 10**9) if seed is None else seed}: count the words of this text and then count to twenty. {text}"}]}
     body.update(extra)
     req = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json"})
     t = time.time()
-    first, chunks = None, 0
+    first, chunks, sample = None, 0, ""
     try:
         with urllib.request.urlopen(req, timeout=1800) as r:
             for line in r:
@@ -228,7 +247,13 @@ def one_request(url, model, size, tokens, extra, out):
                 if b'"content":"' in d or b'"reasoning_content":"' in d or b'"reasoning":"' in d:
                     first = first or time.time() - t
                     chunks += 1
-        out.append({"first": first or 0.0, "total": time.time() - t, "chunks": chunks})
+                    if len(sample) < 160:
+                        try:
+                            delta = json.loads(d)["choices"][0]["delta"]
+                            sample += delta.get("content") or delta.get("reasoning_content") or delta.get("reasoning") or ""
+                        except Exception:
+                            pass
+        out.append({"first": first or 0.0, "total": time.time() - t, "chunks": chunks, "sample": sample[:160]})
     except Exception as ex:
         out.append({"error": str(ex)[:120]})
 
@@ -237,7 +262,9 @@ def measure(server, port, sizes, users, tokens, extra):
     url = f"http://127.0.0.1:{port}/v1/chat/completions"
     warm = []
     one_request(url, server.model, 50, 8, extra, warm)
-    rows = []
+    fixed = []
+    one_request(url, server.model, 100, 40, extra, fixed, seed=7)  # the same request on every engine: the answers can be compared
+    rows = [{"prompt": 100, "users": 0, "sample": (fixed[0].get("sample") or fixed[0].get("error", ""))}]
     for size in sizes:
         for n in users:
             out = []
@@ -271,6 +298,9 @@ def main():
     ap.add_argument("--sizes", default="100,500,2000")
     ap.add_argument("--users", default="1,4,16")
     ap.add_argument("--tokens", type=int, default=64)
+    ap.add_argument("--cpu", action="store_true", help="CPU only: fLLM, llama.cpp and ik_llama.cpp on the processor (no GPU needed; GGUF models only)")
+    ap.add_argument("--threads", type=int, default=0, help="CPU threads for --cpu (default: all cores)")
+    ap.add_argument("--no-ik", action="store_true", help="skip ik_llama.cpp")
     ap.add_argument("--no-llama", action="store_true")
     ap.add_argument("--no-ollama", action="store_true")
     ap.add_argument("--no-vllm", action="store_true")
@@ -285,18 +315,27 @@ def main():
     maxu = max(users)
     ctx = (max(sizes) + args.tokens + 400) * maxu
     result = {"started": time.strftime("%Y-%m-%d %H:%M:%S")}
-    rc, out = sh("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader")
-    if rc != 0 or not out.strip():
-        sys.exit("No GPU: Runtime > Change runtime type > a GPU, then run this again.")
-    gpu = out.strip().splitlines()[0]
-    vram = int("".join(ch for ch in gpu.split(",")[1] if ch.isdigit()) or 0)
+    if args.cpu:
+        cpu_name = sh("lscpu | grep 'Model name' | head -1")[1].split(":", 1)[-1].strip()
+        gpu, vram = "CPU: " + cpu_name, 10**9
+        args.no_ollama = args.no_vllm = args.no_sglang = True
+        args.threads = args.threads or (os.cpu_count() or 4)
+        result["cpu_threads"] = args.threads
+    else:
+        rc, out = sh("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader")
+        if rc != 0 or not out.strip():
+            sys.exit("No GPU: Runtime > Change runtime type > a GPU, then run this again (or use --cpu).")
+        gpu = out.strip().splitlines()[0]
+        vram = int("".join(ch for ch in gpu.split(",")[1] if ch.isdigit()) or 0)
     result["gpu"] = gpu
-    log(f"GPU: {gpu}")
+    log(f"{'CPU' if args.cpu else 'GPU'}: {gpu}")
 
     engines = {}
     engines["fllm"] = get_fllm(args, args.work)
     if not args.no_llama:
-        engines["llama.cpp"] = get_llama(args.work)
+        engines["llama.cpp"] = get_llama(args.work, cpu=args.cpu)
+    if not args.no_ik:
+        engines["ik_llama.cpp"] = get_llama(args.work, cpu=args.cpu, fork="ik_llama.cpp")
     if not args.no_ollama:
         engines["ollama"] = get_ollama()
     if not args.no_vllm:
@@ -341,12 +380,15 @@ def main():
             log(f"== {label} on {name}")
             server = None
             if name == "fllm":
-                server = Server([binary, "serve", "--model", path, "--device", "cuda", "--port", str(port), "--ctx", str(ctx), "--max-seqs", str(maxu), "--model-name", "m"] + args.fllm_args.split(),
+                device = ["--device", "cpu", "--threads", str(args.threads)] if args.cpu else ["--device", "cuda"]
+                server = Server([binary, "serve", "--model", path] + device + ["--port", str(port), "--ctx", str(ctx), "--max-seqs", str(maxu), "--model-name", "m"] + args.fllm_args.split(),
                                 f"http://127.0.0.1:{port}/health", "m", logfile=f"fllm-{key}.log")
                 extra = no_think
-            elif name == "llama.cpp":
-                server = Server([binary, "-m", path, "-ngl", "99", "-c", str(ctx), "-np", str(maxu), "--host", "127.0.0.1", "--port", str(port), "--alias", "m", "--no-webui"],
-                                f"http://127.0.0.1:{port}/health", "m", logfile=f"llama-{key}.log")
+            elif name in ("llama.cpp", "ik_llama.cpp"):
+                gpu_flags = ["-t", str(args.threads), "-ngl", "0"] if args.cpu else ["-ngl", "99"]
+                server = Server([binary, "-m", path] + gpu_flags + ["-c", str(ctx), "-np", str(maxu), "--host", "127.0.0.1", "--port", str(port), "--alias", "m"],
+                                f"http://127.0.0.1:{port}/health", "m", logfile=f"{name.replace('.', '_')}-{key}.log",
+                                env={"LD_LIBRARY_PATH": os.path.dirname(binary) + ":" + os.environ.get("LD_LIBRARY_PATH", "")})
                 extra = no_think
             elif name == "ollama":
                 env = {"OLLAMA_HOST": f"127.0.0.1:{port}", "OLLAMA_MODELS": os.path.join(args.work, "ollama-models"),
@@ -395,15 +437,19 @@ def main():
         print(f"\n{label}  (total tok/s of all users | average first token in s | tok/s one user sees)")
         names = [n for n in per if isinstance(per[n], list)]
         print(f"{'prompt':>6} {'users':>5}  " + "  ".join(f"{n:>24}" for n in names))
-        for i, row in enumerate(per[names[0]] if names else []):
+        table = {n: [r for r in per[n] if r.get("users")] for n in names}
+        for i, row in enumerate(table[names[0]] if names else []):
             cells = []
             for n in names:
-                r = per[n][i] if i < len(per[n]) else {}
+                r = table[n][i] if i < len(table[n]) else {}
                 cells.append(f"{r.get('total_tok_s', '-'):>7} | {r.get('first_s', '-'):>6} | {r.get('each_tok_s', '-'):>5}" if "error" not in r else f"{'error':>24}")
             print(f"{row['prompt']:>6} {row['users']:>5}  " + "  ".join(f"{c:>24}" for c in cells))
         for n in per:
             if isinstance(per[n], dict) and "error" in per[n]:
                 print(f"  {n}: {per[n]['error'][:200]}")
+        for n in names:
+            sample = next((r.get("sample") for r in per[n] if r.get("users") == 0), "")
+            print(f"  answer {n:>13}: {sample[:90]!r}")
     result["seconds"] = round(time.time() - T0)
     json.dump(result, open(os.path.join(args.work, "compare_result.json"), "w"), indent=1)
     print(f"\nwritten: {os.path.join(args.work, 'compare_result.json')}")

@@ -70,7 +70,9 @@ version number, so the script also works with older releases.
 * `--build-from-source` builds only the CUDA architectures of the detected card, so the
   resulting binary is not the release artifact.
 
-## Comparison with vLLM, SGLang, llama.cpp and Ollama
+## Comparison with vLLM, SGLang, llama.cpp, ik_llama.cpp and Ollama
+
+First results on an L4, an A100, an RTX PRO 6000 Blackwell, a T4 and two CPUs (fLLM against llama.cpp and ik_llama.cpp, a quant matrix of eleven models) and the gaps they showed: [docs/colab-comparison-2026-11.md](../../docs/colab-comparison-2026-11.md). `--cpu --threads N` runs the three engines that read GGUF on the processor; `--models` takes the quant keys listed in `--help`.
 
 `compare.py` serves the same models with fLLM and the other engines on the Colab GPU: GGUF files with fLLM, llama.cpp (built with
 CUDA) and Ollama; AWQ 4-bit checkpoints with vLLM, SGLang and fLLM (converted from the same checkpoint). It measures prompts of 100,

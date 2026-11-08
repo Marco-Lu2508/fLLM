@@ -168,7 +168,11 @@ static int launch_kind(cudaStream_t s, const uint8_t *W, const float *X, float *
         fllm_marlin_q4k_try(s, W, X, Y, bias, rows, cols, batch, x16, x16_bytes))
         return fllm_check_launch("linear");
     if (KIND == KIND_Q4_K_MARLIN) {
-        return fllm_set_error("marlin failed to launch");
+        // The GEMM declined (a shape it does not tile, an alignment, too little scratch room for a tall projection): the dual layout holds the plain
+        // Q4_K blocks in front of the Marlin ones (`W` points behind them, backend/cuda.rs), so run the Q4_K kernels on those. Failing the step here took
+        // Gemma 4 E4B down at 16 concurrent requests (the output head of a 262k vocabulary needs more split-K room than the activation scratch had).
+        const uint8_t *plain = W - (size_t)rows * (cols / 256) * 144;
+        return launch_kind<KIND_Q4_K>(s, plain, X, Y, bias, rows, cols, batch, x16, x16_bytes);
     }
     static const bool old_gemv = getenv("FLLM_CUDA_OLD_GEMV") != nullptr;
 #if defined(__HIPCC__)

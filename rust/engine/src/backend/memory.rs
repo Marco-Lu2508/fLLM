@@ -75,6 +75,25 @@ pub fn device_tensor_bytes(t: &fllm_gguf_probe::TensorInfo, backend: &str) -> u6
     tensor_bytes(t)
 }
 
+/// Bytes of the second, Marlin-ordered copy that the CUDA backend keeps of the Q4_K tensors (160 bytes per 256 weights, 5/8 byte per weight) for the
+/// tensors it applies to: 64-wide columns and rows in whole 256s. A stacked expert tensor of a mixture-of-experts model has a third (and
+/// further) dimension, one matrix per expert, and every matrix gets the copy: counting one matrix per tensor left out the copies of all but
+/// one expert (Qwen3-30B-A3B on a 96 GB card planned 62 GB of cache next to 19.5 GB of weights and then ran out of memory while uploading the experts).
+pub fn marlin_q4k_extra_bytes(tensors: &[fllm_gguf_probe::TensorInfo]) -> u64 {
+    let mut extra = 0u64;
+    for t in tensors {
+        if t.type_id == 12 && t.dimensions.len() >= 2 {
+            let cols = t.dimensions[0];
+            let rows = t.dimensions[1];
+            if cols % 64 == 0 && rows % 256 == 0 {
+                let matrices: u64 = t.dimensions[2..].iter().product();
+                extra = extra.saturating_add(cols.saturating_mul(rows).saturating_mul(matrices) * 5 / 8);
+            }
+        }
+    }
+    extra
+}
+
 /// Host memory kept back for the system, the page cache of the host-side weights and the allocator of a device that shares the host's RAM:
 /// 1/32 of the memory, at least 512 MiB.
 pub fn unified_host_reserve(host_total: u64) -> u64 {
@@ -261,16 +280,7 @@ impl MemoryPlan {
 
         // Check if Q4_K Marlin dual-weight layout can be enabled without starving the KV cache or forcing layer offload.
         // Marlin layout adds 160 bytes per 256 weights (= 5/8 bytes/element) for 64x256-aligned Q4_K tensors.
-        let mut marlin_q4k_extra = 0u64;
-        for t in &model.mapping().index().tensors {
-            if t.type_id == 12 && t.dimensions.len() >= 2 {
-                let cols = t.dimensions[0] as usize;
-                let rows = t.dimensions[1] as usize;
-                if cols.is_multiple_of(64) && rows.is_multiple_of(256) {
-                    marlin_q4k_extra += (cols * rows * 5 / 8) as u64;
-                }
-            }
-        }
+        let marlin_q4k_extra = marlin_q4k_extra_bytes(&model.mapping().index().tensors);
 
         let min_kv_needed = min_blocks * kv_block_bytes;
         // Dual layout is enabled when:
@@ -690,6 +700,28 @@ mod tests {
         // a 76 GB model on a 64 GiB machine is larger than the memory it has; one that fits is not
         assert!(unified_oversubscription(76 * gib, 64 * gib) > 0);
         assert_eq!(unified_oversubscription(40 * gib, 64 * gib), 0);
+    }
+
+    #[test]
+    fn the_marlin_copy_of_an_expert_tensor_is_counted_for_every_expert() {
+        let tensor = |type_id: u32, dimensions: &[u64]| fllm_gguf_probe::TensorInfo {
+            name: "blk.0.ffn_up_exps.weight".into(),
+            dimensions: dimensions.to_vec(),
+            type_id,
+            data_offset: 0,
+            payload_len: 0,
+        };
+        // one matrix: 2048 x 768 weights, 5/8 byte each (768 is a whole number of 256-row blocks)
+        let one = marlin_q4k_extra_bytes(&[tensor(12, &[2048, 768])]);
+        assert_eq!(one, 2048 * 768 * 5 / 8);
+        // 128 experts stacked in the third dimension: 128 copies
+        assert_eq!(marlin_q4k_extra_bytes(&[tensor(12, &[2048, 768, 128])]), 128 * one);
+        // a fourth dimension multiplies too
+        assert_eq!(marlin_q4k_extra_bytes(&[tensor(12, &[2048, 768, 4, 3])]), 12 * one);
+        // tensors the backend leaves alone: another format, columns not a multiple of 64, rows not a multiple of 256, a vector
+        assert_eq!(marlin_q4k_extra_bytes(&[tensor(14, &[2048, 768, 128]), tensor(12, &[2050, 768, 8]), tensor(12, &[2048, 700, 8]), tensor(12, &[2048])]), 0);
+        // the sum over tensors
+        assert_eq!(marlin_q4k_extra_bytes(&[tensor(12, &[2048, 768]), tensor(12, &[2048, 768, 128])]), 129 * one);
     }
 
     #[test]
