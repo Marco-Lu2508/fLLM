@@ -5656,6 +5656,12 @@ impl RustDecoder {
         stream
             .quantized_linear_wide(&mut head_out, picked.as_ref().unwrap_or(&final_normed), head, head.bias.as_ref())
             .map_err(err)?;
+        // the final-logit transform (scale, Gemma's soft cap) runs on the device when the stream has it: the device sampler, the greedy argmax
+        // and a recorded graph then read the transformed logits, and the host does not repeat it
+        let capped = (cfg.logit_scale != 1.0 || cfg.logit_softcap.is_some()) && stream.supports_logit_cap();
+        if capped {
+            stream.logit_cap_inplace(&mut head_out, cfg.logit_scale, cfg.logit_softcap).map_err(err)?;
+        }
 
         if let GraphMode::Capture(io) = &mut graph {
             // the logits stay in the graph's buffer; the caller downloads them (or takes their argmax) after every launch
@@ -5666,7 +5672,7 @@ impl RustDecoder {
             scratch.recycle(final_normed);
             return Ok(Vec::new());
         }
-        if self.par.is_none() && cfg.logit_scale == 1.0 && cfg.logit_softcap.is_none() && run_device_sample(&mut **stream, &head_out, cfg.vocab, selected) {
+        if self.par.is_none() && (capped || (cfg.logit_scale == 1.0 && cfg.logit_softcap.is_none())) && run_device_sample(&mut **stream, &head_out, cfg.vocab, selected) {
             scratch.recycle(head_out);
             if let Some(picked) = picked {
                 scratch.recycle(picked);
@@ -5675,7 +5681,7 @@ impl RustDecoder {
             scratch.recycle(final_normed);
             return Ok(Vec::new());
         }
-        if self.par.is_none() && GREEDY_IDS_REQUEST.swap(false, std::sync::atomic::Ordering::Relaxed) && cfg.logit_scale > 0.0 && cfg.logit_softcap.is_none() {
+        if self.par.is_none() && GREEDY_IDS_REQUEST.swap(false, std::sync::atomic::Ordering::Relaxed) && (capped || (cfg.logit_scale > 0.0 && cfg.logit_softcap.is_none())) {
             // argmax commutes with a positive scale and with the monotonic soft cap; only the ids travel to the host
             if let Ok(ids) = stream.argmax_rows(&head_out, selected, cfg.vocab) {
                 *GREEDY_IDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ids);
@@ -5701,12 +5707,12 @@ impl RustDecoder {
         scratch.recycle(final_normed);
         let mut logits = self.par_head_gather(logits, selected)?;
 
-        if cfg.logit_scale != 1.0 {
+        if !capped && cfg.logit_scale != 1.0 {
             for l in &mut logits {
                 *l *= cfg.logit_scale;
             }
         }
-        if let Some(cap) = cfg.logit_softcap {
+        if let Some(cap) = cfg.logit_softcap.filter(|_| !capped) {
             for l in &mut logits {
                 *l = cap * (*l / cap).tanh();
             }
@@ -9069,11 +9075,13 @@ impl RustDecoder {
             graphs.remove(&bucket);
             return Ok(None);
         }
-        if cfg.logit_scale == 1.0 && cfg.logit_softcap.is_none() && run_device_sample(&mut **stream, &graph.head_out, cfg.vocab, rows) {
+        // the recorded step ends with the device logit transform when the stream has it (see forward_backend_inner)
+        let capped = (cfg.logit_scale != 1.0 || cfg.logit_softcap.is_some()) && stream.supports_logit_cap();
+        if (capped || (cfg.logit_scale == 1.0 && cfg.logit_softcap.is_none())) && run_device_sample(&mut **stream, &graph.head_out, cfg.vocab, rows) {
             GREEDY_IDS_REQUEST.store(false, Relaxed);
             return Ok(Some(Vec::new()));
         }
-        if GREEDY_IDS_REQUEST.load(Relaxed) && cfg.logit_scale > 0.0 && cfg.logit_softcap.is_none() {
+        if GREEDY_IDS_REQUEST.load(Relaxed) && (capped || (cfg.logit_scale > 0.0 && cfg.logit_softcap.is_none())) {
             if let Ok(mut picked) = stream.argmax_rows(&graph.head_out, bucket, cfg.vocab) {
                 picked.truncate(rows);
                 *GREEDY_IDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(picked);
@@ -9084,12 +9092,12 @@ impl RustDecoder {
         let mut logits = vec![0.0f32; bucket * cfg.vocab];
         stream.download(cast_f32_to_u8_mut(&mut logits), &graph.head_out).map_err(err)?;
         logits.truncate(rows * cfg.vocab);
-        if cfg.logit_scale != 1.0 {
+        if !capped && cfg.logit_scale != 1.0 {
             for l in &mut logits {
                 *l *= cfg.logit_scale;
             }
         }
-        if let Some(cap) = cfg.logit_softcap {
+        if let Some(cap) = cfg.logit_softcap.filter(|_| !capped) {
             for l in &mut logits {
                 *l = cap * (*l / cap).tanh();
             }

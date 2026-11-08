@@ -60,6 +60,16 @@ __global__ void arch_scale_kernel(float *__restrict__ x, size_t n, float factor)
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x) x[i] *= factor;
 }
 
+// Final logits in the order of the host path (rust_decoder.rs): x = x * scale, then cap * tanh(x / cap) when cap > 0 (final_logit_softcapping).
+__global__ void arch_logit_cap_kernel(float *__restrict__ x, size_t n, float scale, float cap) {
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x) {
+        // the scale in f32 like the host; the cap in double: with --use_fast_math tanhf is the hardware approximation (about 1e-5 relative,
+        // enough to swap two near-tied tokens against the host path), the double tanh is exact to the f32 rounding
+        const float v = x[i] * scale;
+        x[i] = cap > 0.f ? (float)((double)cap * tanh((double)v / (double)cap)) : v;
+    }
+}
+
 // Clamped gated activations (Hy4 / GLM-5-Next clamped SwiGLU, Kimi K3 SiTU), like `gate_activation_clamped` of rust_decoder.rs:
 //   kind 0: g = min(gate, p0); out = g * sigmoid(g) * clamp(up, -p0, p0)
 //   kind 1: out = p0 * tanh(gate / p0) * sigmoid(gate) * u, u = p1 > 0 ? p1 * tanh(up / p1) : up
@@ -115,4 +125,9 @@ int fllm_scale_launch(cudaStream_t s, float *x, size_t n, float factor) {
     if (n == 0) return 0;
     arch_scale_kernel<<<arch_grid(n), 256, 0, s>>>(x, n, factor);
     return fllm_check_launch("scale");
+}
+int fllm_logit_cap_launch(cudaStream_t s, float *x, size_t n, float scale, float cap) {
+    if (n == 0) return 0;
+    arch_logit_cap_kernel<<<arch_grid(n), 256, 0, s>>>(x, n, scale, cap);
+    return fllm_check_launch("logit_cap");
 }

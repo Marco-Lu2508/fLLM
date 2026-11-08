@@ -476,6 +476,7 @@ extern "C" {
     fn fllm_cuda_softplus_mul(st: *mut RawStream, x: *mut f32, g: *const f32, n: usize, beta: f32) -> c_int;
     fn fllm_cuda_head_gate_mul(st: *mut RawStream, x: *mut f32, g: *const f32, n: usize, dv: usize, beta: f32) -> c_int;
     fn fllm_cuda_scale(st: *mut RawStream, x: *mut f32, n: usize, factor: f32) -> c_int;
+    fn fllm_cuda_logit_cap(st: *mut RawStream, x: *mut f32, n: usize, scale: f32, cap: f32) -> c_int;
     fn fllm_cuda_glu_ext(st: *mut RawStream, gate: *const f32, up: *const f32, out: *mut f32, n: usize, kind: c_int, p0: f32, p1: f32) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn fllm_cuda_hc_mix(
@@ -4616,6 +4617,21 @@ impl Stream for CudaStream {
         }
         // SAFETY: the buffer is a whole number of floats.
         check(unsafe { fllm_cuda_scale(self.raw, dev_ptr(x)?.cast(), x.size / 4, factor) })
+    }
+
+    fn logit_cap_inplace(&mut self, x: &mut DeviceBuffer, scale: f32, cap: Option<f32>) -> Result<(), BackendError> {
+        if !x.size.is_multiple_of(4) {
+            return Err(invalid("logit target is not a whole number of floats"));
+        }
+        if cap.is_some_and(|c| c <= 0.0 || !c.is_finite()) || !scale.is_finite() {
+            return Err(invalid("logit cap must be positive and finite"));
+        }
+        // SAFETY: the buffer is a whole number of floats.
+        check(unsafe { fllm_cuda_logit_cap(self.raw, dev_ptr(x)?.cast(), x.size / 4, scale, cap.unwrap_or(0.0)) })
+    }
+
+    fn supports_logit_cap(&self) -> bool {
+        true
     }
 
     fn supports_head_gate(&self) -> bool {

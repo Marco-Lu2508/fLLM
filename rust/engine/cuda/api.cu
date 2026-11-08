@@ -2001,6 +2001,10 @@ int fllm_cuda_scale(FllmStream *st, float *x, size_t n, float factor) {
     PREP(st);
     return fllm_scale_launch(st->s, x, n, factor);
 }
+int fllm_cuda_logit_cap(FllmStream *st, float *x, size_t n, float scale, float cap) {
+    PREP(st);
+    return fllm_logit_cap_launch(st->s, x, n, scale, cap);
+}
 int fllm_cuda_hc_mix(FllmStream *st, const float *streams, const float *mixes, const float *base, const float *scale, float *post, float *comb,
                      float *collapsed, int rows, int hc, int hidden, int mode, int iters, float eps, float magnitude) {
     PREP(st);

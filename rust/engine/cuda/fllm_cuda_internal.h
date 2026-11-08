@@ -395,6 +395,7 @@ int fllm_shortconv_launch(cudaStream_t s, const void *runs, int nruns, int hidde
 int fllm_softplus_mul_launch(cudaStream_t s, float *x, const float *g, size_t n, float beta);
 int fllm_head_gate_launch(cudaStream_t s, float *x, const float *g, size_t n, size_t dv, float beta);
 int fllm_scale_launch(cudaStream_t s, float *x, size_t n, float factor);
+int fllm_logit_cap_launch(cudaStream_t s, float *x, size_t n, float scale, float cap);
 int fllm_glu_ext_launch(cudaStream_t s, const float *gate, const float *up, float *out, size_t n, int kind, float p0, float p1);
 // Hyper-connections (hc.cu)
 int fllm_hc_supported(int hc);

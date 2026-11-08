@@ -2106,6 +2106,17 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("scale_inplace".into()))
     }
 
+    /// In-place final-logit transform in the order of the host path: `x = x * scale`, then `cap * tanh(x / cap)` with a cap (Gemma's
+    /// `final_logit_softcapping`). With it the device sampler and the greedy argmax read the capped logits without a download.
+    fn logit_cap_inplace(&mut self, _x: &mut DeviceBuffer, _scale: f32, _cap: Option<f32>) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("logit_cap_inplace".into()))
+    }
+
+    /// Does this stream implement [`Stream::logit_cap_inplace`]?
+    fn supports_logit_cap(&self) -> bool {
+        false
+    }
+
     /// Does this stream implement [`Stream::head_gate_mul`] and [`Stream::scale_inplace`]?
     fn supports_head_gate(&self) -> bool {
         false

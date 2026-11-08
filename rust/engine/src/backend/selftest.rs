@@ -4153,6 +4153,14 @@ impl Tester<'_> {
         } else {
             self.record_skip("head_gate", "per-head attention gate, value scale", "supports_head_gate is false");
         }
+        if self.device.create_stream().map(|s| s.supports_logit_cap()).unwrap_or(false) {
+            for (scale, cap) in [(1.0f32, Some(30.0f32)), (0.0625, Some(30.0)), (0.5, None)] {
+                let r = self.logit_cap_check(scale, cap);
+                self.record("logit_cap", &format!("4097 values scale {scale} cap {cap:?}"), r);
+            }
+        } else {
+            self.record_skip("logit_cap", "final-logit scale and soft cap", "supports_logit_cap is false");
+        }
         for (heads, nope, rope, value, kv_lora, rows) in [(3usize, 5usize, 4usize, 6usize, 7usize, 5usize), (16, 128, 64, 128, 512, 3)] {
             let r = self.mla_check(heads, nope, rope, value, kv_lora, rows);
             self.record("mla_assemble", &format!("{heads} heads {nope}+{rope}/{value} latent {kv_lora}"), r);
@@ -4329,6 +4337,29 @@ impl Tester<'_> {
         timed(&mut ms, stream.as_mut(), |s| s.scale_inplace(&mut buf, 0.37))?;
         let have = get(stream.as_mut(), &buf, x.len())?;
         Ok(Outcome { device: worst(&have, &want, &vec![1.0; want.len()]), cpu: 0.0, tol: 1e-6, cpu_tol: 1.0, ms })
+    }
+
+    /// `logit_cap_inplace` against the host order of rust_decoder.rs: `v * scale`, then `cap * tanh(v / cap)`. The inputs reach +-80 so the cap
+    /// bends them (Gemma 4: cap 30).
+    fn logit_cap_check(&mut self, scale: f32, cap: Option<f32>) -> Result<Outcome, BackendError> {
+        let x: Vec<f32> = self.rng.vector(4097, 2.0).iter().map(|v| v * 40.0).collect();
+        let want: Vec<f64> = x
+            .iter()
+            .map(|&v| {
+                let s = f64::from(v * scale);
+                match cap {
+                    Some(c) => f64::from(c) * (s / f64::from(c)).tanh(),
+                    None => s,
+                }
+            })
+            .collect();
+        let mut stream = self.device.create_stream()?;
+        let mut buf = put(self.device, stream.as_mut(), &x)?;
+        let mut ms = 0.0;
+        timed(&mut ms, stream.as_mut(), |s| s.logit_cap_inplace(&mut buf, scale, cap))?;
+        let have = get(stream.as_mut(), &buf, x.len())?;
+        let rel: Vec<f64> = want.iter().map(|v| v.abs().max(1.0)).collect();
+        Ok(Outcome { device: worst(&have, &want, &rel), cpu: 0.0, tol: 2e-6, cpu_tol: 1.0, ms })
     }
 
     fn clamp_check(&mut self) -> Result<Outcome, BackendError> {
