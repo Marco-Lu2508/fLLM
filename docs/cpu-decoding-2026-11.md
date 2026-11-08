@@ -59,10 +59,44 @@ kernels, prefill chunks keep the GEMM. Single-user decode is unchanged (33.1 in 
 33.0 in both comparison runs, before and after), and a 2000-token prompt got slightly faster
 (7.2 -> 8.4 at four users, same time to the first token).
 
+## Threads
+
+fLLM does not saturate this host at eight threads (3B Q4_K_M, the batch line in place, total
+tokens/s):
+
+| Threads | 1 user | 4 users | first, 1 user |
+|---:|---:|---:|---:|
+| 4 | 20.0 | 33.7 | 0.71 |
+| 8 | 32.9 | 58.0 | 0.42 |
+| 16 | 43.7 | 88.5 | 0.27 |
+| 32 | 44.6 | 95.3 | 0.27 |
+
+The two tables above are an eight-thread comparison. At sixteen threads for all three engines,
+the same `compare.py` run gives (`total_tok_s | first_s | each_tok_s`):
+
+| Model | Prompt | Users | fLLM | llama.cpp | ik_llama.cpp |
+|---|---:|---:|---|---|---|
+| 3B Q4_K_M | 100 | 1 | 44.0 \| 0.28 \| 44.0 | 48.2 \| 0.22 \| 48.2 | 52.7 \| 0.12 \| 52.7 |
+| 3B Q4_K_M | 100 | 4 | 88.8 \| 1.05 \| 22.3 | 113.3 \| 0.90 \| 28.3 | 141.2 \| 0.41 \| 35.3 |
+| 3B Q4_K_M | 2000 | 1 | 10.7 \| 4.53 \| 10.7 | 12.3 \| 3.87 \| 12.3 | 18.9 \| 1.96 \| 18.9 |
+| 3B Q4_K_M | 2000 | 4 | 12.2 \| 12.81 \| 3.1 | 14.1 \| 9.87 \| 3.5 | 18.5 \| 6.20 \| 4.6 |
+| 8B Q4_K_M | 100 | 1 | 20.3 \| 0.63 \| 20.3 | 22.0 \| 0.49 \| 22.1 | 24.7 \| 0.27 \| 24.7 |
+| 8B Q4_K_M | 100 | 4 | 40.9 \| 2.32 \| 10.3 | 52.6 \| 2.03 \| 13.2 | 70.2 \| 0.91 \| 17.5 |
+| 8B Q4_K_M | 2000 | 1 | 6.0 \| 7.77 \| 6.0 | 5.8 \| 8.30 \| 5.8 | 9.4 \| 4.23 \| 9.4 |
+| 8B Q4_K_M | 2000 | 4 | 7.1 \| 21.79 \| 1.8 | 6.8 \| 21.14 \| 1.7 | 9.9 \| 12.57 \| 2.5 |
+
+Ratios to llama.cpp at sixteen threads: single user 0.91x (3B) and 0.92x (8B), four users
+0.78x for both models, long prompt with four users 0.87x and 1.04x. Against ik_llama.cpp
+fLLM is at 0.57 to 0.83x.
+
 ## What is still behind
 
-* **Single-user decode** is 0.81x of llama.cpp and 0.67x of ik_llama.cpp on the 3B model
-  (0.77x / 0.68x on the 8B). Not explained.
+* **Single-user decode** is 0.81x of llama.cpp at eight threads and 0.91x at sixteen (0.77x
+  and 0.92x on the 8B), against ik_llama.cpp 0.67x at eight and 0.83x at sixteen. Not
+  explained.
+* **Four users** is 0.78x of llama.cpp at sixteen threads (0.84x at eight); the remaining
+  difference is visible in the time to the first token as well (1.05 against 0.90 s on the
+  3B), so it is not only the decode kernels.
 * **ik_llama.cpp** is ahead at every batch size here (0.66 to 0.84x of it); its quantization
   kernels use different integer paths.
 * **Not measured**: other AVX-512 CPUs (Intel, Zen 4), other formats than the two Q4_K_M
