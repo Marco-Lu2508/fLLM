@@ -723,6 +723,7 @@ extern "C" {
     fn fllm_cuda_clamp(st: *mut RawStream, x: *mut f32, n: usize, limit: f32) -> c_int;
     fn fllm_cuda_kda_supported(heads: c_int, head_dim: c_int, ksz: c_int) -> c_int;
     fn fllm_cuda_copy_cols(st: *mut RawStream, dst: *mut f32, src: *const f32, rows: c_int, width: c_int, dst_stride: c_int, dst_col: c_int) -> c_int;
+    fn fllm_cuda_take_cols(st: *mut RawStream, dst: *mut f32, src: *const f32, rows: c_int, width: c_int, src_stride: c_int, src_col: c_int) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn fllm_cuda_kda_layer(
         st: *mut RawStream,
@@ -5689,6 +5690,39 @@ impl Stream for CudaStream {
                 to_c(width, "width")?,
                 to_c(dst_stride, "stride")?,
                 to_c(dst_col, "column")?,
+            )
+        })
+    }
+
+    fn supports_take_columns(&self) -> bool {
+        true
+    }
+
+    fn take_columns(
+        &mut self,
+        dst: &mut DeviceBuffer,
+        src: &DeviceBuffer,
+        src_stride: usize,
+        src_col: usize,
+        rows: usize,
+        width: usize,
+    ) -> Result<(), BackendError> {
+        if rows == 0 || width == 0 {
+            return Ok(());
+        }
+        if src_col + width > src_stride || src.size < rows * src_stride * 4 || dst.size < rows * width * 4 {
+            return Err(invalid("take_columns operands do not fit"));
+        }
+        // SAFETY: sizes checked above.
+        check(unsafe {
+            fllm_cuda_take_cols(
+                self.raw,
+                dev_ptr(dst)?.cast(),
+                dev_ptr(src)?.cast(),
+                to_c(rows, "rows")?,
+                to_c(width, "width")?,
+                to_c(src_stride, "stride")?,
+                to_c(src_col, "column")?,
             )
         })
     }

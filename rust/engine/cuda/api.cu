@@ -1847,6 +1847,10 @@ int fllm_cuda_copy_cols(FllmStream *st, float *dst, const float *src, int rows, 
     PREP(st);
     return fllm_copy_cols_launch(st->s, dst, src, rows, width, dst_stride, dst_col);
 }
+int fllm_cuda_take_cols(FllmStream *st, float *dst, const float *src, int rows, int width, int src_stride, int src_col) {
+    PREP(st);
+    return fllm_take_cols_launch(st->s, dst, src, rows, width, src_stride, src_col);
+}
 // Kimi Delta Attention (KDA) layer: `runs` is nruns DeltaRun records in host memory.
 int fllm_cuda_kda_layer(FllmStream *st, const void *runs, int nruns, int max_n, int heads, int head_dim, int ksz,
                         int bounded, float lower_bound, float eps, size_t state_off, size_t rec_bytes,

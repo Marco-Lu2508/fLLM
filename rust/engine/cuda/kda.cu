@@ -191,6 +191,22 @@ int fllm_copy_cols_launch(cudaStream_t s, float *dst, const float *src, int rows
     return fllm_check_launch("copy_cols");
 }
 
+// dst[r * width + c] = src[r * src_stride + src_col + c]: the inverse of kda_copy_cols_kernel, takes one column block out of wider rows
+__global__ void take_cols_kernel(float *__restrict__ dst, const float *__restrict__ src, size_t count, int width, int src_stride, int src_col) {
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < count; i += (size_t)gridDim.x * blockDim.x) {
+        const size_t r = i / width, c = i % width;
+        dst[i] = src[r * src_stride + src_col + c];
+    }
+}
+
+int fllm_take_cols_launch(cudaStream_t s, float *dst, const float *src, int rows, int width, int src_stride, int src_col) {
+    const size_t count = (size_t)rows * width;
+    if (count == 0) return 0;
+    const int blocks = (int)min((count + 255) / 256, (size_t)65535);
+    take_cols_kernel<<<blocks, 256, 0, s>>>(dst, src, count, width, src_stride, src_col);
+    return fllm_check_launch("take_cols");
+}
+
 int fllm_kda_supported(int heads, int head_dim, int ksz) {
     return heads > 0 && (head_dim == 16 || head_dim == 32 || head_dim == 64 || head_dim == 128) && ksz >= 2 && ksz <= 8;
 }

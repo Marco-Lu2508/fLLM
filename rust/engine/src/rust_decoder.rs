@@ -1016,6 +1016,8 @@ pub struct DeviceModelWeights {
     pub alibi: Option<Arc<Vec<f32>>>,
     /// Gemma per-layer inputs: the projection of the embeddings to `layers x width` (the rest of the path is cheap and stays on the host).
     pub ple_proj: Option<crate::backend::DeviceWeight>,
+    /// Gemma per-layer inputs: the norm weight of one layer's slice (`width` floats); with it the whole path runs on the device.
+    pub ple_norm: Option<crate::backend::DeviceBuffer>,
     /// Hyper-connection weights (Hy4, GLM-5-Next, DeepSeek-V4); the streams then live in their own buffer during a pass.
     hc: Option<DeviceHcModel>,
     /// DeepSeek-V4: `head_dim` ones, the weight of the plain RMS norm of every query head.
@@ -1052,11 +1054,14 @@ pub fn graph_prefill_switch() -> bool {
 struct DecodeGraph {
     id: usize,
     x_in: crate::backend::DeviceBuffer,
+    /// Gemma per-layer inputs: the token-identity part (`rows x layers x width`), filled before every launch like `x_in`.
+    ple_in: Option<crate::backend::DeviceBuffer>,
     head_out: crate::backend::DeviceBuffer,
 }
 /// What `forward_backend_inner` takes from / hands to a graph capture.
 struct GraphIo {
     x_in: crate::backend::DeviceBuffer,
+    ple_in: Option<crate::backend::DeviceBuffer>,
     head_out: Option<crate::backend::DeviceBuffer>,
 }
 enum GraphMode<'a> {
@@ -4160,6 +4165,10 @@ impl RustDecoder {
                 Some(global) => Some(upload_linear_q8("per_layer_model_proj", global.projection())?),
                 None => None,
             },
+            ple_norm: match self.ple.as_ref() {
+                Some(global) => Some(upload_norm("per_layer_proj_norm", &Norm { weight: global.norm().clone(), bias: None })?),
+                None => None,
+            },
             hc: hc_weights,
             v4_ones,
             q4: q4_weights,
@@ -4407,8 +4416,51 @@ impl RustDecoder {
             stream.upload(&mut buf, cast_f32_to_u8(&expanded)).map_err(err)?;
             q4_streams = Some(buf);
         }
-        // Gemma per-layer inputs (rows x layers x width) from the token ids and the scaled embeddings; the large projection runs on the device
-        let ple_host = match (self.ple.as_ref(), dev_weights.ple_proj.as_ref()) {
+        // Gemma per-layer inputs (rows x layers x width) from the token ids and the scaled embeddings. On a stream with the operations the whole
+        // path runs on the device (no download, one upload of the token part, also inside a recorded graph); otherwise the projection runs on
+        // the device and the rest on the host.
+        let mut ple_bufs: Vec<Option<crate::backend::DeviceBuffer>> = Vec::new();
+        let ple_host = if self.ple_on_device(&**stream, dev_weights) {
+            let global = self.ple.as_ref().ok_or("per-layer inputs without a table")?;
+            let proj = dev_weights.ple_proj.as_ref().ok_or("per-layer projection is not on the device")?;
+            let norm_w = dev_weights.ple_norm.as_ref().ok_or("per-layer norm is not on the device")?;
+            let width = global.dim;
+            let total = cfg.layers * width;
+            let mut projected = scratch.acquire(rows * total * 4).map_err(err)?;
+            stream.quantized_linear(&mut projected, &x_buf, proj, proj.bias.as_ref()).map_err(err)?;
+            stream.scale_inplace(&mut projected, (cfg.hidden as f32).powf(-0.5)).map_err(err)?;
+            // rows x layers slices of `width` values, each normalised with the same weight
+            let mut normed = scratch.acquire(rows * total * 4).map_err(err)?;
+            stream.rms_norm(&mut normed, &projected, norm_w, cfg.eps).map_err(err)?;
+            scratch.recycle(projected);
+            stream.scale_inplace(&mut normed, 0.5f32.sqrt()).map_err(err)?;
+            // + the token-identity part, already scaled by sqrt(width) * sqrt(1/2) on the host
+            let ident = match &graph {
+                GraphMode::Capture(io) => io.ple_in.clone().ok_or("the graph has no per-layer input buffer")?,
+                GraphMode::Off => {
+                    let host = self.ple_identity(ids)?.ok_or("per-layer inputs without a table")?;
+                    let mut buf = scratch.acquire(rows * total * 4).map_err(err)?;
+                    stream.upload(&mut buf, cast_f32_to_u8(&host)).map_err(err)?;
+                    buf
+                }
+            };
+            stream.residual_add(&mut normed, &ident, 1.0).map_err(err)?;
+            if !recording {
+                scratch.recycle(ident);
+            }
+            for (i, dev_layer) in dev_weights.layers.iter().enumerate() {
+                if dev_layer.ple.is_none() {
+                    ple_bufs.push(None);
+                    continue;
+                }
+                let mut buf = scratch.acquire(rows * width * 4).map_err(err)?;
+                stream.take_columns(&mut buf, &normed, total, i * width, rows, width).map_err(err)?;
+                ple_bufs.push(Some(buf));
+            }
+            scratch.recycle(normed);
+            None
+        } else {
+            match (self.ple.as_ref(), dev_weights.ple_proj.as_ref()) {
             (Some(global), Some(proj)) if !recording => {
                 let total = cfg.layers * global.dim;
                 let mut projected_buf = scratch.acquire(rows * total * 4).map_err(err)?;
@@ -4420,10 +4472,10 @@ impl RustDecoder {
             }
             (Some(_), _) => self.ple_inputs(ids, &host_x)?,
             _ => None,
+            }
         };
         // every layer's slice of them goes up now, while the device has nothing queued: an upload between the layers would wait for the
         // work recorded before it
-        let mut ple_bufs: Vec<Option<crate::backend::DeviceBuffer>> = Vec::new();
         if let (Some(inputs), Some(global)) = (ple_host.as_deref(), self.ple.as_ref()) {
             let width = global.dim;
             let total = cfg.layers * width;
@@ -8876,6 +8928,10 @@ impl RustDecoder {
         if !stream.lock().map(|s| s.graph_supported()).unwrap_or(false) {
             return false;
         }
+        // Gemma per-layer inputs: recordable only when the whole path runs on the device (the host path would freeze the values of one step)
+        if self.ple.is_some() && !stream.lock().map(|s| self.ple_on_device(&**s, weights)).unwrap_or(false) {
+            return false;
+        }
         // parallel residual and QKV clipping take buffers from the pool in the middle of a step: not recordable
         !self.cfg.parallel_residual
             && self.cfg.qkv_clip.is_none()
@@ -8884,12 +8940,27 @@ impl RustDecoder {
             && self.layers.len() == weights.layers.len()
             && self.layers.iter().zip(&weights.layers).all(|(layer, dev)| {
                 matches!(layer.attn, Attn::Std { .. })
-                    && ((dev.q.is_some() && dev.k.is_some() && dev.v.is_some()) || dev.qkv.is_some())
+                    && ((dev.q.is_some() && dev.k.is_some() && dev.v.is_some())
+                        || dev.qkv.is_some()
+                        // Gemma 4: the values are the keys (global layers), or the layer reads the cache of an earlier one (only q)
+                        || (dev.q.is_some() && dev.k.is_some() && layer.k_eq_v && !dev.host_values)
+                        || (dev.q.is_some() && layer.kv_shared))
                     && (dev.moe.is_some()
                         || matches!(layer.ffn, Ffn::None)
                         || (dev.ffn_gate.is_some() && dev.ffn_up.is_some() && dev.ffn_down.is_some())
                         || (dev.gate_up.is_some() && dev.ffn_down.is_some()))
             })
+    }
+
+    /// Can the Gemma per-layer input path run completely on this stream (projection, norm, token part, the slice of every layer)?
+    fn ple_on_device(&self, stream: &dyn crate::backend::Stream, weights: &DeviceModelWeights) -> bool {
+        self.ple.is_some()
+            && weights.ple_proj.is_some()
+            && weights.ple_norm.is_some()
+            && stream.supports_take_columns()
+            && stream.supports_head_gate()
+            && !stream.act_dtype().is_narrow()
+            && weights.layers.iter().all(|l| l.ple.is_none() || !l.host_layer)
     }
 
     /// Cache positions and slots of the rows (the validation of `forward_backend_inner`).
@@ -9062,6 +9133,11 @@ impl RustDecoder {
             .map_err(|_| "accelerator stream lock poisoned")?;
         let mut x_in = graph.x_in.clone();
         stream.upload_activations(&mut x_in, &host_x).map_err(err)?;
+        if let Some(ple_in) = graph.ple_in.as_ref() {
+            let host = self.ple_identity(&ids_p)?.ok_or("per-layer inputs without a table")?;
+            let mut buf = ple_in.clone();
+            stream.upload(&mut buf, cast_f32_to_u8(&host)).map_err(err)?;
+        }
         let pos32: Vec<u8> = positions.iter().flat_map(|&p| (p as i32).to_ne_bytes()).collect();
         let slot32: Vec<u8> = slots.iter().flat_map(|&p| (p as i32).to_ne_bytes()).collect();
         let table64: Vec<u8> = tables_p.iter().flat_map(|v| v.to_ne_bytes()).collect();
@@ -9119,6 +9195,18 @@ impl RustDecoder {
             .map_err(|_| "accelerator scratch lock poisoned")?
             .acquire(bucket * hidden * 4)
             .map_err(err)?;
+        let ple_in = match self.ple.as_ref() {
+            Some(global) => Some(
+                self.backend_scratch
+                    .as_ref()
+                    .ok_or("accelerator backend is not initialised")?
+                    .lock()
+                    .map_err(|_| "accelerator scratch lock poisoned")?
+                    .acquire(bucket * self.cfg.layers * global.dim * 4)
+                    .map_err(err)?,
+            ),
+            None => None,
+        };
         let logit_rows: Vec<usize> = (0..bucket).collect();
         // the request for greedy ids belongs to the real step, not to these passes
         let requested = GREEDY_IDS_REQUEST.swap(false, Relaxed);
@@ -9132,7 +9220,7 @@ impl RustDecoder {
                 let mut stream = self.backend_stream.as_ref().ok_or("no stream")?.lock().map_err(|_| "stream lock poisoned")?;
                 stream.graph_begin(id, sizes, self.stride * self.block_size).map_err(|e| e.to_string())?;
             }
-            let mut io = GraphIo { x_in: x_in.clone(), head_out: None };
+            let mut io = GraphIo { x_in: x_in.clone(), ple_in: ple_in.clone(), head_out: None };
             let run = self.forward_backend_inner(ids, lengths, tables, &mut [], &mut [], &logit_rows, false, &[], None, GraphMode::Capture(&mut io));
             {
                 let mut stream = self.backend_stream.as_ref().ok_or("no stream")?.lock().map_err(|_| "stream lock poisoned")?;
@@ -9140,7 +9228,7 @@ impl RustDecoder {
             }
             run?;
             let head_out = io.head_out.ok_or("the recorded step produced no logits")?;
-            Ok::<DecodeGraph, String>(DecodeGraph { id, x_in: x_in.clone(), head_out })
+            Ok::<DecodeGraph, String>(DecodeGraph { id, x_in: x_in.clone(), ple_in: ple_in.clone(), head_out })
         })();
         GREEDY_IDS_REQUEST.store(requested, Relaxed);
         *SAMPLE_JOB.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = sample_job;

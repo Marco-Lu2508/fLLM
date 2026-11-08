@@ -2737,6 +2737,26 @@ pub trait Stream: Send {
         false
     }
 
+    /// `dst[r * width + c] = src[r * src_stride + src_col + c]` for `rows` rows: the inverse of [`Stream::copy_columns`], takes one column
+    /// block out of wider rows (the slice of one layer from the Gemma per-layer inputs). Implemented by every stream that reports
+    /// [`Stream::supports_take_columns`].
+    fn take_columns(
+        &mut self,
+        _dst: &mut DeviceBuffer,
+        _src: &DeviceBuffer,
+        _src_stride: usize,
+        _src_col: usize,
+        _rows: usize,
+        _width: usize,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("take_columns".into()))
+    }
+
+    /// Does this stream implement [`Stream::take_columns`]?
+    fn supports_take_columns(&self) -> bool {
+        false
+    }
+
     /// Does this stream implement the RWKV operations ([`Stream::rwkv_shift`], [`Stream::rwkv_lerp`], [`Stream::rwkv_act`],
     /// [`Stream::rwkv7_wkv`], [`Stream::rwkv6_wkv`]) for layers of this shape?
     fn supports_rwkv(&self, _shape: &RwkvShape) -> bool {

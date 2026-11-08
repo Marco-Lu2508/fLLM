@@ -193,6 +193,11 @@ impl PleGlobal {
     pub(super) fn projection(&self) -> &Linear {
         &self.projection
     }
+
+    /// The norm weight of one layer's slice of the per-layer inputs.
+    pub(super) fn norm(&self) -> &Vec<f32> {
+        &self.norm
+    }
 }
 
 impl GemmaLayer {
@@ -231,6 +236,25 @@ impl RustDecoder {
         };
         let projected = ple.projection.forward(embedded)?;
         self.ple_inputs_from(ids, projected)
+    }
+
+    /// The token-identity part of the per-layer inputs for the device path: `table[id] * sqrt(width) * sqrt(1/2)`, `rows x (layers * width)`.
+    /// The device adds it to `norm(projection) * sqrt(1/2)`, which is `ple_inputs_from` with the factor distributed.
+    pub(super) fn ple_identity(&self, ids: &[i64]) -> Result<Option<Vec<f32>>, String> {
+        let Some(ple) = &self.ple else {
+            return Ok(None);
+        };
+        let total = self.cfg.layers * ple.dim;
+        let factor = (ple.dim as f32).sqrt() * 0.5f32.sqrt();
+        let mut out = vec![0.0f32; ids.len() * total];
+        out.par_chunks_mut(total).zip(ids.par_iter()).try_for_each(|(row, &id)| -> Result<(), String> {
+            let identity = ple.table.row(id as usize)?;
+            for (v, e) in row.iter_mut().zip(&identity) {
+                *v = e * factor;
+            }
+            Ok(())
+        })?;
+        Ok(Some(out))
     }
 
     /// [`Self::ple_inputs`] from the projection of the embeddings (`rows x (layers * ple_dim)`), computed wherever it was.

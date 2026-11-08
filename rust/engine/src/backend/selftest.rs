@@ -4161,6 +4161,12 @@ impl Tester<'_> {
         } else {
             self.record_skip("logit_cap", "final-logit scale and soft cap", "supports_logit_cap is false");
         }
+        if self.device.create_stream().map(|s| s.supports_take_columns()).unwrap_or(false) {
+            let r = self.take_columns_check();
+            self.record("take_columns", "5 rows, 8 of 336 columns from 104", r);
+        } else {
+            self.record_skip("take_columns", "column block of wider rows", "supports_take_columns is false");
+        }
         for (heads, nope, rope, value, kv_lora, rows) in [(3usize, 5usize, 4usize, 6usize, 7usize, 5usize), (16, 128, 64, 128, 512, 3)] {
             let r = self.mla_check(heads, nope, rope, value, kv_lora, rows);
             self.record("mla_assemble", &format!("{heads} heads {nope}+{rope}/{value} latent {kv_lora}"), r);
@@ -4360,6 +4366,20 @@ impl Tester<'_> {
         let have = get(stream.as_mut(), &buf, x.len())?;
         let rel: Vec<f64> = want.iter().map(|v| v.abs().max(1.0)).collect();
         Ok(Outcome { device: worst(&have, &want, &rel), cpu: 0.0, tol: 2e-6, cpu_tol: 1.0, ms })
+    }
+
+    /// `take_columns` (the slice of one layer from the Gemma per-layer inputs) against a plain copy on the host.
+    fn take_columns_check(&mut self) -> Result<Outcome, BackendError> {
+        let (rows, stride, col, width) = (5usize, 336usize, 104usize, 8usize);
+        let x = self.rng.vector(rows * stride, 2.0);
+        let want: Vec<f64> = (0..rows).flat_map(|r| x[r * stride + col..r * stride + col + width].iter().map(|&v| f64::from(v)).collect::<Vec<_>>()).collect();
+        let mut stream = self.device.create_stream()?;
+        let src = put(self.device, stream.as_mut(), &x)?;
+        let mut dst = put(self.device, stream.as_mut(), &vec![0.0f32; rows * width])?;
+        let mut ms = 0.0;
+        timed(&mut ms, stream.as_mut(), |s| s.take_columns(&mut dst, &src, stride, col, rows, width))?;
+        let have = get(stream.as_mut(), &dst, rows * width)?;
+        Ok(Outcome { device: worst(&have, &want, &vec![1.0; want.len()]), cpu: 0.0, tol: 1e-12, cpu_tol: 1.0, ms })
     }
 
     fn clamp_check(&mut self) -> Result<Outcome, BackendError> {

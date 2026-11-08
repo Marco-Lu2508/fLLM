@@ -945,6 +945,34 @@ impl Stream for CpuStream {
         })?
     }
 
+    fn supports_take_columns(&self) -> bool {
+        true
+    }
+
+    fn take_columns(
+        &mut self,
+        dst: &mut DeviceBuffer,
+        src: &DeviceBuffer,
+        src_stride: usize,
+        src_col: usize,
+        rows: usize,
+        width: usize,
+    ) -> Result<(), BackendError> {
+        let values = read_f32(src)?;
+        if src_col + width > src_stride || values.len() < rows * src_stride {
+            return Err(invalid("take_columns operands do not fit"));
+        }
+        with_typed_mut::<f32, _>(dst, |out| {
+            if out.len() < rows * width {
+                return Err(invalid("take_columns destination is too small"));
+            }
+            for r in 0..rows {
+                out[r * width..(r + 1) * width].copy_from_slice(&values[r * src_stride + src_col..r * src_stride + src_col + width]);
+            }
+            Ok(())
+        })?
+    }
+
     fn supports_rwkv(&self, s: &crate::backend::RwkvShape) -> bool {
         s.head_size > 0 && s.hidden.is_multiple_of(s.head_size)
     }

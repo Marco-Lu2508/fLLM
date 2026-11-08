@@ -167,6 +167,7 @@ int fllm_scan_delta_launch(cudaStream_t s, float *ws, const FllmRun *h_runs, con
 // Kimi Delta Attention (KDA) layer (kda.cu)
 int fllm_kda_supported(int heads, int head_dim, int ksz);
 int fllm_copy_cols_launch(cudaStream_t s, float *dst, const float *src, int rows, int width, int dst_stride, int dst_col);
+int fllm_take_cols_launch(cudaStream_t s, float *dst, const float *src, int rows, int width, int src_stride, int src_col);
 int fllm_scan_kda_supported(int heads, int head_dim);
 size_t fllm_scan_kda_floats(int heads, int head_dim, int slots);
 int fllm_scan_kda_launch(cudaStream_t s, float *ws, const FllmRun *h_runs, const void *d_runs, int nruns, int max_chunks, int heads, int head_dim, int bounded,
