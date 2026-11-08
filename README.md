@@ -204,6 +204,8 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
 
 Paired CUDA follow-up measurements (L4 Q2_K concurrency, exact server token counts,
 cache/speculation controls, numerical limits): [Colab kernel follow-up](docs/colab-kernel-fixes-2026-11.md).
+CPU decoding on a Zen 5 host against llama.cpp and ik_llama.cpp (exact server tokens, one seed,
+caches and speculation off): [CPU decoding](docs/cpu-decoding-2026-11.md).
 The earlier [multi-card comparison](docs/colab-comparison-2026-11.md) is exploratory,
 not a repeated benchmark or an AMD/multi-GPU result.
 

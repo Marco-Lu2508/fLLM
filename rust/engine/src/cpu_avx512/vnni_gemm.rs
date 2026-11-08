@@ -32,6 +32,21 @@ pub(crate) const DEFAULT_KINDS: &[u32] = &[10, 11, 12, 13, 14, 23, 20, 39];
 /// predecoded K panels (`cpu_quantized::PREDECODE_MIN_BATCH`).
 const MIN_BATCH: usize = 4;
 
+/// `FLLM_VNNI_GEMM_MIN_BATCH`: the smallest batch the 16-row VNNI GEMM serves (default 32, `0` keeps 4).
+/// Measured on an EPYC 9B45 (Zen 5), Llama-3.2-3B Q4_K_M, eight threads, tokens/s for 1/4/8/16 users: 4
+/// (the old line) 33/25/41/-, 8 33/59/44/64, 16 33/60/71/66, 32 33/60/71/80, everywhere off 28/43/48/51.
+/// Decode batches under 32 are faster on the 256-bit kernels, prefill chunks still take the GEMM.
+fn gemm_min_batch() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("FLLM_VNNI_GEMM_MIN_BATCH")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(32)
+            .max(MIN_BATCH)
+    })
+}
+
 /// A transposed panel and the per-group parameters, as the kernels read them.
 pub(crate) struct PanelRefs<'a> {
     /// `[k / 4][16 rows][4 bytes]`, unsigned.
@@ -386,17 +401,21 @@ fn mode() -> u8 {
 /// allowed by the policy, repacking not switched off, a prompt of at least four tokens and only
 /// formats of the default list (every decodable format with `FLLM_VNNI_GEMM=all`).
 pub(crate) fn wanted(batch: usize, kinds: &[u32]) -> bool {
+    wanted_shape(batch, kinds, gemm_min_batch())
+        && crate::cpu_kernels::repack_enabled()
+        && super::ident::policy().wide_int
+        && crate::cpu_kernels::tier_enabled(crate::cpu_kernels::CpuTier::Avx512Vnni)
+}
+
+/// The batch and format half of [`wanted`], with the batch line passed in: the 16-row GEMM only serves
+/// formats of the list and, since the measurement on Zen 5, only batches at or above `min`.
+fn wanted_shape(batch: usize, kinds: &[u32], min: usize) -> bool {
     let formats = match mode() {
         0 => return false,
         2 => kinds.iter().all(|&k| dec::kind_info(k).is_some()),
         _ => kinds.iter().all(|k| DEFAULT_KINDS.contains(k)),
     };
-    formats
-        && !kinds.is_empty()
-        && batch >= MIN_BATCH
-        && crate::cpu_kernels::repack_enabled()
-        && super::ident::policy().wide_int
-        && crate::cpu_kernels::tier_enabled(crate::cpu_kernels::CpuTier::Avx512Vnni)
+    formats && !kinds.is_empty() && batch >= min.max(MIN_BATCH)
 }
 
 /// Build the member list and shared activations of a `cpu_quantized::linear_mixed` call.
@@ -459,6 +478,19 @@ pub(crate) fn linear_group(
 mod tests {
     use super::*;
     use crate::cpu_selftest::{compare, random_weights, reference_packed, Lcg};
+
+    #[test]
+    fn the_16_row_gemm_stays_off_small_decode_batches() {
+        let kinds = [12u32, 14];
+        for (batch, want) in [(1usize, false), (4, false), (8, false), (16, false), (31, false), (32, true), (64, true), (512, true)] {
+            assert_eq!(wanted_shape(batch, &kinds, 32), want, "batch {batch}");
+        }
+        // the old line still serves a decode batch when it is asked to
+        assert!(wanted_shape(4, &kinds, 4));
+        // a format without a decoder in this GEMM keeps it off whatever the batch
+        assert!(!wanted_shape(512, &[1u32], 32));
+        assert!(!wanted_shape(512, &[], 32));
+    }
 
     fn has_avx_vnni() -> bool {
         std::arch::is_x86_feature_detected!("avxvnni")
