@@ -122,6 +122,27 @@ __global__ void to_half_kernel(const float *__restrict__ x, __half *__restrict__
 __global__ void to_bf16_kernel(const float *__restrict__ x, __nv_bfloat16 *__restrict__ y, size_t n) {
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x) y[i] = __float2bfloat16_rn(x[i]);
 }
+// out = 16-bit(glu(gate, up)), four values per thread (the count is a multiple of four, all three arrays 16-byte aligned): the gated activation of a
+// feed-forward block goes straight into the GEMM's input, without the FP32 array in between
+template <bool BF16>
+__global__ void glu_to16_kernel(const float4 *__restrict__ gate, const float4 *__restrict__ up, uint2 *__restrict__ out, size_t n4, int mode) {
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (size_t)gridDim.x * blockDim.x) {
+        const float4 g = gate[i], u = up[i];
+        const float a = fllm_glu(g.x, u.x, mode), b = fllm_glu(g.y, u.y, mode), c = fllm_glu(g.z, u.z, mode), d = fllm_glu(g.w, u.w, mode);
+        uint2 r;
+        if (BF16) {
+            const __nv_bfloat162 lo = __floats2bfloat162_rn(a, b), hi = __floats2bfloat162_rn(c, d);
+            r.x = *reinterpret_cast<const uint32_t *>(&lo);
+            r.y = *reinterpret_cast<const uint32_t *>(&hi);
+        } else {
+            const __half2 lo = __floats2half2_rn(a, b), hi = __floats2half2_rn(c, d);
+            r.x = *reinterpret_cast<const uint32_t *>(&lo);
+            r.y = *reinterpret_cast<const uint32_t *>(&hi);
+        }
+        out[i] = r;
+    }
+}
+
 __global__ void add_bias_kernel(float *__restrict__ y, const float *__restrict__ bias, size_t n, int rows) {
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x) y[i] += bias[i % rows];
 }
@@ -174,6 +195,10 @@ int fllm_cublaslt_gemm_try(cudaStream_t s, const void *W, int kind, const float 
     const int m = mode();
     if (m == 0 || g_failed.load() || (kind != KIND_F16 && kind != KIND_BF16) || fllm_exact_math() || fllm_cc() < 80) return -1;
     if (batch < 9 || rows <= 0 || cols <= 0 || (cols & 7) != 0 || (rows & 3) != 0) return -1;
+    // a pending gated activation (X = gate, fllm_glu_up = up) is folded into the conversion of the activations; the caller computes it itself when this
+    // function declines or fails (the pending state stays set until the product has been launched)
+    const bool glu = fllm_glu_up != nullptr;
+    if (glu && (fllm_glu_half || (reinterpret_cast<uintptr_t>(fllm_glu_up) & 15) != 0)) return -1;
     if ((reinterpret_cast<uintptr_t>(W) & 15) != 0 || (reinterpret_cast<uintptr_t>(X) & 15) != 0 || (reinterpret_cast<uintptr_t>(Y) & 15) != 0) return -1;
     const Api &lt = api();
     if (!lt.ok) {
@@ -225,8 +250,15 @@ int fllm_cublaslt_gemm_try(cudaStream_t s, const void *W, int kind, const float 
     if (!p.desc) return -1;
     const size_t n = (size_t)batch * cols;
     const unsigned grid = (unsigned)((n + 255) / 256 > 4096 ? 4096 : (n + 255) / 256);
-    if (kind == KIND_F16) to_half_kernel<<<grid, 256, 0, s>>>(X, static_cast<__half *>(ctx.x16), n);
-    else to_bf16_kernel<<<grid, 256, 0, s>>>(X, static_cast<__nv_bfloat16 *>(ctx.x16), n);
+    if (glu) {
+        const unsigned g4 = (unsigned)((n / 4 + 255) / 256 > 4096 ? 4096 : (n / 4 + 255) / 256);
+        if (kind == KIND_F16) glu_to16_kernel<false><<<g4, 256, 0, s>>>(reinterpret_cast<const float4 *>(X), reinterpret_cast<const float4 *>(fllm_glu_up), static_cast<uint2 *>(ctx.x16), n / 4, fllm_glu_mode);
+        else glu_to16_kernel<true><<<g4, 256, 0, s>>>(reinterpret_cast<const float4 *>(X), reinterpret_cast<const float4 *>(fllm_glu_up), static_cast<uint2 *>(ctx.x16), n / 4, fllm_glu_mode);
+    } else if (kind == KIND_F16) {
+        to_half_kernel<<<grid, 256, 0, s>>>(X, static_cast<__half *>(ctx.x16), n);
+    } else {
+        to_bf16_kernel<<<grid, 256, 0, s>>>(X, static_cast<__nv_bfloat16 *>(ctx.x16), n);
+    }
     const float alpha = 1.f, beta = 0.f;
     const cublasStatus_t st = lt.matmul(ctx.handle, p.desc, &alpha, W, p.a, ctx.x16, p.b, &beta, Y, p.c, Y, p.c, &p.algo,
                                         p.workspace ? ctx.workspace : nullptr, p.workspace, s);
@@ -235,6 +267,7 @@ int fllm_cublaslt_gemm_try(cudaStream_t s, const void *W, int kind, const float 
         g_failed = true;
         return -1;
     }
+    if (glu) fllm_glu_up = nullptr;
     if (bias) {
         const size_t total = (size_t)batch * rows;
         add_bias_kernel<<<(unsigned)((total + 255) / 256 > 4096 ? 4096 : (total + 255) / 256), 256, 0, s>>>(Y, bias, total, rows);

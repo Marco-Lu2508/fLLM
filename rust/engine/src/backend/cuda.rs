@@ -1119,6 +1119,9 @@ fn next_activation_format(weight: Option<&DeviceWeight>) -> (c_int, c_int) {
         }
     } else if matches!(kind, 12..=14) {
         (3, kind as c_int)
+    } else if matches!(kind, 1 | 30) {
+        // dense 16-bit weights: no activation conversion to fuse, but the kind tells the kernel that up to 63 rows may take the decode-sized add + norm
+        (0, kind as c_int)
     } else {
         (0, 0)
     }

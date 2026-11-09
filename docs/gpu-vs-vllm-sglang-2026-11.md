@@ -79,5 +79,13 @@ Still behind, in the order of the gap: long prompts with 16 users (prefill of 33
 the CUDA-graph launch of a step takes 1.3 ms during which the GPU idles, cuBLASLt's split-K reduction and the per-projection conversion of the
 activations cost 8 % of the GPU time), one user with a long prompt (0.81-0.83x).
 
+## Second round (bf16, same card)
+
+A 2039-token prompt takes 164 ms of GPU time in total, of which the GEMMs are 107 ms (247 TFLOPS of the 312, the same cuBLAS kernels vLLM uses),
+FFN gate / activation conversions 22 ms, prompt attention 7 ms, the rest 28 ms; the changes of this round took about 6 ms off the time to the first token. A decode step with 16 users
+is 15.6 ms (see the changelog for the breakdown): at 11.9 ms the GEMMs stream the weights at the card's practical bandwidth, so what is left is the
+host-side path between two steps (about 1.4 ms) and about 2 ms of small kernels. 16 users with short prompts: 875 tokens/s (0.81 of vLLM's 1078), one user 82 tokens/s
+(vLLM 80.6, SGLang 81.8), four users 257 and eight users 471 sampled tokens/s (from 129 and 132 at the start of the day).
+
 Not measured: FP8, GPTQ, MoE models, a longer output, more than 16 users, other cards, ROCm, more than one GPU, quality (only the first answer was compared).
 Raw results: `compare_result.json` of both runs (`schema_version 2`, `vs_best_rival` per engine).

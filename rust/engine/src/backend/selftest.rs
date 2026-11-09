@@ -4807,6 +4807,13 @@ impl<'a> Tester<'a> {
                 }
             }
         }
+        // dense 16-bit weights read the norm output as it is: the fused kernel serves them up to 63 rows (the other formats up to 15)
+        for kind in self.kinds(&[1u32, 30]) {
+            for rows in [4usize, 16, 32, 63] {
+                let r = self.fuse_add_norm(rows, 1024, Some(kind), 0.0);
+                self.record(&format!("add_rms_norm +{}", format_name(kind)), &format!("{rows}x1024"), r);
+            }
+        }
         if self.filter.wants_kind(0x8000_0010) {
             for (batch, bias) in [(1usize, false), (4, true)] {
                 let r = self.fuse_q4z_add_norm(batch, bias);
@@ -4834,8 +4841,8 @@ impl<'a> Tester<'a> {
         // A gated activation followed by a prompt GEMM that folds it into the FP16 conversion of its input. The second half of the cases gives the kernels the
         // shared memory of a Turing GPU (64 KB): the larger tile shapes do not fit, and a GEMM that finds out after the conversion has to hand the next kernel
         // the activation, not the raw gate.
-        for kind in self.kinds(&[2u32, 3, 6, 7, 8, 12, 13, 14, 20]) {
-            for (batch, smem) in [(16usize, None), (200, None), (16, Some(65536usize)), (200, Some(65536)), (300, Some(65536))] {
+        for kind in self.kinds(&[1u32, 2, 3, 6, 7, 8, 12, 13, 14, 20, 30]) {
+            for (batch, smem) in [(16usize, None), (17, None), (200, None), (16, Some(65536usize)), (200, Some(65536)), (300, Some(65536))] {
                 let r = self.fuse_glu_gemm(kind, batch, 1024, smem);
                 let limit = smem.map_or(String::new(), |b| format!(", {} KB shared memory", b / 1024));
                 self.record(&format!("swiglu + prompt GEMM {}", format_name(kind)), &format!("{batch}x1024{limit}"), r);

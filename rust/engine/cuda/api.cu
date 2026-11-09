@@ -631,6 +631,8 @@ static bool glu_fusable(FllmStream *st, int kind, const void *w, const float *x,
     const bool narrow_ok = kind == 2 || kind == 3 || kind == 6 || kind == 7 || kind == 8 || kind == 20 || kind == 39;
     if ((cols & (narrow_ok ? 31 : 255)) != 0) return false;
     if (kind == 40) return true;
+    // dense 16-bit weights: cuBLASLt converts gate and up itself for 17 tokens and more (cublaslt_gemm.cu), the linear launcher computes the activation when it declines
+    if (kind == 1 || kind == 30) return batch >= 17 && !fllm_exact_math() && fllm_cc() >= 80;
     static const bool no_qgemm = getenv("FLLM_CUDA_NO_QGEMM") != nullptr;
     // Turing (sm_75): the tile shapes of the quantized GEMMs do not all fit its shared memory, and a GEMM that gives up after the fused conversion hands the raw
     // gate to the next kernel (checked on a T4: Llama-3.2-3B Q4_K_M wrote nonsense, the same run was right with FLLM_CUDA_NO_GLU_FUSE=1)
@@ -1225,7 +1227,9 @@ static void fused_quant_done(FllmStream *st, int quant, const float *out, int ro
 int fllm_cuda_add_rms_norm(FllmStream *st, float *x, const float *branch, float scale, const float *w, float *out, int rows, int cols,
                            float eps, int quant, int kind, const void *next_w, int next_rows) {
     // decode batches only: from FLLM_PREFILL_MIN_ROWS rows on, the prompt path (rms_norm_prompt_kernel, FLLM_FUSE_PREFILL_*) owns this fusion
-    if (!fllm_fuse_enabled(FLLM_FUSE_ADD_NORM) || rows <= 0 || rows >= FLLM_PREFILL_MIN_ROWS || cols <= 0 || (cols & 3) != 0 || cols > 8192) return FLLM_DECLINED;
+    // (the next GEMM of dense 16-bit weights (kind 1 or 30) converts its input itself and has no fusion of its own at 16 to 63 rows, so those batches take it too)
+    const int max_rows = quant == 0 && (kind == 1 || kind == 30) ? 64 : FLLM_PREFILL_MIN_ROWS;
+    if (!fllm_fuse_enabled(FLLM_FUSE_ADD_NORM) || rows <= 0 || rows >= max_rows || cols <= 0 || (cols & 3) != 0 || cols > 8192) return FLLM_DECLINED;
     if ((reinterpret_cast<uintptr_t>(x) | reinterpret_cast<uintptr_t>(branch) | reinterpret_cast<uintptr_t>(w) | reinterpret_cast<uintptr_t>(out)) % 16 != 0)
         return FLLM_DECLINED;
     PREP(st);

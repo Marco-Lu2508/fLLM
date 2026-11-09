@@ -84,7 +84,7 @@ When a group passes and the end-to-end text agrees, the default of that switch c
 | `FLLM_FP8_GEMM` | `0` | `auto` / `1`: FP8M weights on sm_89+ as W8A8 (`mma.sync`); `cutlass`: Hopper wgmma kernel; set before the model loads (it chooses the weight layout) |
 | `FLLM_INT8_GEMM` | `0` | `1`: Q8_0 prompts on the int8 tensor cores |
 | `FLLM_CUBLASLT`, `FLLM_CUBLASLT_LIB` | `auto`, unset | `auto` (unset) / `1`: cuBLASLt (loaded at run time) for F16 / BF16 GEMMs of 9 tokens and more on compute capability 8.0 and newer; `0`: never |
-| `FLLM_CUDA_DENSE_SKINNY` | `auto` | `auto`: tensor-core GEMV for F16 / BF16 weights and 1-8 tokens (columns a multiple of 32, cc >= 8.0); `1`: also 9-16 tokens; `0`: never |
+| `FLLM_CUDA_DENSE_SKINNY` | `auto` | `auto`: tensor-core GEMV for F16 / BF16 weights and 1-16 tokens (columns a multiple of 32, cc >= 8.0; from 9 tokens only where it beats cuBLASLt, see the changelog); `1` / `2`: always one / two row tiles per warp; `0`: never |
 | `FLLM_ATTN_BACKEND` | `fa2` | `auto` / `fa3`: FA3 prompt attention on cc 9.0 |
 | `FLLM_ATTN_FI`, `FLLM_ATTN_DECODE`, `FLLM_CASCADE_ATTN`, `FLLM_CASCADE_MIN_PREFIX` | `0`, `builtin`, `0`, `128` | FlashInfer variants and batches, tensor-core decode, cascade attention |
 | `FLLM_MLA`, `FLLM_MLA_KERNEL` | `expanded`, tensor cores | `latent`: latent MLA cache; `ref`: the CUDA-core reference kernel of that path |

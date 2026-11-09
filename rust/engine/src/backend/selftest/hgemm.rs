@@ -13,6 +13,8 @@ impl Tester<'_> {
             return;
         }
         set_cublaslt_mode(1);
+        // (with the tensor-core GEMV switched off: it takes 9 to 16 tokens first, see `skinny_cases`)
+        crate::backend::cuda::hopper_gemm::set_dense_skinny_mode(0);
         for kind in self.kinds(&[1u32, 30]) {
             for (rows, cols) in [(256usize, 512usize), (384, 1024)] {
                 for batch in [9usize, 12, 15, 16, 17, 64, 129, 300] {
@@ -27,6 +29,7 @@ impl Tester<'_> {
             }
         }
         set_cublaslt_mode(-1);
+        crate::backend::cuda::hopper_gemm::set_dense_skinny_mode(-1);
         self.skinny_cases();
         if std::env::var_os("FLLM_SELFTEST_BENCH").is_some_and(|v| v != "0") {
             self.hgemm_bench();
@@ -34,22 +37,27 @@ impl Tester<'_> {
         }
     }
 
-    /// The tensor-core GEMV (`dense_skinny_kernel`, forced on) against the f64 reference. 2080 columns are 65 slabs of 32, so the eight warps of a block get
+    /// The tensor-core GEMV (`dense_skinny_kernel`, forced on, with one and with two row tiles per warp) against the f64 reference. 2080 columns are 65 slabs of 32, so the eight warps of a block get
     /// unequal shares; 13 and 37 rows leave a tail in the last block of 16 rows; batches 1-8 use one group of eight tokens, 9-16 two. The activations are
     /// rounded to the weight's 16-bit format, as in the cuBLASLt cases.
     fn skinny_cases(&mut self) {
         use crate::backend::cuda::hopper_gemm::set_dense_skinny_mode;
-        set_dense_skinny_mode(1);
-        for kind in self.kinds(&[1u32, 30]) {
-            for (rows, cols) in [(13usize, 64usize), (37, 2080)] {
-                for batch in [1usize, 2, 3, 5, 8, 9, 15, 16] {
-                    let with_bias = batch % 2 == 1;
-                    let tol = if kind == 30 { 8e-3 } else { Self::FAST_TOL };
-                    let r = self.linear(kind, rows, cols, batch, with_bias).map(|mut o| {
-                        o.tol = o.tol.max(tol);
-                        o
-                    });
-                    self.record(&format!("tensor-core gemv {}", format_name(kind)), &format!("{rows}x{cols} batch {batch}{}", if with_bias { " +bias" } else { "" }), r);
+        for (mode, name) in [(1, "tensor-core gemv"), (2, "tensor-core gemv 2 tiles")] {
+            set_dense_skinny_mode(mode);
+            for kind in self.kinds(&[1u32, 30]) {
+                for (rows, cols) in [(13usize, 64usize), (37, 2080), (70, 288)] {
+                    for batch in [1usize, 2, 3, 5, 8, 9, 15, 16] {
+                        if mode == 2 && batch < 9 {
+                            continue; // the two-tile variant serves 9 tokens and more
+                        }
+                        let with_bias = batch % 2 == 1;
+                        let tol = if kind == 30 { 8e-3 } else { Self::FAST_TOL };
+                        let r = self.linear(kind, rows, cols, batch, with_bias).map(|mut o| {
+                            o.tol = o.tol.max(tol);
+                            o
+                        });
+                        self.record(&format!("{name} {}", format_name(kind)), &format!("{rows}x{cols} batch {batch}{}", if with_bias { " +bias" } else { "" }), r);
+                    }
                 }
             }
         }
@@ -64,8 +72,11 @@ impl Tester<'_> {
         for kind in self.kinds(&[1u32, 30]) {
             for (rows, cols) in [(3584usize, 3584usize), (18944, 3584), (3584, 18944), (512, 3584)] {
                 let weights = random_kind(&mut self.rng, kind, rows, cols);
-                for batch in [1usize, 2, 4, 8, 12, 16] {
-                    for (label, skinny, lt) in [("bench skinny", 1, 0), ("bench cuda-core", 0, 0), ("bench cublaslt", 0, 1)] {
+                for batch in [1usize, 4, 8, 12, 16] {
+                    for (label, skinny, lt) in [("bench skinny", 1, 0), ("bench skinny-2tile", 2, 0), ("bench cuda-core", 0, 0), ("bench cublaslt", 0, 1)] {
+                        if skinny == 2 && batch < 9 {
+                            continue; // the two-tile variant serves 9 tokens and more
+                        }
                         if lt == 1 && batch < 9 {
                             continue; // cuBLASLt serves 9 tokens and more
                         }
