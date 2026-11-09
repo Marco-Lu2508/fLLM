@@ -92,8 +92,8 @@ fLLM is at 0.57 to 0.83x.
 ## What is still behind
 
 * **Single-user decode** is 0.81x of llama.cpp at eight threads and 0.91x at sixteen (0.77x
-  and 0.92x on the 8B), against ik_llama.cpp 0.67x at eight and 0.83x at sixteen. Not
-  explained.
+  and 0.92x on the 8B), against ik_llama.cpp 0.67x at eight and 0.83x at sixteen. The next
+  section splits it by weight format: the 4-bit formats are the gap, Q8_0 is not.
 * **Four users** is 0.78x of llama.cpp at sixteen threads (0.84x at eight); the remaining
   difference is visible in the time to the first token as well (1.05 against 0.90 s on the
   3B), so it is not only the decode kernels.
@@ -104,3 +104,52 @@ fLLM is at 0.57 to 0.83x.
   between 16 and 32, where the new line decides by batch size alone.
 * The Colab CPU runtime pool served only Zen 2 (EPYC 7B12) and Broadwell; the Zen 5 host is
   the one behind a G4 GPU runtime, measured with `--device cpu`.
+
+## Single-user decode by weight format, against the best engine (2026-11-09)
+
+One Colab G4 runtime (EPYC 9B45, 24 cores / 48 threads, 96 MiB L3), fLLM `1f3d1be`, llama.cpp
+`f317836`, ik_llama.cpp `308fb08`. Llama-3.2-3B-Instruct Q4_K_M, and the same model requantised
+with `llama-quantize --allow-requantize --pure` to one format (speed only, the requantised weights
+are not meant for quality). Decode of 128 tokens, one user, no HTTP in the rivals (`llama-bench
+-n 128 -r 3`), fLLM served with prefix cache, output cache and speculation off, 160 streamed
+tokens, median of four runs. `GB/s` is file size x tokens/s. The yardstick is the faster of the two
+rivals in each row.
+
+| Format | Threads | File GiB | fLLM | llama.cpp | ik_llama.cpp | fLLM / best | fLLM GB/s | best GB/s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Q4_K_M | 8 | 1.881 | 41.71 | 56.09 | 58.26 | **0.72x** (ik_llama.cpp) | 84.2 | 117.6 |
+| Q4_K_M | 16 | 1.881 | 54.05 | 57.38 | 58.67 | **0.92x** (ik_llama.cpp) | 109.1 | 118.5 |
+| Q4_K | 8 | 1.691 | 44.04 | 60.99 | 64.11 | **0.69x** (ik_llama.cpp) | 80.0 | 116.4 |
+| Q4_K | 16 | 1.691 | 59.15 | 61.94 | 66.05 | **0.90x** (ik_llama.cpp) | 107.4 | 119.9 |
+| Q5_K | 8 | 2.065 | 36.62 | 50.63 | 54.06 | **0.68x** (ik_llama.cpp) | 81.2 | 119.9 |
+| Q5_K | 16 | 2.065 | 49.70 | 54.23 | 55.51 | **0.90x** (ik_llama.cpp) | 110.2 | 123.1 |
+| Q6_K | 8 | 2.462 | 37.41 | 44.92 | 45.64 | **0.82x** (ik_llama.cpp) | 98.9 | 120.7 |
+| Q6_K | 16 | 2.462 | 42.83 | 46.96 | 45.25 | **0.91x** (llama.cpp) | 113.2 | 124.2 |
+| Q8_0 | 8 | 3.187 | 33.60 | 36.32 | 35.89 | **0.93x** (llama.cpp) | 115.0 | 124.3 |
+| Q8_0 | 16 | 3.187 | 37.95 | 38.08 | 37.65 | **1.00x** (llama.cpp) | 129.9 | 130.3 |
+| Q4_0 | 8 | 1.691 | 38.78 | 63.58 | 60.34 | **0.61x** (llama.cpp) | 70.4 | 115.4 |
+| Q4_0 | 16 | 1.691 | 57.14 | 64.23 | 65.97 | **0.87x** (ik_llama.cpp) | 103.7 | 119.8 |
+
+What the table says:
+
+* The machine reads 138 GB/s with 8 threads and 145 GB/s with 16 (a 2 GiB buffer, AVX2 loads,
+  best of six). Both rivals reach 110-130 GB/s of weights in every format at 8 threads, so eight
+  threads are enough to stream; the 4-bit formats of fLLM are **compute-bound per thread**:
+  70-84 GB/s at 8 threads (Q4_0 70, Q4_K 80, Q5_K 81) and 103-110 at 16.
+* Q8_0 is the format where fLLM is level (1.00x at 16 threads, 0.93x at 8): the load-and-dot path
+  is fine, what costs time in the 4-bit formats is the unpack and the per-block bookkeeping
+  (scales, minimums, f16 conversions).
+* Q6_K at 16 threads: the LM head (Q6_K, 2.28 ms at 16 threads in the phase profile, 140 GB/s) is
+  at the memory limit; the FFN and QKV projections of the K formats are not.
+* With the whole Q4_K_M file at 16 threads, the phases are `down` (the whole FFN) 10.9 ms, QKV 2.4,
+  head 2.3, output projection 1.4, attention 1.0 ms at a ~200-token context, norm 0.2 and rope
+  0.2 ms: 18.4 ms against 17.0 ms per token of the best engine. Scheduler, batch build and
+  postprocess add 0.04 ms per token (`/metrics`), core pinning changes nothing (54.2 against
+  54.4 tokens/s).
+* Open, in this order of distance from the best engine: Q4_0 and Q5_K/Q4_K at 8 threads (0.61-0.69x),
+  then every 4-bit format at 16 threads (0.87-0.92x), then Q6_K (0.82x / 0.91x) and Q8_0 at 8 threads
+  (0.93x). Nothing in this table is at or above the best engine except Q8_0 at 16 threads.
+
+Not measured: other CPUs, the 8B model, prompts (the rivals' prefill is ahead too: `llama-bench`
+pp128 at 16 threads gave 597 tokens/s for llama.cpp and 1145 for ik_llama.cpp on the 3B Q4_K_M, and
+fLLM's figure for the same run is not taken yet).
