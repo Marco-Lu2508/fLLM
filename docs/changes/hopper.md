@@ -20,7 +20,7 @@ change numerics or can fail at run time (see the table), and the commands below 
 | FP8 W8A8 GEMM (`mma.sync` e4m3, per-token / per-tensor / 1x128 group activation scales, row and 128x128 block weight scales) | `fp8_gemm.cu` | **off** (`FLLM_FP8_GEMM=auto`) | L0 |
 | FP8 W8A8 CUTLASS wgmma GEMM (Hopper) | `fp8_cutlass_sm90.cu` | **off** (`FLLM_FP8_GEMM=cutlass`) | L0 (`QGMMA` in the sm_90a SASS, 12.8 and 13.0) |
 | int8 W8A8 tensor-core GEMM (Q8_0 weights, Turing and newer) | `int8_gemm.cu` | **off** (`FLLM_INT8_GEMM=1`) | L0 |
-| Dense BF16 / FP16 GEMM through cuBLASLt (dlopen) | `cublaslt_gemm.cu` | **off** (`FLLM_CUBLASLT=auto`) | L0 |
+| Dense BF16 / FP16 GEMM through cuBLASLt (dlopen), 16+ tokens, compute capability 8.0 and newer | `cublaslt_gemm.cu` | **on** (`FLLM_CUBLASLT=0` switches it off) | L1 on an A100 (self test group `hgemm`, 60 checks; Hopper and Blackwell: L0) |
 | FA3 prompt attention on Hopper (FlashInfer's port, sm_90a) | `fa3_prefill.cu` | **off** (`FLLM_ATTN_BACKEND=auto`) | L0 |
 | FlashInfer prompt attention with window / soft cap / sinks and ragged batches; tensor-core decode; cascade attention | `fi_attn.cu` | **off** (`FLLM_ATTN_FI=1`, `FLLM_ATTN_DECODE=flashinfer`, `FLLM_CASCADE_ATTN=1`) | L0 |
 | Latent-cache MLA (compressed KV, absorbed projections, tensor-core kernels) | `mla_latent.cu`, `mla_decode.cu`, `rust_decoder/mla_latent.rs` | **off** (`FLLM_MLA=latent`) | L0 + CPU unit tests |
@@ -83,7 +83,7 @@ When a group passes and the end-to-end text agrees, the default of that switch c
 | `FLLM_NVFP4_SM100`, `FLLM_NVFP4_SM100_TILE` | `0`, by shape | NVFP4 W4A4 through CUTLASS tcgen05 on sm_100 / 103 / 110 |
 | `FLLM_FP8_GEMM` | `0` | `auto` / `1`: FP8M weights on sm_89+ as W8A8 (`mma.sync`); `cutlass`: Hopper wgmma kernel; set before the model loads (it chooses the weight layout) |
 | `FLLM_INT8_GEMM` | `0` | `1`: Q8_0 prompts on the int8 tensor cores |
-| `FLLM_CUBLASLT`, `FLLM_CUBLASLT_LIB` | `0`, unset | `auto` / `1`: cuBLASLt (loaded at run time) for F16 / BF16 prompt GEMMs |
+| `FLLM_CUBLASLT`, `FLLM_CUBLASLT_LIB` | `auto`, unset | `auto` (unset) / `1`: cuBLASLt (loaded at run time) for F16 / BF16 GEMMs of 16 tokens and more on compute capability 8.0 and newer; `0`: never |
 | `FLLM_ATTN_BACKEND` | `fa2` | `auto` / `fa3`: FA3 prompt attention on cc 9.0 |
 | `FLLM_ATTN_FI`, `FLLM_ATTN_DECODE`, `FLLM_CASCADE_ATTN`, `FLLM_CASCADE_MIN_PREFIX` | `0`, `builtin`, `0`, `128` | FlashInfer variants and batches, tensor-core decode, cascade attention |
 | `FLLM_MLA`, `FLLM_MLA_KERNEL` | `expanded`, tensor cores | `latent`: latent MLA cache; `ref`: the CUDA-core reference kernel of that path |

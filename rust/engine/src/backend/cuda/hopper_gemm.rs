@@ -2,7 +2,7 @@
 //!
 //! The kernel file opens libcublasLt with dlopen when a prompt-sized product of F16 / BF16 weights asks for it and declines (the built-in tensor-core
 //! GEMM runs) when the library or an entry point is missing, so nothing is linked and no installation is required. `FLLM_CUBLASLT=auto|0|1`:
-//! auto uses it from compute capability 9.0 on for 64 tokens and more, 1 on every device with tensor cores for 16 tokens and more, 0 never.
+//! auto (the default) and 1 use it on every device of compute capability 8.0 and newer for 16 tokens and more, 0 never.
 //! `FLLM_CUBLASLT_LIB` names the library file to open.
 use super::*;
 

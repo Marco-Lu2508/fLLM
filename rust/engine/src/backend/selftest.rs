@@ -2454,6 +2454,18 @@ impl<'a> Tester<'a> {
                 );
             }
         }
+        // Dense 16-bit weights with a width that is a multiple of 16: the CUDA backend serves one to fifteen tokens with its GEMV that keeps four runs of
+        // 16 weights in flight (`gemv_dense_kernel`), which the odd width above never reaches. 2064 columns are 129 runs, so lane 0 takes a second round
+        // of the four-run loop; 13 and 37 rows leave a grid tail; batches 1-8 use one pass, 9 and 15 two (8 + 1, 8 + 7).
+        for kind in self.kinds(&[1u32, 30]) {
+            for (rows, cols) in [(13usize, 64usize), (37, 2064)] {
+                for batch in [1usize, 2, 3, 5, 8, 9, 15] {
+                    let with_bias = batch % 2 == 1;
+                    let r = self.linear(kind, rows, cols, batch, with_bias);
+                    self.record(&format!("linear {}", format_name(kind)), &format!("{rows}x{cols} batch {batch}{}", if with_bias { " +bias" } else { "" }), r);
+                }
+            }
+        }
         if self.filter.wants_kind(8) {
             let r = self.linear(8, 70_001, 32, 2, false);
             self.record("linear q8_0", "70001x32 batch 2", r);

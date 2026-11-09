@@ -50,7 +50,7 @@ cached per shape; the 32 MB workspace and the scratch are allocated at the first
 | `FLLM_FP8_GEMM` | `0` (unset) | `auto`/`1`: FP8M weights on sm_89+ run W8A8 with `mma.sync`; `0`: Marlin W8A16 (the layout is chosen when the weight is uploaded); `cutlass`: Hopper wgmma kernel (sm_90 only, per-token scales; falls back to `mma.sync` elsewhere) |
 | `FLLM_FP8_ACT_STATIC` | unset | a positive factor selects one static per-tensor activation scale for every FP8 layer (experiment) |
 | `FLLM_INT8_GEMM` | `auto` (= off) | `1`: Q8_0 prompts (16+ tokens) on the int8 tensor cores |
-| `FLLM_CUBLASLT` | `0` (unset) | `auto`: cuBLASLt for F16 / BF16 weights from cc 9.0, 64+ tokens; `1`: every cc >= 8.0, 16+ tokens; `0`: never |
+| `FLLM_CUBLASLT` | `auto` (unset) | `auto` and `1`: cuBLASLt for F16 / BF16 weights on every cc >= 8.0, 16+ tokens (measured on an A100; was off, then Hopper-only with 64+ tokens); `0`: never |
 | `FLLM_CUBLASLT_LIB` | unset | file name of the cuBLASLt library to open first |
 | `FLLM_SELFTEST_BENCH` | unset | `1`: the `w8a8` and `hgemm` groups add timing lines (TFLOPS) of the new path against the one it replaces |
 | `FLLM_NO_HOPPER` | unset | build time: do not compile `fp8_cutlass_sm90.cu` for sm_90a (stub) |

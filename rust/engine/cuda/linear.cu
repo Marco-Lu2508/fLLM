@@ -142,6 +142,105 @@ gemm_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *_
     }
 }
 
+#if !defined(__HIPCC__)
+// ---------------------------------------------------------------------------------------------
+// Dense 16-bit weights (F16 / BF16), one to eight tokens: `gemv_kernel` with the weights of four runs in flight.
+//
+// The generic kernel decodes one run of 16 weights per lane and waits for it before it asks for the next, so a lane has two 16-byte loads in flight
+// and the warp reads about 45 % of the memory bandwidth on an A100 (0.096 ms for the average projection of a 7B model, 0.69 TB/s of 1.55). This kernel
+// issues the loads of four runs first and multiplies afterwards. Every lane still visits the runs `lane, lane + 32, ...` in increasing order and runs the
+// 16 FMAs of each in the same order, and the warp sum is the same, so the result is the bit pattern of `gemv_kernel` (the self test compares them).
+// Needs cols % 16 == 0 and 16-byte aligned weights and activations; anything else keeps the generic kernel.
+// ---------------------------------------------------------------------------------------------
+__device__ __forceinline__ void dense16_unpack(uint32_t w, bool bf16, float &lo, float &hi) {
+    if (bf16) {
+        lo = __uint_as_float(w << 16);
+        hi = __uint_as_float(w & 0xffff0000u);
+    } else {
+        lo = h2f_bits((uint16_t)(w & 0xffffu));
+        hi = h2f_bits((uint16_t)(w >> 16));
+    }
+}
+
+template <uint32_t KIND, int NB>
+__global__ void __launch_bounds__(128)
+gemv_dense_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ Y,
+                  const float *__restrict__ bias, int rows, int cols, int batch, int b0) {
+    constexpr int U = 4;
+    constexpr bool bf16 = KIND == KIND_BF16;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int row = blockIdx.x * (blockDim.x >> 5) + warp;
+    if (row >= rows) return;
+    const uint4 *rp = reinterpret_cast<const uint4 *>(W + (size_t)row * cols * 2);
+    const int runs = cols >> 4;
+    float acc[NB];
+#pragma unroll
+    for (int b = 0; b < NB; b++) acc[b] = 0.f;
+    for (int base = lane; base < runs; base += FLLM_WARP * U) {
+        uint4 raw[U][2];
+#pragma unroll
+        for (int u = 0; u < U; u++) {
+            const int run = base + u * FLLM_WARP;
+            if (run < runs) {
+                raw[u][0] = __ldg(rp + 2 * run);
+                raw[u][1] = __ldg(rp + 2 * run + 1);
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < U; u++) {
+            const int run = base + u * FLLM_WARP;
+            if (run < runs) {
+                float w[16];
+                const uint32_t words[8] = {raw[u][0].x, raw[u][0].y, raw[u][0].z, raw[u][0].w, raw[u][1].x, raw[u][1].y, raw[u][1].z, raw[u][1].w};
+#pragma unroll
+                for (int i = 0; i < 8; i++) dense16_unpack(words[i], bf16, w[2 * i], w[2 * i + 1]);
+#pragma unroll
+                for (int b = 0; b < NB; b++) {
+                    const float4 *q = reinterpret_cast<const float4 *>(X + (size_t)(b0 + b) * cols + (size_t)run * 16);
+                    float x[16];
+#pragma unroll
+                    for (int i = 0; i < 4; i++) {
+                        const float4 v = __ldg(q + i);
+                        x[4 * i] = v.x; x[4 * i + 1] = v.y; x[4 * i + 2] = v.z; x[4 * i + 3] = v.w;
+                    }
+#pragma unroll
+                    for (int i = 0; i < 16; i++) acc[b] = fmaf(w[i], x[i], acc[b]);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int b = 0; b < NB; b++) acc[b] = warp_sum(acc[b]);
+    if (lane == 0) {
+        const float bv = bias ? bias[row] : 0.f;
+#pragma unroll
+        for (int b = 0; b < NB; b++) Y[(size_t)(b0 + b) * rows + row] = acc[b] + bv;
+    }
+}
+
+// 1..15 tokens in passes of up to eight; returns false (nothing launched) when the shape or the alignment does not fit.
+template <uint32_t KIND>
+static bool dense_gemv_try(cudaStream_t s, const uint8_t *W, const float *X, float *Y, const float *bias, int rows, int cols, int batch) {
+    static const bool off = getenv("FLLM_CUDA_NO_DENSE_GEMV") != nullptr;
+    if (off || batch < 1 || batch > 15 || (cols & 15) != 0 || rows <= 0) return false;
+    if ((reinterpret_cast<uintptr_t>(W) & 15) != 0 || (reinterpret_cast<uintptr_t>(X) & 15) != 0) return false;
+    const dim3 block(128), grid((rows + 3) / 4);
+    for (int b0 = 0; b0 < batch; b0 += 8) {
+        switch (batch - b0 < 8 ? batch - b0 : 8) {
+            case 1: gemv_dense_kernel<KIND, 1><<<grid, block, 0, s>>>(W, X, Y, bias, rows, cols, batch, b0); break;
+            case 2: gemv_dense_kernel<KIND, 2><<<grid, block, 0, s>>>(W, X, Y, bias, rows, cols, batch, b0); break;
+            case 3: gemv_dense_kernel<KIND, 3><<<grid, block, 0, s>>>(W, X, Y, bias, rows, cols, batch, b0); break;
+            case 4: gemv_dense_kernel<KIND, 4><<<grid, block, 0, s>>>(W, X, Y, bias, rows, cols, batch, b0); break;
+            case 5: gemv_dense_kernel<KIND, 5><<<grid, block, 0, s>>>(W, X, Y, bias, rows, cols, batch, b0); break;
+            case 6: gemv_dense_kernel<KIND, 6><<<grid, block, 0, s>>>(W, X, Y, bias, rows, cols, batch, b0); break;
+            case 7: gemv_dense_kernel<KIND, 7><<<grid, block, 0, s>>>(W, X, Y, bias, rows, cols, batch, b0); break;
+            default: gemv_dense_kernel<KIND, 8><<<grid, block, 0, s>>>(W, X, Y, bias, rows, cols, batch, b0); break;
+        }
+    }
+    return true;
+}
+#endif
+
 // ---------------------------------------------------------------------------------------------
 // Launchers
 // ---------------------------------------------------------------------------------------------
@@ -241,6 +340,12 @@ static int launch_kind(cudaStream_t s, const uint8_t *W, const float *X, float *
 #if defined(__HIPCC__)
     // AMD matrix-core GEMM with the activations converted to FP16 once (hip/hip_gemm.cu)
     if (batch >= 16 && !fllm_exact_math() && fllm_hip_gemm_x16_try(s, W, KIND, X, Y, bias, rows, cols, batch, x16, x16_bytes)) return fllm_check_launch("linear");
+#endif
+#if !defined(__HIPCC__)
+    // F16 / BF16 weights, one to fifteen tokens: the bandwidth-bound GEMV with several runs in flight (bits of the generic kernel below)
+    if constexpr (KIND == KIND_F16 || KIND == KIND_BF16) {
+        if (dense_gemv_try<KIND>(s, W, X, Y, bias, rows, cols, batch)) return fllm_check_launch("linear");
+    }
 #endif
     if (batch >= 16 && !fllm_exact_math() && fllm_tc_gemm_try(s, W, KIND, X, Y, bias, rows, cols, batch)) return fllm_check_launch("linear");
     if (batch <= 8) {
