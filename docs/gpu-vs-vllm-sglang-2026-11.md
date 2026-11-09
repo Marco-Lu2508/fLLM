@@ -87,5 +87,21 @@ is 15.6 ms (see the changelog for the breakdown): at 11.9 ms the GEMMs stream th
 host-side path between two steps (about 1.4 ms) and about 2 ms of small kernels. Two attempts to shorten that path did nothing and were dropped: cutting the recorded graph into four (81.7 -> 79.5 tokens/s for one user) and moving the four staged-array copies out of the graph (81.8 -> 81.9); the trace shows why: the GPU cannot start before `cudaGraphLaunch` returns (0.55-0.7 ms for about 680 nodes), so the cost is the launch call itself, and only launching the next step before the host knows the sampled ids (asynchronous scheduling) or far fewer nodes would remove it. 16 users with short prompts: 875 tokens/s (0.81 of vLLM's 1078), one user 82 tokens/s
 (vLLM 80.6, SGLang 81.8), four users 257 and eight users 471 sampled tokens/s (from 129 and 132 at the start of the day).
 
+Same compare script on `e2c3fe8`, vLLM and SGLang each in a run of their own (fLLM tokens/s of the run that measured the rival, the best rival of each cell):
+
+| Qwen2.5-7B-Instruct | prompt / users | fLLM | best rival | ratio |
+|---|---|---|---|---|
+| bf16 | 100 / 1 | 80.4 | 81.9 (SGLang) | 0.98 |
+| bf16 | 100 / 16 | 790 | 1076 (vLLM) | 0.73 |
+| bf16 | 2000 / 1 | 64.3 | 71.4 (SGLang) | 0.90 |
+| bf16 | 2000 / 16 | 229 | 355 (vLLM, SGLang) | 0.65 |
+| AWQ | 100 / 1 | 167.6 | 185.7 (SGLang) | 0.90 |
+| AWQ | 100 / 16 | 1244 | 1770 (vLLM) | 0.70 |
+| AWQ | 2000 / 1 | 106.7 | 130.1 (SGLang) | 0.82 |
+| AWQ | 2000 / 16 | 225 | 345 (SGLang) | 0.65 |
+
+The AWQ path (Marlin) was not touched in this round. The SGLang value of the bf16 100 / 16 cell moved from 614 to 1005 tokens/s between two runs of the same script, so single cells of
+this table carry a spread of that size for the rival engines.
+
 Not measured: FP8, GPTQ, MoE models, a longer output, more than 16 users, other cards, ROCm, more than one GPU, quality (only the first answer was compared).
 Raw results: `compare_result.json` of both runs (`schema_version 2`, `vs_best_rival` per engine).
