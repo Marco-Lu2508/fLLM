@@ -83,6 +83,8 @@ git clone -q https://github.com/Marco-Lu2508/fLLM && python3 fLLM/scripts/colab/
 python3 fLLM/scripts/colab/compare.py --build-from-source --models llama8b-awq,qwen3b-awq,gemma4 --users 1,8,32   # newest main
 ```
 
+Every table row ends with `vs best: <ratio>x (<engine>)`: fLLM's total tokens per second divided by the fastest engine that produced a figure in that row, kept in `compare_result.json` under `vs_best_rival`. The yardstick is the best rival of the cell (ik_llama.cpp on CPU, vLLM or SGLang on GPU), never the weakest; a row below `1.00x` is open work. `--models qwen7b,qwen7b-awq` serves one public Qwen2.5-7B-Instruct checkpoint (bf16 and INT4) to fLLM, vLLM and SGLang.
+
 Measurement contract (`compare_result.json`, `schema_version: 2`; per-user rates changed meaning from the older chunk-based files):
 
 * Every stream requests `stream_options.include_usage=true`. fLLM supports a final usage-only event (`choices: []`) before `[DONE]`.

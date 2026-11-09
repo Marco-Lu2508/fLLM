@@ -51,6 +51,9 @@ MODELS = {
     "llama8b-awq": ("Llama-3.1-8B-Instruct AWQ INT4", "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4", 7000),
     "qwen2b": ("Qwen3.5-2B Q4_K_M (GGUF)", "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf", 3000),
     "qwen3b-awq": ("Qwen2.5-3B-Instruct AWQ", "Qwen/Qwen2.5-3B-Instruct-AWQ", 4000),
+    # vLLM and SGLang compared with fLLM on one checkpoint: bf16 weights and the AWQ INT4 build of the same model (all public repositories)
+    "qwen7b": ("Qwen2.5-7B-Instruct bf16", "Qwen/Qwen2.5-7B-Instruct", 20000),
+    "qwen7b-awq": ("Qwen2.5-7B-Instruct AWQ INT4", "Qwen/Qwen2.5-7B-Instruct-AWQ", 8000),
     "gemma4": ("Gemma 4 E4B Q4_K_M (GGUF)", "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf", 7000),
     # the quant matrix: one model, every common GGUF quant (llama.cpp, ik_llama.cpp and fLLM read the same file)
     "llama8b-q2k": ("Llama-3.1-8B-Instruct Q2_K (GGUF)", "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q2_K.gguf", 5500),
@@ -366,6 +369,20 @@ def measure(server, port, sizes, users, tokens, extra, seed=0):
     return rows
 
 
+def best_ratio(table, names, i):
+    """fLLM's total tok/s in row `i` against the best rival's: the yardstick is the best engine in the cell, not the weakest.
+    Returns None when fLLM or every rival has no usable figure in the row."""
+    def rate(n):
+        r = table[n][i] if i < len(table[n]) else {}
+        return r.get("total_tok_s") if "error" not in r else None
+    mine = rate("fllm") if "fllm" in names else None
+    rivals = {n: rate(n) for n in names if n != "fllm" and rate(n)}
+    if not mine or not rivals:
+        return None
+    best = max(rivals, key=rivals.get)
+    return {"fllm_tok_s": mine, "best_rival": best, "best_rival_tok_s": rivals[best], "ratio_vs_best": round(mine / rivals[best], 2)}
+
+
 def fllm_control_options(extra_args):
     """The plain-decoding control must not silently enable a different workload."""
     args = shlex.split(extra_args)
@@ -543,7 +560,12 @@ def main():
                 cells.append(f"{values[0]:>7} | {values[1]:>6} | {values[2]:>5}" if "error" not in r else f"{'error':>24}")
                 if r.get("measurement_warning"):
                     print(f"  warning {n}, prompt {r['prompt']}, users {r['users']}: {r['measurement_warning']}")
-            print(f"{row['prompt']:>6} {row['users']:>5}  " + "  ".join(f"{c:>24}" for c in cells))
+            ratio = best_ratio(table, names, i)
+            if ratio:
+                row_out = result.setdefault("vs_best_rival", {}).setdefault(label, [])
+                row_out.append({"prompt": row["prompt"], "users": row["users"], **ratio})
+            tail = f"  vs best: {ratio['ratio_vs_best']:.2f}x ({ratio['best_rival']})" if ratio else ""
+            print(f"{row['prompt']:>6} {row['users']:>5}  " + "  ".join(f"{c:>24}" for c in cells) + tail)
         for n in per:
             if isinstance(per[n], dict) and "error" in per[n]:
                 print(f"  {n}: {per[n]['error'][:200]}")

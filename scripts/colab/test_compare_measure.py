@@ -309,6 +309,34 @@ class MeasurementTests(unittest.TestCase):
             self.assertEqual(popen.call_args.kwargs["env"][name], "off")
 
 
+class BestRivalTests(unittest.TestCase):
+    """The yardstick of a cell is the best rival, not the weakest one."""
+
+    @staticmethod
+    def table(**rates):
+        return {name: [{"total_tok_s": rate}] for name, rate in rates.items()}
+
+    def test_ratio_is_against_the_fastest_rival(self):
+        table = self.table(fllm=60.0, **{"llama.cpp": 40.0, "ik_llama.cpp": 80.0, "vllm": 50.0})
+        got = compare.best_ratio(table, list(table), 0)
+        self.assertEqual(got["best_rival"], "ik_llama.cpp")
+        self.assertEqual(got["ratio_vs_best"], 0.75)
+        self.assertEqual(got["best_rival_tok_s"], 80.0)
+
+    def test_a_win_over_the_best_rival_is_above_one(self):
+        table = self.table(fllm=100.0, vllm=80.0, sglang=90.0)
+        self.assertEqual(compare.best_ratio(table, list(table), 0)["ratio_vs_best"], 1.11)
+
+    def test_failed_or_unavailable_rivals_do_not_count(self):
+        table = {"fllm": [{"total_tok_s": 10.0}], "vllm": [{"error": "did not start"}], "llama.cpp": [{"total_tok_s": None}]}
+        self.assertIsNone(compare.best_ratio(table, list(table), 0))
+
+    def test_no_fllm_figure_gives_no_ratio(self):
+        table = self.table(fllm=None, vllm=50.0)
+        self.assertIsNone(compare.best_ratio(table, list(table), 0))
+        self.assertIsNone(compare.best_ratio(self.table(vllm=50.0), ["vllm"], 0))
+
+
 def run_mutations():
     """Compile valid mutants without touching the source or creating extra files."""
     source = SOURCE.read_text()
@@ -328,6 +356,9 @@ def run_mutations():
          '"m", logfile=f"fllm-{key}.log"'),
         ("batch seed not passed from CLI", 'extra, seed=args.seed)', 'extra, seed=0)'),
         ("truncated streams accepted", 'if not done:', 'if False:'),
+        ("weakest rival as yardstick", 'best = max(rivals, key=rivals.get)', 'best = min(rivals, key=rivals.get)'),
+        ("ratio inverted", '"ratio_vs_best": round(mine / rivals[best], 2)', '"ratio_vs_best": round(rivals[best] / mine, 2)'),
+        ("failed rival counted", 'return r.get("total_tok_s") if "error" not in r else None', 'return r.get("total_tok_s") or 1.0e9'),
     ]
     killed = 0
     for name, old, new in mutations:
@@ -337,7 +368,7 @@ def run_mutations():
         exec(compile(source.replace(old, new, 1), str(SOURCE), "exec"), mutant.__dict__)
         stream = io.StringIO()
         suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(cls)
-                                   for cls in (StreamTests, MeasurementTests))
+                                   for cls in (StreamTests, MeasurementTests, BestRivalTests))
         with patch.object(sys.modules[__name__], "compare", mutant), contextlib.redirect_stdout(io.StringIO()):
             result = unittest.TextTestRunner(stream=stream).run(suite)
         # A thrown exception alone does not prove an assertion detects the regression.
