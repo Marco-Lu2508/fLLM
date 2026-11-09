@@ -237,7 +237,14 @@ fn cost_of_the_invariant_kernels_in_a_verification_pass() {
     let mut rng = Lcg(77);
     let cols = 4096usize;
     println!("COST isa {} threads {}, projections of 320 MB x {cols} columns (more than the cache of the build host)", crate::cpu_kernels::isa(), rayon::current_num_threads());
+    // `FLLM_COST_KINDS=12,2` limits the table to those kinds and `FLLM_COST_ONE_ROW=1` skips the seven-row passes: the decode figure
+    // (GB/s of weights for one token) of a format in seconds, at the thread count of `RAYON_NUM_THREADS`.
+    let only: Option<Vec<u32>> = std::env::var("FLLM_COST_KINDS").ok().map(|v| v.split(',').filter_map(|k| k.trim().parse().ok()).collect());
+    let one_row_only = std::env::var("FLLM_COST_ONE_ROW").is_ok_and(|v| !matches!(v.trim(), "" | "0"));
     for kind in [12u32, 14, 11, 10, 23, 8, 6, 2, 16, 17, 18, 21, 22, 0, 30] {
+        if only.as_ref().is_some_and(|kinds| !kinds.contains(&kind)) {
+            continue;
+        }
         let probe = if matches!(kind, 0 | 1 | 30) { float_bytes(kind, 4 * cols, &mut rng) } else { random_weights(kind, 4, cols, &mut rng) };
         let rows = 320_000_000 / (probe.len() / 4) / 8 * 8;
         let weights = if matches!(kind, 0 | 1 | 30) { float_bytes(kind, rows * cols, &mut rng) } else { random_weights(kind, rows, cols, &mut rng) };
@@ -263,6 +270,11 @@ fn cost_of_the_invariant_kernels_in_a_verification_pass() {
             }
             Some(best)
         };
+        if one_row_only {
+            let Some(one) = time(1, false) else { continue };
+            println!("COST kind {kind}: 1 row {one:.2} ms, {:.1} GB/s of weights", weights.len() as f64 / 1e9 / (one / 1000.0));
+            continue;
+        }
         let (Some(one), Some(default), Some(invariant)) = (time(1, false), time(7, false), time(7, true)) else { continue };
         println!("COST kind {kind}: 1 row {one:.2} ms, 7 rows default {default:.2} ms ({:.2}x), 7 rows invariant {invariant:.2} ms ({:.2}x)", default / one, invariant / one);
     }
