@@ -2454,9 +2454,10 @@ impl<'a> Tester<'a> {
                 );
             }
         }
-        // Dense 16-bit weights with a width that is a multiple of 16: the CUDA backend serves one to fifteen tokens with its GEMV that keeps four runs of
-        // 16 weights in flight (`gemv_dense_kernel`), which the odd width above never reaches. 2064 columns are 129 runs, so lane 0 takes a second round
-        // of the four-run loop; 13 and 37 rows leave a grid tail; batches 1-8 use one pass, 9 and 15 two (8 + 1, 8 + 7).
+        // Dense 16-bit weights with a width that is a multiple of 16: the CUDA backend serves one to eight tokens with its CUDA-core GEMV that keeps four
+        // runs of 16 weights in flight (`gemv_dense_kernel`), which the odd width above never reaches (the tensor-core GEMV and cuBLASLt decline in this
+        // exact pass, group `hgemm` checks them). 2064 columns are 129 runs, so lane 0 takes a second round of the four-run loop; 13 and 37 rows leave a
+        // grid tail; batches 1-8 use one pass, 9 and 15 two (8 + 1, 8 + 7).
         for kind in self.kinds(&[1u32, 30]) {
             for (rows, cols) in [(13usize, 64usize), (37, 2064)] {
                 for batch in [1usize, 2, 3, 5, 8, 9, 15] {

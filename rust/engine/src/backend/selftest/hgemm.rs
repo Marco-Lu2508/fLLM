@@ -15,8 +15,8 @@ impl Tester<'_> {
         set_cublaslt_mode(1);
         for kind in self.kinds(&[1u32, 30]) {
             for (rows, cols) in [(256usize, 512usize), (384, 1024)] {
-                for batch in [16usize, 17, 64, 129, 300] {
-                    let with_bias = batch == 17 || batch == 129;
+                for batch in [9usize, 12, 15, 16, 17, 64, 129, 300] {
+                    let with_bias = matches!(batch, 9 | 17 | 129);
                     let tol = if kind == 30 { 8e-3 } else { Self::FAST_TOL };
                     let r = self.linear(kind, rows, cols, batch, with_bias).map(|mut o| {
                         o.tol = o.tol.max(tol);
@@ -27,8 +27,68 @@ impl Tester<'_> {
             }
         }
         set_cublaslt_mode(-1);
+        self.skinny_cases();
         if std::env::var_os("FLLM_SELFTEST_BENCH").is_some_and(|v| v != "0") {
             self.hgemm_bench();
+            self.skinny_bench();
+        }
+    }
+
+    /// The tensor-core GEMV (`dense_skinny_kernel`, forced on) against the f64 reference. 2080 columns are 65 slabs of 32, so the eight warps of a block get
+    /// unequal shares; 13 and 37 rows leave a tail in the last block of 16 rows; batches 1-8 use one group of eight tokens, 9-16 two. The activations are
+    /// rounded to the weight's 16-bit format, as in the cuBLASLt cases.
+    fn skinny_cases(&mut self) {
+        use crate::backend::cuda::hopper_gemm::set_dense_skinny_mode;
+        set_dense_skinny_mode(1);
+        for kind in self.kinds(&[1u32, 30]) {
+            for (rows, cols) in [(13usize, 64usize), (37, 2080)] {
+                for batch in [1usize, 2, 3, 5, 8, 9, 15, 16] {
+                    let with_bias = batch % 2 == 1;
+                    let tol = if kind == 30 { 8e-3 } else { Self::FAST_TOL };
+                    let r = self.linear(kind, rows, cols, batch, with_bias).map(|mut o| {
+                        o.tol = o.tol.max(tol);
+                        o
+                    });
+                    self.record(&format!("tensor-core gemv {}", format_name(kind)), &format!("{rows}x{cols} batch {batch}{}", if with_bias { " +bias" } else { "" }), r);
+                }
+            }
+        }
+        set_dense_skinny_mode(-1);
+    }
+
+    /// One to sixteen tokens on the weights of a 7B-8B model: the tensor-core GEMV, the CUDA-core GEMV and cuBLASLt side by side (GB/s of weights read;
+    /// nothing is checked).
+    fn skinny_bench(&mut self) {
+        use crate::backend::cuda::hopper_gemm::set_dense_skinny_mode;
+        self.claim = None;
+        for kind in self.kinds(&[1u32, 30]) {
+            for (rows, cols) in [(3584usize, 3584usize), (18944, 3584), (3584, 18944), (512, 3584)] {
+                let weights = random_kind(&mut self.rng, kind, rows, cols);
+                for batch in [1usize, 2, 4, 8, 12, 16] {
+                    for (label, skinny, lt) in [("bench skinny", 1, 0), ("bench cuda-core", 0, 0), ("bench cublaslt", 0, 1)] {
+                        if lt == 1 && batch < 9 {
+                            continue; // cuBLASLt serves 9 tokens and more
+                        }
+                        set_dense_skinny_mode(skinny);
+                        set_cublaslt_mode(lt);
+                        let result = self
+                            .device
+                            .upload_weight("bench", &weights, QuantType::from_gguf_type_id(kind), rows, cols, None)
+                            .and_then(|w| self.bench_linear(&w, batch, 200));
+                        set_dense_skinny_mode(-1);
+                        set_cublaslt_mode(-1);
+                        let gbs = |ms: f64| (rows * cols * 2) as f64 / ms / 1e6;
+                        match result {
+                            Ok(ms) => self.record(
+                                &format!("{label} {}", format_name(kind)),
+                                &format!("{rows}x{cols} b{batch}: {:.0} GB/s", gbs(ms)),
+                                Ok(Outcome { device: 0.0, cpu: 0.0, tol: 1.0, cpu_tol: 1.0, ms }),
+                            ),
+                            Err(e) => self.record(&format!("{label} {}", format_name(kind)), &format!("{rows}x{cols} b{batch}"), Err(e)),
+                        }
+                    }
+                }
+            }
         }
     }
 

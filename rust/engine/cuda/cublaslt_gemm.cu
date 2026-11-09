@@ -9,7 +9,7 @@
 //
 // The FP32 activations are converted to the weight's 16-bit format in a scratch buffer, the product accumulates in FP32 and is written as FP32.
 // Switch FLLM_CUBLASLT = auto | 0 | 1 (fllm_cublaslt_set_mode overrides it): unset and auto use cuBLASLt on every device of compute capability 8.0 and
-// newer for batches of 16 tokens and more, 1 does the same, 0 never. Measured on an A100-SXM4-40GB (the self test group `hgemm` with
+// newer for batches of 9 tokens and more, 1 does the same, 0 never. Measured on an A100-SXM4-40GB (the self test group `hgemm` with
 // FLLM_SELFTEST_BENCH=1, 60 checks ok): 14.6 against 1.7 TFLOPS at 16 tokens, 108.9 against 25.0 at 256, 209.0 against 48.0 at 4096 (F16, 4096x4096),
 // and a 7B BF16 model at 16 users went from 161 to 671 tokens/s. Hopper and Blackwell run the same code path and are not measured.
 //
@@ -132,7 +132,7 @@ std::atomic_bool g_failed{false};  // a plan or call failed once: stay with the 
 int mode() {
     const int forced = g_mode.load();
     if (forced >= 0) return forced;
-    // unset = auto: on from compute capability 8.0 for 16 tokens and more (measured on an A100); FLLM_CUBLASLT=0 switches it off
+    // unset = auto: on from compute capability 8.0 for 9 tokens and more (measured on an A100); FLLM_CUBLASLT=0 switches it off
     static const int env = [] {
         const char *v = getenv("FLLM_CUBLASLT");
         return v == nullptr || *v == 0 ? -1 : fllm_env_tri("FLLM_CUBLASLT");
@@ -173,7 +173,7 @@ void fllm_cublaslt_set_mode(int mode_value) { g_mode.store(mode_value < -1 || mo
 int fllm_cublaslt_gemm_try(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias, int rows, int cols, int batch) {
     const int m = mode();
     if (m == 0 || g_failed.load() || (kind != KIND_F16 && kind != KIND_BF16) || fllm_exact_math() || fllm_cc() < 80) return -1;
-    if (batch < 16 || rows <= 0 || cols <= 0 || (cols & 7) != 0 || (rows & 3) != 0) return -1;
+    if (batch < 9 || rows <= 0 || cols <= 0 || (cols & 7) != 0 || (rows & 3) != 0) return -1;
     if ((reinterpret_cast<uintptr_t>(W) & 15) != 0 || (reinterpret_cast<uintptr_t>(X) & 15) != 0 || (reinterpret_cast<uintptr_t>(Y) & 15) != 0) return -1;
     const Api &lt = api();
     if (!lt.ok) {

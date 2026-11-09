@@ -1,4 +1,5 @@
 // fLLM CUDA backend: quantized linear layers (y = W x [+ bias]) and weight conversion.
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -7,7 +8,10 @@
 #include "common.cuh"
 #include "fllm_cuda_internal.h"
 #if !defined(__HIPCC__)
+#include <cuda_bf16.h>
+
 #include "fp8_gemm.h"
+#include "hopper_util.h"
 int fllm_cublaslt_gemm_try(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias, int rows, int cols, int batch);
 #endif
 
@@ -143,6 +147,15 @@ gemm_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *_
 }
 
 #if !defined(__HIPCC__)
+// The smallest batch the tensor-core GEMV (dense_skinny_kernel) takes when FLLM_CUDA_DENSE_SKINNY is not set; smaller batches use the CUDA-core GEMV below.
+#ifndef FLLM_DENSE_SKINNY_MIN_BATCH
+#define FLLM_DENSE_SKINNY_MIN_BATCH 1
+#endif
+// ... and the largest (9 tokens and more go to cuBLASLt unless the switch forces this kernel: the activations are read once per 16 rows, so
+// the traffic from the L2 cache grows with the batch while cuBLASLt's tiles reuse them)
+#ifndef FLLM_DENSE_SKINNY_MAX_BATCH
+#define FLLM_DENSE_SKINNY_MAX_BATCH 8
+#endif
 // ---------------------------------------------------------------------------------------------
 // Dense 16-bit weights (F16 / BF16), one to eight tokens: `gemv_kernel` with the weights of four runs in flight.
 //
@@ -216,6 +229,147 @@ gemv_dense_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, fl
 #pragma unroll
         for (int b = 0; b < NB; b++) Y[(size_t)(b0 + b) * rows + row] = acc[b] + bv;
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Dense 16-bit weights, one to sixteen tokens on the tensor cores: the weights stream through registers once, nothing else touches them.
+//
+// Y^T (rows x tokens) = W (rows x cols) * X^T with `mma.m16n8k16`: the weights are the A operand (16 rows per block), the tokens the B operand (one or two
+// groups of eight), the activations are rounded to the weight's 16-bit format in registers and the products accumulate in FP32 (the rounding that the
+// cuBLASLt path and tc_gemm.cu apply as well). The eight warps of a block split the columns in slabs of 32, take their weights as 16-byte loads (a lane holds 8
+// consecutive columns of two rows, so nothing is staged in shared memory), keep four slabs in flight, and add their partial sums at the end, so the
+// whole product is one launch with no split-K reduction kernel, no conversion kernel for the activations and the bias folded into the write.
+// The columns of a slab are assigned to the lanes in the order the loads deliver them and the same order is used for the activations; the sum over the
+// 16 columns of an `mma` does not depend on that order.
+// Needs cols % 32 == 0 and 16-byte aligned weights and activations.
+// ---------------------------------------------------------------------------------------------
+template <bool BF16>
+__device__ __forceinline__ void mma_dense16(float c[4], const uint32_t a[4], uint32_t b0, uint32_t b1) {
+    if (BF16) {
+        asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                     : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+                     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+    } else {
+        asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                     : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+                     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+    }
+}
+
+template <bool BF16>
+__device__ __forceinline__ uint32_t pack_dense16(float lo, float hi) {
+    if (BF16) {
+        const __nv_bfloat162 v = __floats2bfloat162_rn(lo, hi);
+        return *reinterpret_cast<const uint32_t *>(&v);
+    }
+    const __half2 v = __floats2half2_rn(lo, hi);
+    return *reinterpret_cast<const uint32_t *>(&v);
+}
+
+template <bool BF16, int NT, int WARPS>
+__global__ void __launch_bounds__(WARPS * 32)
+dense_skinny_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ Y, const float *__restrict__ bias, int rows, int cols,
+                    int batch) {
+    constexpr int U = 4;  // slabs in flight per warp
+    __shared__ float partial[WARPS][NT][4][32];
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int q = lane & 3, g = lane >> 2;
+    const int row0 = blockIdx.x * 16 + g, row1 = row0 + 8;
+    const uint4 *w0 = reinterpret_cast<const uint4 *>(W + (size_t)(row0 < rows ? row0 : rows - 1) * cols * 2);
+    const uint4 *w1 = reinterpret_cast<const uint4 *>(W + (size_t)(row1 < rows ? row1 : rows - 1) * cols * 2);
+    const float4 *xp[NT];
+    bool live[NT];
+#pragma unroll
+    for (int t = 0; t < NT; t++) {
+        const int tok = 8 * t + g;
+        live[t] = tok < batch;
+        xp[t] = reinterpret_cast<const float4 *>(X + (size_t)(live[t] ? tok : 0) * cols) + q * 2;
+    }
+    float c[NT][4];
+#pragma unroll
+    for (int t = 0; t < NT; t++)
+#pragma unroll
+        for (int i = 0; i < 4; i++) c[t][i] = 0.f;
+    const int slabs = cols >> 5;
+    for (int s0 = warp; s0 < slabs; s0 += WARPS * U) {
+        uint4 wa[U], wb[U];
+#pragma unroll
+        for (int u = 0; u < U; u++) {
+            const int s = s0 + u * WARPS;
+            if (s < slabs) {
+                wa[u] = __ldg(w0 + s * 4 + q);
+                wb[u] = __ldg(w1 + s * 4 + q);
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < U; u++) {
+            const int s = s0 + u * WARPS;
+            if (s < slabs) {
+                uint32_t b[NT][4];
+#pragma unroll
+                for (int t = 0; t < NT; t++) {
+                    float4 x0 = make_float4(0.f, 0.f, 0.f, 0.f), x1 = x0;
+                    if (live[t]) {
+                        x0 = __ldg(xp[t] + s * 8);
+                        x1 = __ldg(xp[t] + s * 8 + 1);
+                    }
+                    b[t][0] = pack_dense16<BF16>(x0.x, x0.y);
+                    b[t][1] = pack_dense16<BF16>(x0.z, x0.w);
+                    b[t][2] = pack_dense16<BF16>(x1.x, x1.y);
+                    b[t][3] = pack_dense16<BF16>(x1.z, x1.w);
+                }
+                const uint32_t a1[4] = {wa[u].x, wb[u].x, wa[u].y, wb[u].y};
+                const uint32_t a2[4] = {wa[u].z, wb[u].z, wa[u].w, wb[u].w};
+#pragma unroll
+                for (int t = 0; t < NT; t++) {
+                    mma_dense16<BF16>(c[t], a1, b[t][0], b[t][1]);
+                    mma_dense16<BF16>(c[t], a2, b[t][2], b[t][3]);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int t = 0; t < NT; t++)
+#pragma unroll
+        for (int i = 0; i < 4; i++) partial[warp][t][i][lane] = c[t][i];
+    __syncthreads();
+    // the first warp adds the partial sums of all warps and writes the 16 x (8 * NT) block
+    if (warp == 0) {
+#pragma unroll
+        for (int t = 0; t < NT; t++) {
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                float sum = 0.f;
+#pragma unroll
+                for (int w = 0; w < WARPS; w++) sum += partial[w][t][i][lane];
+                const int row = blockIdx.x * 16 + g + 8 * (i >> 1);
+                const int tok = 8 * t + 2 * q + (i & 1);
+                if (row < rows && tok < batch) Y[(size_t)tok * rows + row] = sum + (bias ? bias[row] : 0.f);
+            }
+        }
+    }
+}
+
+static std::atomic<int> g_dense_skinny_mode{-1};
+// -1: environment (FLLM_CUDA_DENSE_SKINNY = auto | 0 | 1), 0: never, 1: always where the shape fits; used by the self test to compare the paths
+extern "C" void fllm_dense_skinny_set_mode(int mode) { g_dense_skinny_mode.store(mode < -1 || mode > 1 ? -1 : mode); }
+
+template <uint32_t KIND>
+static bool dense_skinny_try(cudaStream_t s, const uint8_t *W, const float *X, float *Y, const float *bias, int rows, int cols, int batch) {
+    static const int env = [] {
+        const char *v = getenv("FLLM_CUDA_DENSE_SKINNY");
+        return v == nullptr || *v == 0 ? -1 : fllm_env_tri("FLLM_CUDA_DENSE_SKINNY");
+    }();
+    const int forced = g_dense_skinny_mode.load();
+    const int mode = forced >= 0 ? forced : env;
+    if (mode == 0 || batch < 1 || batch > 16 || (cols & 31) != 0 || rows <= 0 || fllm_exact_math() || fllm_cc() < 80) return false;
+    if (mode < 0 && (batch < FLLM_DENSE_SKINNY_MIN_BATCH || batch > FLLM_DENSE_SKINNY_MAX_BATCH)) return false;
+    if ((reinterpret_cast<uintptr_t>(W) & 15) != 0 || (reinterpret_cast<uintptr_t>(X) & 15) != 0) return false;
+    constexpr bool bf16 = KIND == KIND_BF16;
+    const dim3 grid((rows + 15) / 16);
+    if (batch <= 8) dense_skinny_kernel<bf16, 1, 8><<<grid, 256, 0, s>>>(W, X, Y, bias, rows, cols, batch);
+    else dense_skinny_kernel<bf16, 2, 8><<<grid, 256, 0, s>>>(W, X, Y, bias, rows, cols, batch);
+    return true;
 }
 
 // 1..15 tokens in passes of up to eight; returns false (nothing launched) when the shape or the alignment does not fit.
@@ -306,10 +460,17 @@ static int launch_kind(cudaStream_t s, const uint8_t *W, const float *X, float *
         fllm_mmvq_try(s, W, KIND, X, Y, bias, rows, cols, batch, x16, x16_bytes))
         return fllm_check_launch("linear");
 #if !defined(__HIPCC__)
+    // F16 / BF16 weights, up to sixteen tokens: the tensor-core GEMV reads the activation itself, so a gated activation is computed first
+    if constexpr (KIND == KIND_F16 || KIND == KIND_BF16) {
+        if (batch <= 16) {
+            X = glu_recover(s, X, batch, cols);
+            if (dense_skinny_try<KIND>(s, W, X, Y, bias, rows, cols, batch)) return fllm_check_launch("linear");
+        }
+    }
     // (cuBLASLt and the int8 GEMM below do not fold a gated activation into their input)
     if ((KIND == KIND_Q8_0 || KIND == KIND_F16 || KIND == KIND_BF16) && batch >= 16) X = glu_recover(s, X, batch, cols);
     // dense 16-bit weights, prompt batches: cuBLASLt loaded at run time (cublaslt_gemm.cu; Hopper / Blackwell kernels), else the built-in GEMM below
-    if ((KIND == KIND_F16 || KIND == KIND_BF16) && batch >= 16) {
+    if ((KIND == KIND_F16 || KIND == KIND_BF16) && batch >= 9) {
         const int rc = fllm_cublaslt_gemm_try(s, W, KIND, X, Y, bias, rows, cols, batch);
         if (rc >= 0) return rc;
     }

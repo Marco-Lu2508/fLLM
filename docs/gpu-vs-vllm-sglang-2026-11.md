@@ -55,5 +55,29 @@ cell where SGLang is slow (868 against vLLM's 1791); against the best rival it i
   datacenters run (vLLM, SGLang) read bf16 and AWQ/FP8 checkpoints, where this table shows the gap. The next step is a per-kernel profile on this
   card (`FLLM_CUDA_PROFILE=1`) for the bf16 projection and attention paths, before any change.
 
+## After the first fixes (same card, same models, `4e97034`)
+
+The profile (`FLLM_CUDA_PROFILE=1`, nsys with `--cuda-graph-trace=node`) found three causes, which are fixed in `4978046` (cuBLASLt from 16 tokens and a
+GEMV with four runs in flight), `4e97034` (sampling on the device) and the commit after them (a tensor-core GEMV for 1-8 tokens, cuBLASLt from 9). The
+same compare script, vLLM and SGLang run again next to it (raw results of the vLLM and the SGLang run in `compare_result.json`):
+
+| Qwen2.5-7B-Instruct | fLLM before | fLLM `4e97034` | best rival | ratio before | ratio now |
+|---|---|---|---|---|---|
+| bf16, 100-token prompt, 1 user | 48 | 76.9 | 81.8 (SGLang) | 0.59 | 0.94 |
+| bf16, 100, 16 users | 155 | 756 / 749 | 1078 (vLLM) | 0.14 | 0.70 |
+| bf16, 2000, 1 user | - | 59.7 | 71.7 (SGLang) | - | 0.83 |
+| bf16, 2000, 16 users | - | 201 | 362 (SGLang) | - | 0.56 |
+| AWQ, 100, 1 user | - | 167 | 171 (vLLM) | 0.80-0.88 | 0.98 |
+| AWQ, 100, 16 users | - | 1240 | 1789 (vLLM) | 0.54 | 0.69 |
+| AWQ, 2000, 1 user | - | 107 | 132 (SGLang) | - | 0.81 |
+| AWQ, 2000, 16 users | - | 228 | 353 (SGLang) | 0.62 | 0.65 |
+
+(The two fLLM columns come from one run each; the vLLM and the SGLang run each measured fLLM as well, the values differ by about 1 %.) Against SGLang alone
+fLLM is ahead at 16 users with short prompts (AWQ 1.43x, bf16 1.22x).
+
+Still behind, in the order of the gap: long prompts with 16 users (prefill of 33k tokens: 0.56-0.65x), 16 users with short prompts against vLLM (0.69-0.70x:
+the CUDA-graph launch of a step takes 1.3 ms during which the GPU idles, cuBLASLt's split-K reduction and the per-projection conversion of the
+activations cost 8 % of the GPU time), one user with a long prompt (0.81-0.83x).
+
 Not measured: FP8, GPTQ, MoE models, a longer output, more than 16 users, other cards, ROCm, more than one GPU, quality (only the first answer was compared).
 Raw results: `compare_result.json` of both runs (`schema_version 2`, `vs_best_rival` per engine).
