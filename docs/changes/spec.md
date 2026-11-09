@@ -35,7 +35,7 @@ change was run on a GPU**: every CUDA statement is L0. CPU statements say `cargo
   (`use_beam_search` was rejected here at the time; it is implemented now, see `docs/api-compat.md`.)
 * CUDA sampler `cuda/sampling.cu` + `Stream::sample_rows` + capability `sample_on_device` (true on CUDA and the CPU backend): bias, penalties, grammar bitmask,
   temperature, top-k, min-p, typical-p, top-p, Gumbel-max draw with Philox noise, raw or processed log-probabilities with top-N alternatives. Host reference
-  `sampling::device_sample_reference` (sorting instead of bisection). `FLLM_DEVICE_SAMPLING=1` routes decode steps through it (default off).
+  `sampling::device_sample_reference` (sorting instead of bisection). `FLLM_DEVICE_SAMPLING` routes decode steps through it (default on for CUDA since the A100 run, off elsewhere).
   Not on the device: DRY, Mirostat, grammar-constrained rows (they stay on the host), logit scale / soft-cap models.
   `selftest-gpu --only sampling` has five new checks: controls (exact), filters (exact up to boundary rows), log-probabilities, batch independence, distribution.
 
@@ -68,7 +68,7 @@ raises the CUDA graph buckets to 128 / 256 rows. Also fixes a scheduler error af
 | `FLLM_SPEC_EXACT` | on | `0` lets the verification pass use the prompt kernels (faster on some CPUs, greedy text can then differ from plain decoding on a near-tie); see [../speculative-decoding.md](../speculative-decoding.md#exactness) |
 | `FLLM_BATCH_INVARIANT` | off | `1` keeps the batch-invariant CPU kernels for every call, so that a request gives the same bits whatever else runs beside it (slower prompts) |
 | `FLLM_SAMPLER_RNG` | `philox` | `xorshift` = previous generator |
-| `FLLM_DEVICE_SAMPLING` | off | `1` samples decode steps on the CUDA device |
+| `FLLM_DEVICE_SAMPLING` | on for CUDA, off elsewhere | `0` samples on the host, `1` asks for the device sampler |
 | `--scheduling-policy` | `fcfs` | `priority`: smaller `priority` first, with preemption |
 | `--max-seqs` | 16 | a number or `auto` (GPU: pool tokens / 512, at most 256; CPU 16) |
 | `--kv-watermark-blocks` | pool / 100, at most 64 | blocks kept free at admission |

@@ -201,7 +201,7 @@ Run each with a repetitive workload (a code-editing or summarization prompt) and
 
 ## Device sampling
 
-`FLLM_DEVICE_SAMPLING=1` runs the sampler of decode steps on the CUDA device instead of copying the logits of every sampled row to the
+`FLLM_DEVICE_SAMPLING` (on by default when the model runs on CUDA, `0` keeps the host sampler, `1` asks for it on any backend) runs the sampler of decode steps on the CUDA device instead of copying the logits of every sampled row to the
 host: logit bias, repetition / presence / frequency penalties, the `min_tokens`, `allowed_token_ids` and `bad_words` controls,
 temperature, top-k, min-p, typical-p, top-p, a seeded draw and the log-probabilities (see `cuda/sampling.cu`). The draw is a
 Gumbel-max over the surviving tokens with Philox-4x32-10 noise keyed by the request seed, the draw number and the token id, so it
@@ -209,8 +209,9 @@ depends on nothing but `(seed, draw number, logits)`. The host sampler uses the 
 (`FLLM_SAMPLER_RNG=xorshift` restores the old generator). The device and the host sampler are separate implementations: they select
 the same *distribution* (tested statistically), and `sampling::device_sample_reference` is the host function that reproduces the
 device's choice token for token. Ties at a top-k, top-p or typical-p threshold are kept on the device. Grammar-constrained rows send
-the mask as a bitmask; DRY and Mirostat rows keep sampling on the host. Default: off, until the device kernels have been run on a GPU
-(`fllm-rs selftest-gpu --only sampling`).
+the mask as a bitmask; DRY and Mirostat rows keep sampling on the host. Default: on for CUDA since the device kernels ran on an A100 (`fllm-rs selftest-gpu --only sampling`: 16 checks ok; Qwen2.5-7B bf16, 16 users with
+`temperature 0.7`, `top_p 0.95`: 336 -> 786 tokens/s; seeded repeats equal, other seeds differ, log-probabilities sorted, a JSON schema and a stop
+sequence honoured, frequency penalty as on the host). Not measured: other cards, ROCm.
 
 ## Scheduling
 

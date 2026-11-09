@@ -1074,7 +1074,7 @@ enum GraphMode<'a> {
 static GREEDY_IDS_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static GREEDY_IDS: std::sync::Mutex<Option<Vec<i32>>> = std::sync::Mutex::new(None);
 
-/// The rows of the next forward pass that the device should sample (`FLLM_DEVICE_SAMPLING=1`, see docs/speculative-decoding.md), and the
+/// The rows of the next forward pass that the device should sample (`FLLM_DEVICE_SAMPLING`, on by default on CUDA, see docs/speculative-decoding.md), and the
 /// result. Like the greedy ids they travel through statics because the decoder is shared by the runtime and the draft engines.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DeviceSampleJob {
@@ -1093,10 +1093,30 @@ impl DeviceSampleJob {
 static SAMPLE_JOB: std::sync::Mutex<Option<DeviceSampleJob>> = std::sync::Mutex::new(None);
 static SAMPLE_RESULT: std::sync::Mutex<Option<crate::backend::SampleOutput>> = std::sync::Mutex::new(None);
 
-/// `FLLM_DEVICE_SAMPLING`: `1`, `on` or `true` sample decode steps on the device (default: off until the kernels were run on a GPU).
+/// `FLLM_DEVICE_SAMPLING`: `0`, `off` or `false` keep the sampler of decode steps on the host, `1`, `on` or `true` ask for the device sampler on any
+/// backend (one without the kernel warns once and samples on the host). Unset, it is on when the model runs on a CUDA device (the kernels passed
+/// the `sampling` self test on an A100 and sampled requests of 16 users went from 336 to 786 tokens/s there) and off elsewhere.
 pub(crate) fn device_sampling_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| matches!(std::env::var("FLLM_DEVICE_SAMPLING").ok().as_deref(), Some("1" | "on" | "true")))
+    static ENV: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let env = ENV.get_or_init(|| std::env::var("FLLM_DEVICE_SAMPLING").ok());
+    device_sampling_choice(env.as_deref(), DEVICE_SAMPLING_DEFAULT.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The value of `FLLM_DEVICE_SAMPLING` (if set) against the default of the backend.
+fn device_sampling_choice(env: Option<&str>, backend_default: bool) -> bool {
+    match env.map(str::trim) {
+        Some("1" | "on" | "true") => true,
+        Some("0" | "off" | "false") => false,
+        _ => backend_default,
+    }
+}
+
+static DEVICE_SAMPLING_DEFAULT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The backend a model runs on decides the default of [`device_sampling_enabled`] (set when a CUDA backend is initialised).
+#[cfg(feature = "cuda")]
+pub(crate) fn set_device_sampling_default(on: bool) {
+    DEVICE_SAMPLING_DEFAULT.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Run the job on the device if the backend can; `None` leaves the logits to the caller.
@@ -2792,6 +2812,7 @@ impl RustDecoder {
                 crate::backend::cuda::CudaBackend::new(selected_dev_id).map_err(|e| e.to_string())?,
             );
             self.init_backend(backend)?;
+            set_device_sampling_default(true);
             eprintln!("[fllm-rs] Unified accelerator backend enabled: cuda:{selected_dev_id}");
             return Ok(());
         }
@@ -9537,3 +9558,27 @@ mod q8_upload_tests {
         assert!(super::quantize_q8_0(&[0.0; 32]).iter().skip(2).all(|&b| b == 0));
     }
 }
+
+#[cfg(test)]
+mod device_sampling_default_tests {
+    use super::device_sampling_choice;
+
+    #[test]
+    fn the_variable_wins_and_an_unknown_value_keeps_the_backend_default() {
+        for (env, default, want) in [
+            (None, true, true),
+            (None, false, false),
+            (Some("0"), true, false),
+            (Some("off"), true, false),
+            (Some("false"), true, false),
+            (Some("1"), false, true),
+            (Some(" on "), false, true),
+            (Some("true"), false, true),
+            (Some(""), true, true),
+            (Some("maybe"), false, false),
+        ] {
+            assert_eq!(device_sampling_choice(env, default), want, "{env:?} with default {default}");
+        }
+    }
+}
+
