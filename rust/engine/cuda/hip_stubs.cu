@@ -58,6 +58,8 @@ int fllm_marlin_q4k_try(cudaStream_t, const void *, const float *, float *, cons
 // Datacenter Blackwell NVFP4 (nvfp4_cutlass_sm100.cu) and the device report (arch_report.cu) are NVIDIA-only
 extern "C" int fllm_cuda_nvfp4_sm100_native(int) { return 0; }
 extern "C" int fllm_cuda_nvfp4_mma_native(int) { return 0; }
+// (the tensor-core GEMV for dense 16-bit weights is CUDA only, linear.cu)
+extern "C" void fllm_dense_skinny_set_mode(int) {}
 extern "C" int fllm_cuda_fast_paths(int, char *buf, size_t len) {
     if (buf != nullptr && len > 0) buf[0] = 0;
     return 0;

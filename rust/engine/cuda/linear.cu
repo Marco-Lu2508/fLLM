@@ -244,6 +244,10 @@ gemv_dense_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, fl
 // ---------------------------------------------------------------------------------------------
 template <bool BF16>
 __device__ __forceinline__ void mma_dense16(float c[4], const uint32_t a[4], uint32_t b0, uint32_t b1) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800)
+    // (Turing has no m16n8k16: the host never launches the kernel below compute capability 8.0, `fllm_cc() < 80` in dense_skinny_try)
+    (void)c; (void)a; (void)b0; (void)b1;
+#else
     if (BF16) {
         asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
                      : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
@@ -253,6 +257,7 @@ __device__ __forceinline__ void mma_dense16(float c[4], const uint32_t a[4], uin
                      : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
                      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
     }
+#endif
 }
 
 template <bool BF16>

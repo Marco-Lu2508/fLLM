@@ -84,7 +84,7 @@ activations cost 8 % of the GPU time), one user with a long prompt (0.81-0.83x).
 A 2039-token prompt takes 164 ms of GPU time in total, of which the GEMMs are 107 ms (247 TFLOPS of the 312, the same cuBLAS kernels vLLM uses),
 FFN gate / activation conversions 22 ms, prompt attention 7 ms, the rest 28 ms; the changes of this round took about 6 ms off the time to the first token. A decode step with 16 users
 is 15.6 ms (see the changelog for the breakdown): at 11.9 ms the GEMMs stream the weights at the card's practical bandwidth, so what is left is the
-host-side path between two steps (about 1.4 ms) and about 2 ms of small kernels. 16 users with short prompts: 875 tokens/s (0.81 of vLLM's 1078), one user 82 tokens/s
+host-side path between two steps (about 1.4 ms) and about 2 ms of small kernels. Two attempts to shorten that path did nothing and were dropped: cutting the recorded graph into four (81.7 -> 79.5 tokens/s for one user) and moving the four staged-array copies out of the graph (81.8 -> 81.9); the trace shows why: the GPU cannot start before `cudaGraphLaunch` returns (0.55-0.7 ms for about 680 nodes), so the cost is the launch call itself, and only launching the next step before the host knows the sampled ids (asynchronous scheduling) or far fewer nodes would remove it. 16 users with short prompts: 875 tokens/s (0.81 of vLLM's 1078), one user 82 tokens/s
 (vLLM 80.6, SGLang 81.8), four users 257 and eight users 471 sampled tokens/s (from 129 and 132 at the start of the day).
 
 Not measured: FP8, GPTQ, MoE models, a longer output, more than 16 users, other cards, ROCm, more than one GPU, quality (only the first answer was compared).
