@@ -383,6 +383,24 @@ def best_ratio(table, names, i):
     return {"fllm_tok_s": mine, "best_rival": best, "best_rival_tok_s": rivals[best], "ratio_vs_best": round(mine / rivals[best], 2)}
 
 
+def engine_versions(engines):
+    """The version string of every rival that is installed, so a result file says what it measured (pip gives the newest release of the day)."""
+    out = {}
+    for name, binary in engines.items():
+        if not binary or name in ("fllm", "ollama"):
+            continue
+        if name == "vllm":
+            cmd = f"{os.path.join(os.path.dirname(binary), 'python')} -c 'import vllm; print(vllm.__version__)'"
+        elif name == "sglang":
+            cmd = f"{binary} -c 'import sglang; print(sglang.__version__)'"
+        else:
+            cmd = f"LD_LIBRARY_PATH={os.path.dirname(binary)} {binary} --version 2>&1 | tail -1"
+        rc, text = sh(cmd, timeout=120)
+        if rc == 0 and text.strip():
+            out[name] = text.strip().splitlines()[-1][:120]
+    return out
+
+
 def fllm_control_options(extra_args):
     """The plain-decoding control must not silently enable a different workload."""
     args = shlex.split(extra_args)
@@ -459,6 +477,7 @@ def main():
     log(f"engines: {result['engines']}")
     if engines.get("fllm"):
         result["fllm_version"] = sh(f"{engines['fllm']} --version")[1].strip()[:200]
+    result["engine_versions"] = engine_versions(engines)
 
     result["models"] = {}
     for key in args.models.split(","):

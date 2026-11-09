@@ -337,6 +337,26 @@ class BestRivalTests(unittest.TestCase):
         self.assertIsNone(compare.best_ratio(self.table(vllm=50.0), ["vllm"], 0))
 
 
+class EngineVersionTests(unittest.TestCase):
+    def test_every_installed_rival_reports_its_version_and_missing_ones_are_left_out(self):
+        calls = []
+
+        def fake(cmd, timeout=None, env=None):
+            calls.append(cmd)
+            return 0, "banner line\n9.8.7\n"
+
+        with patch.object(compare, "sh", side_effect=fake):
+            got = compare.engine_versions({"fllm": "/b/fllm-rs", "vllm": "/env/bin/vllm", "sglang": "/sg/bin/python",
+                                           "llama.cpp": "/l/llama-server", "ik_llama.cpp": None, "ollama": "/usr/bin/ollama"})
+        self.assertEqual(got, {"vllm": "9.8.7", "sglang": "9.8.7", "llama.cpp": "9.8.7"})
+        self.assertTrue(any("/env/bin/python -c" in c and "vllm" in c for c in calls))
+        self.assertTrue(any(c.startswith("/sg/bin/python -c") and "sglang" in c for c in calls))
+
+    def test_a_failing_version_probe_is_not_invented(self):
+        with patch.object(compare, "sh", return_value=(1, "boom")):
+            self.assertEqual(compare.engine_versions({"vllm": "/env/bin/vllm"}), {})
+
+
 def run_mutations():
     """Compile valid mutants without touching the source or creating extra files."""
     source = SOURCE.read_text()
@@ -356,6 +376,8 @@ def run_mutations():
          '"m", logfile=f"fllm-{key}.log"'),
         ("batch seed not passed from CLI", 'extra, seed=args.seed)', 'extra, seed=0)'),
         ("truncated streams accepted", 'if not done:', 'if False:'),
+        ("version probe result invented", 'if rc == 0 and text.strip():', 'if True:'),
+        ("vllm probed with the wrong interpreter", "os.path.join(os.path.dirname(binary), 'python')", "'python3'"),
         ("weakest rival as yardstick", 'best = max(rivals, key=rivals.get)', 'best = min(rivals, key=rivals.get)'),
         ("ratio inverted", '"ratio_vs_best": round(mine / rivals[best], 2)', '"ratio_vs_best": round(rivals[best] / mine, 2)'),
         ("failed rival counted", 'return r.get("total_tok_s") if "error" not in r else None', 'return r.get("total_tok_s") or 1.0e9'),
@@ -368,7 +390,7 @@ def run_mutations():
         exec(compile(source.replace(old, new, 1), str(SOURCE), "exec"), mutant.__dict__)
         stream = io.StringIO()
         suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(cls)
-                                   for cls in (StreamTests, MeasurementTests, BestRivalTests))
+                                   for cls in (StreamTests, MeasurementTests, BestRivalTests, EngineVersionTests))
         with patch.object(sys.modules[__name__], "compare", mutant), contextlib.redirect_stdout(io.StringIO()):
             result = unittest.TextTestRunner(stream=stream).run(suite)
         # A thrown exception alone does not prove an assertion detects the regression.

@@ -204,6 +204,7 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
 
 Paired CUDA follow-up measurements (L4 Q2_K concurrency, exact server token counts,
 cache/speculation controls, numerical limits): [Colab kernel follow-up](docs/colab-kernel-fixes-2026-11.md).
+fLLM against vLLM and SGLang on one A100 (Qwen2.5-7B bf16 and AWQ INT4, 1 and 16 users): [GPU against vLLM and SGLang](docs/gpu-vs-vllm-sglang-2026-11.md). fLLM is behind the best engine in all eight cells there (0.14x to 0.88x).
 CPU decoding on a Zen 5 host against llama.cpp and ik_llama.cpp (exact server tokens, one seed,
 caches and speculation off): [CPU decoding](docs/cpu-decoding-2026-11.md).
 The earlier [multi-card comparison](docs/colab-comparison-2026-11.md) is exploratory,
