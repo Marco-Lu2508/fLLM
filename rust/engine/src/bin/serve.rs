@@ -1493,8 +1493,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // prompt chunks of 1024 tokens fill the GEMM tiles better (NVFP4 prompts +8 %); a discrete card that serves
                         // several sequences takes 2048 (the prompts of several users need half the steps, as with vLLM's default
                         // budget); either only if the plan stays the same apart from a little less KV cache
+                        // (a pool that still holds the context twice over is enough: with --ctx times --max-seqs asked for, the pool is limited by the
+                        // device whatever the chunk size, and 90 % of "all the memory" would never be kept)
+                        let block_tokens = model.block_size();
                         let keeps = |bigger: &fllm_engine::backend::memory::MemoryPlan| {
-                            bigger.offload_layers == first.offload_layers && bigger.kv_block_count * 10 >= first.kv_block_count * 9
+                            bigger.offload_layers == first.offload_layers
+                                && (bigger.kv_block_count * 10 >= first.kv_block_count * 9 || bigger.kv_block_count * block_tokens >= 2 * context)
                         };
                         let wide = (!unified && max_sequences > 1).then(|| plan_for(&model, 2048).ok()).flatten().filter(|b| keeps(b));
                         match wide {

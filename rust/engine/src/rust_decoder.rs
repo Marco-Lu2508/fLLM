@@ -1032,6 +1032,19 @@ pub type SharedRopeTable = (Arc<Vec<f32>>, Arc<Vec<f32>>);
 /// Batch sizes a decode step is padded to when it runs as a CUDA graph.
 const GRAPH_BUCKETS: [usize; 9] = [1, 2, 4, 8, 16, 32, 64, 128, 256];
 
+/// Block tables of `rows` rows of equal width (`tables.len() / rows`) padded to `stride` entries per row with -1.
+fn pad_tables(rows: usize, stride: usize, tables: &[i64]) -> Vec<i64> {
+    let width = tables.len() / rows.max(1);
+    let mut full = vec![-1i64; rows * stride];
+    for r in 0..rows {
+        full[r * stride..r * stride + width].copy_from_slice(&tables[r * width..(r + 1) * width]);
+    }
+    full
+}
+
+/// Batches whose block tables hold at least this many entries (rows x stride) are packed to the blocks of their longest row (`compact_stride`).
+const COMPACT_TABLE_ENTRIES: usize = 1 << 15;
+
 /// Largest batch a decode step may have to run as a CUDA graph: `FLLM_CUDA_GRAPH_MAX_ROWS` (default 64, at most 256, in the buckets).
 fn graph_max_rows() -> usize {
     static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -4429,9 +4442,15 @@ impl RustDecoder {
         let mtp = usize::from(self.mtp.is_some());
         let max_position = self.max_position();
         // The CPU path's batch checks, minus the host cache sizes.
+        // entries per row of the block tables: `stride`, or fewer when the caller packed them (the layers that read them with the full stride are the
+        // ones `narrow_tables_ok` rules out)
+        let tstride = tables.len().checked_div(rows).unwrap_or(0);
         if rows == 0
             || lengths.len() != rows
-            || tables.len() != rows * self.stride
+            || tables.len() != rows * tstride
+            || tstride == 0
+            || tstride > self.stride
+            || (tstride < self.stride && !self.narrow_tables_ok())
             || ids
                 .iter()
                 .any(|&id| id < 0 || id as usize >= self.embedding.rows)
@@ -4457,11 +4476,11 @@ impl RustDecoder {
             {
                 return Err("invalid Rust decoder position".into());
             }
-            let table = &tables[r * self.stride..(r + 1) * self.stride];
+            let table = &tables[r * tstride..(r + 1) * tstride];
             let position = length as usize - 1 + mtp;
             let used = (length as usize).div_ceil(self.block_size);
             let current = position / self.block_size;
-            if used > self.stride || current >= self.stride {
+            if used > tstride || current >= tstride {
                 return Err("invalid Rust decoder KV block".into());
             }
             for &block in table[..used].iter().chain(&table[current..=current]) {
@@ -4473,6 +4492,21 @@ impl RustDecoder {
             // Cache slot of this row's current position, written by every attention layer.
             slots.push(table[current] as usize * self.block_size + position % self.block_size);
         }
+        // A block table has `self.stride` entries per row, enough for the longest context the server was started with (`--ctx`), and every token row of a
+        // prompt chunk carries one: 2000 rows of a 98k-token server are 100 MB of tables to build and upload for each chunk (a 16-user load with 2000-token
+        // prompts ran 35 % slower at --ctx 98560 than at 4096, with the same kernels). The batch needs the blocks of its longest row only.
+        let compact: Vec<i64>;
+        let (tables, stride) = match self.compact_stride(rows, lengths, tstride, &graph) {
+            Some(eff) => {
+                let mut packed = Vec::with_capacity(rows * eff);
+                for r in 0..rows {
+                    packed.extend_from_slice(&tables[r * tstride..r * tstride + eff]);
+                }
+                compact = packed;
+                (&compact[..], eff)
+            }
+            None => (tables, tstride),
+        };
 
         let not_ready = "accelerator backend is not initialised";
         let stream_lock = self.backend_stream.as_ref().ok_or(not_ready)?;
@@ -5132,7 +5166,7 @@ impl RustDecoder {
                     num_kv_heads: layer_kv_heads,
                     head_dim: dk,
                     value_dim: dv,
-                    stride: self.stride,
+                    stride,
                     block_size: self.block_size,
                     scale: cfg.attention_scale.unwrap_or(1.0 / (dk as f32).sqrt()),
                     softcap: cfg.attention_softcap,
@@ -8369,10 +8403,41 @@ impl RustDecoder {
         overrides: &[(usize, Vec<f32>)],
         capture: Option<&mut Vec<f32>>,
     ) -> Result<Vec<f32>, String> {
+        // Block tables may be narrower than `stride` (the runtime packs them to the blocks of the longest row, see `compact_stride`); everything
+        // but the plain device path wants the full width
+        let widened;
+        let tables = if self.is_narrow(ids.len(), tables) && (self.par.is_some() || !self.narrow_tables_ok()) {
+            widened = self.widen_tables(ids.len(), tables);
+            &widened[..]
+        } else {
+            tables
+        };
         if let Some(par) = self.par.clone() {
             return self.par_forward(&par, ids, lengths, tables, key, value, logit_rows, embeddings, overrides, capture);
         }
         self.forward_batch(ids, lengths, tables, key, value, logit_rows, embeddings, overrides, capture)
+    }
+
+    /// Are these block tables narrower than the full `stride` (a whole number of entries per row, fewer than `stride`)?
+    fn is_narrow(&self, rows: usize, tables: &[i64]) -> bool {
+        rows > 0 && tables.len() != rows * self.stride && tables.len().is_multiple_of(rows) && tables.len() / rows < self.stride && !tables.is_empty()
+    }
+
+    /// The tables with every row padded to `stride` entries with -1.
+    fn widen_tables(&self, rows: usize, tables: &[i64]) -> Vec<i64> {
+        pad_tables(rows, self.stride, tables)
+    }
+
+    /// Can the device forward pass read tables narrower than `stride`? Only when every layer is plain paged attention on the device
+    /// (see `compact_stride`; the same conditions).
+    fn narrow_tables_ok(&self) -> bool {
+        let Some(weights) = self.backend_weights.as_ref() else { return false };
+        self.backend.is_some()
+            && self.mtp.is_none()
+            && !self.m3_device
+            && self.layers.len() == weights.layers.len()
+            && std::env::var_os("FLLM_LAYER_CHECK").is_none()
+            && self.layers.iter().zip(&weights.layers).all(|(layer, dev)| matches!(layer.attn, Attn::Std { .. }) && !dev.host_layer)
     }
 
     /// One batch through this decoder's stage (the whole model when it is not part of a parallel group).
@@ -9065,7 +9130,17 @@ impl RustDecoder {
         capture: Option<&mut Vec<f32>>,
     ) -> Result<Vec<f32>, String> {
         if capture.is_none() && self.par.is_none() && self.row_positions3().is_none() && self.row_deepstack().is_none() && self.row_visible_lengths().is_none() {
-            if let Some(out) = self.try_graph_decode(ids, lengths, tables, logit_rows, embeddings, overrides)? {
+            // (a decode step of a few rows: the recorded graph reads full-width tables)
+            let widened;
+            let graph_tables = if self.is_narrow(ids.len(), tables) && ids.len() <= graph_max_rows() {
+                widened = self.widen_tables(ids.len(), tables);
+                Some(&widened[..])
+            } else if self.is_narrow(ids.len(), tables) {
+                None
+            } else {
+                Some(tables)
+            };
+            if let Some(out) = graph_tables.map(|t| self.try_graph_decode(ids, lengths, t, logit_rows, embeddings, overrides)).transpose()?.flatten() {
                 return Ok(out);
             }
         }
@@ -9369,6 +9444,21 @@ impl RustDecoder {
             }
         }
         Ok(Some(logits))
+    }
+
+    /// The width block tables can be packed to for this batch: the blocks of its longest row (`None`: keep the tables as they are, because the batch is
+    /// small, the step is recorded as a graph with fixed arrays, or a layer reads the tables with the full stride - host layers, recurrent and sparse
+    /// attention layers, the layer check).
+    fn compact_stride(&self, rows: usize, lengths: &[i64], tstride: usize, graph: &GraphMode<'_>) -> Option<usize> {
+        if !matches!(graph, GraphMode::Off)
+            || rows * tstride < COMPACT_TABLE_ENTRIES
+            || !self.narrow_tables_ok()
+            || std::env::var_os("FLLM_COMPACT_TABLES").is_some_and(|v| matches!(v.to_str(), Some("0" | "off" | "false")))
+        {
+            return None;
+        }
+        let eff = lengths.iter().map(|&l| (l.max(1) as usize).div_ceil(self.block_size)).max()?.max(1);
+        (eff < tstride).then_some(eff)
     }
 
     /// What the runtime asked the next decode step to return: the rows of a sampler job (if they are this step's rows) or greedy ids.
@@ -9822,6 +9912,13 @@ mod graph_switch_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn packed_block_tables_are_padded_back_with_minus_one() {
+        // two rows of three blocks packed from a stride of five
+        assert_eq!(super::pad_tables(2, 5, &[4, 5, 6, 7, 8, -1]), [4, 5, 6, -1, -1, 7, 8, -1, -1, -1]);
+        assert_eq!(super::pad_tables(1, 3, &[9, 8, 7]), [9, 8, 7]);
     }
 }
 

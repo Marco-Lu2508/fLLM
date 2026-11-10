@@ -2420,11 +2420,16 @@ impl InferenceRuntime {
             let _invariant = (!verify_candidates.is_empty() && crate::speculative::exact_verification()).then(crate::cpu_kernels::BatchInvariant::enter);
             let mut ids = Vec::with_capacity(rows.len());
             let mut lengths = Vec::with_capacity(rows.len());
-            let mut table = Vec::with_capacity(rows.len() * self.model.table_stride());
+            // each row's table is `stride` entries (the room for the longest context); the decoder reads the blocks of the longest row of the batch,
+            // so only those are copied: for 2000 token rows of a 98k-token server that is 1 KB instead of 49 KB per row
+            let stride = self.model.table_stride();
+            let block_size = self.model.block_size();
+            let width = rows.iter().map(|row| (row.length.max(1) as usize + usize::from(self.mtp.is_some())).div_ceil(block_size)).max().unwrap_or(1).clamp(1, stride);
+            let mut table = Vec::with_capacity(rows.len() * width);
             for row in &rows {
                 ids.push(row.token_id);
                 lengths.push(row.length);
-                table.extend_from_slice(&row.table);
+                table.extend_from_slice(&row.table[..width]);
             }
             let overrides = rows
                 .iter()

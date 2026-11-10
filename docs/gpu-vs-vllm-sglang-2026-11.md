@@ -103,5 +103,32 @@ Same compare script on `e2c3fe8`, vLLM and SGLang each in a run of their own (fL
 The AWQ path (Marlin) was not touched in this round. The SGLang value of the bf16 100 / 16 cell moved from 614 to 1005 tokens/s between two runs of the same script, so single cells of
 this table carry a spread of that size for the rival engines.
 
+## Third round: 40 users, and why the 16-user cells fell behind when the 40-user cell was added (2026-11-10)
+
+Same card and models, vLLM 0.33.0 and SGLang 0.5.23 (one run each, the rival column is the best of the two), users 1, 16 and 40. The first fLLM run of the day (`d561d6e`, asynchronous decode scheduling in) showed
+the 16-user cells *slower* than the day before (bf16, 2000-token prompts: 181 against 230 tokens/s). The cause was not the new code: `compare.py` starts fLLM with `--ctx (max prompt + tokens + 400) x max users`,
+so a 40-user cell raises `--ctx` from 39k to 98k, and every token row of a prompt chunk carried a block table of `--ctx / 16` entries (100 MB per 2000-token chunk to build and upload). With the
+same binary and the same load, `--ctx 4096` gave 274 tokens/s, `--ctx 40000` 231 and `--ctx 98560` 178; the kernels were the same (3.35 s against 3.56 s of GPU time). The tables are now packed to the blocks of the longest row
+(see the changelog); fLLM `compare.py` figures after that, against the best rival of each cell:
+
+| Qwen2.5-7B-Instruct | prompt / users | fLLM | best rival | ratio |
+|---|---|---|---|---|
+| bf16 | 100 / 1 | 80.9 | 81.6 (SGLang) | 0.99 |
+| bf16 | 100 / 16 | 852 | 1092 (vLLM) | 0.78 |
+| bf16 | 100 / 40 | 1451 | 1958 (vLLM) | 0.74 |
+| bf16 | 2000 / 1 | 65.3 | 71.5 (SGLang) | 0.91 |
+| bf16 | 2000 / 16 | 270 | 356 (vLLM) | 0.76 |
+| bf16 | 2000 / 40 | 308 | 411 (vLLM) | 0.75 |
+| AWQ | 100 / 1 | 170.5 | 183.9 (SGLang) | 0.93 |
+| AWQ | 100 / 16 | 1373 | 1806 (vLLM) | 0.76 |
+| AWQ | 100 / 40 | 1760 | 2822 (vLLM) | 0.62 |
+| AWQ | 2000 / 1 | 112.4 | 126.6 (vLLM) | 0.89 |
+| AWQ | 2000 / 16 | 276 | 352 (SGLang) | 0.78 |
+| AWQ | 2000 / 40 | 283 | 358 (vLLM) | 0.79 |
+
+The two engines are given a per-sequence limit of 2464 tokens (`--max-model-len`), fLLM `--ctx` times the users (a pool for all sequences together, split by the server); the run before the packing showed how much that
+mattered for fLLM and not for them. Still behind everywhere except one user with a short prompt. Where the time goes (bf16, 16 users, 2000-token prompts, A100): a 2039-token prompt costs 164 ms of GPU time, 107 ms of it GEMMs at 247 TFLOPS (the same
+kernels vLLM uses) and 57 ms around them (gated-activation conversions 22 ms, prompt attention 7 ms, the rest 28 ms), against about 140 ms of time to first token for vLLM; a decode step with 16 rows is 14.4 ms, 11.9 ms of it GEMMs at the weight-streaming limit.
+
 Not measured: FP8, GPTQ, MoE models, a longer output, more than 16 users, other cards, ROCm, more than one GPU, quality (only the first answer was compared).
 Raw results: `compare_result.json` of both runs (`schema_version 2`, `vs_best_rival` per engine).
