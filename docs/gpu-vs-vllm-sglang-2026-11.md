@@ -130,5 +130,18 @@ The two engines are given a per-sequence limit of 2464 tokens (`--max-model-len`
 mattered for fLLM and not for them. Still behind everywhere except one user with a short prompt. Where the time goes (bf16, 16 users, 2000-token prompts, A100): a 2039-token prompt costs 164 ms of GPU time, 107 ms of it GEMMs at 247 TFLOPS (the same
 kernels vLLM uses) and 57 ms around them (gated-activation conversions 22 ms, prompt attention 7 ms, the rest 28 ms), against about 140 ms of time to first token for vLLM; a decode step with 16 rows is 14.4 ms, 11.9 ms of it GEMMs at the weight-streaming limit.
 
+Later the same day (`727c450`: prompt chunks gather their embedding rows on the device, decode attention on the tensor cores, shared 16-bit conversion, split-column GEMV), the same `compare.py` run on the same card, against the rival figures above:
+
+| Qwen2.5-7B-Instruct | prompt / users | fLLM | ratio | | prompt / users | fLLM | ratio |
+|---|---|---|---|---|---|---|---|
+| bf16 | 100 / 1 | 82.1 | 1.01 | AWQ | 100 / 1 | 174.8 | 0.95 |
+| bf16 | 100 / 16 | 871 | 0.80 | AWQ | 100 / 16 | 1432 | 0.79 |
+| bf16 | 100 / 40 | 1519 | 0.78 | AWQ | 100 / 40 | 1852 | 0.66 |
+| bf16 | 2000 / 1 | 67.3 | 0.94 | AWQ | 2000 / 1 | 118.6 | 0.94 |
+| bf16 | 2000 / 16 | 299.5 | 0.84 | AWQ | 2000 / 16 | 306.6 | 0.87 |
+| bf16 | 2000 / 40 | 345.1 | 0.84 | AWQ | 2000 / 40 | 315.4 | 0.88 |
+
+What is left, from nsys of a decode step (16 rows, 2000-token context): about 12.4 ms of GEMMs at 1.1 TB/s (vLLM's whole step is about 12.3 ms), 420 kernel launches (the norm, rope, GLU and conversion kernels between the GEMMs add up to about 2.5 ms), and for AWQ with many users the dequantizing GEMM.
+
 Not measured: FP8, GPTQ, MoE models, a longer output, more than 16 users, other cards, ROCm, more than one GPU, quality (only the first answer was compared).
 Raw results: `compare_result.json` of both runs (`schema_version 2`, `vs_best_rival` per engine).
