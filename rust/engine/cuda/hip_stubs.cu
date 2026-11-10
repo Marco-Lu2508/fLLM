@@ -117,7 +117,7 @@ int fllm_q4z_acc_launch(cudaStream_t s, const void *y16, const float *bias, floa
 }
 int fllm_sample_launch(cudaStream_t s, const float *logits, float *work, int rows, int vocab, const void *params, const int32_t *pen_ids,
                        const int32_t *pen_counts, const int32_t *bias_ids, const float *bias_vals, const uint32_t *mask, int mask_words,
-                       int32_t *out_ids, float *out_logprob, int32_t *top_ids, float *top_logprob, int top_stride) {
+                       int32_t *out_ids, float *out_logprob, int32_t *top_ids, float *top_logprob, int top_stride, const int32_t *prev_ids) {
     return fllm_set_error("this kernel needs an NVIDIA GPU");
 }
 int fllm_tree_attention_launch(cudaStream_t s, const float *q, const uint16_t *kpool_layer,
