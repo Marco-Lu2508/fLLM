@@ -377,6 +377,45 @@ int fllm_argmax_launch(cudaStream_t s, const float *logits, int rows, int vocab,
     return fllm_check_launch("argmax");
 }
 
+// x[r] = scale * embedding[ids[r]] for the first `real_rows` rows, token 0 for the rest (the rows that pad a decode step to its graph size). The table holds
+// `table_rows` rows of `hidden` values in F32 (kind 0), F16 (kind 1) or BF16 (kind 30); the ids are on the device (the output of the sampler of the step
+// before) and an id outside the table (the sampler returns -1 when its controls leave no token) reads row 0. `out_mode` is the format of the activations:
+// 0 F32, 1 F16, 2 BF16 (rounded to nearest even like the host conversion; narrow values fill the first half of the buffer).
+__global__ void embed_gather_kernel(const void *__restrict__ table, int kind, int table_rows, const int32_t *__restrict__ ids, void *__restrict__ x,
+                                    int out_mode, int real_rows, int rows, int hidden, float scale) {
+    const size_t total = (size_t)rows * hidden;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += (size_t)gridDim.x * blockDim.x) {
+        const int r = (int)(i / hidden), c = (int)(i % hidden);
+        size_t id = r < real_rows ? (size_t)(uint32_t)ids[r] : 0;
+        if (id >= (size_t)table_rows) id = 0;
+        float v;
+        if (kind == 0) {
+            v = static_cast<const float *>(table)[id * hidden + c];
+        } else if (kind == 1) {
+            v = __half2float(__ushort_as_half(static_cast<const unsigned short *>(table)[id * hidden + c]));
+        } else {
+            v = __uint_as_float((uint32_t)static_cast<const unsigned short *>(table)[id * hidden + c] << 16);
+        }
+        v *= scale;
+        if (out_mode == 0) {
+            static_cast<float *>(x)[i] = v;
+        } else if (out_mode == 1) {
+            static_cast<unsigned short *>(x)[i] = __half_as_ushort(__float2half_rn(v));
+        } else {
+            uint32_t u = __float_as_uint(v);
+            // NaN keeps a payload bit (quiet NaN), everything else rounds to nearest even
+            const uint32_t bits = (u & 0x7fffffffu) > 0x7f800000u ? ((u >> 16) | 0x40u) : ((u + 0x7fffu + ((u >> 16) & 1u)) >> 16);
+            static_cast<unsigned short *>(x)[i] = (unsigned short)bits;
+        }
+    }
+}
+int fllm_embed_gather_launch(cudaStream_t s, const void *table, int kind, int table_rows, const int32_t *ids, void *x, int out_mode, int real_rows, int rows,
+                             int hidden, float scale) {
+    if (rows <= 0 || hidden <= 0) return 0;
+    embed_gather_kernel<<<grid_for((size_t)rows * hidden, 256), 256, 0, s>>>(table, kind, table_rows, ids, x, out_mode, real_rows, rows, hidden, scale);
+    return fllm_check_launch("embed_gather");
+}
+
 int fllm_glu_launch(cudaStream_t s, const float *gate, const float *up, float *out, size_t count, int mode) {
     if (count == 0) return 0;
     glu_kernel<<<grid_for(count, 256), 256, 0, s>>>(gate, up, out, count, mode);

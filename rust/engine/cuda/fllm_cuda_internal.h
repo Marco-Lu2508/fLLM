@@ -112,6 +112,10 @@ int fllm_glu_launch(cudaStream_t s, const float *gate, const float *up, float *o
 // the same for FP16 gate and up (count even)
 int fllm_glu_launch_f16(cudaStream_t s, const void *gate16, const void *up16, float *out, size_t count, int mode);
 int fllm_argmax_launch(cudaStream_t s, const float *logits, int rows, int vocab, int *out);
+// x = scale * embedding rows of the device ids (first `real_rows` rows; token 0 for the rest of `rows` and for ids outside the table); table kind 0 (F32),
+// 1 (F16) or 30 (BF16); x in out_mode 0 (F32), 1 (F16) or 2 (BF16)
+int fllm_embed_gather_launch(cudaStream_t s, const void *table, int kind, int table_rows, const int32_t *ids, void *x, int out_mode, int real_rows, int rows,
+                             int hidden, float scale);
 int fllm_rope_kv_f16_launch(cudaStream_t s, const uint16_t *q16, const uint16_t *k16, const uint16_t *v16, const float *qb,
                             const float *kb, const float *vb, float *q_out, uint16_t *pool_k, uint16_t *pool_v, const int32_t *pos,
                             const int32_t *slots, const float *cs, const float *sn, int rows, int heads, int kv_heads, int dk, int dv,
@@ -503,7 +507,7 @@ extern "C" int fllm_vllm_marlin_gemm_t(const void *A, const void *B, void *C, vo
 // (it may equal `logits` to work in place).
 int fllm_sample_launch(cudaStream_t s, const float *logits, float *work, int rows, int vocab, const void *params, const int32_t *pen_ids,
                        const int32_t *pen_counts, const int32_t *bias_ids, const float *bias_vals, const uint32_t *mask, int mask_words,
-                       int32_t *out_ids, float *out_logprob, int32_t *top_ids, float *top_logprob, int top_stride);
+                       int32_t *out_ids, float *out_logprob, int32_t *top_ids, float *top_logprob, int top_stride, const int32_t *prev_ids);
 
 int fllm_tree_attention_launch(cudaStream_t s, const float *q, const uint16_t *kpool_layer,
                                const uint16_t *vpool_layer, float *out, const int64_t *tables,

@@ -184,10 +184,14 @@ sample_rows_kernel(const float *__restrict__ logits, float *work, int vocab, con
                    const int32_t *__restrict__ pen_ids, const int32_t *__restrict__ pen_counts,
                    const int32_t *__restrict__ bias_ids, const float *__restrict__ bias_vals, const uint32_t *__restrict__ mask,
                    int mask_words, int32_t *__restrict__ out_ids, float *__restrict__ out_logprob,
-                   int32_t *__restrict__ top_ids, float *__restrict__ top_logprob, int top_stride) {
+                   int32_t *__restrict__ top_ids, float *__restrict__ top_logprob, int top_stride, const int32_t *__restrict__ prev_ids) {
     __shared__ Shared sh;
+    __shared__ int extra_found;
     const int row = blockIdx.x;
     const FllmSampleRow p = rows[row];
+    // a step launched before the one before it was collected: the token that step sampled is not in the penalty lists yet (it counts once more)
+    const int extra = prev_ids ? prev_ids[row] : -1;
+    if (threadIdx.x == 0) extra_found = 0;
     const float *src = logits + (size_t)row * vocab;
     float *w = work + (size_t)row * vocab;
     const bool in_place = (const float *)w == src;
@@ -211,10 +215,24 @@ sample_rows_kernel(const float *__restrict__ logits, float *work, int vocab, con
     for (int j = threadIdx.x; j < p.pen_len; j += blockDim.x) {
         const int id = pen_ids[p.pen_off + j];
         if (id < 0 || id >= vocab) continue;
+        int count = pen_counts[p.pen_off + j];
+        if (id == extra) {
+            count += 1;
+            extra_found = 1;
+        }
         float v = w[id];
         if (fabsf(p.repetition_penalty - 1.f) >= 1e-5f) v = v > 0.f ? v / p.repetition_penalty : v * p.repetition_penalty;
-        v -= p.presence_penalty + p.frequency_penalty * (float)pen_counts[p.pen_off + j];
+        v -= p.presence_penalty + p.frequency_penalty * (float)count;
         w[id] = v;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0 && extra >= 0 && extra < vocab && !extra_found &&
+        (fabsf(p.repetition_penalty - 1.f) >= 1e-5f || p.presence_penalty != 0.f || p.frequency_penalty != 0.f)) {
+        // the sampled token was not in the window yet: it enters it with a count of 1
+        float v = w[extra];
+        if (fabsf(p.repetition_penalty - 1.f) >= 1e-5f) v = v > 0.f ? v / p.repetition_penalty : v * p.repetition_penalty;
+        v -= p.presence_penalty + p.frequency_penalty * 1.f;
+        w[extra] = v;
     }
     __syncthreads();
     for (int j = threadIdx.x; j < p.bias_len; j += blockDim.x) {
@@ -400,11 +418,11 @@ sample_rows_kernel(const float *__restrict__ logits, float *work, int vocab, con
 int fllm_sample_launch(cudaStream_t s, const float *logits, float *work, int rows, int vocab, const void *params,
                        const int32_t *pen_ids, const int32_t *pen_counts, const int32_t *bias_ids, const float *bias_vals,
                        const uint32_t *mask, int mask_words, int32_t *out_ids, float *out_logprob, int32_t *top_ids,
-                       float *top_logprob, int top_stride) {
+                       float *top_logprob, int top_stride, const int32_t *prev_ids) {
     if (rows <= 0 || vocab <= 0) return 0;
     sample_rows_kernel<<<rows, kBlock, 0, s>>>(logits, work, vocab, static_cast<const FllmSampleRow *>(params), pen_ids, pen_counts,
                                                bias_ids, bias_vals, mask, mask_words, out_ids, out_logprob, top_ids, top_logprob,
-                                               top_stride);
+                                               top_stride, prev_ids);
     return fllm_check_launch("sample");
 }
 

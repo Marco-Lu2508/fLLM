@@ -278,6 +278,52 @@ extern "C" {
         top_ids_out: *mut i32,
         top_logprob_out: *mut f32,
     ) -> c_int;
+    fn fllm_cuda_argmax_async(st: *mut RawStream, logits: *const f32, rows: c_int, vocab: c_int, slot: c_int, allow_grow: c_int) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_sample_async(
+        st: *mut RawStream,
+        logits: *const f32,
+        rows: c_int,
+        vocab: c_int,
+        params: *const c_void,
+        pen_ids: *const i32,
+        pen_counts: *const i32,
+        pen_total: c_int,
+        bias_ids: *const i32,
+        bias_vals: *const f32,
+        bias_total: c_int,
+        mask: *const u32,
+        mask_total: c_int,
+        mask_words: c_int,
+        top_stride: c_int,
+        slot: c_int,
+        allow_grow: c_int,
+        append_last: c_int,
+    ) -> c_int;
+    fn fllm_cuda_async_wait(
+        st: *mut RawStream,
+        slot: c_int,
+        rows: c_int,
+        stride: c_int,
+        ids_out: *mut i32,
+        logprob_out: *mut f32,
+        top_ids_out: *mut i32,
+        top_logprob_out: *mut f32,
+    ) -> c_int;
+    fn fllm_cuda_async_discard(st: *mut RawStream, slot: c_int) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_embed_gather(
+        st: *mut RawStream,
+        table: *const c_void,
+        kind: c_int,
+        table_rows: c_int,
+        x: *mut c_void,
+        out_mode: c_int,
+        real_rows: c_int,
+        rows: c_int,
+        hidden: c_int,
+        scale: f32,
+    ) -> c_int;
     fn fllm_cuda_step_begin(st: *mut RawStream) -> c_int;
     fn fllm_cuda_step_end(st: *mut RawStream) -> c_int;
     fn fllm_cuda_get_opt(id: c_int) -> c_int;
@@ -4071,6 +4117,151 @@ impl Stream for CudaStream {
             }
         }
         Ok(out)
+    }
+
+    fn async_launches(&self) -> bool {
+        true
+    }
+
+    fn argmax_rows_async(&mut self, logits: &DeviceBuffer, rows: usize, vocab: usize, slot: usize, allow_grow: bool) -> Result<bool, BackendError> {
+        if rows == 0 || vocab == 0 || logits.size < rows * vocab * 4 {
+            return Err(invalid("argmax input smaller than rows x vocab"));
+        }
+        // SAFETY: sizes checked above; the results go to pinned memory owned by the stream.
+        let rc = unsafe {
+            fllm_cuda_argmax_async(self.raw, dev_ptr(logits)?.cast(), to_c(rows, "rows")?, to_c(vocab, "vocab")?, to_c(slot, "slot")?, c_int::from(allow_grow))
+        };
+        if rc == 3 {
+            return Ok(false);
+        }
+        check(rc)?;
+        Ok(true)
+    }
+
+    fn sample_rows_async(
+        &mut self,
+        logits: &DeviceBuffer,
+        vocab: usize,
+        batch: &SampleBatch,
+        slot: usize,
+        allow_grow: bool,
+        append_last: bool,
+    ) -> Result<bool, BackendError> {
+        batch.validate(vocab)?;
+        let rows = batch.rows.len();
+        if rows == 0 || vocab == 0 || logits.size < rows * vocab * 4 {
+            return Err(invalid("sample_rows: the logits buffer is smaller than rows x vocab"));
+        }
+        let pen_ids: Vec<i32> = batch.pen.iter().map(|p| p.0).collect();
+        let pen_counts: Vec<i32> = batch.pen.iter().map(|p| p.1).collect();
+        let bias_ids: Vec<i32> = batch.bias.iter().map(|p| p.0).collect();
+        let bias_vals: Vec<f32> = batch.bias.iter().map(|p| p.1).collect();
+        // SAFETY: as in `sample_rows`; the lists are copied to the device before the call returns (pageable memory is staged by the driver), and the results
+        // go to pinned memory owned by the stream.
+        let rc = unsafe {
+            fllm_cuda_sample_async(
+                self.raw,
+                dev_ptr(logits)?.cast(),
+                to_c(rows, "rows")?,
+                to_c(vocab, "vocab")?,
+                batch.rows.as_ptr().cast(),
+                pen_ids.as_ptr(),
+                pen_counts.as_ptr(),
+                to_c(pen_ids.len(), "penalty list")?,
+                bias_ids.as_ptr(),
+                bias_vals.as_ptr(),
+                to_c(bias_ids.len(), "bias list")?,
+                batch.mask.as_ptr(),
+                to_c(batch.mask.len(), "grammar bitmask")?,
+                to_c(batch.mask_words, "bitmask words")?,
+                to_c(batch.top_stride, "top stride")?,
+                to_c(slot, "slot")?,
+                c_int::from(allow_grow),
+                c_int::from(append_last),
+            )
+        };
+        if rc == 3 {
+            return Ok(false);
+        }
+        check(rc)?;
+        Ok(true)
+    }
+
+    fn async_collect(&mut self, slot: usize, rows: usize, top_stride: usize, params: &[SampleRowParams]) -> Result<SampleOutput, BackendError> {
+        let mut out = SampleOutput {
+            ids: vec![0; rows],
+            logprobs: vec![0.0; rows],
+            top_ids: vec![-1; rows * top_stride],
+            top_logprobs: vec![f32::NEG_INFINITY; rows * top_stride],
+        };
+        // SAFETY: the outputs have room for rows (and rows x stride) values.
+        check(unsafe {
+            fllm_cuda_async_wait(
+                self.raw,
+                to_c(slot, "slot")?,
+                to_c(rows, "rows")?,
+                to_c(top_stride, "top stride")?,
+                out.ids.as_mut_ptr(),
+                out.logprobs.as_mut_ptr(),
+                out.top_ids.as_mut_ptr(),
+                out.top_logprobs.as_mut_ptr(),
+            )
+        })?;
+        // the kernel writes only the alternatives a row asked for
+        for (r, p) in params.iter().enumerate() {
+            let wanted = if p.logprobs_mode == 0 { 0 } else { p.top_n as usize };
+            for j in wanted..top_stride {
+                out.top_ids[r * top_stride + j] = -1;
+                out.top_logprobs[r * top_stride + j] = f32::NEG_INFINITY;
+            }
+        }
+        Ok(out)
+    }
+
+    fn async_discard(&mut self, slot: usize) -> Result<(), BackendError> {
+        // SAFETY: plain call on a live stream.
+        check(unsafe { fllm_cuda_async_discard(self.raw, to_c(slot, "slot")?) })
+    }
+
+    fn embed_gather_sampled(
+        &mut self,
+        table: &DeviceBuffer,
+        kind: u32,
+        x: &mut DeviceBuffer,
+        real_rows: usize,
+        rows: usize,
+        hidden: usize,
+        scale: f32,
+    ) -> Result<(), BackendError> {
+        let width = match kind {
+            0 => 4,
+            1 | 30 => 2,
+            _ => return Err(invalid("embed_gather_sampled: the table must be F32, F16 or BF16")),
+        };
+        if rows == 0 || hidden == 0 || real_rows > rows || x.size < rows * hidden * 4 || table.size < hidden * width || !table.size.is_multiple_of(hidden * width) {
+            return Err(invalid("embed_gather_sampled: sizes"));
+        }
+        let out_mode = match self.act {
+            ActDtype::F32 => 0,
+            ActDtype::F16 => 1,
+            ActDtype::Bf16 => 2,
+        };
+        // SAFETY: the output holds rows x hidden values of the activation format (checked); the ids are the device output of the last sampler launch, and
+        // the kernel reads row 0 for an id outside the table.
+        check(unsafe {
+            fllm_cuda_embed_gather(
+                self.raw,
+                dev_ptr(table)?.cast(),
+                to_c(kind as usize, "kind")?,
+                to_c(table.size / (hidden * width), "table rows")?,
+                dev_ptr(x)?.cast(),
+                out_mode,
+                to_c(real_rows, "rows")?,
+                to_c(rows, "rows")?,
+                to_c(hidden, "hidden")?,
+                scale,
+            )
+        })
     }
 
     fn swiglu(&mut self, out: &mut DeviceBuffer, gate: &DeviceBuffer, up: &DeviceBuffer) -> Result<(), BackendError> {

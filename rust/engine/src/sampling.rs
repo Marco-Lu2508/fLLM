@@ -1294,6 +1294,15 @@ pub fn penalty_pairs(history: &[i64], repeat_last_n: i64, vocab: usize) -> Vec<(
     counts.into_iter().collect()
 }
 
+/// `penalty_pairs` of the window the NEXT step will have, without the token that is being sampled now (the device appends it, see `AheadKind`): the
+/// window over `history` plus one more token, minus that token.
+pub fn penalty_pairs_ahead(history: &[i64], repeat_last_n: i64, vocab: usize) -> Vec<(i32, i32)> {
+    let mut grown = Vec::with_capacity(history.len() + 1);
+    grown.extend_from_slice(history);
+    grown.push(-1);
+    penalty_pairs(&grown, repeat_last_n, vocab)
+}
+
 impl SamplingParams {
     /// Whether the device sampler (`Stream::sample_rows`) implements this request's sampling exactly. Mirostat and DRY depend on the
     /// sequence in ways that stay on the host, and the host sampler's own random draw differs from the device's Gumbel draw only

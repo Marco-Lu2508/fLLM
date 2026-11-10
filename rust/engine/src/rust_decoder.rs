@@ -1076,7 +1076,7 @@ static GREEDY_IDS: std::sync::Mutex<Option<Vec<i32>>> = std::sync::Mutex::new(No
 
 /// The rows of the next forward pass that the device should sample (`FLLM_DEVICE_SAMPLING`, on by default on CUDA, see docs/speculative-decoding.md), and the
 /// result. Like the greedy ids they travel through statics because the decoder is shared by the runtime and the draft engines.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct DeviceSampleJob {
     pub rows: Vec<crate::backend::SampleRowParams>,
     pub pen: Vec<(i32, i32)>,
@@ -1084,14 +1084,140 @@ pub(crate) struct DeviceSampleJob {
     pub mask: Vec<u32>,
     pub mask_words: usize,
     pub top_stride: usize,
+    /// The job of a step launched ahead of time: the token sampled by the step before it is not in the penalty lists yet, the device adds it
+    /// (`Stream::sample_rows_async`). `with_appended` gives the job the runtime builds once it has that token.
+    pub append_last: bool,
 }
 impl DeviceSampleJob {
-    fn batch(&self) -> crate::backend::SampleBatch<'_> {
+    /// The job with the sampled `ids` (one per row) inside the penalty lists of the rows that have penalties, the way `sampling::penalty_pairs` would
+    /// have built them: sorted by token, a token already listed counts once more.
+    pub(crate) fn with_appended(&self, ids: &[i64], vocab: usize) -> DeviceSampleJob {
+        if !self.append_last {
+            return self.clone();
+        }
+        let mut out = DeviceSampleJob { rows: self.rows.clone(), bias: self.bias.clone(), mask: self.mask.clone(), mask_words: self.mask_words, top_stride: self.top_stride, ..Default::default() };
+        for (r, row) in out.rows.iter_mut().enumerate() {
+            let start = row.pen_off as usize;
+            let mut list: Vec<(i32, i32)> = self.pen[start..start + row.pen_len as usize].to_vec();
+            let penalised = (row.repetition_penalty - 1.0).abs() >= 1e-5 || row.presence_penalty != 0.0 || row.frequency_penalty != 0.0;
+            if let Some(&t) = ids.get(r).filter(|&&t| penalised && t >= 0 && (t as usize) < vocab) {
+                match list.binary_search_by_key(&(t as i32), |e| e.0) {
+                    Ok(i) => list[i].1 += 1,
+                    Err(i) => list.insert(i, (t as i32, 1)),
+                }
+            }
+            row.pen_off = out.pen.len() as i32;
+            row.pen_len = list.len() as i32;
+            out.pen.extend(list);
+        }
+        out
+    }
+    pub(crate) fn batch(&self) -> crate::backend::SampleBatch<'_> {
         crate::backend::SampleBatch { rows: &self.rows, pen: &self.pen, bias: &self.bias, mask: &self.mask, mask_words: self.mask_words, top_stride: self.top_stride }
     }
 }
 static SAMPLE_JOB: std::sync::Mutex<Option<DeviceSampleJob>> = std::sync::Mutex::new(None);
 static SAMPLE_RESULT: std::sync::Mutex<Option<crate::backend::SampleOutput>> = std::sync::Mutex::new(None);
+
+/// What a decode step returns to the runtime (the ids of an argmax, or the result of a sampler job) and with it the kind of step that can be launched ahead
+/// of the runtime's call for it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AheadKind {
+    Greedy,
+    Sample(DeviceSampleJob),
+}
+/// Set by the runtime next to a request for greedy ids or a sampler job: what the request of the step after this one will be if no sequence ends and no
+/// batch change happens (the same kind, the sampler job with the draw numbers one further). The decoder launches that step as soon as this one is on the
+/// device (`AheadStep`).
+static AHEAD_REQUEST: std::sync::Mutex<Option<AheadKind>> = std::sync::Mutex::new(None);
+static AHEAD_LAUNCHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static AHEAD_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static AHEAD_DISCARDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Set after an error in a launch made ahead of time: the steps then run one after the other as before.
+static AHEAD_BROKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ASYNC_SCHEDULING_DEFAULT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Steps launched ahead of the runtime's call, and how many of them it used / threw away.
+pub(crate) fn async_scheduling_stats() -> (u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (AHEAD_LAUNCHED.load(Relaxed), AHEAD_HITS.load(Relaxed), AHEAD_DISCARDS.load(Relaxed))
+}
+
+/// `FLLM_ASYNC_SCHEDULING`: `0`, `off` or `false` run every decode step after the host has the previous one; `1`, `on` or `true` launch the next step of a
+/// plain decode batch before the host has processed the previous one (the sampled ids feed it on the device; the step is thrown away when the batch
+/// changes). Unset, it is on when the model runs on a CUDA device.
+pub(crate) fn async_scheduling_enabled() -> bool {
+    static ENV: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let env = ENV.get_or_init(|| std::env::var("FLLM_ASYNC_SCHEDULING").ok());
+    device_sampling_choice(env.as_deref(), ASYNC_SCHEDULING_DEFAULT.load(std::sync::atomic::Ordering::Relaxed)) && !AHEAD_BROKEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The input of a decode step: embedding rows made on the host, or the embedding of the ids the last launch sampled (on the device).
+enum StepInput<'a> {
+    Host(&'a [f32]),
+    Device(&'a AheadEmbed),
+}
+/// The batch of a decode step as `try_graph_decode` sees it (the rows as given, and padded to the size of the graph).
+struct AsyncLaunch<'a> {
+    bucket: usize,
+    rows: usize,
+    lengths: &'a [i64],
+    tables: &'a [i64],
+    ids_p: &'a [i64],
+    lengths_p: &'a [i64],
+    tables_p: &'a [i64],
+    positions: &'a [usize],
+}
+
+/// Do two block tables give the rows of `lengths` the same blocks? Only the blocks that hold the tokens count: the scheduler may append a block for the
+/// growth to come between two steps, and the step does not read it. `geometry` is `(entries per table, tokens per block)`.
+fn same_blocks((stride, block_size): (usize, usize), lengths: &[i64], a: &[i64], b: &[i64]) -> bool {
+    if a.len() != b.len() || a.len() != lengths.len() * stride {
+        return false;
+    }
+    lengths.iter().enumerate().all(|(r, &length)| {
+        let used = (length.max(0) as usize).div_ceil(block_size).min(stride);
+        a[r * stride..r * stride + used] == b[r * stride..r * stride + used]
+    })
+}
+
+/// A decode step that was launched before the runtime asked for it, on the assumption that every sequence goes on with the token the previous step sampled.
+struct AheadStep {
+    bucket: usize,
+    /// The lengths and block tables of the rows the step was launched with, and the request it answers.
+    lengths: Vec<i64>,
+    tables: Vec<i64>,
+    kind: AheadKind,
+    /// The pinned result slot of the launch.
+    slot: usize,
+    /// The token ids the step was fed with: the ids the step before returned (known once the host collected them).
+    ids: Option<Vec<i64>>,
+}
+impl AheadStep {
+    /// Does the call of the runtime ask for exactly what this step computed? The request it carries is the one this step was launched with, with the
+    /// sampled ids in the penalty lists (`DeviceSampleJob::with_appended`). `geometry`: `(entries per block table, tokens per block, vocabulary)`.
+    fn answers(&self, geometry: (usize, usize, usize), bucket: usize, ids: &[i64], lengths: &[i64], tables: &[i64], kind: Option<&AheadKind>) -> bool {
+        let (stride, block_size, vocab) = geometry;
+        if self.bucket != bucket || self.ids.as_deref() != Some(ids) || self.lengths != lengths || !same_blocks((stride, block_size), lengths, &self.tables, tables) {
+            return false;
+        }
+        match (&self.kind, kind) {
+            (AheadKind::Greedy, Some(AheadKind::Greedy)) => true,
+            (AheadKind::Sample(launched), Some(AheadKind::Sample(asked))) => launched.with_appended(ids, vocab) == *asked,
+            _ => false,
+        }
+    }
+}
+#[derive(Default)]
+struct AheadState {
+    step: Option<AheadStep>,
+}
+/// The token embedding on the device: the next step reads it with the ids the sampler just produced.
+struct AheadEmbed {
+    table: crate::backend::DeviceBuffer,
+    kind: u32,
+    scale: f32,
+}
 
 /// `FLLM_DEVICE_SAMPLING`: `0`, `off` or `false` keep the sampler of decode steps on the host, `1`, `on` or `true` ask for the device sampler on any
 /// backend (one without the kernel warns once and samples on the host). Unset, it is on when the model runs on a CUDA device (the kernels passed
@@ -1117,6 +1243,7 @@ static DEVICE_SAMPLING_DEFAULT: std::sync::atomic::AtomicBool = std::sync::atomi
 #[cfg(feature = "cuda")]
 pub(crate) fn set_device_sampling_default(on: bool) {
     DEVICE_SAMPLING_DEFAULT.store(on, std::sync::atomic::Ordering::Relaxed);
+    ASYNC_SCHEDULING_DEFAULT.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Run the job on the device if the backend can; `None` leaves the logits to the caller.
@@ -1186,6 +1313,9 @@ pub struct RustDecoder {
     graphs: std::sync::Mutex<std::collections::HashMap<usize, DecodeGraph>>,
     graph_ok: std::sync::OnceLock<bool>,
     graph_failed: std::sync::atomic::AtomicBool,
+    /// The decode step that is already on the device for the next call (see `AheadStep`), and the device copy of the token embedding it reads.
+    ahead: std::sync::Mutex<AheadState>,
+    ahead_embed: std::sync::OnceLock<Option<AheadEmbed>>,
     /// The embedding / output tensors of the file are BF16: `FLLM_ACT_DTYPE=auto` then picks BF16 (the GGUF does not record the config dtype).
     act_source_bf16: bool,
     /// This decoder is one rank of a tensor / pipeline / expert parallel group.
@@ -2454,6 +2584,8 @@ impl RustDecoder {
             graphs: std::sync::Mutex::new(std::collections::HashMap::new()),
             graph_ok: std::sync::OnceLock::new(),
             graph_failed: std::sync::atomic::AtomicBool::new(false),
+            ahead: std::sync::Mutex::new(AheadState::default()),
+            ahead_embed: std::sync::OnceLock::new(),
             act_source_bf16: mapping.index().tensors.iter().any(|t| matches!(t.name.as_str(), "token_embd.weight" | "output.weight") && t.type_id == 30),
             par,
             embed_stash: Default::default(),
@@ -8202,6 +8334,14 @@ impl RustDecoder {
         *SAMPLE_JOB.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job);
     }
 
+    /// The request of the step after the next one (see `AHEAD_REQUEST`); `clear_ahead_request` drops it once the call is over.
+    pub(crate) fn request_ahead(kind: AheadKind) {
+        *AHEAD_REQUEST.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(kind);
+    }
+    pub(crate) fn clear_ahead_request() {
+        *AHEAD_REQUEST.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
     /// The result of the last device sampling job, if the backend ran it; clears the request in any case.
     pub(crate) fn take_device_sample() -> Option<crate::backend::SampleOutput> {
         *SAMPLE_JOB.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
@@ -8929,6 +9069,8 @@ impl RustDecoder {
                 return Ok(out);
             }
         }
+        // whatever else runs now comes after a step that was launched ahead of time: its result is not wanted
+        self.drain_ahead()?;
         self.forward_backend_inner(ids, lengths, tables, key, value, logit_rows, embeddings, overrides, capture, GraphMode::Off)
     }
 
@@ -9127,7 +9269,10 @@ impl RustDecoder {
         let mut tables_p = tables.to_vec();
         tables_p.resize(bucket * stride, null_block);
         let (positions, slots) = self.step_meta(&lengths_p, &tables_p)?;
-        let host_x = self.embed_host(&ids_p, &positions)?;
+        // a step launched ahead of this call is the answer when it computed exactly what is asked for; any other one is thrown away before anything else
+        // touches the device
+        let wanted = Self::requested_kind(rows);
+        let matched = self.take_ahead_match(bucket, ids, lengths, tables, wanted.as_ref())?;
 
         let mut graphs = self.graphs.lock().map_err(|_| "graph table lock poisoned")?;
         if let std::collections::hash_map::Entry::Vacant(slot) = graphs.entry(bucket) {
@@ -9152,6 +9297,32 @@ impl RustDecoder {
             .ok_or("accelerator backend is not initialised")?
             .lock()
             .map_err(|_| "accelerator stream lock poisoned")?;
+        // the recorded step ends with the device logit transform when the stream has it (see forward_backend_inner)
+        let capped = (cfg.logit_scale != 1.0 || cfg.logit_softcap.is_some()) && stream.supports_logit_cap();
+        let sample_ok = capped || (cfg.logit_scale == 1.0 && cfg.logit_softcap.is_none());
+        let greedy_ok = capped || (cfg.logit_scale > 0.0 && cfg.logit_softcap.is_none());
+        let async_kind = wanted.filter(|kind| match kind {
+            AheadKind::Greedy => greedy_ok,
+            AheadKind::Sample(job) => sample_ok && job.batch().validate(cfg.vocab).is_ok(),
+        });
+        if let Some(kind) = async_kind {
+            if graph.ple_in.is_none() && async_scheduling_enabled() && stream.async_launches() {
+                if let Some(embed) = self.ahead_embed(&mut **stream) {
+                    let launch = AsyncLaunch { bucket, rows, lengths, tables, ids_p: &ids_p, lengths_p: &lengths_p, tables_p: &tables_p, positions: &positions };
+                    let out = self.decode_async(&mut **stream, graph, embed, matched, kind, &launch)?;
+                    if out.is_none() {
+                        // a scratch buffer was reallocated since the capture: record this size again on the next step
+                        drop(stream);
+                        graphs.remove(&bucket);
+                    }
+                    return Ok(out);
+                }
+            }
+        }
+        if let Some(step) = matched {
+            self.discard_ahead(step)?;
+        }
+        let host_x = self.embed_host(&ids_p, &positions)?;
         let mut x_in = graph.x_in.clone();
         stream.upload_activations(&mut x_in, &host_x).map_err(err)?;
         if let Some(ple_in) = graph.ple_in.as_ref() {
@@ -9172,13 +9343,11 @@ impl RustDecoder {
             graphs.remove(&bucket);
             return Ok(None);
         }
-        // the recorded step ends with the device logit transform when the stream has it (see forward_backend_inner)
-        let capped = (cfg.logit_scale != 1.0 || cfg.logit_softcap.is_some()) && stream.supports_logit_cap();
-        if (capped || (cfg.logit_scale == 1.0 && cfg.logit_softcap.is_none())) && run_device_sample(&mut **stream, &graph.head_out, cfg.vocab, rows) {
+        if sample_ok && run_device_sample(&mut **stream, &graph.head_out, cfg.vocab, rows) {
             GREEDY_IDS_REQUEST.store(false, Relaxed);
             return Ok(Some(Vec::new()));
         }
-        if GREEDY_IDS_REQUEST.load(Relaxed) && (capped || (cfg.logit_scale > 0.0 && cfg.logit_softcap.is_none())) {
+        if GREEDY_IDS_REQUEST.load(Relaxed) && greedy_ok {
             if let Ok(mut picked) = stream.argmax_rows(&graph.head_out, bucket, cfg.vocab) {
                 picked.truncate(rows);
                 *GREEDY_IDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(picked);
@@ -9200,6 +9369,231 @@ impl RustDecoder {
             }
         }
         Ok(Some(logits))
+    }
+
+    /// What the runtime asked the next decode step to return: the rows of a sampler job (if they are this step's rows) or greedy ids.
+    fn requested_kind(rows: usize) -> Option<AheadKind> {
+        if let Some(job) = SAMPLE_JOB.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+            return (job.rows.len() == rows).then(|| AheadKind::Sample(job.clone()));
+        }
+        GREEDY_IDS_REQUEST.load(std::sync::atomic::Ordering::Relaxed).then_some(AheadKind::Greedy)
+    }
+
+    /// The step launched ahead of time, if there is one and it answers this call; otherwise it is waited for and dropped. The token embedding for the
+    /// device (the ids of the previous step feed the next one there), if this model and device allow it.
+    fn take_ahead_match(&self, bucket: usize, ids: &[i64], lengths: &[i64], tables: &[i64], kind: Option<&AheadKind>) -> Result<Option<AheadStep>, String> {
+        let step = self.ahead.lock().map_err(|_| "ahead lock poisoned")?.step.take();
+        let Some(step) = step else { return Ok(None) };
+        if step.answers((self.stride, self.block_size, self.cfg.vocab), bucket, ids, lengths, tables, kind) {
+            return Ok(Some(step));
+        }
+        self.discard_ahead(step)?;
+        Ok(None)
+    }
+
+    /// Wait for a step launched ahead of time and drop its result. Its writes to the KV cache are harmless: they go to the slot after the last token of
+    /// the sequences, which is not read before the sequence's own next step writes it again, and stream order puts them before everything launched later.
+    fn discard_ahead(&self, step: AheadStep) -> Result<(), String> {
+        AHEAD_DISCARDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let Some(stream) = self.backend_stream.as_ref() else { return Ok(()) };
+        stream.lock().map_err(|_| "accelerator stream lock poisoned")?.async_discard(step.slot).map_err(|e| e.to_string())
+    }
+
+    fn drain_ahead(&self) -> Result<(), String> {
+        let step = self.ahead.lock().map_err(|_| "ahead lock poisoned")?.step.take();
+        match step {
+            Some(step) => self.discard_ahead(step),
+            None => Ok(()),
+        }
+    }
+
+    /// The device copy of the token embedding for steps launched ahead of time; `None` (with the reason printed once) for models whose embedding is
+    /// quantized, scaled by position tables or normalized, split over ranks, or that add per-layer inputs.
+    fn ahead_embed(&self, stream: &mut dyn crate::backend::Stream) -> Option<&AheadEmbed> {
+        self.ahead_embed
+            .get_or_init(|| {
+                let cfg = &self.cfg;
+                let emb = &self.embedding;
+                let width = match emb.kind {
+                    0 => 4,
+                    1 | 30 => 2,
+                    _ => 0,
+                };
+                let why = if width == 0 {
+                    Some("the token embedding is not F32, F16 or BF16")
+                } else if self.par.is_some() || emb.first_row != 0 || emb.held != emb.rows {
+                    Some("the embedding is split over ranks")
+                } else if emb.cols != cfg.hidden || emb.row_bytes != cfg.hidden * width || emb.data.len() != emb.rows * emb.row_bytes {
+                    Some("the embedding rows are not plain")
+                } else if self.position_table.is_some() || self.embd_norm.is_some() || cfg.embedding_norm || self.ple.is_some() || self.altup.is_some() {
+                    Some("the model adds to or normalizes the embedding")
+                } else {
+                    None
+                };
+                if let Some(why) = why {
+                    eprintln!("[fllm-rs] asynchronous decode scheduling: off ({why})");
+                    return None;
+                }
+                let mut upload = || -> Result<crate::backend::DeviceBuffer, String> {
+                    let backend = self.backend.as_ref().ok_or("no backend")?;
+                    let mut table = backend.allocate_buffer(emb.data.len()).map_err(|e| e.to_string())?;
+                    stream.upload(&mut table, &emb.data[..]).map_err(|e| e.to_string())?;
+                    Ok(table)
+                };
+                match upload() {
+                    Ok(table) => {
+                        eprintln!(
+                            "[fllm-rs] asynchronous decode scheduling: on (token embedding of {} MiB on the device; FLLM_ASYNC_SCHEDULING=0 switches it off)",
+                            emb.data.len() >> 20
+                        );
+                        Some(AheadEmbed { table, kind: emb.kind, scale: cfg.embedding_scale })
+                    }
+                    Err(e) => {
+                        eprintln!("[fllm-rs] asynchronous decode scheduling: off (the embedding does not fit on the device: {e})");
+                        None
+                    }
+                }
+            })
+            .as_ref()
+    }
+
+    /// Enqueue one recorded decode step and the answer to the request: the staged arrays, the input (host embedding rows, or the embedding of the ids
+    /// the last launch sampled), the graph, and the argmax / sampler with the copy of its result to pinned slot `slot`. `Ok(false)`: a scratch buffer
+    /// was reallocated since the capture and the graph has to be recorded again (nothing was launched).
+    #[allow(clippy::too_many_arguments)]
+    fn launch_decode_step(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        graph: &DecodeGraph,
+        input: StepInput<'_>,
+        bucket: usize,
+        rows: usize,
+        lengths_p: &[i64],
+        tables_p: &[i64],
+        kind: &AheadKind,
+        slot: usize,
+        ahead: bool,
+    ) -> Result<bool, String> {
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let (positions, slots) = self.step_meta(lengths_p, tables_p)?;
+        let mut x_in = graph.x_in.clone();
+        match input {
+            StepInput::Host(x) => stream.upload_activations(&mut x_in, x).map_err(err)?,
+            StepInput::Device(embed) => stream
+                .embed_gather_sampled(&embed.table, embed.kind, &mut x_in, rows, bucket, self.cfg.hidden, embed.scale)
+                .map_err(err)?,
+        }
+        let pos32: Vec<u8> = positions.iter().flat_map(|&p| (p as i32).to_ne_bytes()).collect();
+        let slot32: Vec<u8> = slots.iter().flat_map(|&p| (p as i32).to_ne_bytes()).collect();
+        let table64: Vec<u8> = tables_p.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let len64: Vec<u8> = lengths_p.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        for (array, data) in [&pos32, &slot32, &table64, &len64].into_iter().enumerate() {
+            stream.graph_set(graph.id, array, data).map_err(err)?;
+        }
+        if !stream.graph_launch(graph.id).map_err(err)? {
+            return Ok(false);
+        }
+        // a launch ahead of time must not grow the sampler's buffers (that waits for the stream and frees the buffer the ids it reads are in)
+        let launched = match kind {
+            AheadKind::Greedy => stream.argmax_rows_async(&graph.head_out, bucket, self.cfg.vocab, slot, !ahead),
+            AheadKind::Sample(job) => stream.sample_rows_async(&graph.head_out, self.cfg.vocab, &job.batch(), slot, !ahead, ahead && job.append_last),
+        }
+        .map_err(err)?;
+        Ok(launched)
+    }
+
+    /// A decode step with the answer produced on the device and the next step already queued behind it: the step of this call is the one launched ahead
+    /// when there is one, otherwise it is launched now; then the step after it (`AHEAD_REQUEST`) is launched, reading the ids the sampler of this one
+    /// writes on the device, and only then does the call wait for its own result. The host work of the runtime between two calls (post-processing,
+    /// scheduling, the embedding rows, the staging copies and the 0.6 ms of the graph launch) then overlaps the execution of the next step.
+    /// `Ok(None)`: the graph has to be recorded again.
+    fn decode_async(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        graph: &DecodeGraph,
+        embed: &AheadEmbed,
+        matched: Option<AheadStep>,
+        kind: AheadKind,
+        launch: &AsyncLaunch<'_>,
+    ) -> Result<Option<Vec<f32>>, String> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let AsyncLaunch { bucket, rows, lengths_p, tables_p, .. } = *launch;
+        let slot = if let Some(step) = &matched {
+            AHEAD_HITS.fetch_add(1, Relaxed);
+            step.slot
+        } else {
+            let host_x = self.embed_host(launch.ids_p, launch.positions)?;
+            if !self.launch_decode_step(stream, graph, StepInput::Host(&host_x), bucket, rows, lengths_p, tables_p, &kind, 0, false)? {
+                return Ok(None);
+            }
+            0
+        };
+        let request = AHEAD_REQUEST.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        let next = request.filter(|r| std::mem::discriminant(r) == std::mem::discriminant(&kind)).and_then(|r| self.launch_ahead(stream, graph, embed, launch, r, 1 - slot));
+        // registered at once, so that a failure while waiting for this step leaves nothing behind that nobody collects (the next call drops it: the ids
+        // it was fed with are unknown)
+        let launched_ahead = next.is_some();
+        self.ahead.lock().map_err(|_| "ahead lock poisoned")?.step = next;
+        let sampled: Vec<i64> = match &kind {
+            AheadKind::Greedy => {
+                let mut picked = stream.async_collect(slot, bucket, 0, &[]).map_err(err)?.ids;
+                picked.truncate(rows);
+                let sampled = picked.iter().map(|&v| i64::from(v)).collect();
+                *GREEDY_IDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(picked);
+                GREEDY_IDS_REQUEST.store(false, Relaxed);
+                sampled
+            }
+            AheadKind::Sample(job) => {
+                let out = stream.async_collect(slot, rows, job.top_stride, &job.rows).map_err(err)?;
+                let sampled = out.ids.iter().map(|&v| i64::from(v)).collect();
+                *SAMPLE_JOB.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                *SAMPLE_RESULT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(out);
+                sampled
+            }
+        };
+        if launched_ahead {
+            if let Some(step) = self.ahead.lock().map_err(|_| "ahead lock poisoned")?.step.as_mut() {
+                step.ids = Some(sampled);
+            }
+        }
+        Ok(Some(Vec::new()))
+    }
+
+    /// Launch the step after the one just launched, on the assumption that every sequence goes on with the token that step samples: one position further,
+    /// the same block tables, the ids fed from the device. The position lies in the block the current one writes to or in one the table already holds
+    /// for the growth of the sequence (`step_meta` finds out: a table entry of -1 is no block); neither is shared. `None` when that does not hold or the
+    /// launch is not possible.
+    fn launch_ahead(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        graph: &DecodeGraph,
+        embed: &AheadEmbed,
+        launch: &AsyncLaunch<'_>,
+        kind: AheadKind,
+        slot: usize,
+    ) -> Option<AheadStep> {
+        let AsyncLaunch { bucket, rows, lengths, tables, lengths_p, tables_p, .. } = *launch;
+        if lengths.iter().any(|&l| l <= 0) {
+            return None;
+        }
+        let mut next_p = lengths_p.to_vec();
+        for l in &mut next_p[..rows] {
+            *l += 1;
+        }
+        self.step_meta(&next_p, tables_p).ok()?;
+        match self.launch_decode_step(stream, graph, StepInput::Device(embed), bucket, rows, &next_p, tables_p, &kind, slot, true) {
+            Ok(true) => {
+                AHEAD_LAUNCHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some(AheadStep { bucket, lengths: next_p[..rows].to_vec(), tables: tables.to_vec(), kind, slot, ids: None })
+            }
+            Ok(false) => None,
+            Err(e) => {
+                eprintln!("[fllm-rs] asynchronous decode scheduling stopped, steps run one after the other from here: {e}");
+                AHEAD_BROKEN.store(true, std::sync::atomic::Ordering::Relaxed);
+                None
+            }
+        }
     }
 
     /// Record the decode step of `bucket` rows: one ordinary pass first (it sizes every lazily grown scratch buffer and creates the
@@ -9353,6 +9747,80 @@ mod graph_switch_tests {
         }
         for v in ["1", "on", "On", "true", "TRUE", " 1 "] {
             assert_eq!(parse_graph_switch(Some(v)), GraphSwitch::On, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn a_step_launched_ahead_answers_only_the_call_it_was_made_for() {
+        use super::{AheadKind, AheadStep, DeviceSampleJob};
+        let job = |draw: u64| {
+            let mut j = DeviceSampleJob { mask_words: 4, ..Default::default() };
+            j.rows.push(crate::backend::SampleRowParams { temperature: 0.7, seed: 5, draw, ..Default::default() });
+            j
+        };
+        let step = || AheadStep {
+            bucket: 4,
+            lengths: vec![10, 20],
+            tables: vec![1, 2, -1, 3, 4, -1],
+            kind: AheadKind::Sample(job(8)),
+            slot: 1,
+            ids: Some(vec![100, 200]),
+        };
+        let (ids, lengths, tables) = ([100i64, 200], [10i64, 20], [1i64, 2, -1, 3, 4, -1]);
+        let same = AheadKind::Sample(job(8));
+        assert!(step().answers((3, 16, 1000), 4, &ids, &lengths, &tables, Some(&same)));
+        // each thing the step was computed for decides
+        assert!(!step().answers((3, 16, 1000), 8, &ids, &lengths, &tables, Some(&same)), "another graph size");
+        assert!(!step().answers((3, 16, 1000), 4, &[100, 201], &lengths, &tables, Some(&same)), "another token fed in");
+        assert!(!step().answers((3, 16, 1000), 4, &ids[..1], &lengths, &tables, Some(&same)), "fewer rows");
+        assert!(!step().answers((3, 16, 1000), 4, &ids, &[10, 21], &tables, Some(&same)), "another length");
+        assert!(!step().answers((3, 16, 1000), 4, &ids, &lengths, &[1, 2, -1, 3, 5, -1], Some(&same)), "another block table");
+        assert!(!step().answers((3, 16, 1000), 4, &ids, &lengths, &tables, Some(&AheadKind::Sample(job(9)))), "another draw number");
+        assert!(!step().answers((3, 16, 1000), 4, &ids, &lengths, &tables, Some(&AheadKind::Greedy)), "greedy ids instead of a sampler job");
+        assert!(!step().answers((3, 16, 1000), 4, &ids, &lengths, &tables, None), "a request for logits");
+        // blocks past the tokens do not matter (the scheduler reserves growth), blocks under them do
+        assert!(step().answers((3, 16, 1000), 4, &ids, &lengths, &[1, 2, 7, 3, 4, 8], Some(&same)), "an extra block for the growth");
+        assert!(!step().answers((3, 16, 1000), 4, &ids, &lengths, &[1, 2, -1, 3, 9, -1], Some(&same)), "another block under the tokens");
+        // the ids the step was fed with are known only once the host collected the step before
+        let mut unknown = step();
+        unknown.ids = None;
+        assert!(!unknown.answers((3, 16, 1000), 4, &ids, &lengths, &tables, Some(&same)));
+    }
+
+    /// The job launched ahead plus the token the previous step sampled is the job `device_sample_job` builds from the grown history.
+    #[test]
+    fn the_penalty_lists_of_a_step_launched_ahead_gain_the_sampled_token() {
+        use super::DeviceSampleJob;
+        use crate::backend::SampleRowParams;
+        let vocab = 50;
+        for n in [-1i64, 1, 3, 100] {
+            for history in [vec![5i64, 7, 5, 9], vec![1, 1, 1], vec![4]] {
+                for sampled in [5i64, 6, 49, 50, -1] {
+                    // the real job: the penalty pairs of the history with the sampled token at its end
+                    let mut grown = history.clone();
+                    grown.push(sampled);
+                    let penalised = SampleRowParams { repetition_penalty: 1.2, presence_penalty: 0.1, ..Default::default() };
+                    let plain = SampleRowParams::default();
+                    let mut real = DeviceSampleJob::default();
+                    let mut ahead = DeviceSampleJob { append_last: true, ..Default::default() };
+                    for (job, h, ahead_job) in [(&mut real, &grown, false), (&mut ahead, &history, true)] {
+                        for row in [&penalised, &plain] {
+                            let mut row = *row;
+                            row.pen_off = job.pen.len() as i32;
+                            if row.repetition_penalty != 1.0 {
+                                job.pen.extend(if ahead_job { crate::sampling::penalty_pairs_ahead(h, n, vocab) } else { crate::sampling::penalty_pairs(h, n, vocab) });
+                            }
+                            row.pen_len = job.pen.len() as i32 - row.pen_off;
+                            job.rows.push(row);
+                        }
+                    }
+                    // n = 0 keeps the window empty whatever joins it: the runtime refuses to launch ahead then
+                    if n == 0 {
+                        continue;
+                    }
+                    assert_eq!(ahead.with_appended(&[sampled, sampled], vocab), real, "window {n}, history {history:?}, sampled {sampled}");
+                }
+            }
         }
     }
 }

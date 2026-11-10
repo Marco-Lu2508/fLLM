@@ -236,7 +236,7 @@ Model/scheduler counters and gauges: `fllm_requests_total`, `fllm_completion_tok
 `fllm_prefill_rows_total`, `fllm_decode_rows_total`, `fllm_draft_proposed_tokens_total`,
 `fllm_draft_accepted_tokens_total`, `fllm_scheduler_seconds_total`,
 `fllm_batch_build_seconds_total`, `fllm_model_forward_seconds_total`,
-`fllm_postprocess_seconds_total`.
+`fllm_postprocess_seconds_total`, and `fllm_async_steps_total{result="launched|used|discarded"}` (decode steps launched before the host had the previous one, how many the runtime then asked for, and how many were thrown away; see docs/gpu-backends.md).
 
 API observability (also the whole output of the encoder server's `/metrics`):
 `fllm_api_requests_total`, gauges `fllm_requests_running`, `fllm_requests_waiting`,

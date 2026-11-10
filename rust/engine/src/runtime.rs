@@ -2390,16 +2390,28 @@ impl InferenceRuntime {
                 !self.pending_logits.contains_key(sid) && !self.beam_seq.contains_key(sid) && !self.constraints.contains_key(sid)
             })
         {
-            self.device_sample_job(&step.decode)
+            self.device_sample_job(&step.decode, false)
         } else {
             None
         };
+        // the step after this one, if it is going to be the same batch one token further (see `AheadKind`)
+        let plain_decode = step.prefill.is_empty()
+            && verify_candidates.is_empty()
+            && self.mtp.is_none()
+            && self.mrope_positions.is_empty()
+            && self.deepstack.is_empty()
+            && self.visible_lengths.is_empty()
+            && rows.iter().all(|row| row.embedding.is_none());
+        let ahead = self.ahead_kind(plain_decode, use_greedy_ids, device_job.as_ref(), &step.decode);
         if use_greedy_ids {
             crate::rust_decoder::RustDecoder::request_greedy_ids();
         }
         let device_job_rows = device_job.as_ref().map(|j| j.rows.len());
         if let Some(job) = device_job {
             crate::rust_decoder::RustDecoder::request_device_sample(job);
+        }
+        if let Ok(kind) = ahead {
+            crate::rust_decoder::RustDecoder::request_ahead(kind);
         }
         let batch_logits = if rows.is_empty() {
             Vec::new()
@@ -2487,6 +2499,7 @@ impl InferenceRuntime {
             decoder.set_row_visible_lengths(None);
             forwarded?
         };
+        crate::rust_decoder::RustDecoder::clear_ahead_request();
         let greedy_ids = if use_greedy_ids {
             crate::rust_decoder::RustDecoder::take_greedy_ids()
         } else {
@@ -2988,7 +3001,45 @@ impl InferenceRuntime {
 
     /// The device sampling job of a decode-only step, or `None` when a sequence needs something the device does not do (mirostat, DRY, the
     /// xorshift generator). Rows follow the order of `decode`, which is the order of the logit rows.
-    pub(crate) fn device_sample_job(&self, decode: &[i64]) -> Option<crate::rust_decoder::DeviceSampleJob> {
+    /// What the decode step after this one will ask the decoder for when every sequence goes on with the token sampled now (the decoder launches it
+    /// before this step's result is on the host): greedy ids again, or this step's sampler job with the draw numbers one further. `None` when the next
+    /// step is not predictable: a sequence ends with the next token (token budget), the penalties, bad words or `min_tokens` make the next job depend on the
+    /// sampled token, or the step is not plain decode. A wrong guess costs a step of the device but never changes a result: the decoder compares the
+    /// request it receives with this one.
+    fn ahead_kind(
+        &self,
+        plain_decode: bool,
+        greedy: bool,
+        job: Option<&crate::rust_decoder::DeviceSampleJob>,
+        decode: &[i64],
+    ) -> Result<crate::rust_decoder::AheadKind, &'static str> {
+        use crate::rust_decoder::AheadKind;
+        if !crate::rust_decoder::async_scheduling_enabled() {
+            return Err("off");
+        }
+        if !plain_decode || decode.is_empty() {
+            return Err("not a plain decode step");
+        }
+        for sid in decode {
+            if self.scheduler.sequences.get(sid).ok_or("unknown sequence")?.remaining_max() < 2 {
+                return Err("a sequence ends with the next token");
+            }
+        }
+        if greedy {
+            return Ok(AheadKind::Greedy);
+        }
+        job.ok_or("neither greedy ids nor a sampler job")?;
+        let next = self.device_sample_job(decode, true).ok_or("penalty window, bad words or min_tokens")?;
+        Ok(AheadKind::Sample(next))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sequence_for_tests(&mut self, sid: i64) -> Option<&mut crate::scheduler::Sequence> {
+        self.scheduler.sequences.get_mut(&sid)
+    }
+
+    /// `ahead`: the job of the step after the one being built, as far as it can be known before the sampler of this one has run (see `ahead_kind`).
+    pub(crate) fn device_sample_job(&self, decode: &[i64], ahead: bool) -> Option<crate::rust_decoder::DeviceSampleJob> {
         let vocab = self.model.vocab_size();
         let words = vocab.div_ceil(32);
         let mut job = crate::rust_decoder::DeviceSampleJob { mask_words: words, ..Default::default() };
@@ -2998,10 +3049,21 @@ impl InferenceRuntime {
             if !p.device_samplable() || s.sampling_state.kind != crate::sampling::RngKind::Philox {
                 return None;
             }
-            let mut row = p.device_row(s.sampling_state.rng, s.sampling_state.draws);
+            // the step after this one draws one number further for a sampled row; its penalty window holds one token more, which the device adds
+            let draws = s.sampling_state.draws + u64::from(ahead && p.temperature > 1e-5);
+            let mut row = p.device_row(s.sampling_state.rng, draws);
             row.pen_off = job.pen.len() as i32;
             if (p.repetition_penalty - 1.0).abs() >= 1e-5 || p.presence_penalty != 0.0 || p.frequency_penalty != 0.0 {
-                job.pen.extend(crate::sampling::penalty_pairs(&s.tokens, p.repeat_last_n, vocab));
+                if ahead {
+                    // an empty window stays empty (nothing joins it)
+                    if p.repeat_last_n == 0 {
+                        return None;
+                    }
+                    job.pen.extend(crate::sampling::penalty_pairs_ahead(&s.tokens, p.repeat_last_n, vocab));
+                    job.append_last = true;
+                } else {
+                    job.pen.extend(crate::sampling::penalty_pairs(&s.tokens, p.repeat_last_n, vocab));
+                }
             }
             row.pen_len = job.pen.len() as i32 - row.pen_off;
             // bias, the controls that forbid tokens (as -inf) and single-token bad words, merged per token
@@ -3017,7 +3079,13 @@ impl InferenceRuntime {
                 }
             };
             if s.output_len < p.min_tokens {
+                if ahead {
+                    return None;
+                }
                 self.eos_ids.iter().chain(&p.stop_token_ids).for_each(|&id| forbid(id));
+            }
+            if ahead && !p.bad_word_ids.is_empty() {
+                return None;
             }
             for word in &p.bad_word_ids {
                 if let Some((&last, prefix)) = word.split_last() {

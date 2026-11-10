@@ -266,7 +266,11 @@ int fllm_cuda_memset(int dev, void *ptr, int value, size_t bytes) {
 // Per-step host data of a captured decode step (positions, cache slots, block tables, lengths): a device buffer the kernels read, and a
 // pinned mirror that a copy node of the graph uploads at every launch.
 struct GraphSlot {
-    void *dev = nullptr, *pinned = nullptr;
+    // The staged array lives on the device (`dev`, what the recorded kernels read) and is filled from the pinned buffer `cur` right before every launch (a
+    // copy outside the graph: as a node it made the kernel behind it wait); two buffers, so that the host can prepare the next step while the copies of
+    // the one launched before are still queued.
+    void *dev = nullptr, *pinned[2] = {nullptr, nullptr};
+    int cur = 0;
     size_t cap = 0, bytes = 0;
     bool staged = false;
 };
@@ -331,6 +335,18 @@ struct FllmStream {
     size_t argmax_cap = 0;
     void *sample_scratch = nullptr;  // parameters, lists and results of the last sample call, and the work copy of the logits
     size_t sample_cap = 0;
+    // Results of argmax / sample launches that the host collects later (fllm_cuda_argmax_async, fllm_cuda_sample_async): two slots in pinned memory, each with
+    // the event that marks the copy back as done, so that the next step can be launched while the host still waits for the previous one.
+    struct AsyncOut {
+        int *ids = nullptr;
+        float *lp = nullptr;
+        int *top_ids = nullptr;
+        float *top_lp = nullptr;
+        size_t cap_rows = 0, cap_top = 0;
+        cudaEvent_t ev = nullptr;
+        bool pending = false;
+    } aout[2];
+    const int *last_ids_dev = nullptr;  // device ids of the last argmax / sample launch: the input of fllm_cuda_embed_gather
     // CUDA graphs of whole decode steps (see fllm_cuda_graph_begin): the one being captured, and a counter that is bumped whenever a
     // scratch buffer a captured kernel may point to is freed (a graph captured before that is stale)
     std::vector<struct FllmGraph *> graphs;
@@ -431,6 +447,13 @@ void fllm_cuda_stream_destroy(FllmStream *st) {
     for (void *p : st->act_tmp) cudaFree(p);
     cudaFree(st->act_check);
     cudaFree(st->sample_scratch);
+    for (auto &o : st->aout) {
+        cudaFreeHost(o.ids);
+        cudaFreeHost(o.lp);
+        cudaFreeHost(o.top_ids);
+        cudaFreeHost(o.top_lp);
+        if (o.ev) cudaEventDestroy(o.ev);
+    }
     for (auto *g : st->graphs) {
         if (g) {
             graph_free(g);
@@ -490,10 +513,9 @@ static int stage(FllmStream *st, int kind, const void *host, size_t bytes, void 
         GraphSlot &sl = st->capture->slot[kind];
         if (!sl.dev || bytes > sl.cap) return fllm_set_error("graph capture: staged data of kind %d does not fit its buffer", kind);
         if (!sl.staged) {
-            memcpy(sl.pinned, host, bytes);
+            memcpy(sl.pinned[sl.cur], host, bytes);
             sl.bytes = bytes;
             sl.staged = true;
-            CHECK(cudaMemcpyAsync(sl.dev, sl.pinned, bytes, cudaMemcpyHostToDevice, st->s), "cudaMemcpyAsync(graph stage)");
         } else if (bytes != sl.bytes) {
             return fllm_set_error("graph capture: staged data of kind %d changes size", kind);
         }
@@ -1040,7 +1062,8 @@ static void graph_free(FllmGraph *g) {
     g->exec = nullptr;
     for (auto &sl : g->slot) {
         cudaFree(sl.dev);
-        cudaFreeHost(sl.pinned);
+        cudaFreeHost(sl.pinned[0]);
+        cudaFreeHost(sl.pinned[1]);
         sl = GraphSlot();
     }
 }
@@ -1071,7 +1094,8 @@ int fllm_cuda_graph_begin(FllmStream *st, int id, size_t pos_bytes, size_t slot_
     for (int k = 0; k < 4; k++) {
         const size_t n = sizes[k] > 16 ? sizes[k] : 16;
         CHECK(cudaMalloc(&g->slot[k].dev, n), "cudaMalloc(graph slot)");
-        CHECK(cudaHostAlloc(&g->slot[k].pinned, n, cudaHostAllocDefault), "cudaHostAlloc(graph slot)");
+        CHECK(cudaHostAlloc(&g->slot[k].pinned[0], n, cudaHostAllocDefault), "cudaHostAlloc(graph slot)");
+        CHECK(cudaHostAlloc(&g->slot[k].pinned[1], n, cudaHostAllocDefault), "cudaHostAlloc(graph slot)");
         g->slot[k].cap = n;
     }
     g->max_len = max_len;
@@ -1119,7 +1143,7 @@ int fllm_cuda_graph_set(FllmStream *st, int id, int kind, const void *data, size
         return fllm_set_error("graph %d is not ready", id);
     GraphSlot &sl = st->graphs[id]->slot[kind];
     if (bytes != sl.bytes) return fllm_set_error("graph %d: array %d has %zu bytes, %zu were captured", id, kind, bytes, sl.bytes);
-    memcpy(sl.pinned, data, bytes);
+    memcpy(sl.pinned[sl.cur], data, bytes);
     return 0;
 }
 // Returns 0 on success and 2 when the graph is stale (a buffer it points to was reallocated): capture it again.
@@ -1130,6 +1154,11 @@ int fllm_cuda_graph_launch(FllmStream *st, int id) {
     if (g->epoch != st->epoch) return 2;
     if (int e = flush_glu(st)) return e;
     st->fp4_ready = st->x16_ready = st->x8_ready = st->q4z_ready = false;
+    // the staged arrays (positions, slots, block tables, lengths) go up in front of the graph, from the buffer the host filled last
+    for (auto &sl : g->slot) {
+        if (sl.staged && sl.bytes > 0) CHECK(cudaMemcpyAsync(sl.dev, sl.pinned[sl.cur], sl.bytes, cudaMemcpyHostToDevice, st->s), "cudaMemcpyAsync(graph stage)");
+        sl.cur ^= 1;
+    }
     CHECK(cudaGraphLaunch(static_cast<cudaGraphExec_t>(g->exec), st->s), "cudaGraphLaunch");
     return 0;
 }
@@ -1324,10 +1353,13 @@ int fllm_cuda_argmax(FllmStream *st, const float *logits, int rows, int vocab, i
 // Sampling a batch of rows on the device (sampling.cu). `params` is `rows` FllmSampleRow structs on the host; the lists are host arrays
 // that the call uploads. The logits stay unchanged: the kernel works on a copy, a few rows at a time (at most 64 MiB of work space).
 // Results are copied back.
-int fllm_cuda_sample(FllmStream *st, const float *logits, int rows, int vocab, const void *params, const int32_t *pen_ids,
-                     const int32_t *pen_counts, int pen_total, const int32_t *bias_ids, const float *bias_vals, int bias_total,
-                     const uint32_t *mask, int mask_total, int mask_words, int top_stride, int32_t *ids_out, float *logprob_out,
-                     int32_t *top_ids_out, float *top_logprob_out) {
+// The launches of a sample call (parameters and lists uploaded, kernels enqueued); the device arrays of the results are handed back. With `allow_grow`
+// false a scratch buffer that is too small makes the call return 3 without doing anything (growing it waits for the stream and frees the old buffer, which
+// a launch made ahead of time must not do: the ids it reads sit in that buffer).
+static int sample_run(FllmStream *st, const float *logits, int rows, int vocab, const void *params, const int32_t *pen_ids, const int32_t *pen_counts,
+                      int pen_total, const int32_t *bias_ids, const float *bias_vals, int bias_total, const uint32_t *mask, int mask_total, int mask_words,
+                      int top_stride, bool allow_grow, bool append_last, int32_t **d_ids_out, float **d_lp_out, int32_t **d_top_ids_out,
+                      float **d_top_lp_out) {
     PREP(st);
     if (rows <= 0 || vocab <= 0) return fllm_set_error("sample: empty input");
     if (st->capture) return fllm_set_error("sample: not allowed while a CUDA graph is recorded");
@@ -1340,8 +1372,12 @@ int fllm_cuda_sample(FllmStream *st, const float *logits, int rows, int vocab, c
     if (chunk < 1) chunk = 1;
     if (chunk > (size_t)rows) chunk = (size_t)rows;
     const size_t work_b = up(chunk * (size_t)vocab * 4);
-    const size_t total = params_b + 2 * pen_b + 2 * bias_b + mask_b + ids_b + lp_b + 2 * top_b + work_b;
+    const size_t total = params_b + 2 * pen_b + 2 * bias_b + mask_b + 2 * ids_b + lp_b + 2 * top_b + work_b;
+    // `append_last`: the ids the launch before this one produced join the penalty lists in the kernel (see sample_rows_kernel)
+    const int32_t *prev_src = append_last ? st->last_ids_dev : nullptr;
+    if (append_last && !prev_src) return fllm_set_error("sample: no sampled ids on the device to append to the penalty lists");
     if (total > st->sample_cap) {
+        if (!allow_grow) return 3;
         CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
         cudaFree(st->sample_scratch);
         st->sample_scratch = nullptr;
@@ -1358,7 +1394,9 @@ int fllm_cuda_sample(FllmStream *st, const float *logits, int rows, int vocab, c
     float *d_lp = reinterpret_cast<float *>(reinterpret_cast<char *>(d_ids) + ids_b);
     int32_t *d_top_ids = reinterpret_cast<int32_t *>(reinterpret_cast<char *>(d_lp) + lp_b);
     float *d_top_lp = reinterpret_cast<float *>(reinterpret_cast<char *>(d_top_ids) + top_b);
-    float *d_work = reinterpret_cast<float *>(reinterpret_cast<char *>(d_top_lp) + top_b);
+    int32_t *d_prev = reinterpret_cast<int32_t *>(reinterpret_cast<char *>(d_top_lp) + top_b);
+    float *d_work = reinterpret_cast<float *>(reinterpret_cast<char *>(d_prev) + ids_b);
+    if (append_last) CHECK(cudaMemcpyAsync(d_prev, prev_src, (size_t)rows * 4, cudaMemcpyDeviceToDevice, st->s), "sample previous ids copy");
     CHECK(cudaMemcpyAsync(d_params, params, (size_t)rows * 80, cudaMemcpyHostToDevice, st->s), "sample params upload");
     if (pen_total > 0) {
         CHECK(cudaMemcpyAsync(d_pen_ids, pen_ids, (size_t)pen_total * 4, cudaMemcpyHostToDevice, st->s), "sample penalties upload");
@@ -1374,9 +1412,27 @@ int fllm_cuda_sample(FllmStream *st, const float *logits, int rows, int vocab, c
         if (int e = fllm_sample_launch(st->s, logits + first * (size_t)vocab, d_work, n, vocab, d_params + first * 80, d_pen_ids, d_pen_counts,
                                        d_bias_ids, d_bias_vals, d_mask, mask_words, d_ids + first, d_lp + first,
                                        d_top_ids + first * (size_t)(top_stride > 0 ? top_stride : 1),
-                                       d_top_lp + first * (size_t)(top_stride > 0 ? top_stride : 1), top_stride > 0 ? top_stride : 1))
+                                       d_top_lp + first * (size_t)(top_stride > 0 ? top_stride : 1), top_stride > 0 ? top_stride : 1,
+                                       append_last ? d_prev + first : nullptr))
             return e;
     }
+    st->last_ids_dev = d_ids;
+    *d_ids_out = d_ids;
+    *d_lp_out = d_lp;
+    *d_top_ids_out = d_top_ids;
+    *d_top_lp_out = d_top_lp;
+    return 0;
+}
+
+int fllm_cuda_sample(FllmStream *st, const float *logits, int rows, int vocab, const void *params, const int32_t *pen_ids,
+                     const int32_t *pen_counts, int pen_total, const int32_t *bias_ids, const float *bias_vals, int bias_total,
+                     const uint32_t *mask, int mask_total, int mask_words, int top_stride, int32_t *ids_out, float *logprob_out,
+                     int32_t *top_ids_out, float *top_logprob_out) {
+    int32_t *d_ids = nullptr, *d_top_ids = nullptr;
+    float *d_lp = nullptr, *d_top_lp = nullptr;
+    if (int e = sample_run(st, logits, rows, vocab, params, pen_ids, pen_counts, pen_total, bias_ids, bias_vals, bias_total, mask, mask_total, mask_words,
+                           top_stride, true, false, &d_ids, &d_lp, &d_top_ids, &d_top_lp))
+        return e;
     CHECK(cudaMemcpyAsync(ids_out, d_ids, (size_t)rows * 4, cudaMemcpyDeviceToHost, st->s), "sample download");
     CHECK(cudaMemcpyAsync(logprob_out, d_lp, (size_t)rows * 4, cudaMemcpyDeviceToHost, st->s), "sample download");
     if (top_stride > 0) {
@@ -1385,6 +1441,111 @@ int fllm_cuda_sample(FllmStream *st, const float *logits, int rows, int vocab, c
     }
     CHECK(cudaStreamSynchronize(st->s), "sample sync");
     return 0;
+}
+
+// Pinned result slot `slot` with room for `rows` ids and `rows x stride` alternatives.
+static int async_slot(FllmStream *st, int slot, int rows, int stride) {
+    if (slot < 0 || slot > 1) return fllm_set_error("async result slot %d", slot);
+    FllmStream::AsyncOut &o = st->aout[slot];
+    if (o.pending) return fllm_set_error("async result slot %d is still waiting for its collection", slot);
+    if ((size_t)rows > o.cap_rows) {
+        cudaFreeHost(o.ids);
+        cudaFreeHost(o.lp);
+        o.ids = nullptr;
+        o.lp = nullptr;
+        o.cap_rows = (size_t)rows * 2 > 256 ? (size_t)rows * 2 : 256;
+        CHECK(cudaHostAlloc(reinterpret_cast<void **>(&o.ids), o.cap_rows * 4, cudaHostAllocDefault), "cudaHostAlloc(async ids)");
+        CHECK(cudaHostAlloc(reinterpret_cast<void **>(&o.lp), o.cap_rows * 4, cudaHostAllocDefault), "cudaHostAlloc(async logprobs)");
+    }
+    const size_t top = (size_t)rows * (size_t)(stride > 0 ? stride : 0);
+    if (top > o.cap_top) {
+        cudaFreeHost(o.top_ids);
+        cudaFreeHost(o.top_lp);
+        o.top_ids = nullptr;
+        o.top_lp = nullptr;
+        o.cap_top = top * 2;
+        CHECK(cudaHostAlloc(reinterpret_cast<void **>(&o.top_ids), o.cap_top * 4, cudaHostAllocDefault), "cudaHostAlloc(async top ids)");
+        CHECK(cudaHostAlloc(reinterpret_cast<void **>(&o.top_lp), o.cap_top * 4, cudaHostAllocDefault), "cudaHostAlloc(async top logprobs)");
+    }
+    if (!o.ev) CHECK(cudaEventCreateWithFlags(&o.ev, cudaEventDisableTiming), "cudaEventCreate(async)");
+    return 0;
+}
+
+// Argmax of `rows` rows like fllm_cuda_argmax, but the ids are copied to a pinned slot and the call returns at once: fllm_cuda_async_wait collects them.
+// Returns 3 (nothing done) when `allow_grow` is false and the device buffer of the ids would have to grow.
+int fllm_cuda_argmax_async(FllmStream *st, const float *logits, int rows, int vocab, int slot, int allow_grow) {
+    PREP(st);
+    if (rows <= 0 || vocab <= 0) return fllm_set_error("argmax: empty input");
+    if (int e = async_slot(st, slot, rows, 0)) return e;
+    if ((size_t)rows > st->argmax_cap) {
+        if (!allow_grow) return 3;
+        CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
+        cudaFree(st->argmax_out);
+        st->argmax_out = nullptr;
+        st->argmax_cap = (size_t)rows * 2 > 1024 ? (size_t)rows * 2 : 1024;
+        CHECK(cudaMalloc(&st->argmax_out, st->argmax_cap * sizeof(int)), "cudaMalloc(argmax)");
+    }
+    if (int e = fllm_argmax_launch(st->s, logits, rows, vocab, st->argmax_out)) return e;
+    FllmStream::AsyncOut &o = st->aout[slot];
+    CHECK(cudaMemcpyAsync(o.ids, st->argmax_out, (size_t)rows * 4, cudaMemcpyDeviceToHost, st->s), "argmax download");
+    CHECK(cudaEventRecord(o.ev, st->s), "cudaEventRecord(async)");
+    o.pending = true;
+    st->last_ids_dev = st->argmax_out;
+    return 0;
+}
+
+// fllm_cuda_sample without the wait; see fllm_cuda_argmax_async.
+int fllm_cuda_sample_async(FllmStream *st, const float *logits, int rows, int vocab, const void *params, const int32_t *pen_ids,
+                           const int32_t *pen_counts, int pen_total, const int32_t *bias_ids, const float *bias_vals, int bias_total,
+                           const uint32_t *mask, int mask_total, int mask_words, int top_stride, int slot, int allow_grow, int append_last) {
+    if (rows <= 0 || vocab <= 0) return fllm_set_error("sample: empty input");
+    CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    if (int e = async_slot(st, slot, rows, top_stride)) return e;
+    int32_t *d_ids = nullptr, *d_top_ids = nullptr;
+    float *d_lp = nullptr, *d_top_lp = nullptr;
+    if (int e = sample_run(st, logits, rows, vocab, params, pen_ids, pen_counts, pen_total, bias_ids, bias_vals, bias_total, mask, mask_total, mask_words,
+                           top_stride, allow_grow != 0, append_last != 0, &d_ids, &d_lp, &d_top_ids, &d_top_lp))
+        return e;
+    FllmStream::AsyncOut &o = st->aout[slot];
+    CHECK(cudaMemcpyAsync(o.ids, d_ids, (size_t)rows * 4, cudaMemcpyDeviceToHost, st->s), "sample download");
+    CHECK(cudaMemcpyAsync(o.lp, d_lp, (size_t)rows * 4, cudaMemcpyDeviceToHost, st->s), "sample download");
+    if (top_stride > 0) {
+        CHECK(cudaMemcpyAsync(o.top_ids, d_top_ids, (size_t)rows * top_stride * 4, cudaMemcpyDeviceToHost, st->s), "sample download");
+        CHECK(cudaMemcpyAsync(o.top_lp, d_top_lp, (size_t)rows * top_stride * 4, cudaMemcpyDeviceToHost, st->s), "sample download");
+    }
+    CHECK(cudaEventRecord(o.ev, st->s), "cudaEventRecord(async)");
+    o.pending = true;
+    return 0;
+}
+
+// Wait for the launch that filled `slot` and copy its results out (the outputs the launch did not produce are left alone). `ids_out` has room for
+// `rows` values, the alternatives for `rows x stride`.
+int fllm_cuda_async_wait(FllmStream *st, int slot, int rows, int stride, int32_t *ids_out, float *logprob_out, int32_t *top_ids_out, float *top_logprob_out) {
+    if (slot < 0 || slot > 1 || !st->aout[slot].pending) return fllm_set_error("async result slot %d has no launch to collect", slot);
+    FllmStream::AsyncOut &o = st->aout[slot];
+    CHECK(cudaEventSynchronize(o.ev), "async wait");
+    o.pending = false;
+    if (rows > 0 && ids_out) memcpy(ids_out, o.ids, (size_t)rows * 4);
+    if (rows > 0 && logprob_out && o.lp) memcpy(logprob_out, o.lp, (size_t)rows * 4);
+    if (stride > 0 && rows > 0 && top_ids_out && o.top_ids) memcpy(top_ids_out, o.top_ids, (size_t)rows * stride * 4);
+    if (stride > 0 && rows > 0 && top_logprob_out && o.top_lp) memcpy(top_logprob_out, o.top_lp, (size_t)rows * stride * 4);
+    return 0;
+}
+// Wait for the launch that filled `slot` and drop its results.
+int fllm_cuda_async_discard(FllmStream *st, int slot) {
+    if (slot < 0 || slot > 1 || !st->aout[slot].pending) return 0;
+    CHECK(cudaEventSynchronize(st->aout[slot].ev), "async wait");
+    st->aout[slot].pending = false;
+    return 0;
+}
+// The embedding rows of the ids that the last argmax / sample launch produced, into `x` (the input of a decode graph), enqueued behind that launch.
+int fllm_cuda_embed_gather(FllmStream *st, const void *table, int kind, int table_rows, void *x, int out_mode, int real_rows, int rows, int hidden,
+                           float scale) {
+    CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    if (!st->last_ids_dev) return fllm_set_error("embed gather: no sampled ids on the device");
+    if (kind != 0 && kind != 1 && kind != 30) return fllm_set_error("embed gather: table kind %d", kind);
+    if (out_mode < 0 || out_mode > 2) return fllm_set_error("embed gather: output format %d", out_mode);
+    return fllm_embed_gather_launch(st->s, table, kind, table_rows, st->last_ids_dev, x, out_mode, real_rows, rows, hidden, scale);
 }
 
 int fllm_cuda_rms_norm(FllmStream *st, const float *x, const float *w, float *out, int rows, int cols, float eps) {

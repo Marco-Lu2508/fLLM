@@ -331,7 +331,7 @@ fn the_device_sampling_job_encodes_penalties_bias_controls_and_masks() {
         ..Default::default()
     };
     let sid = rt.submit_with_sampling("job".into(), PROMPT.to_vec(), 8, params).unwrap();
-    let job = rt.device_sample_job(&[sid]).unwrap();
+    let job = rt.device_sample_job(&[sid], false).unwrap();
     assert_eq!(job.rows.len(), 1);
     let row = job.rows[0];
     assert_eq!((row.top_k, row.seed, row.draw, row.logprobs_mode, row.top_n), (9, 4, 0, 1, 3));
@@ -351,7 +351,51 @@ fn the_device_sampling_job_encodes_penalties_bias_controls_and_masks() {
     // mirostat and DRY stay on the host
     let host_only = SamplingParams { mirostat: 2, temperature: 1.0, ..Default::default() };
     let sid2 = rt.submit_with_sampling("host".into(), PROMPT.to_vec(), 8, host_only).unwrap();
-    assert!(rt.device_sample_job(&[sid2]).is_none());
+    assert!(rt.device_sample_job(&[sid2], false).is_none());
+}
+
+#[test]
+fn the_job_launched_ahead_is_the_job_built_after_the_token_it_waits_for() {
+    let mut model = load();
+    model.set_pool_blocks(8);
+    let vocab = model.vocab_size();
+    let mut rt = InferenceRuntime::with_speculative(model, 2, 64, vec![2], 0, 0).unwrap();
+    rt.attach_compute("cpu").unwrap();
+    for repeat_last_n in [-1i64, 3] {
+        let params = SamplingParams {
+            temperature: 0.7,
+            top_k: 9,
+            repetition_penalty: 1.2,
+            presence_penalty: 0.1,
+            frequency_penalty: 0.05,
+            repeat_last_n,
+            seed: Some(4),
+            ..Default::default()
+        };
+        // one sequence continues with a token its window holds, the other with a new one
+        let a = rt.submit_with_sampling(format!("a{repeat_last_n}"), PROMPT.to_vec(), 8, params.clone()).unwrap();
+        let b = rt.submit_with_sampling(format!("b{repeat_last_n}"), PROMPT.to_vec(), 8, params).unwrap();
+        let ahead = rt.device_sample_job(&[a, b], true).unwrap();
+        assert!(ahead.append_last);
+        let sampled = [5i64, 33];
+        for (sid, token) in [a, b].into_iter().zip(sampled) {
+            let s = rt.sequence_for_tests(sid).unwrap();
+            s.append_token(token);
+            s.sampling_state.draws += 1;
+        }
+        let real = rt.device_sample_job(&[a, b], false).unwrap();
+        assert_eq!(ahead.with_appended(&sampled, vocab), real, "window {repeat_last_n}");
+    }
+    // what makes the next job depend on the sampled token is not launched ahead
+    let with_bad_words = SamplingParams { temperature: 0.7, bad_word_ids: vec![vec![9, 3]], ..Default::default() };
+    let c = rt.submit_with_sampling("c".into(), PROMPT.to_vec(), 8, with_bad_words).unwrap();
+    assert!(rt.device_sample_job(&[c], true).is_none());
+    let min_tokens = SamplingParams { temperature: 0.7, min_tokens: 4, ..Default::default() };
+    let d = rt.submit_with_sampling("d".into(), PROMPT.to_vec(), 8, min_tokens).unwrap();
+    assert!(rt.device_sample_job(&[d], true).is_none());
+    let no_window = SamplingParams { temperature: 0.7, repetition_penalty: 1.2, repeat_last_n: 0, ..Default::default() };
+    let e = rt.submit_with_sampling("e".into(), PROMPT.to_vec(), 8, no_window).unwrap();
+    assert!(rt.device_sample_job(&[e], true).is_none());
 }
 
 #[test]

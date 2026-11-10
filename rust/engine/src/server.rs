@@ -1904,6 +1904,10 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
     // the output cache reports itself: hits, misses, evictions, bytes
     body.push_str(&state.cache.prometheus());
     body.push_str(&crate::placement::report().prometheus());
+    let (ahead_launched, ahead_used, ahead_discarded) = crate::rust_decoder::async_scheduling_stats();
+    body.push_str(&format!(
+        "# HELP fllm_async_steps_total Decode steps launched before the host had the previous one, and what became of them\n# TYPE fllm_async_steps_total counter\nfllm_async_steps_total{{result=\"launched\"}} {ahead_launched}\nfllm_async_steps_total{{result=\"used\"}} {ahead_used}\nfllm_async_steps_total{{result=\"discarded\"}} {ahead_discarded}\n"
+    ));
     let (leaders, followers) = state.coalesce.counters();
     body.push_str(&format!(
         "# HELP fllm_draining Whether the server refuses new work (1) or not (0)\n# TYPE fllm_draining gauge\nfllm_draining {}\n\

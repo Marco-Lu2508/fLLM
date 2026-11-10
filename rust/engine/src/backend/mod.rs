@@ -1616,6 +1616,50 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("sample_rows".into()))
     }
 
+    /// Decode steps launched ahead of time: the argmax / sampler variants below enqueue their kernels and the copy of the ids into pinned memory slot
+    /// `slot` (0 or 1) and return at once; `async_collect` waits for them and returns the results. With `allow_grow` false they return `Ok(false)`
+    /// without doing anything when a device buffer would have to grow (that waits for the stream and frees the old one, which the ids read by
+    /// `embed_gather_sampled` live in). `embed_gather_sampled` writes the embedding rows of the ids of the last launch into `x` (F32 `rows x hidden`, token 0
+    /// beyond `real_rows`), enqueued behind it, from a table of `kind` 0 (F32), 1 (F16) or 30 (BF16) on the device.
+    fn async_launches(&self) -> bool {
+        false
+    }
+    fn argmax_rows_async(&mut self, _logits: &DeviceBuffer, _rows: usize, _vocab: usize, _slot: usize, _allow_grow: bool) -> Result<bool, BackendError> {
+        Err(BackendError::UnsupportedOperation("argmax_rows_async".into()))
+    }
+    /// `append_last`: the ids the launch before this one produced are not in the penalty lists of `batch` yet; each row with penalties counts its id once
+    /// more (the kernel adds it, exactly as if the list had held it).
+    fn sample_rows_async(
+        &mut self,
+        _logits: &DeviceBuffer,
+        _vocab: usize,
+        _batch: &SampleBatch,
+        _slot: usize,
+        _allow_grow: bool,
+        _append_last: bool,
+    ) -> Result<bool, BackendError> {
+        Err(BackendError::UnsupportedOperation("sample_rows_async".into()))
+    }
+    fn async_collect(&mut self, _slot: usize, _rows: usize, _top_stride: usize, _params: &[SampleRowParams]) -> Result<SampleOutput, BackendError> {
+        Err(BackendError::UnsupportedOperation("async_collect".into()))
+    }
+    fn async_discard(&mut self, _slot: usize) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("async_discard".into()))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn embed_gather_sampled(
+        &mut self,
+        _table: &DeviceBuffer,
+        _kind: u32,
+        _x: &mut DeviceBuffer,
+        _real_rows: usize,
+        _rows: usize,
+        _hidden: usize,
+        _scale: f32,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("embed_gather_sampled".into()))
+    }
+
     /// CUDA graphs of whole decode steps. `graph_begin` starts recording the operations issued on this stream into graph `id`:
     /// `sizes` are the byte sizes of the four per-step arrays (positions, cache slots, block tables, lengths) that the operations stage
     /// and that `graph_set` replaces before each `graph_launch`; `max_len` is the context length attention is sized for. Operations

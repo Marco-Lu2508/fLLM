@@ -1612,6 +1612,205 @@ impl<'a> Tester<'a> {
         self.record("sample_rows batch independence", "the same seeded row at other batch positions and sizes", r);
         let r = self.sample_distribution(40);
         self.record("sample_rows distribution", "8192 draws from one row against the host sampler's distribution", r);
+        use crate::backend::act_dtype::ActDtype;
+        for (kind, act) in [(30u32, ActDtype::Bf16), (1, ActDtype::F16), (0, ActDtype::F32), (30, ActDtype::F32), (1, ActDtype::Bf16), (0, ActDtype::Bf16)] {
+            let r = self.async_launches(11, 1000, 96, kind, act);
+            self.record("async decode launches", &format!("argmax / sampler results in two slots, embedding rows of the sampled ids (table kind {kind}, {act:?} activations)"), r);
+        }
+        for (rows, vocab) in [(11usize, 1000usize), (16, 32_003)] {
+            let r = self.async_penalties(rows, vocab);
+            self.record("async decode penalties", &format!("{rows} rows x {vocab}: the sampled ids join the penalty lists in the kernel"), r);
+        }
+    }
+
+    /// Penalties on a step launched ahead of time: the ids of the launch before it join the penalty lists inside the kernel (`append_last`), and the
+    /// result must be exactly that of a blocking call whose lists hold them (`DeviceSampleJob::with_appended`), for rows that list the token already and
+    /// rows that do not, with and without penalties, greedy and sampled.
+    fn async_penalties(&mut self, rows: usize, vocab: usize) -> Result<Outcome, BackendError> {
+        let mut stream = self.device.create_stream()?;
+        if !stream.async_launches() {
+            return Err(BackendError::UnsupportedOperation("async_launches".into()));
+        }
+        let logits = self.rng.vector(rows * vocab, 3.0);
+        let buf = put(self.device, stream.as_mut(), &logits)?;
+        let words = vocab.div_ceil(32);
+        let stride = 4;
+        let mask = vec![0u32; words];
+        let params: Vec<crate::backend::SampleRowParams> = (0..rows)
+            .map(|r| crate::backend::SampleRowParams { temperature: 0.5 + 0.1 * (r % 4) as f32, seed: 77 + r as u64, draw: (3 * r) as u64, ..Default::default() })
+            .collect();
+        let batch = crate::backend::SampleBatch { rows: &params, pen: &[], bias: &[], mask: &mask, mask_words: words, top_stride: stride };
+        let start = Instant::now();
+        let mut wrong = 0usize;
+        // penalties: the ids of the launch before join the lists inside the kernel, exactly as if the lists had held them
+        let previous = {
+            if !stream.sample_rows_async(&buf, vocab, &batch, 0, true, false)? {
+                return Err(BackendError::DriverError("an asynchronous launch was refused".into()));
+            }
+            stream.async_collect(0, rows, stride, &params)?.ids
+        };
+        // the token of the launch before is a strong candidate again, so that counting it (or not) changes the distribution that the processed
+        // log-probabilities and the alternatives report
+        let mut boosted = logits.clone();
+        for (r, &last) in previous.iter().enumerate() {
+            if last >= 0 {
+                boosted[r * vocab + last as usize] += 2.5;
+            }
+        }
+        let buf = put(self.device, stream.as_mut(), &boosted)?;
+        let mut job = crate::rust_decoder::DeviceSampleJob { mask_words: words, mask: mask.clone(), append_last: true, top_stride: stride, ..Default::default() };
+        for (r, &last) in previous.iter().enumerate() {
+            let mut p = crate::backend::SampleRowParams {
+                temperature: if r % 3 == 0 { 0.0 } else { 0.8 },
+                seed: 9 + r as u64,
+                draw: (5 * r) as u64,
+                logprobs_mode: 2,
+                top_n: stride as i32,
+                ..Default::default()
+            };
+            p.pen_off = job.pen.len() as i32;
+            if r % 4 != 3 {
+                p.repetition_penalty = 1.0 + 0.1 * (r % 4) as f32;
+                p.presence_penalty = if r % 2 == 0 { 0.3 } else { 0.0 };
+                p.frequency_penalty = if r % 4 == 2 { 0.15 } else { 0.0 };
+                if p.repetition_penalty == 1.0 && p.presence_penalty == 0.0 && p.frequency_penalty == 0.0 {
+                    p.presence_penalty = 0.1;
+                }
+                let mut list = std::collections::BTreeMap::<i32, i32>::new();
+                for k in 0..6 {
+                    list.insert(((self.rng.next() % vocab as u64) as i32).max(0), 1 + k % 3);
+                }
+                // every other row already lists the token the launch before sampled
+                if r % 2 == 0 && last >= 0 {
+                    list.insert(last, 2);
+                } else if last >= 0 {
+                    list.remove(&last);
+                }
+                job.pen.extend(list);
+            }
+            p.pen_len = job.pen.len() as i32 - p.pen_off;
+            p.mask_row = -1;
+            job.rows.push(p);
+        }
+        if !stream.sample_rows_async(&buf, vocab, &job.batch(), 1, true, true)? {
+            return Err(BackendError::DriverError("an asynchronous launch was refused".into()));
+        }
+        let got = stream.async_collect(1, rows, stride, &job.rows)?;
+        let ids64: Vec<i64> = previous.iter().map(|&v| i64::from(v)).collect();
+        let expected_job = job.with_appended(&ids64, vocab);
+        let want = stream.sample_rows(&buf, vocab, &expected_job.batch())?;
+        wrong += usize::from(got.ids != want.ids);
+        wrong += got.logprobs.iter().zip(&want.logprobs).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        wrong += got.top_ids.iter().zip(&want.top_ids).filter(|(a, b)| a != b).count();
+        wrong += got.top_logprobs.iter().zip(&want.top_logprobs).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        // the list without the appended token is a different request: the comparison above can tell
+        let unappended = stream.sample_rows(&buf, vocab, &job.batch())?;
+        if rows >= 8 && unappended.logprobs.iter().zip(&want.logprobs).all(|(a, b)| a.to_bits() == b.to_bits()) {
+            wrong += 100_000;
+        }
+        let ms = start.elapsed().as_secs_f64() * 1e3;
+        Ok(Outcome { device: if wrong == 0 { 0.0 } else { f64::INFINITY }, cpu: 0.0, tol: 0.0, cpu_tol: 1.0, ms })
+    }
+
+    /// The pieces of a decode step launched ahead of time: `argmax_rows_async` and `sample_rows_async` into the two result slots must collect exactly what
+    /// the blocking calls return, and `embed_gather_sampled` must write the table rows of the ids the last launch sampled in the activation format (row 0
+    /// for the padding rows and for the id -1 that a mask without a single allowed token produces).
+    fn async_launches(&mut self, rows: usize, vocab: usize, hidden: usize, kind: u32, act: crate::backend::act_dtype::ActDtype) -> Result<Outcome, BackendError> {
+        use crate::backend::act_dtype::ActDtype;
+        let mut stream = self.device.create_stream()?;
+        if !stream.async_launches() {
+            return Err(BackendError::UnsupportedOperation("async_launches".into()));
+        }
+        if !stream.set_act_dtype(act) {
+            return Err(BackendError::UnsupportedOperation("activation format".into()));
+        }
+        let logits = self.rng.vector(rows * vocab, 3.0);
+        let buf = put(self.device, stream.as_mut(), &logits)?;
+        let words = vocab.div_ceil(32);
+        let stride = 4;
+        let mut params = Vec::new();
+        for r in 0..rows {
+            let mut p = crate::backend::SampleRowParams { temperature: 0.5 + 0.1 * (r % 4) as f32, seed: 77 + r as u64, draw: (3 * r) as u64, ..Default::default() };
+            if r % 3 == 1 {
+                p.top_k = 30;
+            }
+            if r % 3 == 2 {
+                p.top_p = 0.8;
+                p.logprobs_mode = 1;
+                p.top_n = stride as i32;
+            }
+            if r + 1 == rows {
+                // a mask that allows no token: the sampler returns -1
+                p.mask_row = 0;
+            }
+            params.push(p);
+        }
+        let mask = vec![0u32; words];
+        let batch = crate::backend::SampleBatch { rows: &params, pen: &[], bias: &[], mask: &mask, mask_words: words, top_stride: stride };
+        let start = Instant::now();
+        let blocking = stream.sample_rows(&buf, vocab, &batch)?;
+        let blocking_ids = stream.argmax_rows(&buf, rows, vocab)?;
+        let mut wrong = 0usize;
+        // both slots in flight at once, collected in launch order and in reverse
+        for order in [[0usize, 1], [1, 0]] {
+            if !stream.sample_rows_async(&buf, vocab, &batch, order[0], true, false)? || !stream.argmax_rows_async(&buf, rows, vocab, order[1], true)? {
+                return Err(BackendError::DriverError("an asynchronous launch was refused".into()));
+            }
+            let sampled = stream.async_collect(order[0], rows, stride, &params)?;
+            let picked = stream.async_collect(order[1], rows, 0, &[])?;
+            wrong += usize::from(sampled.ids != blocking.ids);
+            wrong += sampled.logprobs.iter().zip(&blocking.logprobs).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            wrong += sampled.top_ids.iter().zip(&blocking.top_ids).filter(|(a, b)| a != b).count();
+            wrong += sampled.top_logprobs.iter().zip(&blocking.top_logprobs).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            wrong += usize::from(picked.ids != blocking_ids);
+        }
+        if blocking.ids[rows - 1] != -1 {
+            wrong += 1000;
+        }
+        // the embedding rows of the sampled ids
+        let table_values: Vec<f32> = {
+            let raw = self.rng.vector(vocab * hidden, 2.0);
+            raw.iter()
+                .map(|&v| match kind {
+                    1 => half::f16::from_f32(v).to_f32(),
+                    30 => half::bf16::from_f32(v).to_f32(),
+                    _ => v,
+                })
+                .collect()
+        };
+        let table_bytes: Vec<u8> = match kind {
+            1 => table_values.iter().flat_map(|&v| half::f16::from_f32(v).to_bits().to_le_bytes()).collect(),
+            30 => table_values.iter().flat_map(|&v| half::bf16::from_f32(v).to_bits().to_le_bytes()).collect(),
+            _ => table_values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        };
+        let mut table = self.device.allocate_buffer(table_bytes.len())?;
+        stream.upload(&mut table, &table_bytes)?;
+        let total_rows = rows + 5;
+        for scale in [1.0f32, 0.37] {
+            if !stream.sample_rows_async(&buf, vocab, &batch, 0, true, false)? {
+                return Err(BackendError::DriverError("an asynchronous launch was refused".into()));
+            }
+            let mut x = self.device.allocate_buffer(total_rows * hidden * 4)?;
+            stream.embed_gather_sampled(&table, kind, &mut x, rows, total_rows, hidden, scale)?;
+            let ids = stream.async_collect(0, rows, stride, &params)?.ids;
+            let mut wide = self.device.allocate_buffer(total_rows * hidden * 4)?;
+            stream.widen_activations(&mut wide, &x)?;
+            let got = get(stream.as_mut(), &wide, total_rows * hidden)?;
+            for r in 0..total_rows {
+                let id = if r < rows && ids[r] >= 0 && (ids[r] as usize) < vocab { ids[r] as usize } else { 0 };
+                for c in 0..hidden {
+                    let v = table_values[id * hidden + c] * scale;
+                    let want = match act {
+                        ActDtype::F32 => v,
+                        ActDtype::F16 => half::f16::from_f32(v).to_f32(),
+                        ActDtype::Bf16 => half::bf16::from_f32(v).to_f32(),
+                    };
+                    wrong += usize::from(got[r * hidden + c].to_bits() != want.to_bits());
+                }
+            }
+        }
+        let ms = start.elapsed().as_secs_f64() * 1e3;
+        Ok(Outcome { device: if wrong == 0 { 0.0 } else { f64::INFINITY }, cpu: 0.0, tol: 0.0, cpu_tol: 1.0, ms })
     }
 
     /// The mismatches (rows whose token differs) between the device and the host reference of `sample_rows`.
