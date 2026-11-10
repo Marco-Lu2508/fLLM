@@ -114,6 +114,11 @@ struct Context {
     void *x16 = nullptr;
     size_t x16_bytes = 0;
     std::map<std::tuple<int, int, int, int>, Plan> plans;  // (rows, cols, batch, kind)
+    // what x16 holds: the conversion of this input (pointer, count, kind) as of this generation of the activations (fllm_x_gen); 0: nothing usable
+    const float *tag_x = nullptr;
+    size_t tag_n = 0;
+    int tag_kind = -1;
+    uint64_t tag_gen = 0;
 };
 
 __global__ void to_half_kernel(const float *__restrict__ x, __half *__restrict__ y, size_t n) {
@@ -250,7 +255,18 @@ int fllm_cublaslt_gemm_try(cudaStream_t s, const void *W, int kind, const float 
     if (!p.desc) return -1;
     const size_t n = (size_t)batch * cols;
     const unsigned grid = (unsigned)((n + 255) / 256 > 4096 ? 4096 : (n + 255) / 256);
-    if (glu) {
+    // the projections of one input follow each other (q, k, v; gate, up): the conversion of the first one serves the others while nothing ran in between
+    static const bool no_reuse = getenv("FLLM_CUDA_NO_X16_REUSE") != nullptr;
+    // (a product that writes into the input of the conversion makes it stale)
+    const char *y_lo = reinterpret_cast<const char *>(Y), *y_hi = y_lo + (size_t)batch * rows * sizeof(float);
+    const char *x_lo = reinterpret_cast<const char *>(X), *x_hi = x_lo + n * sizeof(float);
+    const bool overlap = y_lo < x_hi && x_lo < y_hi;
+    const bool tracked = fllm_x_gen != 0;  // set by fllm_cuda_linear only
+    const bool reuse = !glu && !no_reuse && tracked && !overlap && ctx.tag_gen == fllm_x_gen && ctx.tag_x == X && ctx.tag_n == n && ctx.tag_kind == kind;
+    ctx.tag_gen = 0;
+    if (reuse) {
+        // (nothing to convert)
+    } else if (glu) {
         const unsigned g4 = (unsigned)((n / 4 + 255) / 256 > 4096 ? 4096 : (n / 4 + 255) / 256);
         if (kind == KIND_F16) glu_to16_kernel<false><<<g4, 256, 0, s>>>(reinterpret_cast<const float4 *>(X), reinterpret_cast<const float4 *>(fllm_glu_up), static_cast<uint2 *>(ctx.x16), n / 4, fllm_glu_mode);
         else glu_to16_kernel<true><<<g4, 256, 0, s>>>(reinterpret_cast<const float4 *>(X), reinterpret_cast<const float4 *>(fllm_glu_up), static_cast<uint2 *>(ctx.x16), n / 4, fllm_glu_mode);
@@ -258,6 +274,12 @@ int fllm_cublaslt_gemm_try(cudaStream_t s, const void *W, int kind, const float 
         to_half_kernel<<<grid, 256, 0, s>>>(X, static_cast<__half *>(ctx.x16), n);
     } else {
         to_bf16_kernel<<<grid, 256, 0, s>>>(X, static_cast<__nv_bfloat16 *>(ctx.x16), n);
+    }
+    if (!glu && !overlap && tracked) {
+        ctx.tag_x = X;
+        ctx.tag_n = n;
+        ctx.tag_kind = kind;
+        ctx.tag_gen = fllm_x_gen;
     }
     const float alpha = 1.f, beta = 0.f;
     const cublasStatus_t st = lt.matmul(ctx.handle, p.desc, &alpha, W, p.a, ctx.x16, p.b, &beta, Y, p.c, Y, p.c, &p.algo,

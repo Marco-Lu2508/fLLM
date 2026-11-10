@@ -272,16 +272,16 @@ __device__ __forceinline__ uint32_t pack_dense16(float lo, float hi) {
 
 // MT 16-row tiles per warp share one set of activation fragments (the activations are read once per 16 * MT rows, which halves their traffic from the L2
 // cache for MT = 2); the WARPS warps of a block split the columns.
+// (the slabs [s_begin, s_end) of 32 columns: all of them, or one part of a split product)
 template <bool BF16, int NT, int WARPS, int MT>
-__global__ void __launch_bounds__(WARPS * 32)
-dense_skinny_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ Y, const float *__restrict__ bias, int rows, int cols,
-                    int batch) {
+__device__ __forceinline__ void dense_skinny_core(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ Y, const float *__restrict__ bias,
+                                                  int rows, int cols, int batch, int blk, int s_begin, int s_end) {
     constexpr int U = MT == 1 ? 4 : 2;  // slabs in flight per warp
     constexpr int OUT = MT * NT * 4 * 32;
     __shared__ float partial[WARPS][OUT];
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int q = lane & 3, g = lane >> 2;
-    const int base = blockIdx.x * 16 * MT;
+    const int base = blk * 16 * MT;
     const uint4 *w0[MT], *w1[MT];
 #pragma unroll
     for (int m = 0; m < MT; m++) {
@@ -304,8 +304,8 @@ dense_skinny_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, 
         for (int t = 0; t < NT; t++)
 #pragma unroll
             for (int i = 0; i < 4; i++) c[m][t][i] = 0.f;
-    const int slabs = cols >> 5;
-    for (int s0 = warp; s0 < slabs; s0 += WARPS * U) {
+    const int slabs = s_end;
+    for (int s0 = s_begin + warp; s0 < slabs; s0 += WARPS * U) {
         uint4 wa[U][MT], wb[U][MT];
 #pragma unroll
         for (int u = 0; u < U; u++) {
@@ -367,6 +367,34 @@ dense_skinny_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, 
     }
 }
 
+template <bool BF16, int NT, int WARPS, int MT>
+__global__ void __launch_bounds__(WARPS * 32)
+dense_skinny_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ Y, const float *__restrict__ bias, int rows, int cols,
+                    int batch) {
+    dense_skinny_core<BF16, NT, WARPS, MT>(W, X, Y, bias, rows, cols, batch, blockIdx.x, 0, cols >> 5);
+}
+
+// Split along the columns: block (x, y) sums the slabs of part y of the row tile x into its own slice of `part` (splits x batch x rows values), and
+// dense_skinny_reduce_kernel adds the parts in a fixed order (plus the bias). Few row tiles (3584 rows are 224 tiles on 108 SMs: the last wave of blocks
+// leaves a third of the card idle) become many blocks of equal size; the result does not depend on the schedule.
+template <bool BF16, int NT, int WARPS, int MT>
+__global__ void __launch_bounds__(WARPS * 32)
+dense_skinny_split_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ part, int rows, int cols, int batch, int splits) {
+    const int slabs = cols >> 5;
+    const int per = (slabs + splits - 1) / splits;
+    const int s_begin = blockIdx.y * per, s_end = min(slabs, s_begin + per);
+    dense_skinny_core<BF16, NT, WARPS, MT>(W, X, part + (size_t)blockIdx.y * batch * rows, nullptr, rows, cols, batch, blockIdx.x, s_begin, s_end);
+}
+__global__ void dense_skinny_reduce_kernel(const float *__restrict__ part, float *__restrict__ Y, const float *__restrict__ bias, int rows, int batch, int splits) {
+    const size_t total = (size_t)batch * rows;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += (size_t)gridDim.x * blockDim.x) {
+        float sum = bias ? bias[i % rows] : 0.f;
+        for (int p = 0; p < splits; p++) sum += part[(size_t)p * total + i];
+        Y[i] = sum;
+    }
+}
+
+// (fllm_skinny_part, the scratch for the parts of a split product, is set by fllm_cuda_linear: the attention workspace of the stream)
 static std::atomic<int> g_dense_skinny_mode{-1};
 // -1: environment (FLLM_CUDA_DENSE_SKINNY = auto | 0 | 1), 0: never, 1: always where the shape fits; used by the self test to compare the paths
 extern "C" void fllm_dense_skinny_set_mode(int mode) { g_dense_skinny_mode.store(mode < -1 || mode > 2 ? -1 : mode); }
@@ -394,6 +422,26 @@ static bool dense_skinny_try(cudaStream_t s, const uint8_t *W, const float *X, f
     if ((reinterpret_cast<uintptr_t>(W) & 15) != 0 || (reinterpret_cast<uintptr_t>(X) & 15) != 0) return false;
     constexpr bool bf16 = KIND == KIND_BF16;
     // two row tiles per warp and sixteen warps per block
+    const int tiles = batch > 8 && variant == 2 ? (rows + 31) / 32 : (rows + 15) / 16;
+    // few tiles: split the columns so that about a thousand blocks of equal size are launched (never less than four slabs of 32 columns per part)
+    static const bool no_split = getenv("FLLM_CUDA_NO_SKINNY_SPLIT") != nullptr;
+    int splits = 1;
+    if (!no_split && tiles < 512 && fllm_skinny_part != nullptr) {
+        splits = 1024 / tiles;
+        if (splits > 8) splits = 8;
+        if (splits > (cols >> 5) / 4) splits = (cols >> 5) / 4;
+        while (splits > 1 && (size_t)splits * batch * rows * sizeof(float) > fllm_skinny_part_bytes) splits--;
+        if (splits < 1) splits = 1;
+    }
+    if (splits > 1) {
+        const dim3 grid(tiles, splits);
+        if (batch > 8 && variant == 2) dense_skinny_split_kernel<bf16, 2, 16, 2><<<grid, 512, 0, s>>>(W, X, fllm_skinny_part, rows, cols, batch, splits);
+        else if (batch <= 8) dense_skinny_split_kernel<bf16, 1, 8, 1><<<grid, 256, 0, s>>>(W, X, fllm_skinny_part, rows, cols, batch, splits);
+        else dense_skinny_split_kernel<bf16, 2, 8, 1><<<grid, 256, 0, s>>>(W, X, fllm_skinny_part, rows, cols, batch, splits);
+        const size_t total = (size_t)batch * rows;
+        dense_skinny_reduce_kernel<<<(unsigned)((total + 255) / 256 > 1024 ? 1024 : (total + 255) / 256), 256, 0, s>>>(fllm_skinny_part, Y, bias, rows, batch, splits);
+        return true;
+    }
     if (batch > 8 && variant == 2) {
         dense_skinny_kernel<bf16, 2, 16, 2><<<dim3((rows + 31) / 32), 512, 0, s>>>(W, X, Y, bias, rows, cols, batch);
     } else if (batch <= 8) {

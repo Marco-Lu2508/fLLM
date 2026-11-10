@@ -52,6 +52,11 @@ bool fllm_exact_math();
 // the permuted FP16 layout in the scratch buffer; the stream remembers that, sets `fllm_x16_reuse` for the next call
 // and learns from `fllm_x16_filled` whether the scratch still holds the converted activations afterwards.
 extern thread_local bool fllm_x16_reuse, fllm_x16_filled;
+// The generation of the activations the next linear reads: the stream counts up whenever an operation that may change them ran (everything that clears its
+// `x16_ready`), so a GEMM that converted them for itself (cublaslt_gemm.cu) can reuse the conversion for the next projection of the same input (q, k and v; gate and up).
+extern thread_local uint64_t fllm_x_gen;
+extern thread_local float *fllm_skinny_part;
+extern thread_local size_t fllm_skinny_part_bytes;
 // The same for the int8 activations of the integer dot-product kernels (mmvq.cu), which live in the same scratch.
 extern thread_local bool fllm_x8_reuse, fllm_x8_filled;
 int fllm_mmvq_maxb();

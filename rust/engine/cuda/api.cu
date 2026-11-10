@@ -308,6 +308,7 @@ struct FllmStream {
     const float *x16_x = nullptr;
     int x16_batch = 0, x16_cols = 0;
     bool x16_ready = false;
+    uint64_t x_gen = 1;  // counts the operations that may change the activations a linear reads (every place that clears x16_ready): see fllm_x_gen
     const float *x8_x = nullptr;
     int x8_batch = 0, x8_cols = 0;
     bool x8_ready = false;  // the scratch holds the int8 activations of x8_x (mmvq.cu)
@@ -600,6 +601,7 @@ static void step_runs(FllmStream *st, const int64_t *tables, const int64_t *leng
         (st)->fp4_ready = false; \
         (st)->q4z_ready = false; \
         (st)->x16_ready = false; \
+        (st)->x_gen++; \
         (st)->x8_ready = false; \
         CHECK(cudaSetDevice((st)->dev), "cudaSetDevice"); \
     } while (0)
@@ -681,6 +683,9 @@ static bool glu_q8_fusable(FllmStream *st, int kind, const void *w, const float 
 #endif
 }
 
+thread_local uint64_t fllm_x_gen = 0;
+thread_local float *fllm_skinny_part = nullptr;
+thread_local size_t fllm_skinny_part_bytes = 0;
 int fllm_cuda_linear(FllmStream *st, const void *w, int kind, const float *x, float *y, const float *bias, int rows,
                      int cols, int batch) {
     CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
@@ -704,6 +709,7 @@ int fllm_cuda_linear(FllmStream *st, const void *w, int kind, const float *x, fl
         st->x16_bytes = (need * 2 + 255) & ~size_t(255);
         CHECK(cudaMalloc(&st->x16, st->x16_bytes), "cudaMalloc(activation scratch)");
         st->x16_ready = false;
+        st->x_gen++;
         st->x8_ready = false;
     }
     static const bool no_reuse = getenv("FLLM_CUDA_NO_X16_REUSE") != nullptr;
@@ -717,9 +723,15 @@ int fllm_cuda_linear(FllmStream *st, const void *w, int kind, const float *x, fl
         fllm_glu_mode = st->glu_mode;
         st->glu_pending = false;
     }
+    fllm_x_gen = st->x_gen;
+    fllm_skinny_part = st->ws;
+    fllm_skinny_part_bytes = st->ws_bytes;
     const int rc = fllm_linear_launch(st->s, w, kind, fuse ? st->glu_gate : x, y, bias, rows, cols, batch, st->x16, st->x16_bytes);
     fllm_glu_up = nullptr;
     fllm_glu_dst = nullptr;
+    fllm_x_gen = 0;
+    fllm_skinny_part = nullptr;
+    fllm_skinny_part_bytes = 0;
     fllm_x16_reuse = false;
     fllm_x8_reuse = false;
     st->x16_x = x;
@@ -741,6 +753,7 @@ int fllm_cuda_linear_exl(FllmStream *st, const void *w, int kind, const float *x
     st->q4z_ready = false;
     st->fp4_ready = false;
     st->x16_ready = false;
+    st->x_gen++;
     st->x8_ready = false;
     const size_t need = kind == (int)0x80000031 ? fllm_exl3_scratch_bytes(rows, cols, batch) : 0;
     if (need > st->x16_bytes) {
@@ -779,6 +792,7 @@ int fllm_cuda_linear_q4z(FllmStream *st, const void *w, int group, const float *
     }
     st->fp4_ready = false;
     st->x16_ready = false;
+    st->x_gen++;
     st->x8_ready = false;
     if (!fllm_q4z_supported(rows, cols, group))
         return fllm_set_error("Marlin 4-bit GEMM unsupported for %d x %d (group %d)", rows, cols, group);
@@ -857,6 +871,7 @@ int fllm_cuda_linear_fp8_marlin(FllmStream *st, const void *w, const float *x, f
     }
     st->fp4_ready = false;
     st->x16_ready = false;
+    st->x_gen++;
     st->x8_ready = false;
     if (!fllm_fp8_marlin_supported(rows, cols))
         return fllm_set_error("Marlin FP8 GEMM unsupported for %d x %d", rows, cols);
@@ -1027,6 +1042,7 @@ int fllm_cuda_linear_nvfp4(FllmStream *st, const void *w, const float *x, float 
         st->fp4_ready = false;
     }
     st->x16_ready = false;
+    st->x_gen++;
     st->x8_ready = false;
     const bool reuse = !fuse && st->fp4_ready && st->fp4_x == x && st->fp4_batch == batch && st->fp4_cols == cols;
     if (fuse) {
@@ -1101,6 +1117,7 @@ int fllm_cuda_graph_begin(FllmStream *st, int id, size_t pos_bytes, size_t slot_
     g->max_len = max_len;
     // nothing cached from earlier calls may be baked into the graph
     st->fp4_ready = st->x16_ready = st->x8_ready = st->q4z_ready = false;
+    st->x_gen++;
     cudaError_t e = cudaStreamBeginCapture(st->s, cudaStreamCaptureModeThreadLocal);
     if (e != cudaSuccess) {
         graph_free(g);
@@ -1119,6 +1136,7 @@ int fllm_cuda_graph_end(FllmStream *st, int id, int abort) {
     cudaError_t e = cudaStreamEndCapture(st->s, &graph);
     st->capture = nullptr;
     st->fp4_ready = st->x16_ready = st->x8_ready = st->q4z_ready = false;
+    st->x_gen++;
     if (abort || rc != 0 || e != cudaSuccess) {
         if (graph) cudaGraphDestroy(graph);
         graph_free(g);
@@ -1154,6 +1172,7 @@ int fllm_cuda_graph_launch(FllmStream *st, int id) {
     if (g->epoch != st->epoch) return 2;
     if (int e = flush_glu(st)) return e;
     st->fp4_ready = st->x16_ready = st->x8_ready = st->q4z_ready = false;
+    st->x_gen++;
     // the staged arrays (positions, slots, block tables, lengths) go up in front of the graph, from the buffer the host filled last
     for (auto &sl : g->slot) {
         if (sl.staged && sl.bytes > 0) CHECK(cudaMemcpyAsync(sl.dev, sl.pinned[sl.cur], sl.bytes, cudaMemcpyHostToDevice, st->s), "cudaMemcpyAsync(graph stage)");
