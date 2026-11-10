@@ -273,10 +273,10 @@ __device__ __forceinline__ uint32_t pack_dense16(float lo, float hi) {
 // MT 16-row tiles per warp share one set of activation fragments (the activations are read once per 16 * MT rows, which halves their traffic from the L2
 // cache for MT = 2); the WARPS warps of a block split the columns.
 // (the slabs [s_begin, s_end) of 32 columns: all of them, or one part of a split product)
-template <bool BF16, int NT, int WARPS, int MT>
+template <bool BF16, int NT, int WARPS, int MT, int UF = (MT == 1 ? 4 : 2)>
 __device__ __forceinline__ void dense_skinny_core(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ Y, const float *__restrict__ bias,
                                                   int rows, int cols, int batch, int blk, int s_begin, int s_end) {
-    constexpr int U = MT == 1 ? 4 : 2;  // slabs in flight per warp
+    constexpr int U = UF;  // slabs in flight per warp
     constexpr int OUT = MT * NT * 4 * 32;
     __shared__ float partial[WARPS][OUT];
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
@@ -367,11 +367,11 @@ __device__ __forceinline__ void dense_skinny_core(const uint8_t *__restrict__ W,
     }
 }
 
-template <bool BF16, int NT, int WARPS, int MT>
+template <bool BF16, int NT, int WARPS, int MT, int UF = (MT == 1 ? 4 : 2)>
 __global__ void __launch_bounds__(WARPS * 32)
 dense_skinny_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ Y, const float *__restrict__ bias, int rows, int cols,
                     int batch) {
-    dense_skinny_core<BF16, NT, WARPS, MT>(W, X, Y, bias, rows, cols, batch, blockIdx.x, 0, cols >> 5);
+    dense_skinny_core<BF16, NT, WARPS, MT, UF>(W, X, Y, bias, rows, cols, batch, blockIdx.x, 0, cols >> 5);
 }
 
 // Split along the columns: block (x, y) sums the slabs of part y of the row tile x into its own slice of `part` (splits x batch x rows values), and
@@ -399,16 +399,16 @@ static std::atomic<int> g_dense_skinny_mode{-1};
 // -1: environment (FLLM_CUDA_DENSE_SKINNY = auto | 0 | 1), 0: never, 1: always where the shape fits; used by the self test to compare the paths
 extern "C" void fllm_dense_skinny_set_mode(int mode) { g_dense_skinny_mode.store(mode < -1 || mode > 2 ? -1 : mode); }
 
-template <uint32_t KIND>
-static bool dense_skinny_try(cudaStream_t s, const uint8_t *W, const float *X, float *Y, const float *bias, int rows, int cols, int batch) {
+// 0: the tensor-core GEMV does not take a dense 16-bit projection of this shape (or is switched off); 1: one 16-row tile per warp; 2: two tiles per warp
+int fllm_dense_skinny_variant(int rows, int cols, int batch) {
     static const int env = [] {
         const char *v = getenv("FLLM_CUDA_DENSE_SKINNY");
         return v == nullptr || *v == 0 ? -1 : fllm_env_tri("FLLM_CUDA_DENSE_SKINNY");
     }();
     const int forced = g_dense_skinny_mode.load();
     const int mode = forced >= 0 ? forced : env;
-    if (mode == 0 || batch < 1 || batch > 16 || (cols & 31) != 0 || rows <= 0 || fllm_exact_math() || fllm_cc() < 80) return false;
-    if (mode < 0 && (batch < FLLM_DENSE_SKINNY_MIN_BATCH || batch > FLLM_DENSE_SKINNY_MAX_BATCH)) return false;
+    if (mode == 0 || batch < 1 || batch > 16 || (cols & 31) != 0 || rows <= 0 || fllm_exact_math() || fllm_cc() < 80) return 0;
+    if (mode < 0 && (batch < FLLM_DENSE_SKINNY_MIN_BATCH || batch > FLLM_DENSE_SKINNY_MAX_BATCH)) return 0;
     // automatic choice for 9-16 tokens, measured on an A100 (bf16, 16 tokens, GB/s of weights; one tile per warp / two tiles / cuBLASLt):
     //   3584 x 3584: 1161 / 1053 / 869,  18944 x 3584: 1005 / 1145 / 1046,  3584 x 18944: 808 / 824 / 1167,  512 x 3584: 253 / 315 / 282.
     // A long column range over many blocks but few rows leaves SMs without work in the last wave (224 or 112 blocks on 108 SMs): cuBLASLt splits those
@@ -416,9 +416,16 @@ static bool dense_skinny_try(cudaStream_t s, const uint8_t *W, const float *X, f
     // split-K reduction, no bias kernel) wins.
     int variant = mode == 2 ? 2 : 1;
     if (mode < 0 && batch > 8) {
-        if (rows >= 2048 && cols >= 4 * (size_t)rows) return false;
+        if (rows >= 2048 && cols >= 4 * (size_t)rows) return 0;
         variant = rows >= 8192 || rows < 2048 ? 2 : 1;
     }
+    return variant;
+}
+
+template <uint32_t KIND>
+static bool dense_skinny_try(cudaStream_t s, const uint8_t *W, const float *X, float *Y, const float *bias, int rows, int cols, int batch) {
+    const int variant = fllm_dense_skinny_variant(rows, cols, batch);
+    if (variant == 0) return false;
     if ((reinterpret_cast<uintptr_t>(W) & 15) != 0 || (reinterpret_cast<uintptr_t>(X) & 15) != 0) return false;
     constexpr bool bf16 = KIND == KIND_BF16;
     // two row tiles per warp and sixteen warps per block
@@ -442,7 +449,12 @@ static bool dense_skinny_try(cudaStream_t s, const uint8_t *W, const float *X, f
         dense_skinny_reduce_kernel<<<(unsigned)((total + 255) / 256 > 1024 ? 1024 : (total + 255) / 256), 256, 0, s>>>(fllm_skinny_part, Y, bias, rows, batch, splits);
         return true;
     }
-    if (batch > 8 && variant == 2) {
+    static const bool no_wide = getenv("FLLM_CUDA_NO_SKINNY_WIDE") != nullptr;
+    if (batch > 8 && variant == 2 && rows >= 8192 && !no_wide) {
+        // tall projections (gate, up): four 16-row tiles per warp read each slice of the activations once for 64 rows instead of 32, one slab in flight
+        // per tile (A100, 18944 x 3584, 16 tokens: 119 -> 110 us)
+        dense_skinny_kernel<bf16, 2, 4, 4, 1><<<dim3((rows + 63) / 64), 128, 0, s>>>(W, X, Y, bias, rows, cols, batch);
+    } else if (batch > 8 && variant == 2) {
         dense_skinny_kernel<bf16, 2, 16, 2><<<dim3((rows + 31) / 32), 512, 0, s>>>(W, X, Y, bias, rows, cols, batch);
     } else if (batch <= 8) {
         dense_skinny_kernel<bf16, 1, 8, 1><<<dim3((rows + 15) / 16), 256, 0, s>>>(W, X, Y, bias, rows, cols, batch);

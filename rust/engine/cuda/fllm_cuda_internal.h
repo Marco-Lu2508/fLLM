@@ -55,6 +55,10 @@ extern thread_local bool fllm_x16_reuse, fllm_x16_filled;
 // The generation of the activations the next linear reads: the stream counts up whenever an operation that may change them ran (everything that clears its
 // `x16_ready`), so a GEMM that converted them for itself (cublaslt_gemm.cu) can reuse the conversion for the next projection of the same input (q, k and v; gate and up).
 extern thread_local uint64_t fllm_x_gen;
+// 0 when the tensor-core GEMV does not take a dense 16-bit projection of this shape (linear.cu), else its variant
+int fllm_dense_skinny_variant(int rows, int cols, int batch);
+// 0 when the tensor-core GEMV does not take a dense 16-bit projection of this shape (linear.cu), else its variant
+int fllm_dense_skinny_variant(int rows, int cols, int batch);
 extern thread_local float *fllm_skinny_part;
 extern thread_local size_t fllm_skinny_part_bytes;
 // The same for the int8 activations of the integer dot-product kernels (mmvq.cu), which live in the same scratch.

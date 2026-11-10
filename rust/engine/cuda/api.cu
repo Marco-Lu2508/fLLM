@@ -650,7 +650,7 @@ int fllm_cuda_copy(FllmStream *st, void *dst, const void *src, size_t bytes) {
 
 // Can the GEMM of a (pending) glu's consumer read gate and up itself? Only the tensor-core paths that convert the
 // activations as their first step qualify; everything else needs the glu result in memory.
-static bool glu_fusable(FllmStream *st, int kind, const void *w, const float *x, const float *y, int cols, int batch) {
+static bool glu_fusable(FllmStream *st, int kind, const void *w, const float *x, const float *y, int cols, int batch, int rows = 0) {
     if (!st->glu_pending || x != st->glu_out || (const void *)y == (const void *)x || (size_t)batch * cols != st->glu_count)
         return false;
     if (st->glu_half && kind != 40 && kind != 8) return false;
@@ -661,7 +661,11 @@ static bool glu_fusable(FllmStream *st, int kind, const void *w, const float *x,
     if ((cols & (narrow_ok ? 31 : 255)) != 0) return false;
     if (kind == 40) return true;
     // dense 16-bit weights: cuBLASLt converts gate and up itself for 17 tokens and more (cublaslt_gemm.cu), the linear launcher computes the activation when it declines
-    if (kind == 1 || kind == 30) return batch >= 17 && !fllm_exact_math() && fllm_cc() >= 80;
+    // (9 to 16 tokens: when the tensor-core GEMV declines the shape - the tall inputs of a down projection - cuBLASLt takes it and folds the activation)
+    if (kind == 1 || kind == 30) {
+        if (fllm_exact_math() || fllm_cc() < 80) return false;
+        return batch >= 17 || (batch >= 9 && rows > 0 && fllm_dense_skinny_variant(rows, cols, batch) == 0);
+    }
     static const bool no_qgemm = getenv("FLLM_CUDA_NO_QGEMM") != nullptr;
     // Turing (sm_75): the tile shapes of the quantized GEMMs do not all fit its shared memory, and a GEMM that gives up after the fused conversion hands the raw
     // gate to the next kernel (checked on a T4: Llama-3.2-3B Q4_K_M wrote nonsense, the same run was right with FLLM_CUDA_NO_GLU_FUSE=1)
@@ -694,7 +698,7 @@ int fllm_cuda_linear(FllmStream *st, const void *w, int kind, const float *x, fl
     if (int e = flush_add(st)) return e;
     st->q4z_ready = false;
     st->fp4_ready = false;
-    const bool fuse = glu_fusable(st, kind, w, x, y, cols, batch) || glu_q8_fusable(st, kind, w, x, y, cols, batch);
+    const bool fuse = glu_fusable(st, kind, w, x, y, cols, batch, rows) || glu_q8_fusable(st, kind, w, x, y, cols, batch);
     if (!fuse) {
         if (int e = flush_glu(st)) return e;
     }
