@@ -235,6 +235,218 @@ __global__ void __launch_bounds__(A4_WARPS * 32) attn4_kernel(Attn4Args a) {
     }
 }
 
+#if !defined(__HIPCC__)
+// ---- the same decode attention on the tensor cores -----------------------------------------------------------------------------------------------
+// attn4_kernel above does 2 x G x 128 multiply-adds per key and KV head on the FP32 units (G = 7 for Qwen2.5-7B: 1792 per key), which at 16 rows x 2100
+// keys x 4 KV heads is as long as reading the cache takes (114 us per layer against 58 us of memory time on an A100). Here the products run on `mma.m16n8k16`
+// (FP16 inputs, FP32 accumulation): S = Q K^T with the query heads as the 16 rows (G <= 8 of them, the other rows are zero), O += P V with P in the registers
+// the S fragments leave it in. The queries and the probabilities are split in a high and a low FP16 part (x = hi + lo, 22 bits), so that the result is the one
+// of the FP32 kernel up to rounding: the keys and values are FP16 in the cache anyway. A warp walks its own 16-key tiles, each lane reads its fragments of K and
+// V straight from the cache (V is transposed in the registers with `movmatrix`), and the four warps of the block merge as the FP32 kernel's groups do.
+// The block covers the same keys of the same (row, KV head, split) as attn4_kernel and writes the same partial results, so the merge kernel is shared.
+// Covers: f16 cache, key = value width 128, G <= 8, sliding window / chunk / soft-capping / sinks.
+__device__ __forceinline__ void a4_mma(float c[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800)
+    (void)c; (void)a0; (void)a1; (void)a2; (void)a3; (void)b0; (void)b1;
+#else
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+#endif
+}
+__device__ __forceinline__ uint32_t a4_transpose8x8(uint32_t x) {
+    uint32_t y = 0;
+#if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 800)
+    asm volatile("movmatrix.sync.aligned.m8n8.trans.b16 %0, %1;\n" : "=r"(y) : "r"(x));
+#endif
+    return y;
+}
+__device__ __forceinline__ uint32_t a4_pack(float lo, float hi) {
+    const __half2 v = __floats2half2_rn(lo, hi);
+    return *reinterpret_cast<const uint32_t *>(&v);
+}
+// the FP16 value nearest to x and the FP16 value nearest to the rest: hi + lo = x to 22 bits
+__device__ __forceinline__ void a4_split(float x, __half &hi, __half &lo) {
+    hi = __float2half_rn(x);
+    lo = __float2half_rn(x - __half2float(hi));
+}
+
+template <int G>
+__global__ void __launch_bounds__(128) attn4tc_kernel(Attn4Args a) {
+    constexpr int D = 128;
+    __shared__ uint4 sm_q[8][32][2];  // the A fragments of the queries per 16 dimensions: high part, low part
+    __shared__ float sm_acc[4][G][D];
+    __shared__ float sm_m[4][G], sm_l[4][G];
+    const int kh = blockIdx.x, r = blockIdx.y, sp = blockIdx.z;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int g = lane >> 2, q = lane & 3;
+    const int n = (int)a.lengths[r];
+    const int start = a4_row_start(a, n);
+    const int seff = a4_row_splits(a, n - start);
+    if (sp >= seff) return;
+    const int per_split = (n - start + seff - 1) / seff;
+    const int begin = start + sp * per_split;
+    const int end = min(n, begin + per_split);
+
+    for (int e = threadIdx.x; e < 8 * 32; e += 128) {
+        const int ks = e >> 5, ln = e & 31, gg = ln >> 2, qq = ln & 3;
+        uint32_t hi[4] = {0u, 0u, 0u, 0u}, lo[4] = {0u, 0u, 0u, 0u};  // rows 8..15 (the registers 1 and 3) stay zero
+        if (gg < G) {
+#pragma unroll
+            for (int part = 0; part < 2; part++) {
+                const size_t qi = ((size_t)r * a.heads + (size_t)kh * G + gg) * D + 16 * ks + 2 * qq + 8 * part;
+                const float x0 = a4_load(a.q, qi, a.adt) * a.scale, x1 = a4_load(a.q, qi + 1, a.adt) * a.scale;
+                __half h0, l0, h1, l1;
+                a4_split(x0, h0, l0);
+                a4_split(x1, h1, l1);
+                hi[2 * part] = a4_pack(__half2float(h0), __half2float(h1));
+                lo[2 * part] = a4_pack(__half2float(l0), __half2float(l1));
+            }
+        }
+        sm_q[ks][ln][0] = make_uint4(hi[0], hi[1], hi[2], hi[3]);
+        sm_q[ks][ln][1] = make_uint4(lo[0], lo[1], lo[2], lo[3]);
+    }
+    __syncthreads();
+
+    float acc[D / 8][4];
+#pragma unroll
+    for (int dt = 0; dt < D / 8; dt++) acc[dt][0] = acc[dt][1] = acc[dt][2] = acc[dt][3] = 0.f;
+    float m = A4_FLOOR, l = 0.f;  // of the query head g (the lanes of a quad hold the same m; l is summed over the quad at the end)
+    const int64_t *table = a.tables + (size_t)r * a.stride;
+    const size_t kvw = (size_t)a.kv_heads * D;
+    const uint16_t *kbase = a.kpool + (size_t)kh * D;
+    const uint16_t *vbase = a.vpool + (size_t)kh * D;
+
+    for (int p0 = begin + warp * 16; p0 < end; p0 += 4 * 16) {
+        // the cache rows of the keys g and g + 8 of the tile (K^T fragments: B[k = dimension][n = key]; V: one 8 x 8 block of keys x dimensions per 8 dimensions)
+        const uint16_t *kr[2], *vr[2];
+        bool live[2];
+#pragma unroll
+        for (int j = 0; j < 2; j++) {
+            const int p = p0 + g + 8 * j;
+            live[j] = p < end;
+            const size_t slot = live[j] ? (size_t)table[p / a.block_size] * a.block_size + p % a.block_size : 0;
+            kr[j] = kbase + slot * kvw + 2 * q;
+            vr[j] = vbase + slot * kvw + 2 * q;
+        }
+        uint32_t kb[2][8][2], vw[D / 8][2];
+#pragma unroll
+        for (int j = 0; j < 2; j++) {
+#pragma unroll
+            for (int ks = 0; ks < 8; ks++) {
+                kb[j][ks][0] = __ldg(reinterpret_cast<const uint32_t *>(kr[j] + 16 * ks));
+                kb[j][ks][1] = __ldg(reinterpret_cast<const uint32_t *>(kr[j] + 16 * ks + 8));
+            }
+        }
+#pragma unroll
+        for (int dt = 0; dt < D / 8; dt++) {
+#pragma unroll
+            for (int j = 0; j < 2; j++) vw[dt][j] = live[j] ? __ldg(reinterpret_cast<const uint32_t *>(vr[j] + 8 * dt)) : 0u;
+        }
+        float s[2][4];
+#pragma unroll
+        for (int nt = 0; nt < 2; nt++) s[nt][0] = s[nt][1] = s[nt][2] = s[nt][3] = 0.f;
+#pragma unroll
+        for (int ks = 0; ks < 8; ks++) {
+            const uint4 qh = sm_q[ks][lane][0], ql = sm_q[ks][lane][1];
+#pragma unroll
+            for (int nt = 0; nt < 2; nt++) {
+                a4_mma(s[nt], qh.x, qh.y, qh.z, qh.w, kb[nt][ks][0], kb[nt][ks][1]);
+                a4_mma(s[nt], ql.x, ql.y, ql.z, ql.w, kb[nt][ks][0], kb[nt][ks][1]);
+            }
+        }
+        // the scores of head g for the keys 2q, 2q + 1, 8 + 2q, 8 + 2q + 1 of the tile
+        float sc[4] = {s[0][0], s[0][1], s[1][0], s[1][1]};
+        bool valid[4];
+        float tmax = A4_FLOOR;
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+            valid[i] = p0 + (i >> 1) * 8 + 2 * q + (i & 1) < end;
+            if (a.softcap != 0.f) sc[i] = a.softcap * tanhf(fminf(fmaxf(sc[i] / a.softcap, -15.f), 15.f));
+            if (valid[i]) tmax = fmaxf(tmax, sc[i]);
+        }
+        tmax = fmaxf(tmax, __shfl_xor_sync(0xffffffffu, tmax, 1));
+        tmax = fmaxf(tmax, __shfl_xor_sync(0xffffffffu, tmax, 2));
+        const float m_new = fmaxf(m, tmax);
+        const float corr = __expf(m - m_new);
+        float pr[4], psum = 0.f;
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+            pr[i] = valid[i] ? __expf(sc[i] - m_new) : 0.f;
+            psum += pr[i];
+        }
+        l = l * corr + psum;
+        m = m_new;
+        uint32_t ph0, ph2, pl0, pl2;
+        {
+            __half h[4], lo[4];
+#pragma unroll
+            for (int i = 0; i < 4; i++) a4_split(pr[i], h[i], lo[i]);
+            ph0 = a4_pack(__half2float(h[0]), __half2float(h[1]));
+            ph2 = a4_pack(__half2float(h[2]), __half2float(h[3]));
+            pl0 = a4_pack(__half2float(lo[0]), __half2float(lo[1]));
+            pl2 = a4_pack(__half2float(lo[2]), __half2float(lo[3]));
+        }
+#pragma unroll
+        for (int dt = 0; dt < D / 8; dt++) {
+            acc[dt][0] *= corr;
+            acc[dt][1] *= corr;
+            const uint32_t b0 = a4_transpose8x8(vw[dt][0]), b1 = a4_transpose8x8(vw[dt][1]);
+            a4_mma(acc[dt], ph0, 0u, ph2, 0u, b0, b1);
+            a4_mma(acc[dt], pl0, 0u, pl2, 0u, b0, b1);
+        }
+    }
+
+    l += __shfl_xor_sync(0xffffffffu, l, 1);
+    l += __shfl_xor_sync(0xffffffffu, l, 2);
+    if (g < G) {
+#pragma unroll
+        for (int dt = 0; dt < D / 8; dt++) {
+            sm_acc[warp][g][8 * dt + 2 * q] = acc[dt][0];
+            sm_acc[warp][g][8 * dt + 2 * q + 1] = acc[dt][1];
+        }
+        if (q == 0) {
+            sm_m[warp][g] = m;
+            sm_l[warp][g] = l;
+        }
+    }
+    __syncthreads();
+    // merge the four warps of the block (as attn4_kernel merges its eight groups)
+    for (int d = threadIdx.x; d < D; d += 128) {
+#pragma unroll
+        for (int gq = 0; gq < G; gq++) {
+            float M = A4_FLOOR;
+#pragma unroll
+            for (int s = 0; s < 4; s++) M = fmaxf(M, sm_m[s][gq]);
+            float L = 0.f, v = 0.f;
+#pragma unroll
+            for (int s = 0; s < 4; s++) {
+                const float f = __expf(sm_m[s][gq] - M);
+                L += sm_l[s][gq] * f;
+                v += sm_acc[s][gq][d] * f;
+            }
+            const int h = kh * G + gq;
+            if (seff == 1) {
+                if (a.sinks) {
+                    const float Mf = fmaxf(M, a.sinks[h]);
+                    const float rescale = __expf(M - Mf);
+                    v *= rescale;
+                    L = L * rescale + __expf(a.sinks[h] - Mf);
+                }
+                a4_store(a.out, ((size_t)r * a.heads + h) * D + d, v / L, a.adt);
+            } else {
+                float *dst = a.ws + (((size_t)r * a.heads + h) * a.splits + sp) * (D + 2);
+                dst[d] = v;
+                if (d == 0) {
+                    dst[D] = M;
+                    dst[D + 1] = L;
+                }
+            }
+        }
+    }
+}
+#endif
+
 template <int D>
 __global__ void __launch_bounds__(D) attn4_merge_kernel(Attn4Args a) {
     const int h = blockIdx.x, r = blockIdx.y;
@@ -275,6 +487,16 @@ static int launch4(cudaStream_t st, Attn4Args a, int rows, int max_len, float *w
     }
     a.splits = splits;
     a.ws = ws;
+#if !defined(__HIPCC__)
+    static const bool no_tc = getenv("FLLM_CUDA_NO_ATTN4TC") != nullptr;
+    if constexpr (D == 128 && !Q8 && G <= 8) {
+        if (!no_tc && fllm_cc() >= 80 && !fllm_exact_math()) {
+            attn4tc_kernel<G><<<dim3(a.kv_heads, rows, splits), 128, 0, st>>>(a);
+            if (splits > 1) attn4_merge_kernel<D><<<dim3(a.heads, rows), D, 0, st>>>(a);
+            return fllm_check_launch("attention4 tensor cores");
+        }
+    }
+#endif
     attn4_kernel<D, G, Q8><<<dim3(a.kv_heads, rows, splits), A4_WARPS * 32, 0, st>>>(a);
     if (splits > 1) attn4_merge_kernel<D><<<dim3(a.heads, rows), D, 0, st>>>(a);
     return fllm_check_launch("attention4");
