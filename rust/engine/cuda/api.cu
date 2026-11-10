@@ -186,6 +186,11 @@ int fllm_opt(int id) {
     return g_opt[id].load(std::memory_order_relaxed);
 }
 
+// the generation of the activations and the scratch of the split GEMV (declared in fllm_cuda_internal.h; defined outside of extern "C" like the state above)
+thread_local uint64_t fllm_x_gen = 0;
+thread_local float *fllm_skinny_part = nullptr;
+thread_local size_t fllm_skinny_part_bytes = 0;
+
 extern "C" {
 
 const char *fllm_cuda_last_error(void) { return g_error; }
@@ -683,9 +688,6 @@ static bool glu_q8_fusable(FllmStream *st, int kind, const void *w, const float 
 #endif
 }
 
-thread_local uint64_t fllm_x_gen = 0;
-thread_local float *fllm_skinny_part = nullptr;
-thread_local size_t fllm_skinny_part_bytes = 0;
 int fllm_cuda_linear(FllmStream *st, const void *w, int kind, const float *x, float *y, const float *bias, int rows,
                      int cols, int batch) {
     CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
