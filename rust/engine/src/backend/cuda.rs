@@ -324,6 +324,19 @@ extern "C" {
         hidden: c_int,
         scale: f32,
     ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_embed_gather_ids(
+        st: *mut RawStream,
+        table: *const c_void,
+        kind: c_int,
+        table_rows: c_int,
+        ids: *const c_void,
+        x: *mut c_void,
+        out_mode: c_int,
+        rows: c_int,
+        hidden: c_int,
+        scale: f32,
+    ) -> c_int;
     fn fllm_cuda_step_begin(st: *mut RawStream) -> c_int;
     fn fllm_cuda_step_end(st: *mut RawStream) -> c_int;
     fn fllm_cuda_get_opt(id: c_int) -> c_int;
@@ -4257,6 +4270,47 @@ impl Stream for CudaStream {
                 dev_ptr(x)?.cast(),
                 out_mode,
                 to_c(real_rows, "rows")?,
+                to_c(rows, "rows")?,
+                to_c(hidden, "hidden")?,
+                scale,
+            )
+        })
+    }
+
+    fn embed_gather_ids(
+        &mut self,
+        table: &DeviceBuffer,
+        kind: u32,
+        ids: &DeviceBuffer,
+        x: &mut DeviceBuffer,
+        rows: usize,
+        hidden: usize,
+        scale: f32,
+    ) -> Result<(), BackendError> {
+        let width = match kind {
+            0 => 4,
+            1 | 30 => 2,
+            _ => return Err(invalid("embed_gather_ids: the table must be F32, F16 or BF16")),
+        };
+        if rows == 0 || hidden == 0 || ids.size < rows * 4 || x.size < rows * hidden * 4 || table.size < hidden * width || !table.size.is_multiple_of(hidden * width) {
+            return Err(invalid("embed_gather_ids: sizes"));
+        }
+        let out_mode = match self.act {
+            ActDtype::F32 => 0,
+            ActDtype::F16 => 1,
+            ActDtype::Bf16 => 2,
+        };
+        // SAFETY: the ids are `rows` int32 values and the output holds rows x hidden values of the activation format (checked); the kernel reads row 0
+        // for an id outside the table.
+        check(unsafe {
+            fllm_cuda_embed_gather_ids(
+                self.raw,
+                dev_ptr(table)?.cast(),
+                to_c(kind as usize, "kind")?,
+                to_c(table.size / (hidden * width), "table rows")?,
+                dev_ptr(ids)?.cast(),
+                dev_ptr(x)?.cast(),
+                out_mode,
                 to_c(rows, "rows")?,
                 to_c(hidden, "hidden")?,
                 scale,

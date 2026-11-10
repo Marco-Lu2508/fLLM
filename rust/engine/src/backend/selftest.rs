@@ -1615,7 +1615,7 @@ impl<'a> Tester<'a> {
         use crate::backend::act_dtype::ActDtype;
         for (kind, act) in [(30u32, ActDtype::Bf16), (1, ActDtype::F16), (0, ActDtype::F32), (30, ActDtype::F32), (1, ActDtype::Bf16), (0, ActDtype::Bf16)] {
             let r = self.async_launches(11, 1000, 96, kind, act);
-            self.record("async decode launches", &format!("argmax / sampler results in two slots, embedding rows of the sampled ids (table kind {kind}, {act:?} activations)"), r);
+            self.record("async decode launches", &format!("argmax / sampler results in two slots, embedding rows of the sampled ids and of given ids (table kind {kind}, {act:?} activations)"), r);
         }
         for (rows, vocab) in [(11usize, 1000usize), (16, 32_003)] {
             let r = self.async_penalties(rows, vocab);
@@ -1798,6 +1798,29 @@ impl<'a> Tester<'a> {
             let got = get(stream.as_mut(), &wide, total_rows * hidden)?;
             for r in 0..total_rows {
                 let id = if r < rows && ids[r] >= 0 && (ids[r] as usize) < vocab { ids[r] as usize } else { 0 };
+                for c in 0..hidden {
+                    let v = table_values[id * hidden + c] * scale;
+                    let want = match act {
+                        ActDtype::F32 => v,
+                        ActDtype::F16 => half::f16::from_f32(v).to_f32(),
+                        ActDtype::Bf16 => half::bf16::from_f32(v).to_f32(),
+                    };
+                    wrong += usize::from(got[r * hidden + c].to_bits() != want.to_bits());
+                }
+            }
+        }
+        // the embedding rows of ids given from the host (a prompt chunk), an id outside the table reads row 0
+        let prompt_ids: Vec<i32> = (0..total_rows).map(|r| if r == 3 { -1 } else if r == 5 { vocab as i32 + 7 } else { ((r * 37 + 11) % vocab) as i32 }).collect();
+        let mut ids_dev = self.device.allocate_buffer(total_rows * 4)?;
+        stream.upload(&mut ids_dev, &prompt_ids.iter().flat_map(|v| v.to_ne_bytes()).collect::<Vec<u8>>())?;
+        for scale in [1.0f32, 0.37] {
+            let mut x = self.device.allocate_buffer(total_rows * hidden * 4)?;
+            stream.embed_gather_ids(&table, kind, &ids_dev, &mut x, total_rows, hidden, scale)?;
+            let mut wide = self.device.allocate_buffer(total_rows * hidden * 4)?;
+            stream.widen_activations(&mut wide, &x)?;
+            let got = get(stream.as_mut(), &wide, total_rows * hidden)?;
+            for r in 0..total_rows {
+                let id = if prompt_ids[r] >= 0 && (prompt_ids[r] as usize) < vocab { prompt_ids[r] as usize } else { 0 };
                 for c in 0..hidden {
                     let v = table_values[id * hidden + c] * scale;
                     let want = match act {

@@ -1547,6 +1547,15 @@ int fllm_cuda_embed_gather(FllmStream *st, const void *table, int kind, int tabl
     if (out_mode < 0 || out_mode > 2) return fllm_set_error("embed gather: output format %d", out_mode);
     return fllm_embed_gather_launch(st->s, table, kind, table_rows, st->last_ids_dev, x, out_mode, real_rows, rows, hidden, scale);
 }
+// The embedding rows of `rows` token ids in device memory (int32) into `x`, in the activation format: a prompt chunk without the host gathering, converting and
+// uploading rows x hidden values (an id outside the table reads row 0).
+int fllm_cuda_embed_gather_ids(FllmStream *st, const void *table, int kind, int table_rows, const void *ids, void *x, int out_mode, int rows, int hidden,
+                               float scale) {
+    CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    if (kind != 0 && kind != 1 && kind != 30) return fllm_set_error("embed gather: table kind %d", kind);
+    if (out_mode < 0 || out_mode > 2) return fllm_set_error("embed gather: output format %d", out_mode);
+    return fllm_embed_gather_launch(st->s, table, kind, table_rows, static_cast<const int32_t *>(ids), x, out_mode, rows, rows, hidden, scale);
+}
 
 int fllm_cuda_rms_norm(FllmStream *st, const float *x, const float *w, float *out, int rows, int cols, float eps) {
     // Prompt batches: the residual add that an output projection left pending (FLLM_FUSE_PREFILL_ADD_NORM) and the FP16 copy of the result

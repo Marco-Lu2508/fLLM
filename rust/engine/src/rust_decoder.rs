@@ -1042,6 +1042,9 @@ fn pad_tables(rows: usize, stride: usize, tables: &[i64]) -> Vec<i64> {
     full
 }
 
+/// Prompt chunks of at least this many rows take their embedding rows from the device (`FLLM_PREFILL_DEVICE_EMBED`).
+const DEVICE_EMBED_ROWS: usize = 32;
+
 /// Batches whose block tables hold at least this many entries (rows x stride) are packed to the blocks of their longest row (`compact_stride`).
 const COMPACT_TABLE_ENTRIES: usize = 1 << 15;
 
@@ -4534,8 +4537,32 @@ impl RustDecoder {
         // pipeline stages: the first one embeds, the others continue from the activations of the previous stage
         let first_stage = self.par.as_ref().is_none_or(|p| p.is_first_stage());
         let last_stage = self.par.as_ref().is_none_or(|p| p.is_last_stage());
-        let mut host_x = if first_stage { self.embed_rows(ids)? } else { self.par_recv_activations(rows)? };
-        if first_stage {
+        // A prompt chunk takes its embedding rows from the copy of the token embedding on the device (the ids are all that is uploaded): gathering, converting and
+        // uploading 2000 rows of 3584 floats took 10 ms of host time and a 6 ms copy between two chunks, with the device idle (`FLLM_PREFILL_DEVICE_EMBED=0`
+        // keeps the host path). Only where the rows are the plain table rows times a scale: nothing is added to them, no image rows replace them, no
+        // layer needs them on the host.
+        let embed_dev = if first_stage
+            && !recording
+            && rows >= DEVICE_EMBED_ROWS
+            && overrides.is_empty()
+            && dev_weights.hc.is_none()
+            && dev_weights.q4.is_none()
+            && self.cfg.hybrid.zamba.is_none()
+            && stream.async_launches()
+            && !std::env::var("FLLM_PREFILL_DEVICE_EMBED").is_ok_and(|v| v == "0")
+        {
+            self.ahead_embed(&mut **stream)
+        } else {
+            None
+        };
+        let mut host_x = if embed_dev.is_some() {
+            Vec::new()
+        } else if first_stage {
+            self.embed_rows(ids)?
+        } else {
+            self.par_recv_activations(rows)?
+        };
+        if first_stage && embed_dev.is_none() {
             if cfg.embedding_scale != 1.0 {
                 for v in &mut host_x {
                     *v *= cfg.embedding_scale;
@@ -4567,7 +4594,13 @@ impl RustDecoder {
             }
             self.stash_embeddings(&host_x);
         }
-        if !recording {
+        if let Some(embed) = embed_dev {
+            let mut ids_dev = scratch.acquire(rows * 4).map_err(err)?;
+            let ids32: Vec<u8> = ids.iter().flat_map(|&id| (id as i32).to_ne_bytes()).collect();
+            stream.upload(&mut ids_dev, &ids32).map_err(err)?;
+            stream.embed_gather_ids(&embed.table, embed.kind, &ids_dev, &mut x_buf, rows, hidden, embed.scale).map_err(err)?;
+            scratch.recycle(ids_dev);
+        } else if !recording {
             stream
                 .upload_activations(&mut x_buf, &host_x)
                 .map_err(err)?;
@@ -9533,7 +9566,7 @@ impl RustDecoder {
                 match upload() {
                     Ok(table) => {
                         eprintln!(
-                            "[fllm-rs] asynchronous decode scheduling: on (token embedding of {} MiB on the device; FLLM_ASYNC_SCHEDULING=0 switches it off)",
+                            "[fllm-rs] token embedding of {} MiB on the device (asynchronous decode scheduling and prompt chunks use it; FLLM_ASYNC_SCHEDULING=0 and FLLM_PREFILL_DEVICE_EMBED=0 switch them off)",
                             emb.data.len() >> 20
                         );
                         Some(AheadEmbed { table, kind: emb.kind, scale: cfg.embedding_scale })

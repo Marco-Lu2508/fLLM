@@ -1659,6 +1659,22 @@ pub trait Stream: Send {
     ) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("embed_gather_sampled".into()))
     }
+    /// The embedding rows of the `rows` token ids in `ids` (int32, on the device) into `x`, from a table of `kind` 0 (F32), 1 (F16) or 30 (BF16) on the
+    /// device, in the activation format (`scale` applied, an id outside the table reads row 0): the input of a prompt chunk without the host gathering
+    /// and uploading `rows x hidden` values. Backends without it return `UnsupportedOperation`.
+    #[allow(clippy::too_many_arguments)]
+    fn embed_gather_ids(
+        &mut self,
+        _table: &DeviceBuffer,
+        _kind: u32,
+        _ids: &DeviceBuffer,
+        _x: &mut DeviceBuffer,
+        _rows: usize,
+        _hidden: usize,
+        _scale: f32,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("embed_gather_ids".into()))
+    }
 
     /// CUDA graphs of whole decode steps. `graph_begin` starts recording the operations issued on this stream into graph `id`:
     /// `sizes` are the byte sizes of the four per-step arrays (positions, cache slots, block tables, lengths) that the operations stage
