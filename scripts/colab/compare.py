@@ -432,6 +432,9 @@ def main():
     ap.add_argument("--no-vllm", action="store_true")
     ap.add_argument("--no-sglang", action="store_true")
     ap.add_argument("--fllm-args", default="", help="extra arguments for fllm-rs serve, e.g. \"--chunked-prefill-policy prefill-first\"")
+    ap.add_argument("--rival-prefix-cache", action="store_true",
+                    help="leave the prefix cache of vLLM and SGLang on (their default); without it they run with it off like the fLLM control, so that no engine "
+                         "reuses the 30 tokens of the shared chat-template header between requests")
     ap.add_argument("--only", help="comma-separated engines to measure (the others are still installed if needed), e.g. fllm")
     args = ap.parse_args()
     try:
@@ -447,7 +450,7 @@ def main():
     result = {"schema_version": 2, "started": time.strftime("%Y-%m-%d %H:%M:%S"), "seed": args.seed,
               "measurement": {"tokens": "server_usage_only", "first_s": "first_nonempty_output_delta",
                               "each_tok_s": "end_to_end_including_ttft"},
-              "fllm_control": {"env": control_env, "args": control_args}}
+              "fllm_control": {"env": control_env, "args": control_args}, "rival_prefix_cache": args.rival_prefix_cache}
     if args.cpu:
         cpu_name = sh("lscpu | grep 'Model name' | head -1")[1].split(":", 1)[-1].strip()
         gpu, vram = "CPU: " + cpu_name, 10**9
@@ -537,13 +540,13 @@ def main():
                 extra = {"reasoning_effort": "none"}
             elif name == "vllm":
                 server = Server([binary, "serve", hf_dir, "--port", str(port), "--max-model-len", str(ctx_one), "--max-num-seqs", str(maxu),
-                                 "--gpu-memory-utilization", "0.85", "--served-model-name", "m"],
+                                 "--gpu-memory-utilization", "0.85", "--served-model-name", "m"] + ([] if args.rival_prefix_cache else ["--no-enable-prefix-caching"]),
                                 f"http://127.0.0.1:{port}/health", "m", env={"CUDA_HOME": "/usr/local/cuda", "PATH": f"{args.work}/vllm_env/bin:/usr/local/cuda/bin:" + os.environ["PATH"]},
                                 logfile=f"vllm-{key}.log")
                 extra = no_think
             elif name == "sglang":
                 server = Server([binary, "-m", "sglang.launch_server", "--model-path", hf_dir, "--port", str(port), "--host", "127.0.0.1", "--context-length", str(ctx_one),
-                                 "--max-running-requests", str(maxu), "--mem-fraction-static", "0.8", "--served-model-name", "m"],
+                                 "--max-running-requests", str(maxu), "--mem-fraction-static", "0.8", "--served-model-name", "m"] + ([] if args.rival_prefix_cache else ["--disable-radix-cache"]),
                                 f"http://127.0.0.1:{port}/health", "m", env={"CUDA_HOME": "/usr/local/cuda", "PATH": f"{args.work}/sglang_env/bin:/usr/local/cuda/bin:" + os.environ["PATH"]},
                                 logfile=f"sglang-{key}.log")
                 extra = no_think

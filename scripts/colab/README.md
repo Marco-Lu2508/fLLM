@@ -100,8 +100,10 @@ Measurement contract (`compare_result.json`, `schema_version: 2`; per-user rates
   counts/rates. Stream errors, malformed JSON and missing `[DONE]` invalidate the request/batch rather than reporting partial success.
 * The fLLM control always sets `FLLM_PREFIX_CACHE=off`, `FLLM_OUTPUT_CACHE=off`, `FLLM_SPECULATIVE_DEFAULT=off`, `FLLM_HEAD_FULL=1` (fLLM
   otherwise stores a 16-bit output projection as Q6_K on the device, which vLLM and SGLang do not: same weights for every engine) and
-  `--speculative off`; these settings are recorded under `fllm_control`. Speculation overrides in `--fllm-args` are rejected. Other engines retain their own
-  cache defaults; inspect reported cached counts when comparing. This is not a cache/speculation speedup test.
+  `--speculative off`; these settings are recorded under `fllm_control`. Speculation overrides in `--fllm-args` are rejected. vLLM and SGLang run with their prefix
+  cache off (`--no-enable-prefix-caching`, `--disable-radix-cache`) like the fLLM control, so that no engine reuses the shared header of the chat
+  template between requests; `--rival-prefix-cache` leaves it on (recorded as `rival_prefix_cache`). llama.cpp, ik_llama.cpp and Ollama keep their
+  own defaults; inspect reported cached counts when comparing. This is not a cache/speculation speedup test.
 * `--seed N` (default `0`) gives identical prompt nonces and sampler seeds across engines and A/B runs, independent of thread order.
   Nonces differ within each batch; warm-up and answer-probe requests are separate. Equal seeds do not guarantee cross-engine text equality.
 
