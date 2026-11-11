@@ -167,7 +167,9 @@ jobs:
   windows-cuda:
     name: Windows CUDA kernels (compile only)
     if: github.event_name == 'workflow_dispatch'
-    runs-on: windows-2025
+    # windows-2022, not 2025: the 2025 image ships Visual Studio 2026 (MSVC 14.51), and CUDA 12.8's cudafe++ dies on
+    # nvfp4.cu with it (ACCESS_VIOLATION, 0xC0000005) even with -allow-unsupported-compiler; CUDA 12.8 supports up to VS 2022.
+    runs-on: windows-2022
     timeout-minutes: 240
     steps:
       - name: Checkout
