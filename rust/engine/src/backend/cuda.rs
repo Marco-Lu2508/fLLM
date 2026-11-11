@@ -1098,6 +1098,36 @@ extern "C" {
     ) -> c_int;
     fn fllm_cuda_na_check(st: *mut RawStream, dt: c_int, x: *const c_void, count: usize, max_abs: *mut f32, bad: *mut c_int) -> c_int;
     fn fllm_cuda_na_linear_kquant(st: *mut RawStream, dt: c_int, w: *const c_void, kind: c_int, x: *const c_void, y: *mut f32, bias: *const f32, rows: c_int, cols: c_int, batch: c_int) -> c_int;
+    fn fllm_cuda_na_attention(
+        st: *mut RawStream,
+        dt: c_int,
+        q: *const c_void,
+        kpool_layer: *const u16,
+        vpool_layer: *const u16,
+        out: *mut c_void,
+        tables_host: *const i64,
+        tables_len: usize,
+        lengths_host: *const i64,
+        rows: c_int,
+        sinks: *const f32,
+        alibi: *const f32,
+        heads: c_int,
+        kv_heads: c_int,
+        dk: c_int,
+        dv: c_int,
+        stride: c_int,
+        block_size: c_int,
+        kind: c_int,
+        kgroup: c_int,
+        vgroup: c_int,
+        kscale_base: c_int,
+        vscale_base: c_int,
+        scale: f32,
+        softcap: f32,
+        window: c_int,
+        chunk: c_int,
+    ) -> c_int;
+    fn fllm_cuda_na_linear_dense(st: *mut RawStream, dt: c_int, w: *const c_void, kind: c_int, x: *const c_void, y: *mut c_void, bias: *const f32, rows: c_int, cols: c_int, batch: c_int) -> c_int;
     fn fllm_cuda_reserve_workspace(st: *mut RawStream, rows: c_int, cols: c_int, out_cols: c_int) -> c_int;
     fn fllm_cuda_na_split3(st: *mut RawStream, dt: c_int, src: *const c_void, d0: *mut c_void, d1: *mut c_void, d2: *mut c_void, rows: c_int, n0: c_int, n1: c_int, n2: c_int) -> c_int;
     fn fllm_cuda_na_glu_merged(st: *mut RawStream, dt: c_int, gu: *const c_void, out: *mut c_void, rows: c_int, ff: c_int, mode: c_int) -> c_int;
@@ -1751,6 +1781,7 @@ impl Backend for CudaBackend {
             blocks_checked: None,
             act: self.act(),
             wide: [None, None, None],
+            wide_retired: Vec::new(),
             dsa_scores: None,
             dsa_psel: None,
         }))
@@ -2123,6 +2154,8 @@ pub struct CudaStream {
     act: ActDtype,
     /// Persistent FP32 copies for those operations (grown on demand, never per call once warm).
     wide: [Option<DeviceBuffer>; 3],
+    /// the FP32 copies a graph recorded before a slot grew still points to: kept alive, never freed while the stream lives
+    wide_retired: Vec<DeviceBuffer>,
     /// Scores of the lightning indexer (`dsa_select`), grown on demand.
     dsa_scores: Option<DeviceBuffer>,
     /// Chosen pools of the k-pool indexer (`dsa_select`).
@@ -2284,7 +2317,10 @@ impl CudaStream {
     /// the request: the FP32 operations it feeds derive the batch from `size` (`quantized_linear` wants `x.size` to be `batch * cols * 4`).
     fn wide_slot(&mut self, slot: usize, bytes: usize) -> Result<DeviceBuffer, BackendError> {
         if self.wide[slot].as_ref().is_none_or(|b| b.size < bytes) {
-            self.wide[slot] = None;
+            // a CUDA graph recorded earlier may still point into the old buffer: it stays allocated
+            if let Some(old) = self.wide[slot].take() {
+                self.wide_retired.push(old);
+            }
             self.wide[slot] = Some(self.alloc((bytes * 5 / 4).max(256))?);
         }
         self.wide[slot].as_ref().expect("allocated above").slice(0, bytes)
@@ -2476,8 +2512,35 @@ impl CudaStream {
             }
         }
         let (xn, on) = (batch * cols, batch * rows);
-        // K-quant weights at decode batch sizes: the int8 quantization of the integer dot-product kernel reads the narrow activations itself
         let kind = weight.quant_type.to_gguf_type_id();
+        // dense 16-bit weights of the activations' own type: GEMV / cuBLASLt on the narrow arrays, no conversion either side
+        if (kind == 30 && self.act == ActDtype::Bf16) || (kind == 1 && self.act == ActDtype::F16) {
+            let bias_ptr = match bias {
+                Some(b) => dev_ptr(b)? as *const f32,
+                None => std::ptr::null(),
+            };
+            // SAFETY: sizes checked above; the entry point validates alignment and declines (returns 3) without launching.
+            let rc = unsafe {
+                fllm_cuda_na_linear_dense(
+                    self.raw,
+                    self.act.code(),
+                    dev_ptr(&weight.buffer)?.cast(),
+                    kind as c_int,
+                    dev_ptr(x)?.cast(),
+                    dev_ptr(out)?.cast(),
+                    bias_ptr,
+                    to_c(rows, "rows")?,
+                    to_c(cols, "cols")?,
+                    to_c(batch, "batch")?,
+                )
+            };
+            match rc {
+                0 => return Ok(()),
+                3 => {}
+                _ => return check(rc),
+            }
+        }
+        // K-quant weights at decode batch sizes: the int8 quantization of the integer dot-product kernel reads the narrow activations itself
         if matches!(kind, 12..=14) {
             let of = self.wide_slot(1, on * 4)?;
             let bias_ptr = match bias {
@@ -6311,6 +6374,51 @@ fn attention_paged(
         }
         if q.size < rows * heads * dk * 4 || out.size < rows * heads * dv * 4 {
             return Err(invalid("attention q/out smaller than rows x heads x dim"));
+        }
+        if self.act.is_narrow() && matches!(kv.kv_kind, 1 | 2) && dk <= MAX_ATTENTION_DIM && dv <= MAX_ATTENTION_DIM {
+            // the decode kernel and FlashInfer read and write the narrow arrays (the entry point widens around the kernels that only take FP32)
+            let slots = kv.slots();
+            let (kk, kvv) = (kv.kv_heads * dk, kv.kv_heads * dv);
+            let sinks = match &params.sinks {
+                Some(s) => self.table(s)?,
+                None => std::ptr::null(),
+            };
+            let alibi = match &params.alibi_slopes {
+                Some(s) => self.table(s)?,
+                None => std::ptr::null(),
+            };
+            // SAFETY: `validate_blocks` checked the block tables, lengths and parameters against the cache; the pool pointers address the requested layer.
+            return check(unsafe {
+                fllm_cuda_na_attention(
+                    self.raw,
+                    self.act.code(),
+                    dev_ptr(q)?.cast(),
+                    dev_ptr(&kv.key_pool)?.add(kv.layer_key_offset(layer_idx) * 2).cast(),
+                    dev_ptr(&kv.value_pool)?.add(kv.layer_value_offset(layer_idx) * 2).cast(),
+                    dev_ptr(out)?.cast(),
+                    block_tables.as_ptr(),
+                    block_tables.len(),
+                    lengths.as_ptr(),
+                    to_c(rows, "rows")?,
+                    sinks,
+                    alibi,
+                    to_c(heads, "heads")?,
+                    to_c(params.num_kv_heads, "kv heads")?,
+                    to_c(dk, "key width")?,
+                    to_c(dv, "value width")?,
+                    to_c(params.stride, "block table stride")?,
+                    to_c(params.block_size, "block size")?,
+                    kv.kv_kind,
+                    to_c(kv_quant_group(dk), "key group")?,
+                    to_c(kv_quant_group(dv), "value group")?,
+                    to_c((slots * kk).div_ceil(2), "key scale base")?,
+                    to_c((slots * kvv).div_ceil(2), "value scale base")?,
+                    params.scale,
+                    params.softcap.unwrap_or(0.0),
+                    params.window.map_or(0, |w| w.min(c_int::MAX as usize) as c_int),
+                    params.chunk.map_or(0, |c| c.min(c_int::MAX as usize) as c_int),
+                )
+            });
         }
         if self.act.is_narrow() {
             // the attention kernels read FP32 queries and write FP32: widen q, narrow the result

@@ -62,6 +62,8 @@ extern "C" int fllm_cuda_nvfp4_mma_native(int) { return 0; }
 extern "C" void fllm_dense_skinny_set_mode(int) {}
 int fllm_dense_skinny_variant(int, int, int) { return 0; }
 void *fllm_cublaslt_x16_buffer(cudaStream_t, size_t) { return nullptr; }
+bool fllm_dense_skinny_narrow_try(cudaStream_t, bool, const void *, const void *, void *, const float *, int, int, int) { return false; }
+int fllm_cublaslt_gemm_narrow_try(cudaStream_t, const void *, int, const void *, void *, const float *, int, int, int) { return -1; }
 void fllm_cublaslt_x16_tag(const void *, size_t, int, uint64_t) {}
 bool fllm_dense_skinny_group_try(cudaStream_t, uint32_t, int, const void *const *, void *const *, const void *const *, const int *, int, int, const float *) { return false; }
 extern "C" int fllm_cuda_fast_paths(int, char *buf, size_t len) {

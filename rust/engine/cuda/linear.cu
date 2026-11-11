@@ -273,8 +273,12 @@ __device__ __forceinline__ uint32_t pack_dense16(float lo, float hi) {
 // MT 16-row tiles per warp share one set of activation fragments (the activations are read once per 16 * MT rows, which halves their traffic from the L2
 // cache for MT = 2); the WARPS warps of a block split the columns.
 // (the slabs [s_begin, s_end) of 32 columns: all of them, or one part of a split product)
-template <bool BF16, int NT, int WARPS, int MT, int UF = (MT == 1 ? 4 : 2)>
-__device__ __forceinline__ void dense_skinny_core(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ Y, const float *__restrict__ bias,
+__host__ __device__ constexpr int dense_uf(int mt) { return mt == 1 ? 4 : 2; }
+
+// XN: the activations are narrow (BF16 when BF16, else FP16: the type of the weights, FLLM_ACT_DTYPE) and are read as the bits the tensor cores take; YN: the
+// result is written narrow (the bias is added in FP32 before the rounding)
+template <bool BF16, int NT, int WARPS, int MT, int UF = dense_uf(MT), bool XN = false, bool YN = false>
+__device__ __forceinline__ void dense_skinny_core(const uint8_t *__restrict__ W, const void *__restrict__ X, void *__restrict__ Y, const float *__restrict__ bias,
                                                   int rows, int cols, int batch, int blk, int s_begin, int s_end) {
     constexpr int U = UF;  // slabs in flight per warp
     constexpr int OUT = MT * NT * 4 * 32;
@@ -290,12 +294,17 @@ __device__ __forceinline__ void dense_skinny_core(const uint8_t *__restrict__ W,
         w1[m] = reinterpret_cast<const uint4 *>(W + (size_t)(row1 < rows ? row1 : rows - 1) * cols * 2);
     }
     const float4 *xp[NT];
+    const uint4 *xq[NT];
     bool live[NT];
 #pragma unroll
     for (int t = 0; t < NT; t++) {
         const int tok = 8 * t + g;
         live[t] = tok < batch;
-        xp[t] = reinterpret_cast<const float4 *>(X + (size_t)(live[t] ? tok : 0) * cols) + q * 2;
+        if constexpr (XN) {
+            xq[t] = reinterpret_cast<const uint4 *>(static_cast<const uint16_t *>(X) + (size_t)(live[t] ? tok : 0) * cols) + q;
+        } else {
+            xp[t] = reinterpret_cast<const float4 *>(static_cast<const float *>(X) + (size_t)(live[t] ? tok : 0) * cols) + q * 2;
+        }
     }
     float c[MT][NT][4];
 #pragma unroll
@@ -325,15 +334,25 @@ __device__ __forceinline__ void dense_skinny_core(const uint8_t *__restrict__ W,
                 uint32_t b[NT][4];
 #pragma unroll
                 for (int t = 0; t < NT; t++) {
-                    float4 x0 = make_float4(0.f, 0.f, 0.f, 0.f), x1 = x0;
-                    if (live[t]) {
-                        x0 = __ldg(xp[t] + s * 8);
-                        x1 = __ldg(xp[t] + s * 8 + 1);
+                    if constexpr (XN) {
+                        // eight consecutive columns of the lane's slab as they are stored: the pairs the mma takes
+                        uint4 xv = make_uint4(0u, 0u, 0u, 0u);
+                        if (live[t]) xv = __ldg(xq[t] + s * 4);
+                        b[t][0] = xv.x;
+                        b[t][1] = xv.y;
+                        b[t][2] = xv.z;
+                        b[t][3] = xv.w;
+                    } else {
+                        float4 x0 = make_float4(0.f, 0.f, 0.f, 0.f), x1 = x0;
+                        if (live[t]) {
+                            x0 = __ldg(xp[t] + s * 8);
+                            x1 = __ldg(xp[t] + s * 8 + 1);
+                        }
+                        b[t][0] = pack_dense16<BF16>(x0.x, x0.y);
+                        b[t][1] = pack_dense16<BF16>(x0.z, x0.w);
+                        b[t][2] = pack_dense16<BF16>(x1.x, x1.y);
+                        b[t][3] = pack_dense16<BF16>(x1.z, x1.w);
                     }
-                    b[t][0] = pack_dense16<BF16>(x0.x, x0.y);
-                    b[t][1] = pack_dense16<BF16>(x0.z, x0.w);
-                    b[t][2] = pack_dense16<BF16>(x1.x, x1.y);
-                    b[t][3] = pack_dense16<BF16>(x1.z, x1.w);
                 }
 #pragma unroll
                 for (int m = 0; m < MT; m++) {
@@ -363,15 +382,21 @@ __device__ __forceinline__ void dense_skinny_core(const uint8_t *__restrict__ W,
         const int ln = idx & 31, i = (idx >> 5) & 3, t = (idx >> 7) % NT, m = (idx >> 7) / NT;
         const int row = base + 16 * m + (ln >> 2) + 8 * (i >> 1);
         const int tok = 8 * t + 2 * (ln & 3) + (i & 1);
-        if (row < rows && tok < batch) Y[(size_t)tok * rows + row] = sum + (bias ? bias[row] : 0.f);
+        if (row < rows && tok < batch) {
+            const float value = sum + (bias ? bias[row] : 0.f);
+            const size_t at = (size_t)tok * rows + row;
+            if constexpr (!YN) static_cast<float *>(Y)[at] = value;
+            else if constexpr (BF16) static_cast<__nv_bfloat16 *>(Y)[at] = __float2bfloat16(value);
+            else static_cast<__half *>(Y)[at] = __float2half(value);
+        }
     }
 }
 
-template <bool BF16, int NT, int WARPS, int MT, int UF = (MT == 1 ? 4 : 2)>
+template <bool BF16, int NT, int WARPS, int MT, int UF = dense_uf(MT), bool XN = false, bool YN = false>
 __global__ void __launch_bounds__(WARPS * 32)
-dense_skinny_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ Y, const float *__restrict__ bias, int rows, int cols,
+dense_skinny_kernel(const uint8_t *__restrict__ W, const void *__restrict__ X, void *__restrict__ Y, const float *__restrict__ bias, int rows, int cols,
                     int batch) {
-    dense_skinny_core<BF16, NT, WARPS, MT, UF>(W, X, Y, bias, rows, cols, batch, blockIdx.x, 0, cols >> 5);
+    dense_skinny_core<BF16, NT, WARPS, MT, UF, XN, YN>(W, X, Y, bias, rows, cols, batch, blockIdx.x, 0, cols >> 5);
 }
 
 // Up to three projections that read the same activations (q, k and v) in one launch: the blocks of the segments follow each other, so the small ones (k and v
@@ -395,20 +420,23 @@ __global__ void __launch_bounds__(WARPS * 32) dense_skinny_group_kernel(DenseSeg
 // Split along the columns: block (x, y) sums the slabs of part y of the row tile x into its own slice of `part` (splits x batch x rows values), and
 // dense_skinny_reduce_kernel adds the parts in a fixed order (plus the bias). Few row tiles (3584 rows are 224 tiles on 108 SMs: the last wave of blocks
 // leaves a third of the card idle) become many blocks of equal size; the result does not depend on the schedule.
-template <bool BF16, int NT, int WARPS, int MT>
+template <bool BF16, int NT, int WARPS, int MT, bool XN = false>
 __global__ void __launch_bounds__(WARPS * 32)
-dense_skinny_split_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ part, int rows, int cols, int batch, int splits) {
+dense_skinny_split_kernel(const uint8_t *__restrict__ W, const void *__restrict__ X, float *__restrict__ part, int rows, int cols, int batch, int splits) {
     const int slabs = cols >> 5;
     const int per = (slabs + splits - 1) / splits;
     const int s_begin = blockIdx.y * per, s_end = min(slabs, s_begin + per);
-    dense_skinny_core<BF16, NT, WARPS, MT>(W, X, part + (size_t)blockIdx.y * batch * rows, nullptr, rows, cols, batch, blockIdx.x, s_begin, s_end);
+    dense_skinny_core<BF16, NT, WARPS, MT, dense_uf(MT), XN, false>(W, X, part + (size_t)blockIdx.y * batch * rows, nullptr, rows, cols, batch, blockIdx.x, s_begin, s_end);
 }
-__global__ void dense_skinny_reduce_kernel(const float *__restrict__ part, float *__restrict__ Y, const float *__restrict__ bias, int rows, int batch, int splits) {
+template <bool BF16, bool YN>
+__global__ void dense_skinny_reduce_kernel(const float *__restrict__ part, void *__restrict__ Y, const float *__restrict__ bias, int rows, int batch, int splits) {
     const size_t total = (size_t)batch * rows;
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += (size_t)gridDim.x * blockDim.x) {
         float sum = bias ? bias[i % rows] : 0.f;
         for (int p = 0; p < splits; p++) sum += part[(size_t)p * total + i];
-        Y[i] = sum;
+        if constexpr (!YN) static_cast<float *>(Y)[i] = sum;
+        else if constexpr (BF16) static_cast<__nv_bfloat16 *>(Y)[i] = __float2bfloat16(sum);
+        else static_cast<__half *>(Y)[i] = __float2half(sum);
     }
 }
 
@@ -440,12 +468,11 @@ int fllm_dense_skinny_variant(int rows, int cols, int batch) {
     return variant;
 }
 
-template <uint32_t KIND>
-static bool dense_skinny_try(cudaStream_t s, const uint8_t *W, const float *X, float *Y, const float *bias, int rows, int cols, int batch) {
+template <bool bf16, bool XN, bool YN>
+static bool dense_skinny_launch(cudaStream_t s, const uint8_t *W, const void *X, void *Y, const float *bias, int rows, int cols, int batch) {
     const int variant = fllm_dense_skinny_variant(rows, cols, batch);
     if (variant == 0) return false;
     if ((reinterpret_cast<uintptr_t>(W) & 15) != 0 || (reinterpret_cast<uintptr_t>(X) & 15) != 0) return false;
-    constexpr bool bf16 = KIND == KIND_BF16;
     // two row tiles per warp and sixteen warps per block
     const int tiles = batch > 8 && variant == 2 ? (rows + 31) / 32 : (rows + 15) / 16;
     // few tiles: split the columns so that about a thousand blocks of equal size are launched (never less than four slabs of 32 columns per part)
@@ -460,26 +487,38 @@ static bool dense_skinny_try(cudaStream_t s, const uint8_t *W, const float *X, f
     }
     if (splits > 1) {
         const dim3 grid(tiles, splits);
-        if (batch > 8 && variant == 2) dense_skinny_split_kernel<bf16, 2, 16, 2><<<grid, 512, 0, s>>>(W, X, fllm_skinny_part, rows, cols, batch, splits);
-        else if (batch <= 8) dense_skinny_split_kernel<bf16, 1, 8, 1><<<grid, 256, 0, s>>>(W, X, fllm_skinny_part, rows, cols, batch, splits);
-        else dense_skinny_split_kernel<bf16, 2, 8, 1><<<grid, 256, 0, s>>>(W, X, fllm_skinny_part, rows, cols, batch, splits);
+        if (batch > 8 && variant == 2) dense_skinny_split_kernel<bf16, 2, 16, 2, XN><<<grid, 512, 0, s>>>(W, X, fllm_skinny_part, rows, cols, batch, splits);
+        else if (batch <= 8) dense_skinny_split_kernel<bf16, 1, 8, 1, XN><<<grid, 256, 0, s>>>(W, X, fllm_skinny_part, rows, cols, batch, splits);
+        else dense_skinny_split_kernel<bf16, 2, 8, 1, XN><<<grid, 256, 0, s>>>(W, X, fllm_skinny_part, rows, cols, batch, splits);
         const size_t total = (size_t)batch * rows;
-        dense_skinny_reduce_kernel<<<(unsigned)((total + 255) / 256 > 1024 ? 1024 : (total + 255) / 256), 256, 0, s>>>(fllm_skinny_part, Y, bias, rows, batch, splits);
+        dense_skinny_reduce_kernel<bf16, YN><<<(unsigned)((total + 255) / 256 > 1024 ? 1024 : (total + 255) / 256), 256, 0, s>>>(fllm_skinny_part, Y, bias, rows, batch, splits);
         return true;
     }
     static const bool no_wide = getenv("FLLM_CUDA_NO_SKINNY_WIDE") != nullptr;
     if (batch > 8 && variant == 2 && rows >= 8192 && !no_wide) {
         // tall projections (gate, up): four 16-row tiles per warp read each slice of the activations once for 64 rows instead of 32, one slab in flight
         // per tile (A100, 18944 x 3584, 16 tokens: 119 -> 110 us)
-        dense_skinny_kernel<bf16, 2, 4, 4, 1><<<dim3((rows + 63) / 64), 128, 0, s>>>(W, X, Y, bias, rows, cols, batch);
+        dense_skinny_kernel<bf16, 2, 4, 4, 1, XN, YN><<<dim3((rows + 63) / 64), 128, 0, s>>>(W, X, Y, bias, rows, cols, batch);
     } else if (batch > 8 && variant == 2) {
-        dense_skinny_kernel<bf16, 2, 16, 2><<<dim3((rows + 31) / 32), 512, 0, s>>>(W, X, Y, bias, rows, cols, batch);
+        dense_skinny_kernel<bf16, 2, 16, 2, dense_uf(2), XN, YN><<<dim3((rows + 31) / 32), 512, 0, s>>>(W, X, Y, bias, rows, cols, batch);
     } else if (batch <= 8) {
-        dense_skinny_kernel<bf16, 1, 8, 1><<<dim3((rows + 15) / 16), 256, 0, s>>>(W, X, Y, bias, rows, cols, batch);
+        dense_skinny_kernel<bf16, 1, 8, 1, dense_uf(1), XN, YN><<<dim3((rows + 15) / 16), 256, 0, s>>>(W, X, Y, bias, rows, cols, batch);
     } else {
-        dense_skinny_kernel<bf16, 2, 8, 1><<<dim3((rows + 15) / 16), 256, 0, s>>>(W, X, Y, bias, rows, cols, batch);
+        dense_skinny_kernel<bf16, 2, 8, 1, dense_uf(1), XN, YN><<<dim3((rows + 15) / 16), 256, 0, s>>>(W, X, Y, bias, rows, cols, batch);
     }
     return true;
+}
+
+template <uint32_t KIND>
+static bool dense_skinny_try(cudaStream_t s, const uint8_t *W, const float *X, float *Y, const float *bias, int rows, int cols, int batch) {
+    return dense_skinny_launch<KIND == KIND_BF16, false, false>(s, W, X, Y, bias, rows, cols, batch);
+}
+
+// FLLM_ACT_DTYPE: dense 16-bit weights on narrow activations (BF16 weights with BF16 activations, FP16 with FP16): the activations are read and the result is written
+// narrow, no conversion kernels. false (nothing launched) when the tensor-core GEMV does not take the shape (cuBLASLt does, from 9 tokens on).
+bool fllm_dense_skinny_narrow_try(cudaStream_t s, bool bf16, const void *W, const void *X, void *Y, const float *bias, int rows, int cols, int batch) {
+    return bf16 ? dense_skinny_launch<true, true, true>(s, static_cast<const uint8_t *>(W), X, Y, bias, rows, cols, batch)
+                : dense_skinny_launch<false, true, true>(s, static_cast<const uint8_t *>(W), X, Y, bias, rows, cols, batch);
 }
 
 // q, k, v as one launch: every segment must be a shape the single projections would give to the tensor-core GEMV, the activations and weights aligned; returns

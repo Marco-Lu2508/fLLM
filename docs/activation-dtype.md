@@ -69,12 +69,20 @@ Reading of the numbers:
 ## 2. The narrow pipeline (implemented, `FLLM_ACT_DTYPE`)
 
 `FLLM_ACT_DTYPE=f32|f16|bf16|auto`. Unset behaves like `auto` without a word about the models it leaves alone: a model with 4-bit Marlin (AWQ / GPTQ) projections
-runs narrow (FP16, BF16 when the checkpoint is BF16 or the family is Gemma), with `FLLM_MERGE_PROJ` on (q/k/v and gate/up as one matrix each, four Marlin launches a
+runs narrow (FP16, BF16 when the checkpoint is BF16 or the family is Gemma), and so do dense 16-bit checkpoints (BF16 weights on BF16 activations, FP16 on FP16) of the families that were
+compared end to end with the FP32 pipeline (Qwen2, Qwen3, Llama; `auto`, `f16` and `bf16` ask for any other eligible family): their projections run the tensor-core GEMV (up to 16 tokens) and
+cuBLASLt (from 9) on the narrow arrays with no conversion kernel, the bias in the epilogue; Marlin models run with `FLLM_MERGE_PROJ` on (q/k/v and gate/up as one matrix each, four Marlin launches a
 layer instead of seven); every other model keeps the FP32 pipeline above. `f32` asks for the FP32 pipeline everywhere (bit-identical to earlier versions), `FLLM_MERGE_PROJ=0`
 keeps the projections separate. Measured on an A100 (Qwen2.5-7B-Instruct AWQ, 100-token prompts, 64 new tokens, `compare.py` workload, alternating runs): 40 users 2191 ->
 2423 tokens/s (+10.6 %), 16 users 1465 -> 1658 (+13.2 %); the narrow pipeline alone gained nothing (2168), the merged launches are what pays. nsys of the 40-user cell:
 vLLM runs 13 496 Marlin launches (qkv, o, gate_up, down), fLLM with separate projections 21 316 (+58 %), 1041 ms of Marlin time against 927 ms. Greedy texts of 8 prompts (60 tokens)
 are identical with and without it.
+
+Dense BF16 (A100, Qwen2.5-7B-Instruct, `compare.py` workload, same binary built before and after): 100-token prompts, 40 users 1822 -> 1841 tokens/s, 16 users 950 -> 953; 2000-token
+prompts, 40 users 355 -> 366, 16 users 311 -> 320 (+3 %: no `glu_to16` / `to_bf16` kernels, one norm kernel less per layer). Greedy texts of 8 prompts (60 tokens) are identical for
+Qwen2.5-7B, 7 of 8 for Qwen3-1.7B and 6 of 8 for Llama-3.2-1B (the others diverge after a prefix of the same fluent text: the residual stream is rounded to BF16 after every layer). Narrow
+attention: prompt rows (a run of 16 or more rows of one sequence, alone or next to others in a chunk) go to FlashInfer through the FP32 entry of the attention, the decode rows to the decode
+kernel on the narrow arrays; before this the narrow attention widened q and narrowed the result around the FP32 kernel on every layer.
 
 What `f16` / `bf16` change (kernels in `cuda/act_narrow.cu`, entry points in `cuda/act_api.inc`, Rust side `backend/cuda.rs`, `backend/act_dtype.rs`):
 

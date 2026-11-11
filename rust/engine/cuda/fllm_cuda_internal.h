@@ -60,6 +60,9 @@ int fllm_dense_skinny_variant(int rows, int cols, int batch);
 // The 16-bit copy of the activations that cuBLASLt (cublaslt_gemm.cu) multiplies, for a norm kernel to fill: nullptr when it is not allocated (and the
 // stream is being captured) or too small; the tag tells the next product of the same activations that the conversion is done (`gen`: fllm_x_gen then)
 void *fllm_cublaslt_x16_buffer(cudaStream_t s, size_t bytes);
+// FLLM_ACT_DTYPE, dense 16-bit weights on narrow activations (linear.cu, cublaslt_gemm.cu): true / 0 when the product was computed
+bool fllm_dense_skinny_narrow_try(cudaStream_t s, bool bf16, const void *W, const void *X, void *Y, const float *bias, int rows, int cols, int batch);
+int fllm_cublaslt_gemm_narrow_try(cudaStream_t s, const void *W, int kind, const void *X, void *Y, const float *bias, int rows, int cols, int batch);
 void fllm_cublaslt_x16_tag(const void *x, size_t n, int kind, uint64_t gen);
 extern thread_local float *fllm_skinny_part;
 extern thread_local size_t fllm_skinny_part_bytes;

@@ -98,6 +98,11 @@ pub fn overflow_prone(arch: &str) -> bool {
     a.starts_with("gemma") || a == "vaultgemma"
 }
 
+/// Families whose dense 16-bit checkpoints run narrow by default (Qwen2.5 7B, Qwen3 1.7B and Llama 3.2 1B were compared with the FP32 pipeline on an A100).
+pub fn dense_default_family(arch: &str) -> bool {
+    matches!(arch.to_ascii_lowercase().as_str(), "qwen2" | "qwen3" | "llama")
+}
+
 /// The type `auto` picks: BF16 when the file's float tensors are BF16 (the config dtype of the checkpoint was bfloat16) or the family is
 /// overflow-prone, FP16 otherwise.
 pub fn auto_dtype(arch: &str, source_bf16: bool) -> ActDtype {
@@ -116,8 +121,11 @@ pub struct ModelFacts {
     pub source_bf16: bool,
     /// Why this model cannot keep narrow activations (first reason), if it cannot.
     pub blocker: Option<&'static str>,
-    /// The projections are 4-bit AWQ / GPTQ (Marlin) weights: the only format whose GEMMs read and write narrow activations without conversions.
+    /// The projections are 4-bit AWQ / GPTQ (Marlin) weights: a format whose GEMMs read and write narrow activations without conversions.
     pub marlin_weights: bool,
+    /// The projections are dense 16-bit weights of this type (BF16 or FP16 in every layer): their GEMMs read and write narrow activations of the same type without
+    /// conversions (the tensor-core GEMV and cuBLASLt on the narrow arrays).
+    pub dense_dtype: Option<ActDtype>,
 }
 
 /// Outcome of the policy: the type to use and, when the request could not be honoured, the reason.
@@ -132,15 +140,26 @@ pub struct Decision {
 pub fn decide(request: ActRequest, facts: &ModelFacts) -> Decision {
     let wanted = match request {
         ActRequest::Fixed(d) => d,
+        // dense 16-bit weights run in their own type (a BF16 matrix on FP16 activations would be converted around every GEMM)
+        ActRequest::Auto | ActRequest::Default if !facts.marlin_weights && facts.dense_dtype.is_some() => facts.dense_dtype.unwrap_or(ActDtype::F32),
         ActRequest::Auto | ActRequest::Default => auto_dtype(&facts.arch, facts.source_bf16),
     };
     if !wanted.is_narrow() {
         return Decision { dtype: ActDtype::F32, note: None };
     }
+    // dense 16-bit weights run narrow when nothing is asked only for the families that were run end to end on a device (greedy texts against the FP32 pipeline, speed);
+    // `auto`, `f16` and `bf16` ask for it for any other eligible model
+    if request == ActRequest::Default && !facts.marlin_weights && !dense_default_family(&facts.arch) {
+        return Decision { dtype: ActDtype::F32, note: None };
+    }
+    // an FP16 checkpoint of a family whose residual stream leaves the FP16 range has no safe narrow type of its own weights: stays FP32 unless asked for
+    if request == ActRequest::Default && wanted == ActDtype::F16 && !facts.marlin_weights && (overflow_prone(&facts.arch) || facts.source_bf16) {
+        return Decision { dtype: ActDtype::F32, note: None };
+    }
     let asked = request != ActRequest::Default; // nothing asked: no word about the models it leaves at f32
     // `auto` only switches where it pays: the other weight formats widen and narrow around every GEMM
-    if matches!(request, ActRequest::Auto | ActRequest::Default) && !facts.marlin_weights && facts.blocker.is_none() {
-        let note = asked.then(|| "FLLM_ACT_DTYPE=auto: the model has no 4-bit Marlin weights, narrow activations would only add conversions; activations stay f32".into());
+    if matches!(request, ActRequest::Auto | ActRequest::Default) && !facts.marlin_weights && facts.dense_dtype.is_none() && facts.blocker.is_none() {
+        let note = asked.then(|| "FLLM_ACT_DTYPE=auto: the model has neither 4-bit Marlin nor dense 16-bit weights, narrow activations would only add conversions; activations stay f32".into());
         return Decision { dtype: ActDtype::F32, note };
     }
     if let Some(why) = facts.blocker {
@@ -213,8 +232,27 @@ mod tests {
     }
 
     #[test]
+    fn dense_16_bit_models_run_in_the_type_of_their_weights() {
+        let dense = |dtype, source_bf16| ModelFacts { arch: "llama".into(), source_bf16, blocker: None, marlin_weights: false, dense_dtype: Some(dtype) };
+        // a BF16 matrix on FP16 activations would be converted around every GEMM, whatever the family would otherwise get
+        assert_eq!(decide(ActRequest::Default, &dense(ActDtype::Bf16, false)), Decision { dtype: ActDtype::Bf16, note: None });
+        assert_eq!(decide(ActRequest::Default, &dense(ActDtype::F16, false)), Decision { dtype: ActDtype::F16, note: None });
+        let gemma = ModelFacts { arch: "gemma2".into(), ..dense(ActDtype::F16, false) };
+        assert_eq!(decide(ActRequest::Default, &gemma), Decision { dtype: ActDtype::F32, note: None });
+        assert_eq!(decide(ActRequest::Auto, &dense(ActDtype::Bf16, true)), Decision { dtype: ActDtype::Bf16, note: None });
+        assert_eq!(decide(ActRequest::Fixed(ActDtype::F32), &dense(ActDtype::Bf16, true)), Decision { dtype: ActDtype::F32, note: None });
+        let blocked = ModelFacts { blocker: Some("mixture of experts"), ..dense(ActDtype::Bf16, true) };
+        assert_eq!(decide(ActRequest::Default, &blocked), Decision { dtype: ActDtype::F32, note: None });
+        // families nobody ran end to end stay FP32 when nothing is asked, and run narrow when asked
+        let other = ModelFacts { arch: "phi3".into(), ..dense(ActDtype::Bf16, true) };
+        assert_eq!(decide(ActRequest::Default, &other), Decision { dtype: ActDtype::F32, note: None });
+        assert_eq!(decide(ActRequest::Auto, &other), Decision { dtype: ActDtype::Bf16, note: None });
+        assert!(dense_default_family("Qwen2") && dense_default_family("llama") && !dense_default_family("gemma2"));
+    }
+
+    #[test]
     fn nothing_asked_runs_marlin_models_narrow_and_says_nothing_about_the_others() {
-        let marlin = ModelFacts { arch: "qwen2".into(), source_bf16: false, blocker: None, marlin_weights: true };
+        let marlin = ModelFacts { arch: "qwen2".into(), source_bf16: false, blocker: None, marlin_weights: true, dense_dtype: None };
         assert_eq!(decide(ActRequest::Default, &marlin), Decision { dtype: ActDtype::F16, note: None });
         let bf16_source = ModelFacts { source_bf16: true, ..marlin.clone() };
         assert_eq!(decide(ActRequest::Default, &bf16_source), Decision { dtype: ActDtype::Bf16, note: None });
@@ -238,7 +276,7 @@ mod tests {
 
     #[test]
     fn blockers_keep_f32_and_say_why() {
-        let facts = ModelFacts { arch: "mixtral".into(), source_bf16: false, blocker: Some("mixture of experts"), marlin_weights: true };
+        let facts = ModelFacts { arch: "mixtral".into(), source_bf16: false, blocker: Some("mixture of experts"), marlin_weights: true, dense_dtype: None };
         let d = decide(ActRequest::Fixed(ActDtype::F16), &facts);
         assert_eq!(d.dtype, ActDtype::F32);
         assert!(d.note.unwrap().contains("mixture of experts"));
@@ -249,7 +287,7 @@ mod tests {
 
     #[test]
     fn forced_f16_on_a_bf16_model_is_honoured_with_a_warning() {
-        let facts = ModelFacts { arch: "qwen2".into(), source_bf16: true, blocker: None, marlin_weights: true };
+        let facts = ModelFacts { arch: "qwen2".into(), source_bf16: true, blocker: None, marlin_weights: true, dense_dtype: None };
         let d = decide(ActRequest::Fixed(ActDtype::F16), &facts);
         assert_eq!(d.dtype, ActDtype::F16);
         assert!(d.note.is_some());
@@ -259,7 +297,7 @@ mod tests {
 
     #[test]
     fn auto_stays_f32_without_marlin_weights_but_explicit_requests_are_honoured() {
-        let facts = ModelFacts { arch: "llama".into(), source_bf16: false, blocker: None, marlin_weights: false };
+        let facts = ModelFacts { arch: "llama".into(), source_bf16: false, blocker: None, marlin_weights: false, dense_dtype: None };
         let d = decide(ActRequest::Auto, &facts);
         assert_eq!(d.dtype, ActDtype::F32);
         assert!(d.note.unwrap().contains("Marlin"));

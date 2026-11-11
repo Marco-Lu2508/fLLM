@@ -159,11 +159,31 @@ impl Tester<'_> {
                     self.record(&format!("actdtype linear {tag} {}", format_name(kind)), &format!("259x1024 batch {batch}{}", if batch == 2 { " +bias" } else { "" }), r);
                 }
             }
+            // dense 16-bit weights: the type of the activations runs the tensor-core GEMV (up to 16 tokens, split over the columns for few rows) and cuBLASLt (from 9
+            // tokens on, bias from the epilogue) on the narrow arrays; the other type and shapes the kernels decline run on FP32 copies
+            for kind in self.kinds(&[1u32, 30]) {
+                for (rows, cols, batch, bias) in [
+                    (264usize, 1024usize, 1usize, false),
+                    (264, 1024, 3, true),
+                    (256, 4096, 8, false),
+                    (640, 4096, 12, true),
+                    (512, 1024, 16, false),
+                    (264, 1024, 17, true),
+                    (512, 2048, 40, false),
+                    (3584, 4096, 40, true),
+                    (320, 18944, 4, false),
+                    (320, 18944, 16, true),
+                    (259, 1024, 20, true),
+                ] {
+                    let r = self.act_linear(dt, kind, rows, cols, batch, bias);
+                    self.record(&format!("actdtype dense {tag} {}", format_name(kind)), &format!("{rows}x{cols} batch {batch}{}", if bias { " +bias" } else { "" }), r);
+                }
+            }
             for rows in [1usize, 4, 40] {
                 let r = self.act_ffn_chain(dt, rows);
                 self.record(&format!("actdtype chain {tag}"), &format!("2 FFN blocks, hidden 512, ff 1024, {rows} rows"), r);
             }
-            for runs in [&[48usize][..], &[3][..]] {
+            for runs in [&[48usize][..], &[3][..], &[20, 20][..], &[20, 3][..]] {
                 let r = self.act_attention(dt, runs);
                 self.record(&format!("actdtype attention {tag}"), &format!("{runs:?} rows, f16 cache"), r);
             }

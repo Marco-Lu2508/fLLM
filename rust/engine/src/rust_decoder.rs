@@ -3433,7 +3433,19 @@ impl RustDecoder {
         let marlin_weights = self.layers.iter().any(|l| {
             matches!(&l.attn, Attn::Std { q, .. } if q.packed_weights().is_some_and(|(kind, _)| crate::backend::QuantType::from_gguf_type_id(kind).q4z_group().is_some_and(|g| g != 16)))
         });
-        let facts = ModelFacts { arch: self.cfg.arch.clone(), source_bf16: self.act_source_bf16, blocker: self.narrow_blocker(layer_reasons), marlin_weights };
+        // dense 16-bit projections of one type in every standard-attention layer
+        let mut dense_kinds = std::collections::HashSet::new();
+        for layer in &self.layers {
+            if let Attn::Std { q, .. } = &layer.attn {
+                dense_kinds.insert(q.packed_weights().map(|(kind, _)| kind));
+            }
+        }
+        let dense_dtype = match (dense_kinds.len(), dense_kinds.iter().next().copied().flatten()) {
+            (1, Some(30)) => Some(ActDtype::Bf16),
+            (1, Some(1)) => Some(ActDtype::F16),
+            _ => None,
+        };
+        let facts = ModelFacts { arch: self.cfg.arch.clone(), source_bf16: self.act_source_bf16, blocker: self.narrow_blocker(layer_reasons), marlin_weights, dense_dtype };
         let decision = decide(request_from_env(), &facts);
         let mut dtype = decision.dtype;
         if let Some(note) = &decision.note {

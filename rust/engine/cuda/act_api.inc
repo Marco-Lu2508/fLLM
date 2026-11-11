@@ -221,6 +221,26 @@ int fllm_cuda_na_linear_q4z(FllmStream *st, int dt, const void *w, int group, co
     return 0;
 }
 
+// Dense 16-bit weights on narrow activations of the weights' own type (BF16 weights with BF16 activations, FP16 with FP16): the tensor-core GEMV for up to 16 tokens
+// (the activations are read as they are, the result is written narrow) and cuBLASLt from 9 tokens on where the GEMV declines the shape (the tall input of a down
+// projection), without a conversion kernel on either side. bias (FP32, may be null) is added in FP32 before the rounding. Returns 3 (nothing launched) otherwise.
+int fllm_cuda_na_linear_dense(FllmStream *st, int dt, const void *w, int kind, const void *x, void *y, const float *bias, int rows, int cols, int batch) {
+    PREP(st);
+    if (!((kind == 30 && dt == 2) || (kind == 1 && dt == 1)) || batch < 1 || rows <= 0 || cols <= 0) return 3;
+    if ((reinterpret_cast<uintptr_t>(x) & 15) != 0 || (reinterpret_cast<uintptr_t>(w) & 15) != 0) return 3;
+    if (batch <= 16) {
+        fllm_skinny_part = st->ws;
+        fllm_skinny_part_bytes = st->ws_bytes;
+        const bool done = fllm_dense_skinny_narrow_try(st->s, kind == 30, w, x, y, bias, rows, cols, batch);
+        fllm_skinny_part = nullptr;
+        fllm_skinny_part_bytes = 0;
+        if (done) return fllm_check_launch("act dense gemv");
+    }
+    const int rc = fllm_cublaslt_gemm_narrow_try(st->s, w, kind, x, y, bias, rows, cols, batch);
+    if (rc > 0) return rc;
+    return rc == 0 ? 0 : 3;
+}
+
 // K-quant (Q4_K, Q5_K, Q6_K) GEMV on narrow activations: the activations are quantized to int8 straight from the narrow array into the scratch the integer dot-product
 // kernel reads (fllm_mmvq_try then finds them prepared), the result is FP32. Returns 3 (nothing launched) when that kernel would not take the product.
 int fllm_cuda_na_linear_kquant(FllmStream *st, int dt, const void *w, int kind, const void *x, float *y, const float *bias, int rows, int cols, int batch) {
@@ -288,10 +308,21 @@ int fllm_cuda_na_attention(FllmStream *st, int dt, const void *q, const uint16_t
             }
         }
     }
+    // prompt rows (16 or more rows of one sequence, alone or next to others in the chunk) belong to the tensor-core kernels of fllm_cuda_attention, which also
+    // sorts the decode rows of a mixed chunk out; the decode kernel on the narrow arrays is for steps without such a run
+    bool prompt_rows = false;
+    if (rows >= 16 && !st->capture) {
+        if (step_cached(st)) {
+            step_runs(st, tables_host, lengths_host, rows, stride);
+            for (const auto &run : st->step.runs) prompt_rows = prompt_rows || run.second - run.first >= 16;
+        } else {
+            prompt_rows = true;
+        }
+    }
     // decode kernel (attention4.cu) on the narrow arrays as they are
     {
         static const bool old_attention = getenv("FLLM_CUDA_OLD_ATTN") != nullptr;
-        if (!old_attention && dk == dv && (kind == 1 || kind == 2) && alibi == nullptr) {
+        if (!prompt_rows && !old_attention && dk == dv && (kind == 1 || kind == 2) && alibi == nullptr) {
             void *dt_dev = nullptr, *dl = nullptr;
             const bool cached = step_cached(st);
             if (cached) {
