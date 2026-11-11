@@ -196,11 +196,12 @@ jobs:
           sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "visual_studio_integration"]'
           log-file-suffix: "windows-cuda.txt"
 
-      - name: CUTLASS and FlashInfer headers (Blackwell NVFP4 and Turing+ prefill attention)
+      # FlashInfer is left out like in release.yml: its vec_dtypes.cuh uses GNU __attribute__ syntax that the MSVC host
+      # compiler rejects ("expected a type specifier", fi_attn.cu), and build.rs builds its own prompt attention without it.
+      - name: CUTLASS headers (Blackwell NVFP4; FlashInfer does not compile with the MSVC host compiler)
         shell: bash
         run: |
           git clone --depth 1 --branch v4.8.0 https://github.com/NVIDIA/cutlass third_party/cutlass
-          git clone --depth 1 --branch v0.6.5 https://github.com/flashinfer-ai/flashinfer third_party/flashinfer
 
       - name: Build with the CUDA kernels (MSVC host flags /Zc:__cplusplus /std:c++17 /EHsc, static C runtime, Ampere and Blackwell)
         id: build
