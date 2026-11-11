@@ -6,6 +6,13 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Fixed
+- **The CUDA and ROCm Docker images build again.** Their dependency layer copied only `Cargo.toml` and `build.rs` into the stub
+  tree, but `build.rs` reads `rust/engine/hip/default_archs.txt` with `include_str!` at every feature set (the arch list moved into
+  that file with the "HIP backend for every AMD GPU family" change), so `docker build -f docker/Dockerfile.cuda` and `.rocm` stopped
+  at `couldn't read rust/engine/hip/default_archs.txt`; the layer copies `rust/engine/hip` now. Affects the image builds and the
+  release's ROCm asset only, not the binaries.
+
 ## [0.2.2] - 2026-11-11
 
 Fixes for what the first users of 0.2.1 found, and the self-improvement loop of the coding agent. The GPU speed work against vLLM and SGLang, the KV-cache tiers, and a calmer Studio and desktop app.

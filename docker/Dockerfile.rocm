@@ -43,6 +43,8 @@ WORKDIR /build/fLLM
 # dependencies), so this layer is reused until a Cargo.toml / Cargo.lock changes.
 COPY Cargo.toml Cargo.lock ./
 COPY rust/engine/Cargo.toml rust/engine/build.rs rust/engine/
+# build.rs reads hip/default_archs.txt with include_str! even when the hip feature is off, so the stub layer needs it.
+COPY rust/engine/hip ./rust/engine/hip
 COPY rust/gguf-probe/Cargo.toml rust/gguf-probe/
 COPY rust/checkpoint/Cargo.toml rust/checkpoint/
 RUN for c in engine gguf-probe checkpoint; do mkdir -p rust/$c/src && : > rust/$c/src/lib.rs; done \
