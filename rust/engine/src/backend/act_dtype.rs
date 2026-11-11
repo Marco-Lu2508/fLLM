@@ -4,7 +4,8 @@
 //! FP32 (docs/activation-dtype.md): no conversion kernels around the Marlin GEMMs, half the bytes for every elementwise kernel. Sums, residual adds,
 //! rotations and the gated activation still run in FP32 registers; only the stored values are narrow.
 //!
-//! `FLLM_ACT_DTYPE=f32|f16|bf16|auto` (default `f32`, the original pipeline, bit-identical to earlier versions). `auto` picks BF16 for models whose
+//! `FLLM_ACT_DTYPE=f32|f16|bf16|auto`; unset behaves like `auto` without the log lines for the models it leaves alone: 4-bit Marlin (AWQ / GPTQ)
+//! models run narrow, everything else keeps FP32 (`f32` asks for the original pipeline everywhere). `auto` picks BF16 for models whose
 //! float tensors are BF16 in the file and for families whose residual stream is known to exceed the FP16 range (Gemma), FP16 otherwise. A model that
 //! cannot run in a narrow type (see [`eligibility`]) stays FP32 whatever was asked, with a line in the log.
 
@@ -62,12 +63,15 @@ impl fmt::Display for ActDtype {
 pub enum ActRequest {
     Fixed(ActDtype),
     Auto,
+    /// Nothing was asked: `Auto`, but silent where it leaves the model at FP32.
+    Default,
 }
 
-/// Parse the value of `FLLM_ACT_DTYPE` (`None` = unset = FP32).
+/// Parse the value of `FLLM_ACT_DTYPE` (`None` = unset = `Default`).
 pub fn parse_request(value: Option<&str>) -> Result<ActRequest, String> {
     match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
-        None | Some("") | Some("f32") | Some("fp32") | Some("float32") | Some("float") => Ok(ActRequest::Fixed(ActDtype::F32)),
+        None | Some("") => Ok(ActRequest::Default),
+        Some("f32") | Some("fp32") | Some("float32") | Some("float") => Ok(ActRequest::Fixed(ActDtype::F32)),
         Some("f16") | Some("fp16") | Some("float16") | Some("half") => Ok(ActRequest::Fixed(ActDtype::F16)),
         Some("bf16") | Some("bfloat16") => Ok(ActRequest::Fixed(ActDtype::Bf16)),
         Some("auto") => Ok(ActRequest::Auto),
@@ -81,8 +85,8 @@ pub fn request_from_env() -> ActRequest {
     *REQUEST.get_or_init(|| match parse_request(std::env::var("FLLM_ACT_DTYPE").ok().as_deref()) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[fllm-rs] {e}; using f32");
-            ActRequest::Fixed(ActDtype::F32)
+            eprintln!("[fllm-rs] {e}; using the default");
+            ActRequest::Default
         }
     })
 }
@@ -128,17 +132,20 @@ pub struct Decision {
 pub fn decide(request: ActRequest, facts: &ModelFacts) -> Decision {
     let wanted = match request {
         ActRequest::Fixed(d) => d,
-        ActRequest::Auto => auto_dtype(&facts.arch, facts.source_bf16),
+        ActRequest::Auto | ActRequest::Default => auto_dtype(&facts.arch, facts.source_bf16),
     };
     if !wanted.is_narrow() {
         return Decision { dtype: ActDtype::F32, note: None };
     }
+    let asked = request != ActRequest::Default; // nothing asked: no word about the models it leaves at f32
     // `auto` only switches where it pays: the other weight formats widen and narrow around every GEMM
-    if request == ActRequest::Auto && !facts.marlin_weights && facts.blocker.is_none() {
-        return Decision { dtype: ActDtype::F32, note: Some("FLLM_ACT_DTYPE=auto: the model has no 4-bit Marlin weights, narrow activations would only add conversions; activations stay f32".into()) };
+    if matches!(request, ActRequest::Auto | ActRequest::Default) && !facts.marlin_weights && facts.blocker.is_none() {
+        let note = asked.then(|| "FLLM_ACT_DTYPE=auto: the model has no 4-bit Marlin weights, narrow activations would only add conversions; activations stay f32".into());
+        return Decision { dtype: ActDtype::F32, note };
     }
     if let Some(why) = facts.blocker {
-        return Decision { dtype: ActDtype::F32, note: Some(format!("FLLM_ACT_DTYPE={wanted} is not used for this model ({why}); activations stay f32")) };
+        let note = asked.then(|| format!("FLLM_ACT_DTYPE={wanted} is not used for this model ({why}); activations stay f32"));
+        return Decision { dtype: ActDtype::F32, note };
     }
     let note = if wanted == ActDtype::F16 && (overflow_prone(&facts.arch) || facts.source_bf16) {
         Some(format!(
@@ -196,12 +203,29 @@ mod tests {
 
     #[test]
     fn requests_parse() {
-        assert_eq!(parse_request(None).unwrap(), ActRequest::Fixed(ActDtype::F32));
-        assert_eq!(parse_request(Some("")).unwrap(), ActRequest::Fixed(ActDtype::F32));
+        assert_eq!(parse_request(None).unwrap(), ActRequest::Default);
+        assert_eq!(parse_request(Some("")).unwrap(), ActRequest::Default);
+        assert_eq!(parse_request(Some("f32")).unwrap(), ActRequest::Fixed(ActDtype::F32));
         assert_eq!(parse_request(Some(" F16 ")).unwrap(), ActRequest::Fixed(ActDtype::F16));
         assert_eq!(parse_request(Some("bfloat16")).unwrap(), ActRequest::Fixed(ActDtype::Bf16));
         assert_eq!(parse_request(Some("AUTO")).unwrap(), ActRequest::Auto);
         assert!(parse_request(Some("int8")).is_err());
+    }
+
+    #[test]
+    fn nothing_asked_runs_marlin_models_narrow_and_says_nothing_about_the_others() {
+        let marlin = ModelFacts { arch: "qwen2".into(), source_bf16: false, blocker: None, marlin_weights: true };
+        assert_eq!(decide(ActRequest::Default, &marlin), Decision { dtype: ActDtype::F16, note: None });
+        let bf16_source = ModelFacts { source_bf16: true, ..marlin.clone() };
+        assert_eq!(decide(ActRequest::Default, &bf16_source), Decision { dtype: ActDtype::Bf16, note: None });
+        let dense = ModelFacts { marlin_weights: false, ..marlin.clone() };
+        assert_eq!(decide(ActRequest::Default, &dense), Decision { dtype: ActDtype::F32, note: None });
+        let blocked = ModelFacts { blocker: Some("mixture of experts"), ..marlin.clone() };
+        assert_eq!(decide(ActRequest::Default, &blocked), Decision { dtype: ActDtype::F32, note: None });
+        // asked for: the notes stay, and f32 means f32 for a Marlin model too
+        assert!(decide(ActRequest::Auto, &blocked).note.is_some());
+        assert!(decide(ActRequest::Auto, &dense).note.is_some());
+        assert_eq!(decide(ActRequest::Fixed(ActDtype::F32), &marlin), Decision { dtype: ActDtype::F32, note: None });
     }
 
     #[test]

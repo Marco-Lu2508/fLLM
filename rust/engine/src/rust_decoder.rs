@@ -852,16 +852,20 @@ fn debug_sum(stream: &mut dyn crate::backend::Stream, name: &str, buf: &crate::b
 }
 
 /// RMS-normalizes `buf` in place over `weight.len()` values (through a pooled temporary); no-op without weights.
-/// `FLLM_MERGE_PROJ=1`: q/k/v and gate/up uploaded as one matrix each. Needs narrow activations and a backend with the merged-projection operations (with FP32
-/// activations the existing norm / GLU / conversion fusions of the separate projections are better). Default off: the merged GEMM has another reduction
-/// order than the separate ones, so results can differ in the last bits.
+/// `FLLM_MERGE_PROJ`: q/k/v and gate/up uploaded as one matrix each. Needs narrow activations and a backend with the merged-projection operations (with FP32
+/// activations the existing norm / GLU / conversion fusions of the separate projections are better). On by default where it can run (seven GEMMs per layer
+/// become four: A100, Qwen2.5-7B AWQ, 40 users 2191 -> 2423 tokens/s); `0` keeps the projections separate. The merged GEMM has another reduction order
+/// than the separate ones, so results can differ in the last bits.
 fn merge_proj_requested(narrow: bool, supported: bool) -> bool {
-    let asked = matches!(std::env::var("FLLM_MERGE_PROJ").ok().map(|v| v.trim().to_ascii_lowercase()).as_deref(), Some("1" | "on" | "true" | "yes"));
-    if asked && !(narrow && supported) {
-        eprintln!("[fllm-rs] FLLM_MERGE_PROJ=1 needs FLLM_ACT_DTYPE=f16|bf16 and a CUDA GPU; projections stay separate");
-        return false;
+    let value = std::env::var("FLLM_MERGE_PROJ").ok().map(|v| v.trim().to_ascii_lowercase());
+    match value.as_deref() {
+        Some("0" | "off" | "false" | "no") => false,
+        Some("1" | "on" | "true" | "yes") if !(narrow && supported) => {
+            eprintln!("[fllm-rs] FLLM_MERGE_PROJ=1 needs FLLM_ACT_DTYPE=f16|bf16 and a CUDA GPU; projections stay separate");
+            false
+        }
+        _ => narrow && supported,
     }
-    asked
 }
 
 /// `FLLM_FUSE_QK_NORM_ROPE=1`: per-head RMS norm of q and k, rotary embedding and KV cache write in one kernel (default off until measured).

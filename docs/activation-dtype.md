@@ -66,9 +66,15 @@ Reading of the numbers:
   352 kB per row, are the same size in both and dominate; they are the target of the SwiGLU-into-quantization fusions of docs/changes/cuda-act.md).
   Expected effect: 3 to 5 ms of 55 ms per chunk (5 to 9 %); the measurement decides.
 
-## 2. The narrow pipeline (implemented, behind `FLLM_ACT_DTYPE`)
+## 2. The narrow pipeline (implemented, `FLLM_ACT_DTYPE`)
 
-`FLLM_ACT_DTYPE=f32|f16|bf16|auto`, default `f32`: the pipeline above, bit-identical to earlier versions (the narrow code is not reached).
+`FLLM_ACT_DTYPE=f32|f16|bf16|auto`. Unset behaves like `auto` without a word about the models it leaves alone: a model with 4-bit Marlin (AWQ / GPTQ) projections
+runs narrow (FP16, BF16 when the checkpoint is BF16 or the family is Gemma), with `FLLM_MERGE_PROJ` on (q/k/v and gate/up as one matrix each, four Marlin launches a
+layer instead of seven); every other model keeps the FP32 pipeline above. `f32` asks for the FP32 pipeline everywhere (bit-identical to earlier versions), `FLLM_MERGE_PROJ=0`
+keeps the projections separate. Measured on an A100 (Qwen2.5-7B-Instruct AWQ, 100-token prompts, 64 new tokens, `compare.py` workload, alternating runs): 40 users 2191 ->
+2423 tokens/s (+10.6 %), 16 users 1465 -> 1658 (+13.2 %); the narrow pipeline alone gained nothing (2168), the merged launches are what pays. nsys of the 40-user cell:
+vLLM runs 13 496 Marlin launches (qkv, o, gate_up, down), fLLM with separate projections 21 316 (+58 %), 1041 ms of Marlin time against 927 ms. Greedy texts of 8 prompts (60 tokens)
+are identical with and without it.
 
 What `f16` / `bf16` change (kernels in `cuda/act_narrow.cu`, entry points in `cuda/act_api.inc`, Rust side `backend/cuda.rs`, `backend/act_dtype.rs`):
 
