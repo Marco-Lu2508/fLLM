@@ -147,11 +147,13 @@ int fllm_attn_encoder_launch(cudaStream_t s, const float *q, const float *k, con
 
 // C entry points of the NVIDIA-only paths (narrow activations, Marlin small-m, PDL) that the Rust backend declares; AMD builds answer "unsupported".
 extern "C" {
+int fllm_cuda_na_attention() { return -1; }
 int fllm_cuda_na_check() { return -1; }
 int fllm_cuda_na_convert() { return -1; }
 int fllm_cuda_na_glu() { return -1; }
 int fllm_cuda_na_glu_merged() { return -1; }
 int fllm_cuda_na_kv_write() { return -1; }
+int fllm_cuda_na_linear_dense() { return -1; }
 int fllm_cuda_na_linear_kquant() { return -1; }
 int fllm_cuda_na_linear_q4z() { return -1; }
 int fllm_cuda_na_residual() { return -1; }
