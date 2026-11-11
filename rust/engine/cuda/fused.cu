@@ -43,6 +43,7 @@ void fllm_fuse_force(int which, int on) {
 }
 
 #if !defined(__HIPCC__)
+#include <cuda_bf16.h>
 #include "nvfp4_quant.cuh"
 
 // Same reduction as block_sum in elementwise.cu (the sums must come out in the same order).
@@ -58,7 +59,8 @@ __device__ __forceinline__ float norm_block_sum(float v, float *scratch) {
 }
 
 // quant: what the GEMM that follows reads (the norm output itself is always written as FP32 as well)
-//   0 nothing, 1 FP16 activations of the Marlin GEMMs (row-major halves in q0), 2 NVFP4 (nibbles in q0, UE4M3 scales in q1, the layout
+//   0 nothing, 1 FP16 activations of the Marlin GEMMs (row-major halves in q0), 4 BF16 and 5 FP16 activations of the cuBLASLt GEMM of dense 16-bit
+//   weights (row-major in q0: the conversion that GEMM would do itself, bit for bit), 2 NVFP4 (nibbles in q0, UE4M3 scales in q1, the layout
 //   of nvfp4_quantize_kernel), 3 int8 with one float2 {d, d * sum(q)} per 32 values (q0, q1; the layout of quantize_x8_kernel)
 // RES: 1 FP32 branch (x += scale * branch, the residual_kernel), 2 FP16 branch plus optional bias (x += scale * (branch + bias), the
 //   f16_to_f32_acc_kernel of the Marlin GEMMs). The updated x is written back. One block per row, rows of up to 8192 values.
@@ -117,11 +119,17 @@ add_rms_norm_kernel(float *__restrict__ x, const void *__restrict__ branch, cons
         const float4 g = live ? __ldg(w4 + c) : make_float4(0.f, 0.f, 0.f, 0.f);
         const float4 o = make_float4(v[i].x * (inv * g.x), v[i].y * (inv * g.y), v[i].z * (inv * g.z), v[i].w * (inv * g.w));
         if (live) orow[c] = o;
-        if (QUANT == 1) {
+        if (QUANT == 1 || QUANT == 5) {
             if (live) {
                 __half2 *y = reinterpret_cast<__half2 *>(q0) + (((size_t)blockIdx.x * cols + (size_t)c * 4) >> 1);
                 y[0] = __floats2half2_rn(o.x, o.y);
                 y[1] = __floats2half2_rn(o.z, o.w);
+            }
+        } else if (QUANT == 4) {
+            if (live) {
+                __nv_bfloat162 *y = reinterpret_cast<__nv_bfloat162 *>(q0) + (((size_t)blockIdx.x * cols + (size_t)c * 4) >> 1);
+                y[0] = __floats2bfloat162_rn(o.x, o.y);
+                y[1] = __floats2bfloat162_rn(o.z, o.w);
             }
         } else if (QUANT == 3) {
             // eight lanes hold the 32 values of one group (c is the float4 index, 256 is a multiple of 8)
@@ -186,6 +194,8 @@ static void add_rms_norm_dispatch(cudaStream_t s, int quant, int rows, float *x,
         case 1: FLLM_ARN(1); break;
         case 2: FLLM_ARN(2); break;
         case 3: FLLM_ARN(3); break;
+        case 4: FLLM_ARN(4); break;
+        case 5: FLLM_ARN(5); break;
         default: FLLM_ARN(0); break;
     }
 #undef FLLM_ARN
@@ -198,7 +208,7 @@ int fllm_add_rms_norm_launch(cudaStream_t s, float *x, const void *branch, int r
     if ((reinterpret_cast<uintptr_t>(x) | reinterpret_cast<uintptr_t>(branch) | reinterpret_cast<uintptr_t>(w) |
          reinterpret_cast<uintptr_t>(out) | reinterpret_cast<uintptr_t>(rbias)) % 16 != 0)
         return 1;
-    if (quant == 1 && (reinterpret_cast<uintptr_t>(q0) & 15) != 0) return 1;
+    if ((quant == 1 || quant == 4 || quant == 5) && (reinterpret_cast<uintptr_t>(q0) & 15) != 0) return 1;
     if (quant == 2 && ((cols & 255) != 0 || (reinterpret_cast<uintptr_t>(q0) & 15) != 0)) return 1;
     if (quant == 3 && ((cols & 31) != 0 || (reinterpret_cast<uintptr_t>(q0) & 15) != 0 || (reinterpret_cast<uintptr_t>(q1) & 15) != 0)) return 1;
     const bool wide = cols / 4 > 1024;

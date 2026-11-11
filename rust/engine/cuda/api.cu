@@ -5,6 +5,7 @@
 // statically and loads the driver (libcuda) lazily, so a binary built with it still starts on a
 // machine without NVIDIA drivers (device_count then reports an error and fLLM falls back).
 #include <algorithm>
+#include <climits>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstdio>
@@ -1249,6 +1250,14 @@ static int fused_quant_target(FllmStream *st, int quant, int kind, int rows, int
         *q0 = st->q4z_io;
         return 1;
     }
+    if (quant == 4 || quant == 5) {
+        // dense 16-bit weights: the 16-bit copy that cuBLASLt multiplies (BF16 4, FP16 5); only where cuBLASLt takes every projection (17 rows and more)
+        if (rows < 17 || (quant == 4 && kind != 30) || (quant == 5 && kind != 1)) return 0;
+        void *buf = fllm_cublaslt_x16_buffer(st->s, (size_t)rows * cols * 2);
+        if (!buf) return 0;
+        *q0 = buf;
+        return quant;
+    }
     if (!st->x16) return 0;
     if (quant == 2) {
         if (!fllm_nvfp4_prep_ok(cols, rows)) return 0;
@@ -1274,7 +1283,9 @@ static int fused_quant_target(FllmStream *st, int quant, int kind, int rows, int
 }
 // the next GEMM finds its activations prepared when it reads `out`
 static void fused_quant_done(FllmStream *st, int quant, const float *out, int rows, int cols) {
-    if (quant == 1) {
+    if (quant == 4 || quant == 5) {
+        fllm_cublaslt_x16_tag(out, (size_t)rows * cols, quant == 4 ? 30 : 1, st->x_gen);
+    } else if (quant == 1) {
         st->q4z_x = out;
         st->q4z_batch = rows;
         st->q4z_cols = cols;
@@ -1300,7 +1311,8 @@ int fllm_cuda_add_rms_norm(FllmStream *st, float *x, const float *branch, float 
     // decode batches only: from FLLM_PREFILL_MIN_ROWS rows on, the prompt path (rms_norm_prompt_kernel, FLLM_FUSE_PREFILL_*) owns this fusion
     // (the next GEMM of dense 16-bit weights (kind 1 or 30) converts its input itself and has no fusion of its own at 16 to 63 rows, so those batches take it too)
     // (a decode graph of 64 rows - 33 to 64 users - is a decode batch too; the prompt graphs start at 128 rows)
-    const int max_rows = quant == 0 && (kind == 1 || kind == 30) ? (st->capture ? 65 : 64) : FLLM_PREFILL_MIN_ROWS;
+    // (dense 16-bit weights have no prompt-path norm of their own: any number of rows)
+    const int max_rows = (quant == 0 || quant == 4 || quant == 5) && (kind == 1 || kind == 30) ? INT_MAX : FLLM_PREFILL_MIN_ROWS;
     if (!fllm_fuse_enabled(FLLM_FUSE_ADD_NORM) || rows <= 0 || rows >= max_rows || cols <= 0 || (cols & 3) != 0 || cols > 8192) return FLLM_DECLINED;
     if ((reinterpret_cast<uintptr_t>(x) | reinterpret_cast<uintptr_t>(branch) | reinterpret_cast<uintptr_t>(w) | reinterpret_cast<uintptr_t>(out)) % 16 != 0)
         return FLLM_DECLINED;

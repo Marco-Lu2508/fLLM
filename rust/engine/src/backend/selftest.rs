@@ -5029,9 +5029,10 @@ impl<'a> Tester<'a> {
                 }
             }
         }
-        // dense 16-bit weights read the norm output as it is: the fused kernel serves them up to 63 rows (the other formats up to 15)
+        // dense 16-bit weights: the fused kernel serves them at any number of rows (the other formats up to 15), and from 17 rows on it writes the 16-bit
+        // copy that cuBLASLt multiplies (the product that follows reuses it)
         for kind in self.kinds(&[1u32, 30]) {
-            for rows in [4usize, 16, 32, 63] {
+            for rows in [4usize, 16, 17, 32, 63, 64, 129, 512] {
                 let r = self.fuse_add_norm(rows, 1024, Some(kind), 0.0);
                 self.record(&format!("add_rms_norm +{}", format_name(kind)), &format!("{rows}x1024"), r);
             }

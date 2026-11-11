@@ -57,8 +57,10 @@ extern thread_local bool fllm_x16_reuse, fllm_x16_filled;
 extern thread_local uint64_t fllm_x_gen;
 // 0 when the tensor-core GEMV does not take a dense 16-bit projection of this shape (linear.cu), else its variant
 int fllm_dense_skinny_variant(int rows, int cols, int batch);
-// 0 when the tensor-core GEMV does not take a dense 16-bit projection of this shape (linear.cu), else its variant
-int fllm_dense_skinny_variant(int rows, int cols, int batch);
+// The 16-bit copy of the activations that cuBLASLt (cublaslt_gemm.cu) multiplies, for a norm kernel to fill: nullptr when it is not allocated (and the
+// stream is being captured) or too small; the tag tells the next product of the same activations that the conversion is done (`gen`: fllm_x_gen then)
+void *fllm_cublaslt_x16_buffer(cudaStream_t s, size_t bytes);
+void fllm_cublaslt_x16_tag(const void *x, size_t n, int kind, uint64_t gen);
 extern thread_local float *fllm_skinny_part;
 extern thread_local size_t fllm_skinny_part_bytes;
 // The same for the int8 activations of the integer dot-product kernels (mmvq.cu), which live in the same scratch.

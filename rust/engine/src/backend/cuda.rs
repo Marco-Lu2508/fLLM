@@ -1192,8 +1192,9 @@ fn next_activation_format(weight: Option<&DeviceWeight>) -> (c_int, c_int) {
     } else if matches!(kind, 12..=14) {
         (3, kind as c_int)
     } else if matches!(kind, 1 | 30) {
-        // dense 16-bit weights: no activation conversion to fuse, but the kind tells the kernel that up to 63 rows may take the decode-sized add + norm
-        (0, kind as c_int)
+        // dense 16-bit weights: the norm writes the 16-bit copy that cuBLASLt multiplies (BF16 4, FP16 5; the kernel decides by the rows whether it does),
+        // and the kind tells it that dense weights take the fused add + norm at any number of rows
+        (if kind == 30 { 4 } else { 5 }, kind as c_int)
     } else {
         (0, 0)
     }

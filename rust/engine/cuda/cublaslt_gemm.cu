@@ -167,6 +167,12 @@ int mode() {
     return env;
 }
 
+// one context per thread and device, shared by the product and by the norm kernels that fill its activations
+Context &context_for(int dev) {
+    static thread_local std::map<int, Context> contexts;
+    return contexts[dev];
+}
+
 bool make_plan(const Api &api, Context &ctx, Plan &p, int rows, int cols, int batch, cudaDataType in, bool biased) {
     if (api.desc_create(&p.desc, CUBLAS_COMPUTE_32F, CUDA_R_32F) != CUBLAS_STATUS_SUCCESS) return false;
     const cublasOperation_t trans = CUBLAS_OP_T, none = CUBLAS_OP_N;
@@ -203,6 +209,39 @@ bool make_plan(const Api &api, Context &ctx, Plan &p, int rows, int cols, int ba
 
 }  // namespace
 
+void *fllm_cublaslt_x16_buffer(cudaStream_t s, size_t bytes) {
+    if (mode() == 0 || g_failed.load() || fllm_exact_math() || fllm_cc() < 80) return nullptr;
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) return nullptr;
+    Context &ctx = context_for(dev);
+    if (ctx.x16 && ctx.x16_bytes >= bytes) return ctx.x16;
+    cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(s, &cap) != cudaSuccess || cap != cudaStreamCaptureStatusNone) {
+        cudaGetLastError();
+        return nullptr;
+    }
+    // (not freed, like the growth in fllm_cublaslt_gemm_try: a captured graph may hold the old pointer)
+    void *p = nullptr;
+    const size_t want = bytes > 2 * ctx.x16_bytes ? bytes : 2 * ctx.x16_bytes;
+    if (cudaMalloc(&p, want) != cudaSuccess) {
+        cudaGetLastError();
+        return nullptr;
+    }
+    ctx.x16 = p;
+    ctx.x16_bytes = want;
+    return p;
+}
+
+void fllm_cublaslt_x16_tag(const void *x, size_t n, int kind, uint64_t gen) {
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) return;
+    Context &ctx = context_for(dev);
+    ctx.tag_x = static_cast<const float *>(x);
+    ctx.tag_n = n;
+    ctx.tag_kind = kind;
+    ctx.tag_gen = gen;
+}
+
 void fllm_cublaslt_set_mode(int mode_value) { g_mode.store(mode_value < -1 || mode_value > 1 ? -1 : mode_value); }
 
 // Returns 0 when the product was computed, -1 when the caller has to use another kernel, > 0 on a launch error.
@@ -222,8 +261,7 @@ int fllm_cublaslt_gemm_try(cudaStream_t s, const void *W, int kind, const float 
     }
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess) return -1;
-    static thread_local std::map<int, Context> contexts;
-    Context &ctx = contexts[dev];
+    Context &ctx = context_for(dev);
     cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
     const bool capturing = cudaStreamIsCapturing(s, &cap) != cudaSuccess || cap != cudaStreamCaptureStatusNone;
     cudaGetLastError();
