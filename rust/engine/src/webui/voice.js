@@ -333,6 +333,8 @@
         $('tourTitle').textContent = STEPS[tour.step];
         $('tourBody').innerHTML = tourBody();
         $('tourDots').innerHTML = STEPS.map((_, i) => `<span class="${i === tour.step ? 'on' : ''}"></span>`).join('');
+        $('tourDots').setAttribute('role', 'img');
+        $('tourDots').setAttribute('aria-label', `Step ${tour.step + 1} of ${STEPS.length}`);
         $('tourBack').style.visibility = tour.step ? 'visible' : 'hidden';
         $('tourNext').textContent = tour.step === STEPS.length - 1 ? 'Get started' : 'Next';
         $('tourSkip').style.visibility = tour.step === STEPS.length - 1 ? 'hidden' : 'visible';

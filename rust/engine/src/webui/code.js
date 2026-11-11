@@ -1005,7 +1005,7 @@
           <span class="thread-row-title">${escapeHtml(p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p)}</span>
         </div>`).join('');
       $('threadList').innerHTML = `${rows || '<div class="thread-empty">No folder opened yet</div>'}
-        <div class="thread-row" data-ws-open><span class="thread-row-title">Open folder ...</span></div>`;
+        <div class="thread-row" data-ws-open><span class="thread-row-title">Open folder…</span></div>`;
     }
     $('threadList').addEventListener('click', async (e) => {
       if (state.tab !== 'code') return;

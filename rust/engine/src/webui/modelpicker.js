@@ -129,7 +129,7 @@
       mpEl('modelPickerModal').classList.add('open');
       if (initial) mpCheck(initial);
     };
-    // the start screen calls this one ("Choose a file ...")
+    // the start screen calls this one ("Choose a file…")
     window.fllmPickModelFile = () => window.fllmChooseModel('');
 
     mpEl('mpCheck').addEventListener('click', () => mpCheck());

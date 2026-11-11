@@ -69,7 +69,7 @@
       const key = JSON.stringify([plan.mode, plan.primary && plan.primary.ref, plan.others.map((o) => o.ref), plan.download && plan.download.id, plan.download && plan.download.default_quant]);
       if (heroStartFor === key) return; // the hero is redrawn on every status poll
       heroStartFor = key;
-      const chooseFile = '<button class="btn btn-sm btn-ghost" id="btnHeroPick">Choose a model ...</button>';
+      const chooseFile = '<button class="btn btn-sm btn-ghost" id="btnHeroPick">Choose a model…</button>';
       const browse = '<button class="btn btn-sm btn-ghost" id="btnHeroBrowse">Browse models</button>';
       box.style.display = '';
       if (plan.mode === 'load') {

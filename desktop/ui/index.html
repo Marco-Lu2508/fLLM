@@ -18,11 +18,11 @@
   body {
     display: flex; align-items: center; justify-content: center;
     background: var(--bg); color: var(--fg);
-    font: 15px/1.55 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, "Helvetica Neue", sans-serif; -webkit-font-smoothing: antialiased;
   }
   main { width: min(440px, 100% - 48px); text-align: center; }
   .mark { width: 56px; height: 56px; margin: 0 auto 18px; }
-  h1 { margin: 0 0 6px; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
+  h1 { margin: 0 0 6px; font-size: 26px; font-weight: 650; letter-spacing: -0.022em; }
   #note { margin: 0 auto; min-height: 3.1em; max-width: 38ch; color: var(--muted); overflow-wrap: anywhere; }
   .bar { position: relative; height: 3px; margin: 22px auto 0; width: 160px; border-radius: 3px; background: var(--line); overflow: hidden; }
   .bar::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 40%; border-radius: 3px; background: var(--accent); animation: slide 1.5s cubic-bezier(0.45, 0, 0.25, 1) infinite; }
@@ -34,11 +34,13 @@
   #actions { display: none; gap: 10px; justify-content: center; margin-top: 22px; flex-wrap: wrap; }
   .failed.can-act #actions { display: flex; }
   button {
-    font: inherit; font-weight: 600; font-size: 14px; cursor: pointer; border-radius: 9px; padding: 8px 16px;
+    font: inherit; font-weight: 500; font-size: 13px; cursor: pointer; transition: background 140ms, transform 140ms; border-radius: 8px; padding: 0 16px; min-height: 30px;
     border: 1px solid var(--line); background: var(--surface); color: var(--fg);
   }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-  button:hover { filter: brightness(1.08); }
+  button:hover { filter: brightness(1.06); }
+  button:active { transform: scale(0.97); }
+  @media (prefers-reduced-motion: reduce) { button { transition: none; } button:active { transform: none; } }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   #hint { margin-top: 26px; font-size: 13px; color: var(--muted); }
   .failed #hint { display: none; }
@@ -46,7 +48,7 @@
 </head>
 <body>
 <main id="box">
-  <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#121a21"/><circle cx="16" cy="16" r="8" fill="#43c0aa"/></svg>
+  <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#121a21"/><circle cx="16" cy="16" r="8" fill="var(--accent)"/></svg>
   <h1 id="title">fLLM</h1>
   <p id="note" role="status" aria-live="polite">Starting the engine ...</p>
   <div class="bar" aria-hidden="true"></div>

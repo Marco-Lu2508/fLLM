@@ -1,0 +1,473 @@
+/* ==========================================================================
+   fLLM Studio — design system v3, "calm native"
+   Loaded after theme.css. Takes the structure of Apple's Human Interface Guidelines
+   (references: foundations/color, typography, layout, materials, motion, accessibility;
+   components/sidebars, toolbars, buttons, sheets, segmented controls) and keeps fLLM's own
+   voice in ONE place: the copper accent, the material of a Rust engine (see design-system/fllm-studio/MASTER.md).
+   Deliberate deviations from "looks like macOS": no system blue (the accent is copper), the
+   chat composer keeps its own shape, and shortcut hints show Ctrl on Windows and Linux.
+
+   What changes against v2:
+   - neutrals follow the system gray ramp (label / secondary label / separator), secondary text >= 4.5:1
+   - one flat translucent sidebar instead of a floating card with a second card inside it
+   - toolbars and sheets are materials (blur + saturation), with a solid fallback for
+     prefers-reduced-transparency and prefers-contrast
+   - controls are 30 px high with 8 px radii, the one primary action per view is filled,
+     everything else is a quiet gray fill
+   - motion has a reason: press feedback on pointer down, critically damped easing by default,
+     a slightly springy entrance for sheets only, none under prefers-reduced-motion
+   ========================================================================== */
+
+/* ---- tokens ------------------------------------------------------------------------------------- */
+:root {
+  --bg: #f5f5f7;
+  --bg-glow: none;
+  --surface: #ffffff;
+  --surface-2: #f5f5f7;
+  --surface-3: #e8e8ed;
+  --fg: #1d1d1f;
+  --fg-soft: #424245;
+  --muted-fg: #636366; /* 5.6:1 on white, 5.1:1 on #f5f5f7 */
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.18);
+  --separator: rgba(60, 60, 67, 0.16);
+  --fill: rgba(120, 120, 128, 0.12); /* quiet control fill */
+  --fill-hover: rgba(120, 120, 128, 0.18);
+  --fill-active: rgba(120, 120, 128, 0.24);
+  --material: color-mix(in oklab, #f5f5f7 72%, transparent);
+  --material-thick: color-mix(in oklab, #ffffff 82%, transparent);
+  --shadow-2: 0 1px 2px rgba(0, 0, 0, 0.04), 0 6px 20px rgba(0, 0, 0, 0.08);
+  --shadow-3: 0 0 0 0.5px rgba(0, 0, 0, 0.10), 0 24px 64px rgba(0, 0, 0, 0.20), 0 4px 14px rgba(0, 0, 0, 0.08);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, "Helvetica Neue", sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI Variable Display", "Segoe UI", Inter, system-ui, sans-serif;
+  --text-md: 14px;
+  --leading: 1.5;
+
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 22px;
+  --control-h: 30px;
+
+  /* motion: critically damped by default; the spring is for sheets and popovers that arrive */
+  --ease: cubic-bezier(0.25, 0.9, 0.3, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --fast: 140ms var(--ease);
+  --normal: 220ms var(--ease);
+  --slow: 320ms var(--ease);
+  --spring: linear(0, 0.009, 0.035 2.1%, 0.141 4.4%, 0.723 12.9%, 0.938 16.7%, 1.017 19.6%, 1.077 22.8%, 1.121 26.2%, 1.149 30%, 1.159 34.5%, 1.144 39.6%, 1.088 48.7%, 1.034 58.7%, 1.007 67.6%, 1 80%, 1);
+  --chrome-h: 52px; /* one height for the sidebar brand row and the page header, so their baselines meet */
+  --inset: 12px; /* one horizontal inset for everything in the sidebar */
+}
+
+html.dark {
+  --bg: #161618;
+  --surface: #1c1c1e;
+  --surface-2: #232326;
+  --surface-3: #2c2c2e;
+  --fg: #f5f5f7;
+  --fg-soft: #d1d1d6;
+  --muted-fg: #a1a1a6; /* 6.9:1 on #1c1c1e */
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.20);
+  --separator: rgba(84, 84, 88, 0.55);
+  --fill: rgba(120, 120, 128, 0.24);
+  --fill-hover: rgba(120, 120, 128, 0.32);
+  --fill-active: rgba(120, 120, 128, 0.40);
+  --material: color-mix(in oklab, #232326 70%, transparent);
+  --material-thick: color-mix(in oklab, #2c2c2e 84%, transparent);
+  --shadow-2: 0 1px 2px rgba(0, 0, 0, 0.30), 0 8px 24px rgba(0, 0, 0, 0.40);
+  --shadow-3: 0 0 0 0.5px rgba(255, 255, 255, 0.10), 0 28px 72px rgba(0, 0, 0, 0.62), 0 4px 14px rgba(0, 0, 0, 0.40);
+}
+
+/* ---- type ------------------------------------------------------------------------------------------ */
+/* size-specific tracking: display text tightens, small text opens a little (apple-design-motion §15) */
+body { font-size: var(--text-md); letter-spacing: 0; font-feature-settings: "kern" 1, "calt" 1; font-synthesis: none; }
+h1, .hero-title, #welcomeHeading { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.12; }
+h2 { font-size: 22px; font-weight: 650; letter-spacing: -0.018em; }
+h3 { font-size: 17px; font-weight: 600; letter-spacing: -0.012em; }
+small, .app-item-desc, .text-xs, .kbd-group { letter-spacing: 0.005em; }
+.mono, code, pre, kbd { font-variant-ligatures: none; }
+.app-item-desc { color: var(--muted-fg); line-height: 1.45; }
+p, .app-item-desc { max-width: 72ch; text-wrap: pretty; }
+h1, h2, h3, .app-card-title { text-wrap: balance; }
+
+/* ---- shell: one flat material sidebar, no card in a card ------------------------------------------ */
+.app-shell { background: var(--bg); }
+.sidebar-outer { padding: 0; background: transparent; }
+.sidebar-floating {
+  border: 0;
+  border-right: 0.5px solid var(--separator);
+  border-radius: 0;
+  background: var(--material);
+  -webkit-backdrop-filter: blur(28px) saturate(170%);
+  backdrop-filter: blur(28px) saturate(170%);
+  box-shadow: none;
+}
+.sidebar-content {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 4px var(--inset) 8px;
+}
+.sidebar-header { padding: 0 var(--inset) 8px; }
+.sidebar-brand-row { height: var(--chrome-h); padding: 0 2px 0 6px; margin: 0; border: 0; align-items: center; }
+.brand-title { gap: 8px; font-weight: 650; font-size: 15px; letter-spacing: -0.012em; }
+.brand-dot { width: 9px; height: 9px; }
+.sidebar-footer { padding: 10px calc(var(--inset) + 6px) 12px; border-top: 0; color: var(--muted-fg); }
+.sidebar-footer .mono { font-family: var(--font-sans); font-size: 12px; letter-spacing: 0.005em; }
+.sidebar-footer .tabular { font-variant-numeric: tabular-nums; }
+
+/* chat / code switch: a real segmented control, the pill carries the state (no underline on top of it) */
+.nav-tabs { background: var(--fill); border: 0; border-radius: var(--r-md); padding: 2px; gap: 2px; margin: 0 0 10px; }
+.nav-tab { border-radius: 8px; min-height: 26px; font-weight: 500; font-size: 13px; color: var(--fg-soft); transition: background var(--fast), color var(--fast), box-shadow var(--fast); }
+.nav-tab:hover { background: transparent; color: var(--fg); }
+.nav-tab.active { background: var(--surface); color: var(--fg); box-shadow: 0 0 0 0.5px var(--border), 0 1px 3px rgba(0, 0, 0, 0.12); }
+html.dark .nav-tab.active { background: var(--surface-3); box-shadow: 0 0 0 0.5px var(--border-strong), 0 1px 3px rgba(0, 0, 0, 0.4); }
+.nav-tab.active::after { content: none; }
+
+/* sidebar rows: 8 px radius, selection is the accent tint, no stray bar outside the row */
+.nav-main { gap: 1px; }
+.nav-item, .thread-row { border-radius: var(--r-sm); min-height: 32px; font-size: 13.5px; font-weight: 450; color: var(--fg); transition: background var(--fast), color var(--fast); }
+.nav-item::before, .nav-item::after, .thread-row::before, .thread-row::after { content: none !important; }
+.nav-item:hover, .thread-row:hover { background: var(--fill); }
+.nav-item:active, .thread-row:active { background: var(--fill-hover); }
+.nav-item.active, .thread-row.active, .thread-row.is-active { background: var(--primary-soft); color: var(--fg); }
+.nav-item.active svg.icon, .nav-item.active .icon { color: var(--primary); }
+.nav-item svg.icon { color: var(--muted-fg); transition: color var(--fast); }
+.kbd-group { color: var(--muted-fg); font-family: var(--font-sans); font-size: 12px; letter-spacing: 0.02em; font-variant-numeric: tabular-nums; }
+.sidebar-group-header { padding: 14px 6px 4px; color: var(--muted-fg); font-size: 12px; font-weight: 600; letter-spacing: 0.005em; text-transform: none; }
+.thread-search { width: 100%; box-sizing: border-box; border: 0; background: var(--fill); border-radius: var(--r-sm); height: 30px; margin: 4px 0 6px; padding: 0 10px; font-size: 13px; }
+.thread-search:focus { background: var(--surface); box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 55%, transparent); outline: 0; }
+
+/* ---- page chrome: translucent toolbar, hairline instead of a bar, same height as the brand row --------- */
+.main-inset { background: var(--bg); }
+.header-page {
+  min-height: var(--chrome-h);
+  padding: 0 var(--space-5);
+  border-bottom: 0;
+  box-shadow: 0 0.5px 0 var(--separator);
+  background: var(--material);
+  -webkit-backdrop-filter: blur(24px) saturate(170%);
+  backdrop-filter: blur(24px) saturate(170%);
+}
+.header-page h1, .header-page .page-title, .header-page .header-title { font-size: 15px; font-weight: 650; letter-spacing: -0.012em; line-height: 1.2; }
+
+/* ---- surfaces: grouped, not outlined ---------------------------------------------------------------- */
+.app-card, .settings-pane > section {
+  background: var(--surface);
+  border: 0;
+  border-radius: var(--r-lg);
+  box-shadow: 0 0 0 0.5px var(--border);
+  padding: 20px 22px;
+}
+.app-card-title { font-size: 15px; font-weight: 650; letter-spacing: -0.012em; }
+.app-card-header { gap: 12px; }
+.app-card-item { border-bottom: 0.5px solid var(--separator); padding: 12px 0; }
+.app-card-item:last-child { border-bottom: 0; }
+.app-card-item:hover { background: transparent; }
+.chip, .tag, .badge { border-radius: var(--r-pill); }
+
+/* ---- controls --------------------------------------------------------------------------------------- */
+.btn, .btn-icon, .btn-icon-xs, .send-circle-btn, .composer-chip, .cs-btn {
+  transition: background var(--fast), color var(--fast), transform var(--fast), box-shadow var(--fast), opacity var(--fast);
+}
+.btn { min-height: var(--control-h); border-radius: var(--r-sm); font-weight: 500; font-size: 13px; letter-spacing: 0; padding: 0 14px; }
+.btn-sm { min-height: 26px; padding: 0 10px; font-size: 12.5px; border-radius: 7px; }
+.btn-xs { min-height: 22px; padding: 0 8px; border-radius: 6px; }
+/* default, secondary and outline buttons are a quiet gray fill; the border is gone */
+.btn:not(.btn-primary):not(.btn-destructive):not(.btn-ghost) { background: var(--fill); color: var(--fg); border-color: transparent; box-shadow: none; }
+.btn:not(.btn-primary):not(.btn-destructive):not(.btn-ghost):hover:not(:disabled) { background: var(--fill-hover); border-color: transparent; color: var(--fg); }
+.btn:not(.btn-primary):not(.btn-destructive):not(.btn-ghost):active:not(:disabled) { background: var(--fill-active); }
+.btn-ghost { background: transparent; border-color: transparent; color: var(--primary); }
+.btn-ghost:hover:not(:disabled) { background: var(--primary-soft); color: var(--primary); }
+.btn.btn-primary { background: var(--primary); color: var(--on-primary); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
+.btn.btn-primary:hover:not(:disabled) { background: var(--primary-hover); filter: none; }
+.btn.btn-destructive { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+.btn.btn-destructive:hover:not(:disabled) { background: color-mix(in oklab, var(--danger) 22%, transparent); color: var(--danger); }
+/* in a list only the first (recommended) row keeps the filled button; the others are tinted, one prominent action per view */
+.app-card-item:not(:first-of-type) .btn-primary,
+#computerCard .btn-primary:not(:first-of-type) { background: var(--primary-soft); color: var(--primary); box-shadow: none; }
+.app-card-item:not(:first-of-type) .btn-primary:hover:not(:disabled),
+#computerCard .btn-primary:not(:first-of-type):hover:not(:disabled) { background: color-mix(in oklab, var(--primary) 24%, transparent); color: var(--primary); }
+/* press feedback starts on pointer down, not on release */
+.btn:active:not(:disabled), .btn-icon:active:not(:disabled), .send-circle-btn:active:not(:disabled), .composer-chip:active, .starter-pill:active { transform: scale(0.97); }
+.btn-icon, .btn-icon-xs { border-radius: var(--r-sm); color: var(--muted-fg); }
+.btn-icon:hover, .btn-icon-xs:hover { background: var(--fill); color: var(--fg); }
+input[type="text"], input[type="search"], input[type="password"], input[type="number"], input:not([type]), select, textarea { border-radius: var(--r-sm); }
+.app-card input, .app-card select, .settings-pane input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), .settings-pane select {
+  min-height: var(--control-h);
+  background: var(--surface);
+  border: 0;
+  box-shadow: inset 0 0 0 0.5px var(--border-strong);
+  transition: box-shadow var(--fast), background var(--fast);
+}
+.app-card input:focus, .app-card select:focus, .settings-pane input:focus, .settings-pane select:focus {
+  outline: 0;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 32%, transparent), inset 0 0 0 1px var(--primary);
+}
+:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+a { text-underline-offset: 3px; }
+
+/* ---- chat home: centred, calm, the composer is the object ------------------------------------------ */
+.chat-empty-hero { text-align: center; padding-top: 11vh; }
+.chat-empty-hero #welcomeSub { margin-inline: auto; color: var(--muted-fg); font-size: 15px; text-wrap: balance; max-width: 44ch; }
+.chat-empty-hero .hero-start-main, .chat-empty-hero .hero-start-more { justify-content: center; }
+.chat-empty-hero .hero-start-meta { font-family: var(--font-sans); font-size: 12px; color: var(--muted-fg); }
+.chat-input-box {
+  border: 0;
+  border-radius: var(--r-xl);
+  background: var(--surface);
+  box-shadow: 0 0 0 0.5px var(--border-strong), var(--shadow-2);
+  transition: box-shadow var(--normal);
+}
+.chat-input-box:focus-within { box-shadow: 0 0 0 0.5px color-mix(in oklab, var(--primary) 50%, var(--border-strong)), 0 0 0 4px color-mix(in oklab, var(--primary) 16%, transparent), var(--shadow-2); }
+.chat-textarea { font-size: 15px; line-height: 1.45; padding-inline: 14px; }
+.chat-input-toolbar { padding: 4px 8px 8px; }
+.composer-chip { border-radius: var(--r-pill); background: transparent; border: 0; color: var(--muted-fg); min-height: 28px; font-size: 12.5px; font-weight: 500; }
+.composer-chip:hover { background: var(--fill); color: var(--fg); }
+.composer-chip.active { background: var(--primary-soft); color: var(--primary); }
+.send-circle-btn, .send-btn, #btnSend { border-radius: 50%; width: 32px; height: 32px; min-height: 32px; padding: 0; }
+.send-circle-btn:disabled, #btnSend:disabled { background: var(--fill); color: var(--muted-fg); opacity: 1; }
+.chat-starter-pills { gap: 8px; }
+.starter-pill {
+  border: 0;
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: 0 0 0 0.5px var(--border);
+  color: var(--fg-soft);
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 12px 14px;
+  transition: background var(--fast), box-shadow var(--fast), transform var(--fast);
+}
+.starter-pill:hover { background: var(--surface); box-shadow: 0 0 0 0.5px var(--border-strong), var(--shadow-2); color: var(--fg); }
+
+/* messages */
+.msg-user .msg-body, .message.user .bubble { border-radius: 18px 18px 6px 18px; }
+.message.assistant .bubble { background: transparent; }
+
+/* ---- popovers, menus, sheets: materials that arrive with a little spring --------------------------- */
+.popover-panel, .menu, .context-menu, .dropdown-menu {
+  background: var(--material-thick);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  backdrop-filter: blur(30px) saturate(180%);
+  border: 0;
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-3);
+  padding: 6px;
+}
+.popover-panel button, .menu button, .menu-item { border-radius: var(--r-sm); }
+.popover-panel button:hover, .menu button:hover, .menu-item:hover { background: var(--primary); color: var(--on-primary); }
+.popover-panel[hidden], .popover-panel:not(.open) { transition: none; }
+@keyframes apple-pop { from { opacity: 0; transform: scale(0.96) translateY(-4px); } to { opacity: 1; transform: none; } }
+@keyframes apple-sheet { from { opacity: 0; transform: scale(0.94) translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes apple-fade { from { opacity: 0; } to { opacity: 1; } }
+.popover-panel.open, .popover-panel:not([hidden]) { animation: apple-pop 200ms var(--spring) both; transform-origin: top left; }
+
+dialog, .modal, .modal-card, .dialog-card, .sheet {
+  border: 0;
+  border-radius: var(--r-xl);
+  background: var(--material-thick);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  backdrop-filter: blur(40px) saturate(180%);
+  box-shadow: var(--shadow-3);
+}
+dialog[open], .modal.open .modal-card, .modal-card { animation: apple-sheet 320ms var(--spring) both; }
+dialog::backdrop, .modal-scrim, .scrim { background: rgba(0, 0, 0, 0.32); animation: apple-fade 220ms var(--ease) both; }
+
+/* ---- welcome dialog: trailing actions, a progress bar people can see and hear ---------------------- */
+.dialog-footer, .modal-footer, .sheet-footer { display: flex; justify-content: flex-end; gap: 8px; align-items: center; }
+.dialog-footer .btn-ghost:first-child, .modal-footer .btn-ghost:first-child { margin-right: auto; color: var(--muted-fg); }
+.step-dots > *, .onboard-dots > *, .welcome-progress > * { background: var(--fill-active); }
+.step-dots > .active, .onboard-dots > .active, .welcome-progress > .active { background: var(--primary); }
+
+/* ---- scroll edge, not a divider ---------------------------------------------------------------------- */
+.chat-messages-scroll { scroll-padding-top: 12px; }
+
+/* ---- toasts and small status ------------------------------------------------------------------------- */
+.toast { border: 0; border-radius: var(--r-lg); background: var(--material-thick); -webkit-backdrop-filter: blur(24px) saturate(170%); backdrop-filter: blur(24px) saturate(170%); box-shadow: var(--shadow-3); }
+
+/* ---- accessibility: every material has an answer ------------------------------------------------------ */
+@media (prefers-reduced-transparency: reduce) {
+  :root { --material: var(--surface-2); --material-side: var(--surface-3); --material-thick: var(--surface); }
+  html.dark { --material: var(--surface-2); --material-side: var(--surface-2); --material-thick: var(--surface-3); }
+  .sidebar-floating, .header-page, .popover-panel, .menu, .context-menu, dialog, .modal-card, .toast { -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+@media (prefers-contrast: more) {
+  :root { --muted-fg: #424245; --border: rgba(0, 0, 0, 0.35); --border-strong: rgba(0, 0, 0, 0.6); --separator: rgba(0, 0, 0, 0.4); --fill: rgba(120, 120, 128, 0.22); }
+  html.dark { --muted-fg: #d1d1d6; --border: rgba(255, 255, 255, 0.4); --border-strong: rgba(255, 255, 255, 0.7); --separator: rgba(255, 255, 255, 0.4); }
+  .app-card, .starter-pill, .chat-input-box { box-shadow: 0 0 0 1px var(--border-strong); }
+  .btn:not(.btn-primary):not(.btn-ghost) { box-shadow: inset 0 0 0 1px var(--border-strong); }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; animation-delay: 0s !important; transition-duration: 1ms !important; }
+  .btn:active, .btn-icon:active, .starter-pill:active { transform: none; }
+}
+@media (forced-colors: active) {
+  .nav-item.active, .nav-tab.active { outline: 2px solid Highlight; }
+  .btn.btn-primary { border: 1px solid ButtonText; }
+}
+
+/* ---- second pass, from the first look at the real screens --------------------------------------------- */
+/* the sidebar is darker than the page so the material reads as a material; light content sits on it */
+:root { --material-side: color-mix(in oklab, #e4e4ea 62%, transparent); }
+html.dark { --material-side: color-mix(in oklab, #232326 72%, transparent); }
+.sidebar-floating { background: var(--material-side); }
+/* one left axis in the sidebar: controls start at the inset, text and icons 8 px further in */
+.sidebar-brand-row { padding: 0 4px 0 8px; }
+.nav-item { padding-inline: 8px; gap: 10px; }
+.sidebar-group-header { padding: 16px 8px 6px; }
+.sidebar-content .side-empty, .sidebar-content .thread-empty, .sidebar-content .empty { padding: 6px 8px; color: var(--muted-fg); font-size: 13px; }
+.sidebar-footer { padding: 10px calc(var(--inset) + 8px) 14px; }
+.nav-item .kbd-group { margin-left: auto; }
+
+/* header pills are one component: same height, same padding */
+.model-pill { height: 30px; min-height: 30px; padding: 0 12px; border: 0; border-radius: var(--r-pill); background: var(--fill); color: var(--fg); font-size: 13px; font-weight: 500; gap: 6px; }
+.model-pill:hover { background: var(--fill-hover); }
+.model-pill[aria-expanded="true"] { background: var(--fill-active); }
+#btnPresets { background: var(--fill); color: var(--fg); } /* the second pill is not "more important" than the first */
+#btnPresets .icon-tile, #btnPresets > span:first-child:not(:last-child) { background: transparent; }
+.ctx-bar { background: var(--fill-active); border-radius: var(--r-pill); }
+.ctx-meter, .ctx-meter * { font-size: 12px; white-space: nowrap; }
+
+/* start screen: the button is the axis, its detail sits under it */
+.hero-start-main { flex-direction: column; gap: 8px; }
+.hero-start-more { gap: 4px; }
+#btnHeroDownload { min-height: 36px; padding: 0 20px; border-radius: var(--r-pill); font-size: 14px; font-weight: 600; }
+.chat-empty-hero #welcomeHeading { margin-bottom: 6px; }
+
+/* the composer: one clean ring on focus; send is a quiet gray until there is something to send */
+/* the composer is focused when the page opens: a quiet ring, so it does not read as "active, click here" (it competes with the one primary action otherwise) */
+.chat-input-box:focus-within { box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--primary) 34%, var(--border-strong)), var(--shadow-2); }
+.chat-textarea:focus, .chat-textarea:focus-visible { outline: 0; box-shadow: none; }
+.chat-input-box:has(.chat-textarea:placeholder-shown) #btnSendChat:not(.stop) { background: var(--fill); color: var(--muted-fg); box-shadow: none; }
+.chat-input-box { --composer-pad: 10px; }
+.chat-input-toolbar { padding: 4px var(--composer-pad) var(--composer-pad); }
+.starter-pill { text-align: left; align-items: center; min-height: 52px; font-size: 13.5px; box-shadow: 0 0 0 0.5px var(--border-strong); }
+.chat-starter-pills { gap: 10px; }
+
+/* ---- conversation: one reading column shared with the composer ------------------------------------------ */
+/* messages, composer and start screen share ONE column (they were 1120, 900 and 760 px wide) */
+.chat-messages-scroll .messages-column, .messages-column, .chat-input-shell, .chat-empty-hero, .chat-starter-pills { max-width: 780px; width: 100%; margin-inline: auto; }
+.messages-column { padding: 20px 0 8px; }
+.msg-user-wrap { display: flex; justify-content: flex-end; margin: 0; }
+.msg-user-bubble {
+  max-width: min(78%, 640px);
+  width: fit-content;
+  border: 0;
+  border-radius: 20px 20px 6px 20px;
+  background: var(--primary-soft);
+  color: var(--fg);
+  padding: 9px 15px;
+  font-size: 15px;
+  line-height: 1.45;
+  box-shadow: none;
+}
+.msg-assistant-wrap { margin: 0; }
+.msg-assistant-prose { font-size: 15px; line-height: 1.62; letter-spacing: -0.003em; color: var(--fg); }
+.msg-assistant-prose > * + * { margin-top: 14px; }
+.msg-assistant-prose p { margin-block: 0; }
+.msg-assistant-prose > .code-card, .msg-assistant-prose > .md-table { margin-block: 6px; }
+.msg-assistant-prose strong { font-weight: 650; }
+.msg-assistant-prose ol, .msg-assistant-prose ul { padding-left: 1.4em; }
+.msg-assistant-prose li + li { margin-top: 4px; }
+.msg-assistant-prose li::marker { color: var(--muted-fg); font-variant-numeric: tabular-nums; }
+.msg-assistant-prose blockquote { margin-inline: 0; padding: 2px 0 2px 14px; border-left: 3px solid var(--primary-soft); color: var(--fg-soft); }
+.msg-assistant-prose :not(pre) > code { background: var(--fill); border: 0; border-radius: 6px; padding: 0.12em 0.4em; font-size: 0.9em; }
+
+.code-card { border: 0; border-radius: var(--r-md); background: var(--surface-2); box-shadow: 0 0 0 0.5px var(--border); overflow: hidden; }
+html.dark .code-card { background: #121214; }
+.code-card-header { padding: 6px 8px 6px 14px; min-height: 34px; border-bottom: 0.5px solid var(--separator); background: transparent; color: var(--muted-fg); font-family: var(--font-sans); font-size: 12px; font-weight: 500; letter-spacing: 0.01em; }
+.code-card-header .btn { min-height: 24px; padding: 0 8px; font-size: 12px; color: var(--muted-fg); background: transparent; }
+.code-card-header .btn:hover:not(:disabled) { background: var(--fill); color: var(--fg); }
+.code-card pre, .code-card code { font-size: 13px; line-height: 1.55; }
+.code-card pre { padding: 12px 14px; }
+
+.md-table { border: 0; border-radius: var(--r-md); box-shadow: 0 0 0 0.5px var(--border-strong); overflow: hidden; }
+.md-table table { font-size: 14px; border-collapse: collapse; width: 100%; }
+.md-table th { background: var(--fill); color: var(--fg); font-weight: 600; font-size: 13px; text-align: left; padding: 8px 12px; }
+.md-table td { padding: 8px 12px; border-top: 0.5px solid var(--separator); }
+.md-table tr:hover td { background: color-mix(in oklab, var(--fill) 50%, transparent); }
+
+/* actions belong to the message: quiet until the message is hovered or focused, but still 5:1 for anyone who looks for them */
+.msg-actions-bar { gap: 2px; margin-top: 8px; padding-left: 0; }
+.msg-actions-bar .btn-icon { width: 28px; height: 28px; color: var(--muted-fg); }
+.msg-actions-bar .btn-icon:hover { color: var(--fg); background: var(--fill); }
+.msg-stats, .speed-chip { font-family: var(--font-sans); font-size: 12px; color: var(--muted-fg); font-variant-numeric: tabular-nums; letter-spacing: 0.005em; }
+@media (hover: hover) {
+  .msg-user-wrap .msg-actions-bar, .msg-assistant-wrap .msg-actions-bar { opacity: 0.55; transition: opacity var(--normal); }
+  .msg-user-wrap:hover .msg-actions-bar, .msg-assistant-wrap:hover .msg-actions-bar, .msg-actions-bar:focus-within { opacity: 1; }
+}
+.thread-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- dialogs: a sheet, with the way out on the left and the decision on the right ----------------------------- */
+.dialog {
+  width: min(460px, calc(100vw - 32px));
+  border: 0;
+  border-radius: var(--r-xl);
+  background: color-mix(in oklab, var(--surface) 94%, transparent);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  backdrop-filter: blur(40px) saturate(180%);
+  box-shadow: var(--shadow-3);
+  padding: 24px 24px 0;
+  animation: apple-sheet 320ms var(--spring) both;
+  transform-origin: 50% 40%;
+}
+.dialog h3 { font-size: 19px; font-weight: 650; letter-spacing: -0.016em; margin-bottom: 8px; }
+.dialog p { font-size: 14px; color: var(--fg-soft); line-height: 1.5; }
+.dialog-actions { margin: 16px -24px 0; padding: 14px 24px 18px; border-top: 0.5px solid var(--separator); background: transparent; align-items: center; }
+.dialog.tour .dialog-actions #tourSkip { margin-right: auto; margin-left: -12px; color: var(--fg-soft); }
+.dialog.tour .dialog-actions .btn-ghost:hover:not(:disabled) { color: var(--fg); background: var(--fill); }
+.tour-dots { gap: 6px; margin-bottom: 14px; }
+.tour-dots span { width: 24px; height: 4px; background: var(--border-strong); transition: background var(--normal), width var(--normal); }
+.tour-dots span.on { background: var(--primary); width: 32px; }
+dialog::backdrop { background: rgba(0, 0, 0, 0.30); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+@media (prefers-reduced-transparency: reduce) { dialog::backdrop { -webkit-backdrop-filter: none; backdrop-filter: none; background: rgba(0, 0, 0, 0.5); } .dialog { -webkit-backdrop-filter: none; backdrop-filter: none; } }
+
+/* ---- settings and lists --------------------------------------------------------------------------------- */
+/* a separator is a straight hairline: the rows had a radius, so their bottom border curled up at the ends */
+.app-card-item { border-radius: 0; }
+.app-card-item:hover { background: transparent; }
+.settings-pane { margin-inline: auto; }
+.settings-nav-btn { border-radius: var(--r-sm); min-height: 32px; font-size: 13.5px; font-weight: 450; transition: background var(--fast), color var(--fast); }
+.settings-nav-btn::before, .settings-nav-btn::after { content: none !important; }
+.settings-nav-btn:hover { background: var(--fill); }
+.settings-nav-btn.active, .settings-nav-btn[aria-current="true"], .settings-nav-btn[aria-selected="true"] { background: var(--primary-soft); color: var(--fg); border-left: 0; box-shadow: none; }
+.settings-nav-btn.active .icon { color: var(--primary); }
+input[type="search"] { border: 0; background: var(--fill); box-shadow: none; }
+input[type="search"]:focus { background: var(--surface); box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 55%, transparent); outline: 0; }
+::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* ---- pages that scroll (Models, Settings, Logs): air above the first card and below the last ---------------------- */
+.hub-scroll, .settings-scroll, .page-scroll { padding-block: 20px 40px; }
+.hub-container { gap: 16px; }
+/* a catalog: the first row is the recommendation, the others are quiet */
+.catalog-row { padding-block: 12px; border-bottom: 0.5px solid var(--separator); border-radius: 0; }
+.catalog-row:last-child { border-bottom: 0; }
+.catalog-row ~ .catalog-row .btn-primary { background: var(--primary-soft); color: var(--primary); box-shadow: none; }
+.catalog-row ~ .catalog-row .btn-primary:hover:not(:disabled) { background: color-mix(in oklab, var(--primary) 24%, transparent); color: var(--primary); }
+::placeholder { color: var(--muted-fg); opacity: 1; }
+/* one control height for buttons, inputs and selects that share a row */
+.btn:not(.btn-sm):not(.btn-xs), .app-card input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), .app-card select { height: var(--control-h); min-height: var(--control-h); box-sizing: border-box; }
+.btn { white-space: nowrap; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+details > summary { cursor: pointer; border-radius: var(--r-sm); padding: 4px 6px; margin-left: -6px; color: var(--fg-soft); }
+details > summary:hover { background: var(--fill); }
+
+/* ---- segmented controls everywhere look like the one in the sidebar ------------------------------------------- */
+.seg { background: var(--fill); border: 0; border-radius: var(--r-md); padding: 2px; gap: 2px; }
+.seg button { border-radius: 8px; min-height: 26px; padding: 0 12px; font-size: 13px; font-weight: 500; color: var(--fg-soft); transition: background var(--fast), color var(--fast), box-shadow var(--fast); }
+.seg button:hover { color: var(--fg); }
+.seg button.active { background: var(--surface); color: var(--fg); box-shadow: 0 0 0 0.5px var(--border), 0 1px 3px rgba(0, 0, 0, 0.12); }
+html.dark .seg button.active { background: var(--surface-3); box-shadow: 0 0 0 0.5px var(--border-strong), 0 1px 3px rgba(0, 0, 0, 0.4); }
+
+/* ---- small screens keep the drawer behaviour of the older sheets ----------------------------------------- */
+@media (max-width: 860px) {
+  .sidebar-floating { background: var(--material-thick); border-right: 0; }
+  .header-page { padding: 0 8px; }
+  .chat-empty-hero { padding-top: 6vh; }
+}

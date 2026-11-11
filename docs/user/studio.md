@@ -439,7 +439,7 @@ disk, so a later download continues where it stopped. The list shows speed and t
 same after a page reload (but not after the server restarts). *Settings > Models* sets the models folder for new downloads
 (models that are already downloaded stay where they are).
 
-**Choose a model.** *Choose a model ...* on the start screen and *Choose ...* in the *Add a model* card of the Models page open one dialog
+**Choose a model.** *Choose a model…* on the start screen and *Choose…* in the *Add a model* card of the Models page open one dialog
 for everything fLLM can load: a **.gguf** file (the first part of a split file is enough; if you pick another part, the set is loaded from
 part 1), a **folder in the Hugging Face layout** (`config.json`, the tokenizer files and one or more `.safetensors` files, also sharded
 with an index; unquantized, AWQ, GPTQ, FP8, NVFP4, bitsandbytes, MLX, EXL2 and EXL3 checkpoints), a single `.safetensors` or `config.json`
@@ -871,17 +871,19 @@ sidebar chats are reachable with Tab and open with Enter, and every control show
 ![](../img/studio-phone-drawer.webp)
 ![](../img/studio-phone-settings.webp)
 
-`webui/theme.css` is the design system and is loaded after the older sheets, so it refines them without a rewrite: one accent
+`webui/theme.css` (v2) and `webui/apple.css` (v3, “calm native”) are the design system and are loaded after the older sheets, so
+they refine them without a rewrite; `design-system/fllm-studio/MASTER.md` in the repository is the source of truth. One accent
 colour per personality (**copper** by default — the colour of the material, since this is a Rust engine — with seven
-alternatives in the accent picker; green is kept for “ok” states only), a slate-black background for the
-dark theme and warm paper for the light one, an 8-pixel grid, two radii (8 for controls, 14 for surfaces), a type scale from
-11 to 34 px, mono for meta and numbers, and motion tokens that respect `prefers-reduced-motion`. The rules follow the UI/UX
-Pro Max guidance for developer tools (dark-first Swiss minimalism, bento surfaces, contrast of at least 4.5:1, visible focus
-rings, no colour as the only signal). The sidebar is a floating rail with a hairline border, chat text is centred in a 900 px
-reading column, the composer is the one elevated card, and the empty chat hides the sparkline instead of showing a flat line
-and a lonely counter. Deliberate deviations from the generated `design-system/fllm-studio/MASTER.md`: copper instead of acid
-green (the database default reads as every other AI tool), no uppercase eyebrows, no dotted meta strings, and cards sit on
-hairlines instead of shadows.
+alternatives in the accent picker; green is kept for “ok” states only). The structure follows Apple's Human Interface
+Guidelines: neutrals from the system gray ramp (secondary text at least 4.5:1 in both themes), one flat translucent sidebar
+(selection is a tint inside a rounded row), a toolbar that is a material with a hairline, 30-pixel controls with 8-pixel
+radii, one filled action per view (in a list only the recommended row, the others are tinted), grouped cards with straight
+hairlines between rows, a 780-pixel reading column shared by messages, composer and start screen, sheets and popovers that
+arrive with a short spring, and press feedback that starts on pointer down. Every material has an answer for
+`prefers-reduced-transparency` (solid), `prefers-contrast: more` (stronger lines and text) and `forced-colors`, and all motion
+stops under `prefers-reduced-motion`. Deliberate deviations from “looks like macOS”: the copper accent instead of system blue,
+the composer keeps its own shape, and shortcuts read Ctrl on Windows and Linux. The older choices stay: no uppercase eyebrows,
+no dotted meta strings, mono only for numbers and code.
 
 ## The desktop app
 
