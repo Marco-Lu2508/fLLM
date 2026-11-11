@@ -337,6 +337,19 @@ extern "C" {
         hidden: c_int,
         scale: f32,
     ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_linear_group(
+        st: *mut RawStream,
+        kind: c_int,
+        n: c_int,
+        w: *const *const c_void,
+        y: *const *mut c_void,
+        bias: *const *const c_void,
+        rows: *const c_int,
+        cols: c_int,
+        batch: c_int,
+        x: *const f32,
+    ) -> c_int;
     fn fllm_cuda_step_begin(st: *mut RawStream) -> c_int;
     fn fllm_cuda_step_end(st: *mut RawStream) -> c_int;
     fn fllm_cuda_get_opt(id: c_int) -> c_int;
@@ -4275,6 +4288,68 @@ impl Stream for CudaStream {
                 scale,
             )
         })
+    }
+
+    fn linear_group(
+        &mut self,
+        outs: &mut [&mut DeviceBuffer],
+        x: &DeviceBuffer,
+        weights: &[&DeviceWeight],
+        biases: &[Option<&DeviceBuffer>],
+    ) -> Result<bool, BackendError> {
+        let n = outs.len();
+        if self.act.is_narrow() || !(2..=3).contains(&n) || weights.len() != n || biases.len() != n {
+            return Ok(false);
+        }
+        let kind = weights[0].quant_type.to_gguf_type_id();
+        let cols = weights[0].cols;
+        if !matches!(weights[0].quant_type, QuantType::BF16 | QuantType::F16)
+            || weights.iter().any(|w| w.quant_type != weights[0].quant_type || w.cols != cols || w.rows == 0 || w.perm.is_some())
+            || cols == 0
+            || !x.size.is_multiple_of(cols * 4)
+        {
+            return Ok(false);
+        }
+        let batch = x.size / (cols * 4);
+        if batch == 0 || batch > 16 {
+            return Ok(false);
+        }
+        let mut w_ptrs = [std::ptr::null::<c_void>(); 3];
+        let mut y_ptrs = [std::ptr::null_mut::<c_void>(); 3];
+        let mut b_ptrs = [std::ptr::null::<c_void>(); 3];
+        let mut rows = [0 as c_int; 3];
+        for i in 0..n {
+            let r = weights[i].rows;
+            if outs[i].size < batch * r * 4 || biases[i].is_some_and(|b| b.size < r * 4) {
+                return Err(invalid("linear group output or bias smaller than batch x rows"));
+            }
+            w_ptrs[i] = dev_ptr(&weights[i].buffer)?.cast();
+            y_ptrs[i] = dev_ptr(&*outs[i])?.cast();
+            b_ptrs[i] = match biases[i] {
+                Some(b) => dev_ptr(b)?.cast(),
+                None => std::ptr::null(),
+            };
+            rows[i] = to_c(r, "rows")?;
+        }
+        // SAFETY: the pointers are live device buffers of the sizes checked above; the call launches nothing and returns 0 for shapes the kernel does not take.
+        let rc = unsafe {
+            fllm_cuda_linear_group(
+                self.raw,
+                to_c(kind as usize, "kind")?,
+                to_c(n, "n")?,
+                w_ptrs.as_ptr(),
+                y_ptrs.as_ptr(),
+                b_ptrs.as_ptr(),
+                rows.as_ptr(),
+                to_c(cols, "cols")?,
+                to_c(batch, "batch")?,
+                dev_ptr(x)?.cast(),
+            )
+        };
+        if rc < 0 {
+            check(rc)?;
+        }
+        Ok(rc == 1)
     }
 
     fn embed_gather_ids(

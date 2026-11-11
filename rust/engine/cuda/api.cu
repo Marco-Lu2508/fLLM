@@ -751,6 +751,23 @@ int fllm_cuda_linear(FllmStream *st, const void *w, int kind, const float *x, fl
     return rc;
 }
 
+// Two or three projections of the same activations (q, k, v; gate, up) in one launch of the tensor-core GEMV (linear.cu). 1: launched, 0: the shapes or the
+// alignment are not the ones that kernel takes (nothing was launched, the caller runs the projections one by one), negative: error.
+int fllm_cuda_linear_group(FllmStream *st, int kind, int n, const void *const *w, void *const *y, const void *const *bias, const int *rows, int cols, int batch,
+                           const float *x) {
+    CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    if ((kind != (int)KIND_BF16 && kind != (int)KIND_F16) || n < 2 || n > 3 || batch < 1 || batch > 16 || fllm_exact_math()) return 0;
+    if (int e = flush_add(st)) return e;
+    if (int e = flush_glu(st)) return e;
+    if (!fllm_dense_skinny_group_try(st->s, (uint32_t)kind, n, w, y, bias, rows, cols, batch, x)) return 0;
+    if (int e = fllm_check_launch("linear group")) return e;
+    st->q4z_ready = false;
+    st->fp4_ready = false;
+    st->x16_ready = false;
+    st->x8_ready = false;
+    return 1;
+}
+
 // Packed EXL2 / EXL3 weights (exl.cu): CUDA-core kernels that decode the codes while multiplying. Any pending fused work is flushed first, the
 // activation caches are invalidated (the scratch of EXL3 is the FP16 activation buffer).
 int fllm_cuda_linear_exl(FllmStream *st, const void *w, int kind, const float *x, float *y, const float *bias, int rows, int cols, int batch) {

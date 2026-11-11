@@ -1042,6 +1042,12 @@ fn pad_tables(rows: usize, stride: usize, tables: &[i64]) -> Vec<i64> {
     full
 }
 
+/// `FLLM_NO_LINEAR_GROUP=1`: q, k and v are separate launches again. (gate and up as one launch were measured slower than two: 267 against 238 us per layer on an A100.)
+fn group_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("FLLM_NO_LINEAR_GROUP").is_some())
+}
+
 /// Prompt chunks of at least this many rows take their embedding rows from the device (`FLLM_PREFILL_DEVICE_EMBED`).
 const DEVICE_EMBED_ROWS: usize = 32;
 
@@ -4972,9 +4978,23 @@ impl RustDecoder {
                     scratch.recycle(qkv);
                     merged_done = true;
                 }
+                // q, k and v from one launch of the tensor-core GEMV where the three are dense 16-bit projections of a decode-sized batch
+                let mut grouped_done = false;
+                if !fused_qkv && !merged_done && !layer.output_gate && !layer.kv_shared && !layer.k_eq_v && layer.value_moe.is_none() && rows <= 16 {
+                    if let (Some(v_w), false) = (v_w, group_off()) {
+                        grouped_done = stream
+                            .linear_group(
+                                &mut [&mut q_buf, &mut k_buf, &mut v_buf],
+                                &normed_buf,
+                                &[q_w, k_w, v_w],
+                                &[q_w.bias.as_ref(), k_w.bias.as_ref(), v_w.bias.as_ref()],
+                            )
+                            .map_err(err)?;
+                    }
+                }
                 // gated attention: the projection holds queries and gates; attention runs on the queries
                 if !fused_qkv {
-                if merged_done {
+                if merged_done || grouped_done {
                     // q, k and v are ready
                 } else if layer.output_gate {
                     let mut projected = scratch.acquire(rows * cfg.heads * dk * 8).map_err(err)?;
@@ -4992,12 +5012,12 @@ impl RustDecoder {
                     .quantized_linear(&mut q_buf, &normed_buf, q_w, q_w.bias.as_ref())
                     .map_err(err)?;
                 }
-                if !merged_done && !layer.kv_shared {
+                if !merged_done && !grouped_done && !layer.kv_shared {
                 stream
                     .quantized_linear(&mut k_buf, &normed_buf, k_w, k_w.bias.as_ref())
                     .map_err(err)?;
                 }
-                if merged_done {
+                if merged_done || grouped_done {
                 } else if let Some(v_w) = v_w {
                     stream
                         .quantized_linear(&mut v_buf, &normed_buf, v_w, v_w.bias.as_ref())

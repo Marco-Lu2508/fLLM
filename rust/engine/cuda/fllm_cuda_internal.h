@@ -123,6 +123,8 @@ int fllm_glu_launch_f16(cudaStream_t s, const void *gate16, const void *up16, fl
 int fllm_argmax_launch(cudaStream_t s, const float *logits, int rows, int vocab, int *out);
 // x = scale * embedding rows of the device ids (first `real_rows` rows; token 0 for the rest of `rows` and for ids outside the table); table kind 0 (F32),
 // 1 (F16) or 30 (BF16); x in out_mode 0 (F32), 1 (F16) or 2 (BF16)
+bool fllm_dense_skinny_group_try(cudaStream_t s, uint32_t kind, int n, const void *const *W, void *const *Y, const void *const *bias, const int *rows, int cols,
+                                 int batch, const float *X);
 int fllm_embed_gather_launch(cudaStream_t s, const void *table, int kind, int table_rows, const int32_t *ids, void *x, int out_mode, int real_rows, int rows,
                              int hidden, float scale);
 int fllm_rope_kv_f16_launch(cudaStream_t s, const uint16_t *q16, const uint16_t *k16, const uint16_t *v16, const float *qb,

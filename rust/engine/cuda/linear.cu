@@ -374,6 +374,24 @@ dense_skinny_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, 
     dense_skinny_core<BF16, NT, WARPS, MT, UF>(W, X, Y, bias, rows, cols, batch, blockIdx.x, 0, cols >> 5);
 }
 
+// Up to three projections that read the same activations (q, k and v) in one launch: the blocks of the segments follow each other, so the small ones (k and v
+// are 16 blocks each) run in the last wave of the big one instead of after it.
+struct DenseSegs {
+    const uint8_t *W[3];
+    float *Y[3];
+    const float *bias[3];
+    int rows[3];
+    int end[3];  // first block after the segment
+    int n;
+};
+template <bool BF16, int NT, int WARPS, int MT>
+__global__ void __launch_bounds__(WARPS * 32) dense_skinny_group_kernel(DenseSegs sg, const float *__restrict__ X, int cols, int batch) {
+    int s = 0;
+    while (s + 1 < sg.n && (int)blockIdx.x >= sg.end[s]) s++;
+    const int begin = s ? sg.end[s - 1] : 0;
+    dense_skinny_core<BF16, NT, WARPS, MT>(sg.W[s], X, sg.Y[s], sg.bias[s], sg.rows[s], cols, batch, (int)blockIdx.x - begin, 0, cols >> 5);
+}
+
 // Split along the columns: block (x, y) sums the slabs of part y of the row tile x into its own slice of `part` (splits x batch x rows values), and
 // dense_skinny_reduce_kernel adds the parts in a fixed order (plus the bias). Few row tiles (3584 rows are 224 tiles on 108 SMs: the last wave of blocks
 // leaves a third of the card idle) become many blocks of equal size; the result does not depend on the schedule.
@@ -460,6 +478,44 @@ static bool dense_skinny_try(cudaStream_t s, const uint8_t *W, const float *X, f
         dense_skinny_kernel<bf16, 1, 8, 1><<<dim3((rows + 15) / 16), 256, 0, s>>>(W, X, Y, bias, rows, cols, batch);
     } else {
         dense_skinny_kernel<bf16, 2, 8, 1><<<dim3((rows + 15) / 16), 256, 0, s>>>(W, X, Y, bias, rows, cols, batch);
+    }
+    return true;
+}
+
+// q, k, v as one launch: every segment must be a shape the single projections would give to the tensor-core GEMV, the activations and weights aligned; returns
+// false (nothing launched) otherwise. All segments run with the tile of the smallest variant any of them asked for (the results are those of the separate
+// launches up to the order of the sums over the columns).
+bool fllm_dense_skinny_group_try(cudaStream_t s, uint32_t kind, int n, const void *const *W, void *const *Y, const void *const *bias, const int *rows, int cols,
+                                 int batch, const float *X) {
+    if (n < 2 || n > 3 || (kind != KIND_BF16 && kind != KIND_F16) || (reinterpret_cast<uintptr_t>(X) & 15) != 0) return false;
+    int variant = 2;
+    for (int i = 0; i < n; i++) {
+        const int v = fllm_dense_skinny_variant(rows[i], cols, batch);
+        if (v == 0 || (reinterpret_cast<uintptr_t>(W[i]) & 15) != 0) return false;
+        if (v == 1) variant = 1;
+    }
+    const bool big = batch > 8 && variant == 2;
+    DenseSegs sg{};
+    sg.n = n;
+    int blocks = 0;
+    for (int i = 0; i < n; i++) {
+        sg.W[i] = static_cast<const uint8_t *>(W[i]);
+        sg.Y[i] = static_cast<float *>(Y[i]);
+        sg.bias[i] = static_cast<const float *>(bias[i]);
+        sg.rows[i] = rows[i];
+        blocks += big ? (rows[i] + 31) / 32 : (rows[i] + 15) / 16;
+        sg.end[i] = blocks;
+    }
+    const bool bf16 = kind == KIND_BF16;
+    if (big) {
+        if (bf16) dense_skinny_group_kernel<true, 2, 16, 2><<<dim3(blocks), 512, 0, s>>>(sg, X, cols, batch);
+        else dense_skinny_group_kernel<false, 2, 16, 2><<<dim3(blocks), 512, 0, s>>>(sg, X, cols, batch);
+    } else if (batch <= 8) {
+        if (bf16) dense_skinny_group_kernel<true, 1, 8, 1><<<dim3(blocks), 256, 0, s>>>(sg, X, cols, batch);
+        else dense_skinny_group_kernel<false, 1, 8, 1><<<dim3(blocks), 256, 0, s>>>(sg, X, cols, batch);
+    } else {
+        if (bf16) dense_skinny_group_kernel<true, 2, 8, 1><<<dim3(blocks), 256, 0, s>>>(sg, X, cols, batch);
+        else dense_skinny_group_kernel<false, 2, 8, 1><<<dim3(blocks), 256, 0, s>>>(sg, X, cols, batch);
     }
     return true;
 }

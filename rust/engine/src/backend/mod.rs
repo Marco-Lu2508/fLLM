@@ -1659,6 +1659,18 @@ pub trait Stream: Send {
     ) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("embed_gather_sampled".into()))
     }
+    /// Two or three projections of the same activations `x` (q, k and v; gate and up) in one launch. `Ok(true)`: all of them were computed into `outs`; `Ok(false)`:
+    /// nothing was launched (the weights are not dense 16-bit, the batch is not one the tensor-core GEMV takes, ...) and the caller runs them one by one.
+    fn linear_group(
+        &mut self,
+        _outs: &mut [&mut DeviceBuffer],
+        _x: &DeviceBuffer,
+        _weights: &[&DeviceWeight],
+        _biases: &[Option<&DeviceBuffer>],
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
     /// The embedding rows of the `rows` token ids in `ids` (int32, on the device) into `x`, from a table of `kind` 0 (F32), 1 (F16) or 30 (BF16) on the
     /// device, in the activation format (`scale` applied, an id outside the table reads row 0): the input of a prompt chunk without the host gathering
     /// and uploading `rows x hidden` values. Backends without it return `UnsupportedOperation`.

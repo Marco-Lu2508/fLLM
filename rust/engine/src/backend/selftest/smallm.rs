@@ -91,6 +91,71 @@ impl Tester<'_> {
             self.record("smallm gemv", &label, result);
         }
         self.marlin_cfg_cases();
+        self.linear_group_cases();
+    }
+
+    /// Two or three dense 16-bit projections of the same activations in one launch (`Stream::linear_group`: q, k and v; gate and up) against the f64
+    /// reference with the tolerance of the tensor-core GEMV (it rounds the activations to the weight format).
+    pub(super) fn linear_group_cases(&mut self) {
+        for kind in self.kinds(&[30u32, 1]) {
+            for (cols, segs) in [(3584usize, vec![3584usize, 512, 512]), (3584, vec![18944, 18944]), (1024, vec![1024, 256, 256])] {
+                for batch in [5usize, 9, 12, 16] {
+                    let r = self.linear_group(kind, cols, &segs, batch);
+                    let shape = format!("{} x {cols} batch {batch}", segs.iter().map(usize::to_string).collect::<Vec<_>>().join("+"));
+                    self.record(&format!("linear group {}", format_name(kind)), &shape, r);
+                }
+            }
+        }
+    }
+
+    fn linear_group(&mut self, kind: u32, cols: usize, segs: &[usize], batch: usize) -> Result<Outcome, BackendError> {
+        self.claim = Some(kind);
+        let mut stream = self.device.create_stream()?;
+        let x = self.rng.vector(batch * cols, 1.0);
+        let xb = put(self.device, stream.as_mut(), &x)?;
+        let mut weights = Vec::new();
+        let mut biases = Vec::new();
+        let mut dequantized = Vec::new();
+        for (i, &rows) in segs.iter().enumerate() {
+            let raw = random_kind(&mut self.rng, kind, rows, cols);
+            let bias = (i != 1).then(|| self.rng.vector(rows, 1.0));
+            dequantized.push(crate::compute::dequantize(&raw, kind, rows * cols).map_err(BackendError::DriverError)?);
+            weights.push(self.device.upload_weight("selftest", &raw, QuantType::from_gguf_type_id(kind), rows, cols, bias.as_deref())?);
+            biases.push(bias);
+        }
+        let mut outs = segs.iter().map(|&rows| self.device.allocate_buffer(batch * rows * 4)).collect::<Result<Vec<_>, _>>()?;
+        let start = Instant::now();
+        let handled = {
+            let mut refs: Vec<&mut DeviceBuffer> = outs.iter_mut().collect();
+            let wrefs: Vec<&DeviceWeight> = weights.iter().collect();
+            let brefs: Vec<Option<&DeviceBuffer>> = weights.iter().map(|w| w.bias.as_ref()).collect();
+            stream.linear_group(&mut refs, &xb, &wrefs, &brefs)?
+        };
+        if !handled {
+            return Err(BackendError::UnsupportedOperation("linear_group".into()));
+        }
+        stream.synchronize()?;
+        let ms = start.elapsed().as_secs_f64() * 1e3;
+        let mut worst = 0.0f64;
+        for (i, &rows) in segs.iter().enumerate() {
+            let got = get(stream.as_mut(), &outs[i], batch * rows)?;
+            for b in 0..batch {
+                for r in 0..rows {
+                    let (mut sum, mut mag) = (0.0f64, 0.0f64);
+                    for (&xv, &wv) in x[b * cols..(b + 1) * cols].iter().zip(&dequantized[i][r * cols..(r + 1) * cols]) {
+                        let term = f64::from(xv) * f64::from(wv);
+                        sum += term;
+                        mag += term.abs();
+                    }
+                    if let Some(bias) = &biases[i] {
+                        sum += f64::from(bias[r]);
+                        mag += f64::from(bias[r]).abs();
+                    }
+                    worst = worst.max((f64::from(got[b * rows + r]) - sum).abs() / mag.max(1e-30));
+                }
+            }
+        }
+        Ok(Outcome { device: worst, cpu: 0.0, tol: Self::FAST_TOL, cpu_tol: 1.0, ms })
     }
 
     /// `FLLM_MARLIN_PREFILL_CFG=fllm` (the M tail in the last tile) against `vllm` on the same data: the label says how many of the values differ in at least one bit,
