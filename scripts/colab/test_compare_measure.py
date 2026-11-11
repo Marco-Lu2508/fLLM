@@ -253,6 +253,7 @@ class MeasurementTests(unittest.TestCase):
         self.assertEqual(env["FLLM_PREFIX_CACHE"], "off")
         self.assertEqual(env["FLLM_OUTPUT_CACHE"], "off")
         self.assertEqual(env["FLLM_SPECULATIVE_DEFAULT"], "off")
+        self.assertEqual(env["FLLM_HEAD_FULL"], "1")  # the same 16-bit output projection as the rival engines, not fLLM's Q6_K copy of it
         for option in ("--speculative suffix", "--speculative=ngram", "--speculative-model draft.gguf",
                        "--speculative-lookup 4", "-sp 4", "-sw 4", "--num-speculative-tokens 4"):
             with self.subTest(option=option), self.assertRaisesRegex(ValueError, "cannot override"):
@@ -305,8 +306,8 @@ class MeasurementTests(unittest.TestCase):
         with patch.dict(compare.os.environ, inherited), patch.object(compare.subprocess, "Popen") as popen, \
                 patch.object(compare, "wait_health", return_value=True), patch("builtins.open", mock_open()):
             compare.Server(["fixture"], "http://fixture/health", "m", env=control)
-        for name in control:
-            self.assertEqual(popen.call_args.kwargs["env"][name], "off")
+        for name, value in control.items():
+            self.assertEqual(popen.call_args.kwargs["env"][name], value)
 
 
 class BestRivalTests(unittest.TestCase):

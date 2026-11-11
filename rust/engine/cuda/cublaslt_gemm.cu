@@ -105,6 +105,7 @@ struct Plan {
     cublasLtMatrixLayout_t a = nullptr, b = nullptr, c = nullptr;
     cublasLtMatmulAlgo_t algo;
     size_t workspace = 0;
+    bool biased = false;  // the bias is added by the epilogue of the product (its pointer is set before every launch)
 };
 
 // Per thread and device: the handle, the workspace, the converted activations, and the plan of every product shape.
@@ -113,7 +114,7 @@ struct Context {
     void *workspace = nullptr;
     void *x16 = nullptr;
     size_t x16_bytes = 0;
-    std::map<std::tuple<int, int, int, int>, Plan> plans;  // (rows, cols, batch, kind)
+    std::map<std::tuple<int, int, int, int, int>, Plan> plans;  // (rows, cols, batch, kind, with bias)
     // what x16 holds: the conversion of this input (pointer, count, kind) as of this generation of the activations (fllm_x_gen); 0: nothing usable
     const float *tag_x = nullptr;
     size_t tag_n = 0;
@@ -166,12 +167,21 @@ int mode() {
     return env;
 }
 
-bool make_plan(const Api &api, Context &ctx, Plan &p, int rows, int cols, int batch, cudaDataType in) {
+bool make_plan(const Api &api, Context &ctx, Plan &p, int rows, int cols, int batch, cudaDataType in, bool biased) {
     if (api.desc_create(&p.desc, CUBLAS_COMPUTE_32F, CUDA_R_32F) != CUBLAS_STATUS_SUCCESS) return false;
     const cublasOperation_t trans = CUBLAS_OP_T, none = CUBLAS_OP_N;
     if (api.desc_set(p.desc, CUBLASLT_MATMUL_DESC_TRANSA, &trans, sizeof trans) != CUBLAS_STATUS_SUCCESS ||
         api.desc_set(p.desc, CUBLASLT_MATMUL_DESC_TRANSB, &none, sizeof none) != CUBLAS_STATUS_SUCCESS)
         return false;
+    if (biased) {
+        // D = A * B + bias[row] in the epilogue (one value per row of the column-major result = per output feature): no separate add_bias_kernel
+        const cublasLtEpilogue_t ep = CUBLASLT_EPILOGUE_BIAS;
+        const cudaDataType bt = CUDA_R_32F;
+        if (api.desc_set(p.desc, CUBLASLT_MATMUL_DESC_EPILOGUE, &ep, sizeof ep) != CUBLAS_STATUS_SUCCESS ||
+            api.desc_set(p.desc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bt, sizeof bt) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        p.biased = true;
+    }
     // column-major view of the row-major operands: A = W^T is cols x rows (ld cols), B = X^T is cols x batch (ld cols), D = Y^T is rows x batch (ld rows)
     if (api.layout_create(&p.a, in, cols, rows, cols) != CUBLAS_STATUS_SUCCESS || api.layout_create(&p.b, in, cols, batch, cols) != CUBLAS_STATUS_SUCCESS ||
         api.layout_create(&p.c, CUDA_R_32F, rows, batch, rows) != CUBLAS_STATUS_SUCCESS)
@@ -240,19 +250,33 @@ int fllm_cublaslt_gemm_try(cudaStream_t s, const void *W, int kind, const float 
             ctx.x16_bytes = want;
         }
     }
-    const auto key = std::make_tuple(rows, cols, batch, kind);
+    // (the epilogue needs a 16-byte aligned bias; FLLM_CUBLASLT_NO_BIAS_EPILOGUE keeps the separate kernel)
+    static const bool no_epilogue = getenv("FLLM_CUBLASLT_NO_BIAS_EPILOGUE") != nullptr;
+    const bool want_bias = bias != nullptr && !no_epilogue && (reinterpret_cast<uintptr_t>(bias) & 15) == 0;
+    const auto key = std::make_tuple(rows, cols, batch, kind, want_bias ? 1 : 0);
     auto it = ctx.plans.find(key);
     if (it == ctx.plans.end()) {
         if (capturing) return -1;
         Plan p;
-        if (!make_plan(lt, ctx, p, rows, cols, batch, kind == KIND_F16 ? CUDA_R_16F : CUDA_R_16BF)) {
-            // this shape has no algorithm: remember that with an empty plan
-            p.desc = nullptr;
+        const cudaDataType in = kind == KIND_F16 ? CUDA_R_16F : CUDA_R_16BF;
+        if (!make_plan(lt, ctx, p, rows, cols, batch, in, want_bias)) {
+            // no algorithm with the epilogue: the plan without it and the separate bias kernel; no algorithm at all: remember that with an empty plan
+            if (want_bias) {
+                if (p.desc) lt.desc_destroy(p.desc);
+                p = Plan();
+                if (!make_plan(lt, ctx, p, rows, cols, batch, in, false)) p.desc = nullptr;
+            } else {
+                p.desc = nullptr;
+            }
         }
         it = ctx.plans.emplace(key, p).first;
     }
     const Plan &p = it->second;
     if (!p.desc) return -1;
+    if (p.biased && lt.desc_set(p.desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof bias) != CUBLAS_STATUS_SUCCESS) {
+        g_failed = true;
+        return -1;
+    }
     const size_t n = (size_t)batch * cols;
     const unsigned grid = (unsigned)((n + 255) / 256 > 4096 ? 4096 : (n + 255) / 256);
     // the projections of one input follow each other (q, k, v; gate, up): the conversion of the first one serves the others while nothing ran in between
@@ -290,7 +314,7 @@ int fllm_cublaslt_gemm_try(cudaStream_t s, const void *W, int kind, const float 
         return -1;
     }
     if (glu) fllm_glu_up = nullptr;
-    if (bias) {
+    if (bias && !p.biased) {
         const size_t total = (size_t)batch * rows;
         add_bias_kernel<<<(unsigned)((total + 255) / 256 > 4096 ? 4096 : (total + 255) / 256), 256, 0, s>>>(Y, bias, total, rows);
     }

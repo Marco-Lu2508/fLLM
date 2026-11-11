@@ -1299,7 +1299,8 @@ int fllm_cuda_add_rms_norm(FllmStream *st, float *x, const float *branch, float 
                            float eps, int quant, int kind, const void *next_w, int next_rows) {
     // decode batches only: from FLLM_PREFILL_MIN_ROWS rows on, the prompt path (rms_norm_prompt_kernel, FLLM_FUSE_PREFILL_*) owns this fusion
     // (the next GEMM of dense 16-bit weights (kind 1 or 30) converts its input itself and has no fusion of its own at 16 to 63 rows, so those batches take it too)
-    const int max_rows = quant == 0 && (kind == 1 || kind == 30) ? 64 : FLLM_PREFILL_MIN_ROWS;
+    // (a decode graph of 64 rows - 33 to 64 users - is a decode batch too; the prompt graphs start at 128 rows)
+    const int max_rows = quant == 0 && (kind == 1 || kind == 30) ? (st->capture ? 65 : 64) : FLLM_PREFILL_MIN_ROWS;
     if (!fllm_fuse_enabled(FLLM_FUSE_ADD_NORM) || rows <= 0 || rows >= max_rows || cols <= 0 || (cols & 3) != 0 || cols > 8192) return FLLM_DECLINED;
     if ((reinterpret_cast<uintptr_t>(x) | reinterpret_cast<uintptr_t>(branch) | reinterpret_cast<uintptr_t>(w) | reinterpret_cast<uintptr_t>(out)) % 16 != 0)
         return FLLM_DECLINED;

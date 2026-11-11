@@ -406,8 +406,10 @@ def fllm_control_options(extra_args):
     args = shlex.split(extra_args)
     if any(a.startswith(("--speculative", "--num-speculative-tokens")) or a in ("-sp", "-sw") for a in args):
         raise ValueError("--fllm-args cannot override speculation in the control measurement")
+    # FLLM_HEAD_FULL: by default fLLM stores a 16-bit output projection as Q6_K on the device; vLLM and SGLang keep the checkpoint's 16-bit head, so the
+    # comparison runs on the same weights (a head that is already quantized in a GGUF stays as it is)
     return args + ["--speculative", "off"], {"FLLM_PREFIX_CACHE": "off", "FLLM_OUTPUT_CACHE": "off",
-                                             "FLLM_SPECULATIVE_DEFAULT": "off"}
+                                             "FLLM_SPECULATIVE_DEFAULT": "off", "FLLM_HEAD_FULL": "1"}
 
 
 # ---- main ----------------------------------------------------------------------------------------------------------------
