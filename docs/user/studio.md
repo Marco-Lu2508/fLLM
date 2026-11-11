@@ -871,11 +871,10 @@ sidebar chats are reachable with Tab and open with Enter, and every control show
 ![](../img/studio-phone-drawer.webp)
 ![](../img/studio-phone-settings.webp)
 
-`webui/theme.css` (v2) and `webui/apple.css` (v3, “calm native”) are the design system and are loaded after the older sheets, so
+`webui/theme.css` (v2) and `webui/refine.css` (v3, “calm native”) are the design system and are loaded after the older sheets, so
 they refine them without a rewrite; `design-system/fllm-studio/MASTER.md` in the repository is the source of truth. One accent
 colour per personality (**copper** by default — the colour of the material, since this is a Rust engine — with seven
-alternatives in the accent picker; green is kept for “ok” states only). The structure follows Apple's Human Interface
-Guidelines: neutrals from the system gray ramp (secondary text at least 4.5:1 in both themes), one flat translucent sidebar
+alternatives in the accent picker; green is kept for “ok” states only). The structure follows platform design guidelines: neutrals from the system gray ramp (secondary text at least 4.5:1 in both themes), one flat translucent sidebar
 (selection is a tint inside a rounded row), a toolbar that is a material with a hairline, 30-pixel controls with 8-pixel
 radii, one filled action per view (in a list only the recommended row, the others are tinted), grouped cards with straight
 hairlines between rows, a 780-pixel reading column shared by messages, composer and start screen, sheets and popovers that

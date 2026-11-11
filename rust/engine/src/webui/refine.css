@@ -1,6 +1,6 @@
 /* ==========================================================================
    fLLM Studio — design system v3, "calm native"
-   Loaded after theme.css. Takes the structure of Apple's Human Interface Guidelines
+   Loaded after theme.css. Takes its structure from platform design guidelines (HIG-style)
    (references: foundations/color, typography, layout, materials, motion, accessibility;
    components/sidebars, toolbars, buttons, sheets, segmented controls) and keeps fLLM's own
    voice in ONE place: the copper accent, the material of a Rust engine (see design-system/fllm-studio/MASTER.md).
@@ -83,7 +83,7 @@ html.dark {
 }
 
 /* ---- type ------------------------------------------------------------------------------------------ */
-/* size-specific tracking: display text tightens, small text opens a little (apple-design-motion §15) */
+/* size-specific tracking: display text tightens, small text opens a little */
 body { font-size: var(--text-md); letter-spacing: 0; font-feature-settings: "kern" 1, "calt" 1; font-synthesis: none; }
 h1, .hero-title, #welcomeHeading { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.12; }
 h2 { font-size: 22px; font-weight: 650; letter-spacing: -0.018em; }
@@ -132,7 +132,7 @@ html.dark .nav-tab.active { background: var(--surface-3); box-shadow: 0 0 0 0.5p
 /* sidebar rows: 8 px radius, selection is the accent tint, no stray bar outside the row */
 .nav-main { gap: 1px; }
 .nav-item, .thread-row { border-radius: var(--r-sm); min-height: 32px; font-size: 13.5px; font-weight: 450; color: var(--fg); transition: background var(--fast), color var(--fast); }
-.nav-item::before, .nav-item::after, .thread-row::before, .thread-row::after { content: none !important; }
+.nav-item::before, .thread-row::before, .thread-row::after, .sidebar-floating .nav-item::after { content: none !important; }
 .nav-item:hover, .thread-row:hover { background: var(--fill); }
 .nav-item:active, .thread-row:active { background: var(--fill-hover); }
 .nav-item.active, .thread-row.active, .thread-row.is-active { background: var(--primary-soft); color: var(--fg); }
@@ -261,12 +261,13 @@ a { text-underline-offset: 3px; }
   padding: 6px;
 }
 .popover-panel button, .menu button, .menu-item { border-radius: var(--r-sm); }
-.popover-panel button:hover, .menu button:hover, .menu-item:hover { background: var(--primary); color: var(--on-primary); }
+.menu button:hover, .menu-item:hover, .context-menu button:hover { background: var(--primary); color: var(--on-primary); }
+.popover-panel button:hover:not(:disabled) { background: var(--fill); }
 .popover-panel[hidden], .popover-panel:not(.open) { transition: none; }
-@keyframes apple-pop { from { opacity: 0; transform: scale(0.96) translateY(-4px); } to { opacity: 1; transform: none; } }
-@keyframes apple-sheet { from { opacity: 0; transform: scale(0.94) translateY(8px); } to { opacity: 1; transform: none; } }
-@keyframes apple-fade { from { opacity: 0; } to { opacity: 1; } }
-.popover-panel.open, .popover-panel:not([hidden]) { animation: apple-pop 200ms var(--spring) both; transform-origin: top left; }
+@keyframes ui-pop { from { opacity: 0; transform: scale(0.96) translateY(-4px); } to { opacity: 1; transform: none; } }
+@keyframes ui-sheet { from { opacity: 0; transform: scale(0.94) translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes ui-fade { from { opacity: 0; } to { opacity: 1; } }
+.popover-panel.open, .popover-panel:not([hidden]) { animation: ui-pop 200ms var(--spring) both; transform-origin: top left; }
 
 dialog, .modal, .modal-card, .dialog-card, .sheet {
   border: 0;
@@ -276,8 +277,8 @@ dialog, .modal, .modal-card, .dialog-card, .sheet {
   backdrop-filter: blur(40px) saturate(180%);
   box-shadow: var(--shadow-3);
 }
-dialog[open], .modal.open .modal-card, .modal-card { animation: apple-sheet 320ms var(--spring) both; }
-dialog::backdrop, .modal-scrim, .scrim { background: rgba(0, 0, 0, 0.32); animation: apple-fade 220ms var(--ease) both; }
+dialog[open], .modal.open .modal-card, .modal-card { animation: ui-sheet 320ms var(--spring) both; }
+dialog::backdrop, .modal-scrim, .scrim { background: rgba(0, 0, 0, 0.32); animation: ui-fade 220ms var(--ease) both; }
 
 /* ---- welcome dialog: trailing actions, a progress bar people can see and hear ---------------------- */
 .dialog-footer, .modal-footer, .sheet-footer { display: flex; justify-content: flex-end; gap: 8px; align-items: center; }
@@ -414,7 +415,7 @@ html.dark .code-card { background: #121214; }
   backdrop-filter: blur(40px) saturate(180%);
   box-shadow: var(--shadow-3);
   padding: 24px 24px 0;
-  animation: apple-sheet 320ms var(--spring) both;
+  animation: ui-sheet 320ms var(--spring) both;
   transform-origin: 50% 40%;
 }
 .dialog h3 { font-size: 19px; font-weight: 650; letter-spacing: -0.016em; margin-bottom: 8px; }
@@ -464,6 +465,30 @@ details > summary:hover { background: var(--fill); }
 .seg button:hover { color: var(--fg); }
 .seg button.active { background: var(--surface); color: var(--fg); box-shadow: 0 0 0 0.5px var(--border), 0 1px 3px rgba(0, 0, 0, 0.12); }
 html.dark .seg button.active { background: var(--surface-3); box-shadow: 0 0 0 0.5px var(--border-strong), 0 1px 3px rgba(0, 0, 0, 0.4); }
+
+/* ---- pickers (model, style, sampling): one label style, rows that never wrap, a check for the current one ------------ */
+#modelDropdownMenu { min-width: 340px; }
+.popover-panel .popover-body { padding: 0; }
+.popover-head { padding: 6px 10px 4px; }
+.popover-head > span:first-child, .popover-panel .app-item-desc { font-size: 12px; font-weight: 600; letter-spacing: 0.01em; color: var(--muted-fg); }
+.popover-panel .app-item-desc { padding: 10px 10px 4px !important; }
+.popover-panel .nav-item { padding: 6px 10px; gap: 8px; min-height: 32px; border-radius: var(--r-sm); width: 100%; }
+.popover-panel .nav-item > .mono, .popover-panel .nav-item > span:not(.quant-chip) { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.popover-panel .nav-item .quant-chip { flex: none; margin-left: 0 !important; }
+.popover-panel .nav-item.active { background: var(--primary-soft); }
+.popover-panel .nav-item.active::after {
+  content: ""; flex: none; width: 14px; height: 14px; background: var(--primary);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5l3.2 3.2L13 4.8' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5l3.2 3.2L13 4.8' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.header-page [aria-expanded="true"], #btnModelDropdown[aria-expanded="true"] { background: var(--fill-active); }
+#btnModelDropdown .chev, #btnModelDropdown svg:last-child { transition: transform var(--normal) var(--spring); }
+#btnModelDropdown[aria-expanded="true"] svg:last-child { transform: rotate(180deg); }
+
+/* ---- code mode ------------------------------------------------------------------------------------------ */
+.code-empty input[type="text"], .code-empty input:not([type]), .code-empty .btn { height: var(--control-h); min-height: var(--control-h); box-sizing: border-box; }
+/* the tokens-per-second trace only means something while the model is generating */
+.header-trace:not(.is-busy) { display: none; }
 
 /* ---- small screens keep the drawer behaviour of the older sheets ----------------------------------------- */
 @media (max-width: 860px) {

@@ -14,7 +14,7 @@ const STYLE: [&str; 5] = [
     include_str!("webui/code.css"),
     // the design system v2 refines the older sheets without rewriting every selector, v3 ("calm native") refines v2
     include_str!("webui/theme.css"),
-    include_str!("webui/apple.css"),
+    include_str!("webui/refine.css"),
 ];
 /// The script parts, joined in this order inside one function scope.
 const SCRIPT: [&str; 43] = [
@@ -82,7 +82,7 @@ fn dev_file(dir: &std::path::Path, name: &str) -> Option<String> {
 fn dev_page(dir: &std::path::Path) -> Option<String> {
     let shell = dev_file(dir, "shell.html")?;
     let mut style = String::new();
-    for name in ["style.css", "chat.css", "code.css", "theme.css", "apple.css"] {
+    for name in ["style.css", "chat.css", "code.css", "theme.css", "refine.css"] {
         style.push_str(&dev_file(dir, name)?);
     }
     let mut script = String::new();

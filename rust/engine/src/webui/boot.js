@@ -71,6 +71,18 @@
         }
       }
     });
+    // a popover's trigger tells assistive technology whether it is open (the CSS also uses it for the pressed look)
+    for (const [pop, btn] of [
+      ['samplerPopover', 'btnToggleSamplerPop'], ['assistantPopover', 'btnToggleAssistantPop'], ['modelDropdownMenu', 'btnModelDropdown'],
+      ['presetMenu', 'btnPresets'], ['chatMenu', 'btnChatMenu'], ['styleMenu', 'btnStyle'],
+    ]) {
+      const p = $(pop), b = $(btn);
+      if (!p || !b) continue;
+      b.setAttribute('aria-haspopup', 'true');
+      const sync = () => b.setAttribute('aria-expanded', String(p.classList.contains('open')));
+      sync();
+      new MutationObserver(sync).observe(p, { attributes: true, attributeFilter: ['class'] });
+    }
     $('selConstraint').addEventListener('change', () => {
       const v = $('selConstraint').value;
       $('txtConstraintSpec').style.display = (v === 'none' || v === 'json_object') ? 'none' : 'block';

@@ -2,12 +2,12 @@
 
 The Studio and the desktop app share one page (`rust/engine/src/webui/`). The look is layered, loaded in this order and
 embedded in the binary: `style.css`, `chat.css`, `code.css` (the original sheets), `theme.css` (v2 tokens),
-`apple.css` (v3, "calm native"). A later sheet refines an earlier one; nothing was rewritten. `FLLM_STUDIO_DEV=<dir>`
+`refine.css` (v3, "calm native"). A later sheet refines an earlier one; nothing was rewritten. `FLLM_STUDIO_DEV=<dir>`
 serves the files from disk on every request, so a change shows on reload.
 
 ## Direction
 
-Calm and native, with one identity. The structure follows Apple's Human Interface Guidelines (foundations: color,
+Calm and native, with one identity. The structure follows platform design guidelines (sidebars, toolbars, sheets, segmented controls, materials, accessibility fallbacks) (foundations: color,
 typography, layout, materials, motion, accessibility; components: sidebars, toolbars, buttons, sheets, segmented
 controls). The identity is **copper**, the material of a Rust engine: one accent, used for the one primary action of a
 view, the selection tint and the focus ring. Green is for "ok" only, red for errors. There is no system blue and no
