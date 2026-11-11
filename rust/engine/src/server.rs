@@ -769,6 +769,12 @@ pub fn serve(
 ) -> Result<(), String> {
     let address = listen_address(&config.host, config.port)?;
     let tls = config.http.tls_cert.is_some();
+    let started = std::time::Instant::now();
+    match runtime.warm_up() {
+        Ok(0) => {}
+        Ok(requests) => eprintln!("[fllm-rs] warm-up: {requests} synthetic requests in {:.1} s", started.elapsed().as_secs_f64()),
+        Err(error) => tracing::warn!("warm-up skipped: {error}"),
+    }
     let Built { state, router, worker_rx, metrics, jump_forward } = build(&runtime, tokenizer, config)?;
     runtime.set_jump_forward(jump_forward);
     let ready = state.ready.clone();

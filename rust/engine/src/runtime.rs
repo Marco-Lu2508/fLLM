@@ -1024,6 +1024,101 @@ impl InferenceRuntime {
     }
     /// Sequences preempted so far, and the KV blocks swapped out to and back in from host memory.
     /// Empties the prefix cache; returns how many entries it held.
+    /// Runs a few synthetic requests before the first real one, so that what an accelerator builds on first use exists when the server answers:
+    /// a CUDA graph for every decode batch size a server of `--max-seqs` sequences can reach, the plans and kernels of the prompt chunks of 128 to
+    /// 2048 tokens, and the sampler. vLLM and SGLang do the same at start-up; without it the first requests of a fresh server paid for that (an A100,
+    /// 40 users: the first run of a cell was 12 % slower than the second). Nothing of it stays: the prefix cache is cleared and the counters are
+    /// put back. `FLLM_WARMUP=0` skips it; the host CPU path skips it itself. Returns the number of requests run.
+    pub fn warm_up(&mut self) -> Result<usize, String> {
+        if std::env::var("FLLM_WARMUP").is_ok_and(|v| matches!(v.as_str(), "0" | "off" | "false")) {
+            return Ok(0);
+        }
+        if !self.decoder.as_ref().is_some_and(|d| d.uses_accelerator()) {
+            return Ok(0);
+        }
+        self.run_warm_up()
+    }
+
+    fn run_warm_up(&mut self) -> Result<usize, String> {
+        if !self.scheduler.requests.is_empty() {
+            return Ok(0);
+        }
+        let saved = self.batch_stats;
+        let max_seqs = self.scheduler.cfg.max_num_seqs.max(1);
+        let room = self.model.max_context();
+        // ordinary token ids: the special ones sit at the end of the vocabulary, the first few hundred are control bytes in most of them
+        let vocab = self.model.config().vocab as i64;
+        let (base, span) = if vocab > 1000 { (100, (vocab / 2).min(20_000)) } else { (1, (vocab / 2).max(4)) };
+        // (requests at once, prompt tokens each, new tokens each, sampled)
+        let mut plan: Vec<(usize, usize, usize, bool)> = Vec::new();
+        for rows in crate::rust_decoder::graph_warm_sizes(max_seqs) {
+            plan.push((rows, 8, 4, false));
+        }
+        plan.push((1, 8, 4, true));
+        plan.push((max_seqs.min(16), 8, 4, true));
+        let budget = self.scheduler.cfg.max_num_batched_tokens.max(1);
+        // many prompts at once: a prompt chunk made of several sequences (block tables, attention work space and scratch grow with them), then
+        // decoding all of them together
+        for prompt_len in [150usize, 1000] {
+            let count = (budget / prompt_len).clamp(1, max_seqs);
+            if count > 1 && prompt_len + 4 <= room {
+                plan.push((count, prompt_len, 4, false));
+            }
+        }
+        for tokens in crate::rust_decoder::PREFILL_GRAPH_BUCKETS {
+            if tokens + 8 <= room && tokens <= budget {
+                plan.push((1, tokens, 1, false));
+            }
+        }
+        let mut ran = 0usize;
+        let mut serial = 0i64;
+        for (count, prompt_len, new_tokens, sampled) in plan {
+            let mut ids = Vec::new();
+            for _ in 0..count {
+                if prompt_len + new_tokens > room {
+                    break;
+                }
+                serial += 1;
+                // distinct prompts (no prefix hit, no shared blocks), token ids far from the special ones
+                let prompt: Vec<i64> = (0..prompt_len as i64).map(|j| base + (serial * 131 + j * 17) % span).collect();
+                let id = format!("__warmup_{serial}");
+                let sampling = crate::sampling::SamplingParams {
+                    temperature: if sampled { 0.7 } else { 0.0 },
+                    top_p: if sampled { 0.9 } else { 1.0 },
+                    ignore_eos: true,
+                    ..Default::default()
+                };
+                if self.submit_with_sampling(id.clone(), prompt, new_tokens, sampling).is_ok() {
+                    ids.push(id);
+                }
+            }
+            let mut rounds = 0usize;
+            while ids.iter().any(|id| self.scheduler.requests.contains_key(id)) && rounds < 4096 {
+                rounds += 1;
+                match self.step() {
+                    Ok(_) => {}
+                    Err(error) => {
+                        for id in &ids {
+                            let _ = self.cancel_request(id);
+                        }
+                        self.batch_stats = saved;
+                        let _ = self.clear_prefix_cache();
+                        return Err(format!("warm-up step failed: {error}"));
+                    }
+                }
+            }
+            for id in &ids {
+                if self.scheduler.requests.contains_key(id) {
+                    let _ = self.cancel_request(id);
+                }
+            }
+            ran += ids.len();
+        }
+        let _ = self.clear_prefix_cache();
+        self.batch_stats = saved;
+        Ok(ran)
+    }
+
     pub fn clear_prefix_cache(&mut self) -> Result<usize, String> {
         let dropped = self.scheduler.clear_prefix_cache().map_err(|e| e.to_string())?;
         self.save_pins();

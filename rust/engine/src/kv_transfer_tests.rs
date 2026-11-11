@@ -1090,3 +1090,21 @@ fn a_server_with_only_a_disk_still_reads_it_while_others_run() {
     assert_eq!(tokens, reference);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn warm_up_leaves_no_trace_and_the_next_request_is_unchanged() {
+    let long = prompt(20);
+    let mut fresh = runtime();
+    let reference = generate(&mut fresh, "ref", &long, 6);
+    let mut warmed = runtime();
+    let blocks = free_after_clearing_cache(&mut warmed);
+    let stats = warmed.batch_stats();
+    // the host CPU path declines by itself; the same plan runs when asked to (the sizes, the sampled pass, no prompt bucket fits in a context of 128)
+    assert_eq!(warmed.warm_up().unwrap(), 0);
+    let ran = warmed.run_warm_up().unwrap();
+    assert!(ran >= 4, "one request per decode graph size and the sampled passes, got {ran}");
+    assert_eq!(warmed.active_requests(), 0);
+    assert_eq!(free_after_clearing_cache(&mut warmed), blocks, "every block of the synthetic requests is free again");
+    assert_eq!(warmed.batch_stats(), stats, "the counters are put back");
+    assert_eq!(generate(&mut warmed, "ref", &long, 6), reference);
+}

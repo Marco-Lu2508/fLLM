@@ -1030,7 +1030,7 @@ pub struct DeviceModelWeights {
 pub type SharedRopeTable = (Arc<Vec<f32>>, Arc<Vec<f32>>);
 
 /// Batch sizes a decode step is padded to when it runs as a CUDA graph.
-const GRAPH_BUCKETS: [usize; 9] = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+const GRAPH_BUCKETS: [usize; 13] = [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 128, 256];
 
 /// Block tables of `rows` rows of equal width (`tables.len() / rows`) padded to `stride` entries per row with -1.
 fn pad_tables(rows: usize, stride: usize, tables: &[i64]) -> Vec<i64> {
@@ -1061,6 +1061,23 @@ fn graph_max_rows() -> usize {
         let asked = std::env::var("FLLM_CUDA_GRAPH_MAX_ROWS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(64);
         GRAPH_BUCKETS.iter().copied().filter(|b| *b <= asked.max(1)).max().unwrap_or(1)
     })
+}
+
+/// The numbers of decode rows that cover every decode graph a server of `max_seqs` sequences can need: one per bucket, the largest one capped at `max_seqs`.
+pub fn graph_warm_sizes(max_seqs: usize) -> Vec<usize> {
+    let limit = graph_max_rows();
+    let mut sizes = Vec::new();
+    for bucket in GRAPH_BUCKETS {
+        if bucket > limit {
+            break;
+        }
+        sizes.push(bucket.min(max_seqs.max(1)));
+        if bucket >= max_seqs {
+            break;
+        }
+    }
+    sizes.dedup();
+    sizes
 }
 
 /// Buckets for prompt chunk CUDA graphs (`FLLM_CUDA_GRAPH_PREFILL`).
