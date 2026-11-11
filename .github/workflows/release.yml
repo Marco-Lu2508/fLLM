@@ -131,7 +131,15 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --prerelease --latest=false
           else
-            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes --prerelease --latest=false
+            # notes: the changelog section of this version first (scripts/release_notes.py), then GitHub's list of merged changes
+            python3 scripts/release_notes.py "$TAG" > release-notes.md
+            {
+              cat release-notes.md
+              echo "## What's changed"
+              echo ""
+              gh api -X POST "repos/$GH_REPO/releases/generate-notes" -f tag_name="$TAG" --jq '.body' || true
+            } > release-body.md
+            gh release create "$TAG" --verify-tag --title "fLLM $TAG" --notes-file release-body.md --prerelease --latest=false
           fi
 
   build:
