@@ -40,7 +40,8 @@ jobs:
         include:
           - asset: fllm-desktop-linux-x86_64.tar.gz
             engine: fllm-linux-x86_64-gnu.tar.gz
-            os: ubuntu-26.04
+            # the oldest runner that is offered: a program needs at least the glibc of the system it was built on
+            os: ubuntu-24.04
             exe: ""
           - asset: fllm-desktop-windows-x86_64.zip
             engine: fllm-windows-x86_64-msvc.zip
@@ -48,7 +49,7 @@ jobs:
             exe: ".exe"
           - asset: fllm-desktop-macos-aarch64.tar.gz
             engine: fllm-macos-aarch64.tar.gz
-            os: macos-26
+            os: macos-15
             exe: ""
     defaults:
       run:
@@ -58,6 +59,8 @@ jobs:
       ASSET: ${{ matrix.asset }}
       ENGINE: ${{ matrix.engine }}
       EXE: ${{ matrix.exe }}
+      # the app runs on the systems of the last few years, not only on the one it was built on
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
@@ -79,6 +82,22 @@ jobs:
       - name: Build the app
         working-directory: desktop/native
         run: cargo build --release --locked
+
+      - name: Which system versions does the app need
+        run: |
+          set -e
+          app="desktop/native/target/release/fllm-app$EXE"
+          case "$RUNNER_OS" in
+            Linux)
+              need=$(objdump -T "$app" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+              echo "the app needs $need"
+              # Ubuntu 24.04 has 2.39, Debian 13 has 2.41: nothing newer than the oldest runner may be needed
+              [ "$(printf '%s\n' "$need" GLIBC_2.39 | sort -V | tail -1)" = GLIBC_2.39 ] || { echo "the app needs a newer glibc than 2.39"; exit 1; }
+              ;;
+            macOS)
+              otool -l "$app" | grep -A3 LC_BUILD_VERSION || otool -l "$app" | grep -A3 LC_VERSION_MIN
+              ;;
+          esac
 
       - name: Fetch the engine of the release and check it
         run: |
