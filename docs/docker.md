@@ -146,6 +146,7 @@ docker run --rm -p 127.0.0.1:8000:8000 \
 | `FLLM_BIND_HOST` | `127.0.0.1` | Host side of the port mapping |
 | `FLLM_PORT` | `8000` | Host side port (the container always listens on 8000, so the health check inside the container keeps using 8000) |
 | `FLLM_API_KEY` | empty | Passed as `FLLM_API_KEY` into the container; set it together with `FLLM_BIND_HOST=0.0.0.0` when the port is reachable from other hosts |
+| `FLLM_STATE_CACHE`, `FLLM_PREFIX_CACHE`, `FLLM_KV_RAM_BYTES` | unset | Passed into the container only when set on the host: the state checkpoints of models with recurrent layers (`auto`, `off` or a size), prefix sharing, and host memory for KV blocks. The same options are on the Studio page Settings > Engine and then live in the data volume |
 | `FLLM_MAX_MODEL_LEN` | `4096` | `--ctx` |
 | `FLLM_MAX_SEQS` | `16` | `--max-seqs` |
 | `FLLM_MAX_BATCHED_TOKENS` | `512` | `--max-batched-tokens` |

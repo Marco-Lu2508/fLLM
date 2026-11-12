@@ -31,6 +31,10 @@ services:
     # server demand an empty key and answer every request with 401.
     environment:
       - FLLM_API_KEY
+      # engine options (see docs/configuration.md); the Studio page Settings > Engine writes the same ones into the data volume
+      - FLLM_STATE_CACHE
+      - FLLM_PREFIX_CACHE
+      - FLLM_KV_RAM_BYTES
       - HF_TOKEN
     volumes:
       - fllm-cache:/home/fllm/.cache

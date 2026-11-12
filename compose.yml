@@ -17,6 +17,10 @@ services:
     environment:
       # passed through only when set: an empty FLLM_API_KEY would make the server answer every request with 401
       - FLLM_API_KEY
+      # engine options (see docs/configuration.md); the Studio page Settings > Engine writes the same ones into the data volume
+      - FLLM_STATE_CACHE
+      - FLLM_PREFIX_CACHE
+      - FLLM_KV_RAM_BYTES
     volumes:
       - ${FLLM_MODELS_DIR:-./models}:/models:ro
       # the settings made in the app (Settings > Engine, keys, ...) stay across restarts and updates
