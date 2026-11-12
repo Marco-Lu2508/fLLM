@@ -21,6 +21,8 @@ use std::path::Path;
 /// The most model calls one request of yours may take: a loop that never ends is stopped here.
 pub const MAX_STEPS: usize = 30;
 
+const PLAN_PROMPT: &str = "PLAN MODE: you may only read and search. You must not change files, run commands that change anything, or call tools that write. Investigate the code that matters with list_dir, glob, grep and read_file, then answer with a plan and stop. A good plan: a one-sentence goal; the files to change and what changes in each (path and function); the order of the steps; how to verify (exact commands); risks and open questions. Be specific enough that someone else could carry it out. The user will tell you when to carry the plan out.";
+
 const CODE_PROMPT: &str = "You are a coding agent working in the user's project folder. Use the tools to look at the code before you answer or change anything: list_dir, glob and grep to find files, read_file to read them. Read a file before you edit it, make small precise edits with edit_file, and check your work (run the tests or the build with bash when there are any). Answer briefly and say what you changed. Never invent file contents or command output.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,13 +57,15 @@ pub enum Mode {
     AutoEdit,
     /// Everything runs without asking.
     Auto,
+    /// The plan agent: it may only read and answers with a plan; nothing else is offered or run.
+    Plan,
 }
 
 impl Mode {
     pub fn allows(self, p: Permission) -> bool {
         match p {
             Permission::Read | Permission::Memory => true,
-            Permission::Edit => self != Mode::Ask,
+            Permission::Edit => matches!(self, Mode::AutoEdit | Mode::Auto),
             Permission::Command | Permission::Network | Permission::Other => self == Mode::Auto,
         }
     }
@@ -190,6 +194,8 @@ pub enum CodeMsg {
     Undo(Option<u64>),
     Undone(Result<String, String>),
     NewSession,
+    /// Leave plan mode and tell the agent to carry out the plan it wrote.
+    ExecutePlan,
 }
 
 /// What the agent needs from the window for a request.
@@ -209,6 +215,8 @@ pub struct CodeState {
     pub items: Vec<Item>,
     pub editor: Content,
     pub mode: Mode,
+    /// The mode to go back to when a plan is carried out.
+    pub build_mode: Mode,
     pub running: bool,
     pub steps: usize,
     pub changes: Vec<Change>,
@@ -227,6 +235,7 @@ impl Default for CodeState {
             items: Vec::new(),
             editor: Content::new(),
             mode: Mode::Ask,
+            build_mode: Mode::Ask,
             running: false,
             steps: 0,
             changes: Vec::new(),
@@ -445,7 +454,7 @@ impl CodeState {
 
     /// The messages of the next request: the agent's instructions, then the session with every call answered.
     pub fn wire(&self, extra: Option<&str>) -> Vec<WireMessage> {
-        let mut system = CODE_PROMPT.to_string();
+        let mut system = if self.mode == Mode::Plan { PLAN_PROMPT } else { CODE_PROMPT }.to_string();
         if let Some(w) = &self.workspace {
             system.push_str(&format!("\n\nThe project folder is {} (tool paths are relative to it).", w.root));
         }
@@ -503,10 +512,19 @@ impl CodeState {
         let wire = self.wire(env.extra);
         self.items.push(Item::Assistant { text: String::new(), md: Box::new(markdown::Content::new()) });
         self.running = true;
-        let events = api::chat_stream_with_tools(env.base.to_string(), model.to_string(), wire, env.params, Some(self.tools_json.clone()));
+        let events = api::chat_stream_with_tools(env.base.to_string(), model.to_string(), wire, env.params, Some(self.tools_for_model()));
         let (task, handle) = Task::stream(events).map(|ev| Message::Code(CodeMsg::Stream(ev))).abortable();
         self.handle = Some(handle.abort_on_drop());
         task
+    }
+
+    /// The tools the model is offered: in plan mode only those that read.
+    pub fn tools_for_model(&self) -> Value {
+        if self.mode != Mode::Plan {
+            return self.tools_json.clone();
+        }
+        let readable = |name: &str| self.tool(name).is_some_and(|t| self.mode.allows(t.permission));
+        Value::Array(self.tools_json.as_array().into_iter().flatten().filter(|t| t.pointer("/function/name").and_then(Value::as_str).is_some_and(readable)).cloned().collect())
     }
 
     fn run(&mut self, base: &str, id: &str) -> Task<Message> {
@@ -539,7 +557,15 @@ impl CodeState {
             let id = if p.id.is_empty() { format!("call_{}_{n}", self.steps) } else { p.id };
             let tool = self.tool(&p.name).cloned();
             let permission = tool.as_ref().map_or(Permission::Other, |t| t.permission);
-            let state = if tool.is_none() { CallState::Done { ok: false, output: format!("There is no tool called {}.", p.name) } } else if self.mode.allows(permission) { CallState::Running } else { CallState::Pending };
+            let state = if tool.is_none() {
+                CallState::Done { ok: false, output: format!("There is no tool called {}.", p.name) }
+            } else if self.mode.allows(permission) {
+                CallState::Running
+            } else if self.mode == Mode::Plan {
+                CallState::Done { ok: false, output: "Plan mode only allows reading. Write the plan instead.".into() }
+            } else {
+                CallState::Pending
+            };
             let run_now = state == CallState::Running;
             self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, state }));
             if run_now {
@@ -727,7 +753,22 @@ impl CodeState {
                 }
             }
             CodeMsg::SetMode(m) => {
+                if m != Mode::Plan {
+                    self.build_mode = m;
+                } else if self.mode != Mode::Plan {
+                    self.build_mode = self.mode;
+                }
                 self.mode = m;
+                if m == Mode::Plan {
+                    // a plan changes nothing: what waited for approval is refused
+                    for i in self.items.iter_mut() {
+                        if let Item::Call(c) = i {
+                            if c.state == CallState::Pending {
+                                c.state = CallState::Done { ok: false, output: "Plan mode only allows reading. Write the plan instead.".into() };
+                            }
+                        }
+                    }
+                }
                 // calls that wait now may be allowed
                 let ids: Vec<String> = self.items.iter().filter_map(|i| if let Item::Call(c) = i { (c.state == CallState::Pending && m.allows(c.permission)).then(|| c.id.clone()) } else { None }).collect();
                 let mut tasks = Vec::new();
@@ -750,6 +791,14 @@ impl CodeState {
                     Err(e) => self.error = Some(e),
                 }
                 Task::perform(fetch_changes(env.base.to_string()), |r| Message::Code(CodeMsg::ChangesLoaded(r)))
+            }
+            CodeMsg::ExecutePlan => {
+                if self.running || self.mode != Mode::Plan {
+                    return Task::none();
+                }
+                self.mode = self.build_mode;
+                self.editor = Content::with_text("Carry out the plan above.");
+                self.update(CodeMsg::Send, env)
             }
             CodeMsg::NewSession => {
                 if self.running {
@@ -896,10 +945,10 @@ pub fn page<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, can_send: bool
         return container(card).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill).padding(24).into();
     };
 
-    let mode = segmented(t, vec![("Ask", s.mode == Mode::Ask, Message::Code(CodeMsg::SetMode(Mode::Ask))), ("Edit freely", s.mode == Mode::AutoEdit, Message::Code(CodeMsg::SetMode(Mode::AutoEdit))), ("Everything", s.mode == Mode::Auto, Message::Code(CodeMsg::SetMode(Mode::Auto)))]);
-    let branch = w.branch.as_deref().map(|b| format!(" · {b}")).unwrap_or_default();
+    let mode = segmented(t, vec![("Plan", s.mode == Mode::Plan, Message::Code(CodeMsg::SetMode(Mode::Plan))), ("Ask", s.mode == Mode::Ask, Message::Code(CodeMsg::SetMode(Mode::Ask))), ("Edit freely", s.mode == Mode::AutoEdit, Message::Code(CodeMsg::SetMode(Mode::AutoEdit))), ("Everything", s.mode == Mode::Auto, Message::Code(CodeMsg::SetMode(Mode::Auto)))]);
+    let branch = w.branch.clone().unwrap_or_default();
     let header = row![
-        column![text(w.name.as_str()).size(15).font(bold()), text(format!("{}{}", w.root, branch)).size(12).color(t.muted).font(Font::MONOSPACE)].spacing(2).width(Length::Fill),
+        container(column![row![text(w.name.as_str()).size(15).font(bold()), text(branch).size(12).color(t.muted).font(Font::MONOSPACE)].spacing(8).align_y(Alignment::Center), text(w.root.as_str()).size(12).color(t.muted).font(Font::MONOSPACE).wrapping(text::Wrapping::None)].spacing(2)).clip(true).width(Length::Fill),
         mode,
         button(text("New session").size(13)).on_press_maybe((!s.running).then_some(Message::Code(CodeMsg::NewSession))).padding([5, 14]).style(theme::secondary_button(t)),
         button(text("Other folder").size(13)).on_press_maybe((!s.running).then_some(Message::Code(CodeMsg::Close))).padding([5, 14]).style(theme::secondary_button(t)),
@@ -911,6 +960,16 @@ pub fn page<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, can_send: bool
     let mut bar = column![].spacing(6);
     if let Some(e) = &s.error {
         bar = bar.push(text(e.as_str()).size(13).color(t.danger));
+    }
+    if s.mode == Mode::Plan && !s.running && matches!(s.items.last(), Some(Item::Assistant { text, .. }) if !text.trim().is_empty()) {
+        bar = bar.push(
+            row![
+                text("The plan is ready. Nothing was changed.").size(13).color(t.fg_soft).width(Length::Fill),
+                button(text("Carry out the plan").size(12)).on_press_maybe(can_send.then_some(Message::Code(CodeMsg::ExecutePlan))).padding([4, 14]).style(theme::primary_button(t)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
     }
     if !s.changes.is_empty() {
         let files: std::collections::BTreeSet<&str> = s.changes.iter().map(|c| c.path.as_str()).collect();
@@ -1187,6 +1246,56 @@ mod tests {
         let kept = long.saved();
         assert!(kept.len() <= SAVED_ITEMS && matches!(kept.first(), Some(Saved::User { .. })));
         assert!(matches!(kept.last(), Some(Saved::Note { text }) if text == "n149"));
+    }
+
+    #[test]
+    fn plan_mode_offers_only_reading_refuses_the_rest_and_the_plan_can_be_carried_out() {
+        let mut s = state(Mode::Ask);
+        s.tools_json = json!([
+            {"type": "function", "function": {"name": "read_file"}},
+            {"type": "function", "function": {"name": "grep"}},
+            {"type": "function", "function": {"name": "edit_file"}},
+            {"type": "function", "function": {"name": "bash"}}
+        ]);
+        assert_eq!(s.tools_for_model().as_array().unwrap().len(), 4);
+        let _ = s.update(CodeMsg::SetMode(Mode::Plan), &env());
+        let offered = s.tools_for_model();
+        let names: Vec<&str> = offered.as_array().unwrap().iter().filter_map(|t| t.pointer("/function/name").and_then(Value::as_str)).collect();
+        assert_eq!(names, vec!["read_file", "grep"], "the model is not even offered a tool that writes");
+        assert_eq!(s.build_mode, Mode::Ask);
+        say(&mut s, "How would you rename the module?");
+        assert!(s.wire(None)[0].content.starts_with("PLAN MODE"));
+        // a model that calls a writing tool anyway is told no, and nobody is asked
+        answer(&mut s, "", &[("e1", "edit_file", r#"{"path":"a","old_string":"1","new_string":"2"}"#), ("r1", "read_file", r#"{"path":"a"}"#)]);
+        assert!(matches!(&call(&s, "e1").state, CallState::Done { ok: false, output } if output.contains("Plan mode only allows reading")));
+        assert_eq!(call(&s, "r1").state, CallState::Running);
+        let _ = s.update(CodeMsg::ToolDone("r1".into(), Ok("x".into())), &env());
+        answer(&mut s, "1. Rename the file.\n2. Fix the imports.", &[]);
+        assert!(!s.running);
+        // carrying it out leaves plan mode for the mode before, and the agent is asked to do it
+        let _ = s.update(CodeMsg::ExecutePlan, &env());
+        assert_eq!(s.mode, Mode::Ask);
+        assert!(s.running);
+        assert!(matches!(s.items.iter().rev().find(|i| matches!(i, Item::User(_))), Some(Item::User(t)) if t == "Carry out the plan above."));
+        assert!(s.wire(None)[0].content.starts_with("You are a coding agent"));
+        // outside plan mode the button does nothing
+        let before = s.items.len();
+        let _ = s.update(CodeMsg::ExecutePlan, &env());
+        assert_eq!(s.items.len(), before);
+    }
+
+    #[test]
+    fn switching_to_plan_mode_refuses_what_waited_for_approval() {
+        let mut s = state(Mode::Ask);
+        say(&mut s, "x");
+        answer(&mut s, "", &[("w1", "write_file", r#"{"path":"n","content":"hi"}"#)]);
+        assert_eq!(call(&s, "w1").state, CallState::Pending);
+        let _ = s.update(CodeMsg::SetMode(Mode::Plan), &env());
+        assert!(matches!(&call(&s, "w1").state, CallState::Done { ok: false, .. }));
+        assert_eq!(s.build_mode, Mode::Ask, "the mode before is remembered");
+        let _ = s.update(CodeMsg::SetMode(Mode::AutoEdit), &env());
+        let _ = s.update(CodeMsg::SetMode(Mode::Plan), &env());
+        assert_eq!(s.build_mode, Mode::AutoEdit);
     }
 
     #[test]

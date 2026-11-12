@@ -205,3 +205,21 @@ fn a_session_is_kept_per_folder_and_comes_back_when_the_folder_is_opened_again()
     open_folder(&mut app);
     assert!(app.code().items.is_empty(), "a session that was cleared stays cleared");
 }
+
+#[test]
+fn the_plan_mode_is_a_choice_of_the_bar_and_its_plan_can_be_carried_out_from_a_button() {
+    let (mut app, _dir) = app("light");
+    open_folder(&mut app);
+    let msgs = click(&app, "Plan");
+    assert!(msgs.iter().any(|m| matches!(m, Message::Code(CodeMsg::SetMode(fllm_app::code::Mode::Plan)))), "{msgs:?}");
+    code(&mut app, CodeMsg::SetMode(fllm_app::code::Mode::Plan));
+    say(&mut app, "How would you add a --json flag?");
+    code(&mut app, CodeMsg::Stream(StreamEvent::Delta("1. Add the flag in cli.rs.\n2. Print JSON in report.rs.\n3. Test it with cargo test.".into())));
+    code(&mut app, CodeMsg::Stream(StreamEvent::Done));
+    assert!(!app.code().running);
+    picture(&app, "code-plan-light");
+    let msgs = click(&app, "Carry out the plan");
+    assert!(msgs.iter().any(|m| matches!(m, Message::Code(CodeMsg::ExecutePlan))), "{msgs:?}");
+    code(&mut app, CodeMsg::ExecutePlan);
+    assert!(app.code().running && app.code().mode == fllm_app::code::Mode::Ask);
+}
