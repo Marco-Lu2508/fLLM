@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod app;
+pub mod chatlist;
 pub mod code;
 pub mod engine_settings;
 pub mod md;

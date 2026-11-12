@@ -15,7 +15,7 @@ checks at the bottom pass.
 | Streaming chat, markdown, code blocks with copy | done |
 | Stats line (tokens/s, tokens, first token, prompt speed), context meter | done |
 | Stop | done (Esc: todo) |
-| Chat list, rename, delete, search over chats | part (list and delete; rename and search: todo) |
+| Chat list, rename, delete, search over chats | done (date groups, pinned, archived; search in titles and messages) |
 | Conversation tree: edit a message / regenerate keeps the old version, arrows between versions | todo |
 | Thinking chip (off/low/medium/high, per model), collapsible reasoning | part (chip done, one level for all chats; reasoning shown, collapsing: todo) |
 | Default system prompt builder (date, language, model family, tools), response style | part (built from date, language, model family and size, prompt length auto/full/short, your text replaces or is added, clock held 30 min; tools and response style: todo) |
@@ -30,7 +30,7 @@ checks at the bottom pass.
 | Temporary chat | todo |
 | Artifacts (HTML/SVG/Markdown/CSV preview), run JavaScript | todo |
 | Math (LaTeX) and tables | part (tables via markdown; math: todo) |
-| Organizing chats (bulk delete, move, archive, export) | todo |
+| Organizing chats (bulk delete, move, archive, export) | part (select many, delete, archive, duplicate, export Markdown/JSON to Downloads; import and move to a project: todo) |
 
 ## Everyday
 

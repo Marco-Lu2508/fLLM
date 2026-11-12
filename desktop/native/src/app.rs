@@ -1,7 +1,8 @@
 //! The window: state, messages, update and view.
 
 use crate::api::{self, ModelInfo, StreamEvent, WireMessage};
-use crate::store::{self, ChatRecord, Record, Role, Stats, Store};
+use crate::store::{self, Record, Role, Stats, Store};
+use crate::chatlist::{self, ChatList, ListMsg};
 use crate::md;
 use crate::prompts;
 use crate::code::{self, CodeState};
@@ -22,20 +23,21 @@ const STARTERS: [&str; 4] = [
     "Summarize a topic I name in five bullet points.",
 ];
 
-fn icon(bytes: &'static [u8]) -> svg::Handle {
+pub(crate) fn icon(bytes: &'static [u8]) -> svg::Handle {
     svg::Handle::from_memory(bytes)
 }
 
 const ICON_PLUS: &[u8] = include_bytes!("../icons/plus.svg");
 const ICON_SEND: &[u8] = include_bytes!("../icons/arrow-up.svg");
 const ICON_STOP: &[u8] = include_bytes!("../icons/stop.svg");
-const ICON_TRASH: &[u8] = include_bytes!("../icons/trash.svg");
 const ICON_CHAT: &[u8] = include_bytes!("../icons/chat.svg");
 const ICON_CUBE: &[u8] = include_bytes!("../icons/cube.svg");
 const ICON_SETTINGS: &[u8] = include_bytes!("../icons/settings.svg");
 /// How many of the newest messages a chat draws before "Show earlier messages" asks for more.
 pub const CHAT_WINDOW: usize = 60;
 
+pub(crate) const ICON_MORE: &[u8] = include_bytes!("../icons/more.svg");
+pub(crate) const ICON_PIN: &[u8] = include_bytes!("../icons/pin.svg");
 const ICON_CODE: &[u8] = include_bytes!("../icons/code.svg");
 const ICON_CHEVRON: &[u8] = include_bytes!("../icons/chevron-down.svg");
 const ICON_CHECK: &[u8] = include_bytes!("../icons/check.svg");
@@ -112,6 +114,9 @@ pub struct App {
     code: CodeState,
     /// How many of the newest messages the conversation draws: laying out hundreds of messages on every frame of a stream would stall the window.
     window: usize,
+    list: ChatList,
+    /// A line for the user that stays until it is clicked or the next message is sent ("Saved to ...").
+    toast: Option<String>,
     /// The clock the model was told in this chat (held for 30 minutes, so that the start of the prompt stays the same and can be cached).
     clock: Option<(u64, i64)>,
     sampling_text: settings::SamplingTexts,
@@ -180,6 +185,8 @@ pub enum Message {
     ClosePicker,
     /// Draw the next older messages of a long chat too.
     ShowEarlier,
+    List(ListMsg),
+    DismissToast,
     /// The thinking chip: the next level of the model.
     CycleThinking,
     PromptLength(crate::prompts::Length),
@@ -237,6 +244,8 @@ impl App {
             picker_open: false,
             code: CodeState::default(),
             window: CHAT_WINDOW,
+            list: ChatList::default(),
+            toast: None,
             clock: None,
             sampling_text: settings::SamplingTexts::default(),
             editing: None,
@@ -328,6 +337,7 @@ impl App {
             let records: Vec<Record> = self.messages.iter().map(Msg::record).collect();
             if let Some(chat) = self.store.chat_mut(id) {
                 chat.messages = records;
+                chat.updated = chrono::Local::now().timestamp();
             }
         }
     }
@@ -562,16 +572,26 @@ impl App {
                 }
                 Task::none()
             }
-            Message::DeleteChat(id) => {
-                if self.live.as_ref().is_some_and(|l| l.chat == id) {
-                    return Task::none();
+            Message::DeleteChat(id) => self.update(Message::List(ListMsg::Delete(id))),
+            Message::DismissToast => {
+                self.toast = None;
+                Task::none()
+            }
+            Message::List(msg) => {
+                let live = self.live.as_ref().map(|l| l.chat);
+                let now = chrono::Local::now().timestamp();
+                match self.list.update(msg, &mut self.store, live, now) {
+                    chatlist::Effect::Nothing => {}
+                    chatlist::Effect::Save => self.save(),
+                    chatlist::Effect::Deleted(ids) => {
+                        if self.current.is_some_and(|c| ids.contains(&c)) {
+                            self.current = None;
+                            self.messages.clear();
+                        }
+                        self.save();
+                    }
+                    chatlist::Effect::Toast(t) => self.toast = Some(t),
                 }
-                self.store.chats.retain(|c| c.id != id);
-                if self.current == Some(id) {
-                    self.current = None;
-                    self.messages.clear();
-                }
-                self.save();
                 Task::none()
             }
             Message::Edit(action) => {
@@ -926,7 +946,20 @@ impl App {
 
     pub fn view(&self) -> Element<'_, Message> {
         let t = self.tokens();
-        let body = row![self.sidebar(t), self.main(t)];
+        let mut main = column![self.main(t)];
+        if let Some(line) = &self.toast {
+            main = main.push(
+                container(
+                    button(row![text(line.as_str()).size(13).color(t.fg_soft).width(Length::Fill), text("Dismiss").size(12).color(t.muted)].spacing(12).align_y(Alignment::Center))
+                        .on_press(Message::DismissToast)
+                        .padding([8, 14])
+                        .width(Length::Fill)
+                        .style(theme::secondary_button(t)),
+                )
+                .padding([6, 24]),
+            );
+        }
+        let body = row![self.sidebar(t), main.width(Length::Fill)];
         container(body).width(Length::Fill).height(Length::Fill).style(theme::page(t)).into()
     }
 
@@ -948,13 +981,7 @@ impl App {
             .width(Length::Fill)
             .style(theme::row_button(t, false));
 
-        let mut chats = column![].spacing(2);
-        if self.store.chats.is_empty() {
-            chats = chats.push(container(text("No chats yet").size(13).color(t.muted)).padding([6, 10]));
-        }
-        for c in &self.store.chats {
-            chats = chats.push(self.chat_row(t, c));
-        }
+        let chats = self.list.view(t, &self.store, self.current, self.hover, self.live.is_none(), chrono::Local::now().timestamp());
 
         let footer = container(
             row![
@@ -988,7 +1015,7 @@ impl App {
                 new_chat,
                 nav,
                 container(text("Chats").size(12).font(bold()).color(t.muted)).padding(Padding { top: 16.0, right: 10.0, bottom: 4.0, left: 10.0 }),
-                scrollable(chats).height(Length::Fill),
+                chats,
                 footer,
             ]
             .spacing(4)
@@ -1009,35 +1036,6 @@ impl App {
         }
     }
 
-    fn chat_row<'a>(&'a self, t: Tokens, c: &'a ChatRecord) -> Element<'a, Message> {
-        let selected = self.current == Some(c.id);
-        let hovered = self.hover == Some(c.id);
-        let can_act = self.live.is_none();
-        let delete: Element<'a, Message> = if (selected || hovered) && can_act {
-            button(svg(icon(ICON_TRASH)).width(14).height(14).style(muted_svg(t)))
-                .on_press(Message::DeleteChat(c.id))
-                .padding(5)
-                .style(theme::ghost_button(t))
-                .into()
-        } else {
-            Space::new().width(24).height(24).into()
-        };
-        let line = row![
-            button(text(ellipsize(&c.title, 26)).size(14).wrapping(text::Wrapping::None))
-                .on_press_maybe(can_act.then_some(Message::OpenChat(c.id)))
-                .padding([7, 10])
-                .width(Length::Fill)
-                .style(theme::plain_button(t)),
-            delete,
-        ]
-        .align_y(Alignment::Center);
-        let framed = container(line).padding(Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 0.0 }).style(move |_| container::Style {
-            background: if selected { Some(iced::Background::Color(t.primary_soft)) } else if hovered { Some(iced::Background::Color(t.fill)) } else { None },
-            border: iced::border::rounded(theme::R_SM),
-            ..Default::default()
-        });
-        mouse_area(framed).on_enter(Message::Hover(Some(c.id))).on_exit(Message::Hover(None)).into()
-    }
 
     fn main(&self, t: Tokens) -> Element<'_, Message> {
         if self.page == View::Models && !matches!(self.server, Server::Down(_)) {
@@ -1338,6 +1336,21 @@ impl App {
         self.page
     }
 
+    /// The file the chats are kept in.
+    pub fn data_file(&self) -> &std::path::Path {
+        &self.data_file
+    }
+
+    /// The list of chats in the sidebar.
+    pub fn chat_list(&self) -> &ChatList {
+        &self.list
+    }
+
+    /// The line for the user, when there is one.
+    pub fn toast(&self) -> Option<&str> {
+        self.toast.as_deref()
+    }
+
     /// The state of Code mode.
     pub fn code(&self) -> &CodeState {
         &self.code
@@ -1524,7 +1537,7 @@ pub fn group(n: u64) -> String {
     parts.join(",")
 }
 
-fn muted_svg(t: Tokens) -> impl Fn(&Theme, svg::Status) -> svg::Style {
+pub(crate) fn muted_svg(t: Tokens) -> impl Fn(&Theme, svg::Status) -> svg::Style {
     move |_, _| svg::Style { color: Some(t.muted) }
 }
 

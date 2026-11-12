@@ -59,6 +59,13 @@ pub struct ChatRecord {
     /// The other versions, whole conversations that share their beginning with the shown one.
     #[serde(default)]
     pub variants: Vec<Variant>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
+    /// When the chat was last used (seconds since 1970); 0 for a chat from before the date was kept.
+    #[serde(default)]
+    pub updated: i64,
 }
 
 /// Which version of a message is shown out of how many.
