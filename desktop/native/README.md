@@ -28,6 +28,9 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   memory, prompt blocks in RAM or on disk, what happens when memory runs out, saved answers and who shares them, loading the last model at start,
   unloading when idle. A switch or choice is written at once, a number or text when you press Enter (checked first); the server says which
   options its environment fixes; engine options apply after a restart, which the page offers ("Restart now") and waits for.
+- The model name in the top bar of the chat is a picker: the models on this computer with the loaded one marked, a click loads another
+  (a file from a folder by its path, a downloaded one by its name), "Manage models…" opens the Models page. While the server switches its model
+  (it restarts its engine for a load, an unload and a settings restart) the window says "Loading …" instead of "No server" and looks every second.
 - Models (sidebar > Models): what is loaded (Unload), the downloads with progress, speed, time left and Pause / Resume / Cancel / Remove, the
   models on this computer (Load: a file from a folder by its path, a downloaded one by its name), and the catalog with a search field, the
   quantizations as chips (the recommended one is chosen; you pick another before you press Download), the size of the chosen one and whether
@@ -38,7 +41,7 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 
 | Stage | Content |
 |---|---|
-| 2c | Load options (context, device), the model picker in the chat bar, the measured prompt speed with the compact prompt, projects and memory, web tools |
+| 2c | Load options (context, device), the measured prompt speed with the compact prompt, projects and memory, web tools |
 | 3 | Code mode (folder, agent loop, diffs, approvals, terminal) |
 | 4 | The server inside the process (no second program), installers per system, the tray, autostart, updates; then the Tauri app and the web Studio files can go |
 | later | Voice, artifacts, the research mode, the command palette |
@@ -48,7 +51,7 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 61 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+cargo test --locked      # 66 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
                          # window driven headless (new chat, send, stream, stop, error, delete, theme) and drawn to PNG files
 ```
 

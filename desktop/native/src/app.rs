@@ -8,7 +8,7 @@ use crate::models::{self, ModelsState};
 use crate::settings;
 use crate::theme::{self, Tokens};
 use iced::widget::text_editor::{Action, Binding, Content, KeyPress, Status};
-use iced::widget::{button, column, container, markdown, mouse_area, row, scrollable, svg, text, text_editor, Space};
+use iced::widget::{button, column, container, markdown, mouse_area, row, scrollable, stack, svg, text, text_editor, Space};
 use iced::{keyboard, task, time, Alignment, Element, Font, Length, Padding, Subscription, Task, Theme};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -31,6 +31,8 @@ const ICON_TRASH: &[u8] = include_bytes!("../icons/trash.svg");
 const ICON_CHAT: &[u8] = include_bytes!("../icons/chat.svg");
 const ICON_CUBE: &[u8] = include_bytes!("../icons/cube.svg");
 const ICON_SETTINGS: &[u8] = include_bytes!("../icons/settings.svg");
+const ICON_CHEVRON: &[u8] = include_bytes!("../icons/chevron-down.svg");
+const ICON_CHECK: &[u8] = include_bytes!("../icons/check.svg");
 
 /// A message with its rendered Markdown.
 pub struct Msg {
@@ -98,6 +100,10 @@ pub struct App {
     system_editor: Content,
     max_tokens_text: String,
     engine: EngineState,
+    /// The list of models under the model name in the top bar.
+    picker_open: bool,
+    /// A load, unload or restart is under way: the server is away for a moment and the window says so instead of "no server".
+    switching: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +158,8 @@ pub enum Message {
     EngineReset,
     RestartServer,
     RestartDone(Result<(), String>),
+    TogglePicker,
+    ClosePicker,
 }
 
 impl App {
@@ -182,6 +190,8 @@ impl App {
             system_editor: Content::new(),
             max_tokens_text: String::new(),
             engine: EngineState::default(),
+            picker_open: false,
+            switching: false,
         };
         app.system_editor = Content::with_text(&app.store.prefs.system_prompt);
         app.max_tokens_text = if app.store.prefs.max_tokens > 0 { app.store.prefs.max_tokens.to_string() } else { String::new() };
@@ -299,10 +309,23 @@ impl App {
         match message {
             Message::Connected(Ok(model)) => {
                 self.server = Server::Ready(model);
+                self.switching = false;
                 Task::none()
             }
             Message::Connected(Err(e)) if e == models::NO_MODEL => {
                 self.server = Server::NoModel;
+                self.switching = false;
+                Task::none()
+            }
+            Message::TogglePicker => {
+                self.picker_open = !self.picker_open;
+                if self.picker_open && !self.models.fetched {
+                    return Task::perform(models::fetch_overview(self.base.clone()), Message::OverviewLoaded);
+                }
+                Task::none()
+            }
+            Message::ClosePicker => {
+                self.picker_open = false;
                 Task::none()
             }
             Message::Connected(Err(e)) => {
@@ -396,6 +419,7 @@ impl App {
             }
             Message::Go(page) => {
                 self.page = page;
+                self.picker_open = false;
                 if page == View::Models {
                     return self.refresh_models();
                 }
@@ -485,6 +509,7 @@ impl App {
             }
             Message::RestartServer => {
                 self.engine.restarting = true;
+                self.switching = true;
                 Task::perform(engine_settings::restart(self.base.clone()), Message::RestartDone)
             }
             Message::RestartDone(result) => {
@@ -551,6 +576,8 @@ impl App {
                 }
                 self.models.busy = Some(reference.clone());
                 self.models.error = None;
+                self.picker_open = false;
+                self.switching = true;
                 Task::perform(models::load(self.base.clone(), reference), Message::ModelAction)
             }
             Message::UnloadModel => {
@@ -559,6 +586,8 @@ impl App {
                 }
                 self.models.busy = Some(String::new());
                 self.models.error = None;
+                self.picker_open = false;
+                self.switching = true;
                 Task::perform(models::unload(self.base.clone()), Message::ModelAction)
             }
             Message::Pull(id) => {
@@ -579,6 +608,7 @@ impl App {
             }
             Message::ModelAction(Err(e)) => {
                 self.models.busy = None;
+                self.switching = false;
                 self.models.error = Some(e);
                 Task::none()
             }
@@ -673,7 +703,9 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        let retry = if matches!(self.server, Server::Down(_)) { time::every(Duration::from_secs(4)).map(|_| Message::Tick) } else { Subscription::none() };
+        // a server that was told to switch its model is back within seconds: look more often then
+        let every = if self.switching { 1 } else { 4 };
+        let retry = if matches!(self.server, Server::Down(_)) { time::every(Duration::from_secs(every)).map(|_| Message::Tick) } else { Subscription::none() };
         let poll = if (self.page == View::Models && !matches!(self.server, Server::Down(_))) || self.models.any_active() {
             time::every(Duration::from_secs(1)).map(|_| Message::Poll)
         } else {
@@ -806,12 +838,58 @@ impl App {
             return settings::page(t, &self.store.prefs, &self.system_editor, &self.max_tokens_text, engine_settings::view(t, &self.engine, !matches!(self.server, Server::Down(_))));
         }
         let content: Element<'_, Message> = match &self.server {
+            Server::Down(_) | Server::Connecting if self.switching => self.switching_card(t),
             Server::Down(reason) => self.offline(t, reason),
             Server::NoModel => self.no_model(t),
             _ if self.messages.is_empty() => self.welcome(t),
             _ => self.conversation(t),
         };
-        column![self.topbar(t), content, self.composer(t)].width(Length::Fill).height(Length::Fill).into()
+        let page: Element<'_, Message> = column![self.topbar(t), content, self.composer(t)].width(Length::Fill).height(Length::Fill).into();
+        if self.picker_open {
+            return stack![page, mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::ClosePicker), self.picker(t)].into();
+        }
+        page
+    }
+
+    fn switching_card(&self, t: Tokens) -> Element<'_, Message> {
+        let what = match self.models.busy.as_deref() {
+            Some("") => "Unloading the model…".to_string(),
+            Some(r) => format!("Loading {}…", r.rsplit(['/', '\\']).next().unwrap_or(r)),
+            None => "The server is restarting…".to_string(),
+        };
+        let card = column![text(what).size(22).font(bold()), text("The server restarts its engine for this. It takes a few seconds, larger models longer.").size(14).color(t.fg_soft)].spacing(10).max_width(520);
+        container(card).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill).padding(24).into()
+    }
+
+    /// The list of models that opens under the name in the top bar: the ones on this computer, the loaded one marked.
+    fn picker(&self, t: Tokens) -> Element<'_, Message> {
+        let loaded = match &self.server {
+            Server::Ready(m) => Some(m.id.as_str()),
+            _ => None,
+        };
+        let mut list = column![].spacing(2);
+        if self.models.overview.installed.is_empty() {
+            list = list.push(container(text(if self.models.fetched { "No models downloaded yet." } else { "Looking…" }).size(13).color(t.muted)).padding([8, 10]));
+        }
+        for m in &self.models.overview.installed {
+            let is_loaded = loaded.is_some_and(|l| m.name.starts_with(l) || l.starts_with(&m.name)) || self.models.overview.loaded.as_deref() == Some(m.name.as_str());
+            let mark: Element<'_, Message> = if is_loaded { svg(icon(ICON_CHECK)).width(14).height(14).style(accent_svg(t)).into() } else { Space::new().width(14).height(14).into() };
+            list = list.push(
+                button(row![mark, text(ellipsize(&m.name, 34)).size(13).font(Font::MONOSPACE).width(Length::Fill), text(models::size(m.bytes)).size(12).color(t.muted)].spacing(10).align_y(Alignment::Center))
+                    .on_press(if is_loaded { Message::ClosePicker } else { Message::LoadModel(m.reference.clone()) })
+                    .padding([7, 10])
+                    .width(Length::Fill)
+                    .style(theme::row_button(t, false)),
+            );
+        }
+        let manage = button(text("Manage models…").size(13).color(t.fg_soft)).on_press(Message::Go(View::Models)).padding([7, 10]).width(Length::Fill).style(theme::row_button(t, false));
+        let panel = container(column![scrollable(list).height(Length::Shrink), container(Space::new().height(1)).width(Length::Fill).style(move |_| container::Style { background: Some(iced::Background::Color(t.separator)), ..Default::default() }), manage].spacing(6))
+            .padding(6)
+            .width(380)
+            .max_height(360)
+            .style(theme::card(t, theme::R_LG, false));
+        // under the model name: the top bar is 52 high and the column is centered like the chat
+        container(container(panel).max_width(780).width(Length::Fill)).center_x(Length::Fill).padding(Padding { top: 46.0, right: 24.0, bottom: 0.0, left: 24.0 }).width(Length::Fill).height(Length::Fill).into()
     }
 
     fn topbar(&self, t: Tokens) -> Element<'_, Message> {
@@ -820,9 +898,13 @@ impl App {
             Server::Connecting => ("Connecting…".into(), 0),
             Server::NoModel | Server::Down(_) => ("No model".into(), 0),
         };
-        let pill = container(row![svg(icon(ICON_CUBE)).width(15).height(15).style(accent_svg(t)), text(name).size(13).font(Font::MONOSPACE)].spacing(8).align_y(Alignment::Center))
+        let pill = button(row![svg(icon(ICON_CUBE)).width(15).height(15).style(accent_svg(t)), text(name).size(13).font(Font::MONOSPACE), svg(icon(ICON_CHEVRON)).width(13).height(13).style(muted_svg(t))].spacing(8).align_y(Alignment::Center))
+            .on_press_maybe((!matches!(self.server, Server::Down(_)) && self.live.is_none()).then_some(Message::TogglePicker))
             .padding([5, 12])
-            .style(theme::chip(t));
+            .style(move |_, status| {
+                let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                button::Style { background: Some(iced::Background::Color(if hovered { t.fill_hover } else { t.fill })), text_color: t.fg_soft, border: iced::border::rounded(999), ..Default::default() }
+            });
         let meter: Element<'_, Message> = if max > 0 {
             let ratio = (self.used_tokens as f32 / max as f32).clamp(0.0, 1.0);
             let used_part = ((ratio * 1000.0).round() as u16).max(if self.used_tokens > 0 { 8 } else { 0 });
@@ -962,6 +1044,16 @@ impl App {
     /// The engine and server settings as the page shows them.
     pub fn engine(&self) -> &EngineState {
         &self.engine
+    }
+
+    /// Whether the list of models under the model name is open.
+    pub fn picker_open(&self) -> bool {
+        self.picker_open
+    }
+
+    /// Whether a load, unload or restart is under way.
+    pub fn switching(&self) -> bool {
+        self.switching
     }
 
     /// The state of the Models page.
