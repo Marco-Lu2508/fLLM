@@ -1,5 +1,6 @@
 //! The chats on disk: one JSON file in the app's data folder, written after every change.
 
+use crate::assistants::Assistant;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -66,6 +67,9 @@ pub struct ChatRecord {
     /// When the chat was last used (seconds since 1970); 0 for a chat from before the date was kept.
     #[serde(default)]
     pub updated: i64,
+    /// The assistant of this chat (None: what the settings say, shown as Standard).
+    #[serde(default)]
+    pub assistant: Option<String>,
 }
 
 /// Which version of a message is shown out of how many.
@@ -183,6 +187,9 @@ pub struct Prefs {
     /// The level of the thinking chip (off, low, medium, high); a model that has no such level uses its own default.
     #[serde(default)]
     pub thinking_level: String,
+    /// The assistant chosen for new chats (the Studio's current preset).
+    #[serde(default)]
+    pub assistant: String,
 }
 
 /// The more advanced sampling values. The neutral value of each is the default, and a neutral value is not sent.
@@ -266,7 +273,7 @@ fn default_top_p() -> f32 {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new() }
+        Prefs { manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
     }
 }
 
@@ -299,6 +306,9 @@ pub const BUILT_IN_SYSTEM_PROMPT: &str = "You are a helpful assistant running lo
 pub struct Store {
     #[serde(default)]
     pub prefs: Prefs,
+    /// The saved assistants; the six built-ins are rebuilt on every start and never stored.
+    #[serde(default)]
+    pub assistants: Vec<Assistant>,
     pub chats: Vec<ChatRecord>,
     #[serde(default)]
     pub next_id: u64,
@@ -320,6 +330,8 @@ impl Store {
         match serde_json::from_str::<Store>(&text) {
             Ok(mut s) => {
                 s.next_id = s.next_id.max(s.chats.iter().map(|c| c.id + 1).max().unwrap_or(0));
+                // the same cleanup the Studio runs on every load: a broken entry is dropped, the rest is clamped
+                s.assistants = s.assistants.drain(..).filter_map(Assistant::cleaned).collect();
                 s
             }
             Err(_) => {

@@ -104,7 +104,7 @@ pub fn file_stem(title: &str) -> String {
     if s.is_empty() { "chat".into() } else { s.chars().take(60).collect() }
 }
 
-fn export_dir() -> std::path::PathBuf {
+pub fn export_dir() -> std::path::PathBuf {
     if let Some(dir) = std::env::var_os("FLLM_EXPORT_DIR") {
         return dir.into();
     }

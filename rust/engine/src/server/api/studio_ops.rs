@@ -791,13 +791,17 @@ fn command(program: &'static str, args: &[&str]) -> PickCommand {
     PickCommand { program, args: args.iter().map(|a| (*a).to_owned()).collect() }
 }
 
-/// The programs that can show a file or folder dialog on `os`, best first.
+/// The programs that can show a file or folder dialog on `os`, best first. `kind` is "folder" for a
+/// directory, "file" for any file (its text is imported) and "model"/"gguf" for a model file.
 fn pick_commands(kind: &str, os: &str) -> Vec<PickCommand> {
     let folder = kind == "folder";
+    let any_file = kind == "file";
     match os {
         "windows" => {
             let dialog = if folder {
                 "$d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose a folder'; $r = $d.ShowDialog($o); $p = $d.SelectedPath"
+            } else if any_file {
+                "$d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose a file'; $d.Filter = 'JSON files (*.json)|*.json|All files (*.*)|*.*'; $r = $d.ShowDialog($o); $p = $d.FileName"
             } else {
                 "$d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose a model file'; $d.Filter = 'Models (*.gguf;*.safetensors;*.json)|*.gguf;*.safetensors;*.json|GGUF models (*.gguf)|*.gguf|Safetensors weights (*.safetensors)|*.safetensors|All files (*.*)|*.*'; $r = $d.ShowDialog($o); $p = $d.FileName"
             };
@@ -809,6 +813,8 @@ fn pick_commands(kind: &str, os: &str) -> Vec<PickCommand> {
         "macos" => {
             let script = if folder {
                 "POSIX path of (choose folder with prompt \"Choose a folder\")"
+            } else if any_file {
+                "POSIX path of (choose file with prompt \"Choose a file\")"
             } else {
                 "POSIX path of (choose file with prompt \"Choose a model file\" of type {\"gguf\", \"safetensors\", \"json\"})"
             };
@@ -819,6 +825,11 @@ fn pick_commands(kind: &str, os: &str) -> Vec<PickCommand> {
                 vec![
                     command("zenity", &["--file-selection", "--directory", "--title=Choose a folder"]),
                     command("kdialog", &["--getexistingdirectory", ".", "--title", "Choose a folder"]),
+                ]
+            } else if any_file {
+                vec![
+                    command("zenity", &["--file-selection", "--title=Choose a file", "--file-filter=JSON | *.json", "--file-filter=All files | *"]),
+                    command("kdialog", &["--getopenfilename", ".", "*.json|JSON files", "--title", "Choose a file"]),
                 ]
             } else {
                 vec![
@@ -870,14 +881,34 @@ fn run_picker(kind: &str) -> Result<Option<String>, PickError> {
     Err(PickError::Unavailable)
 }
 
-/// `POST /api/studio/pick-file` with `{kind: "model" | "gguf" | "folder"}` (`model` and `gguf` choose a model file: .gguf, .safetensors or config.json; `folder` a folder, for example a Hugging Face model): opens the dialog of the operating system on this machine and answers
-/// with `{path}` (`null` when the dialog was closed).
+/// How large a file the `file` dialog may read back (an exported assistant is a few kilobytes).
+const PICKED_MAX: usize = 4 * 1024 * 1024;
+
+/// The text of the file a dialog chose: read on this machine, cut at `PICKED_MAX`, must be UTF-8.
+fn read_picked(path: &str) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("The file could not be read: {e}"))?;
+    if bytes.len() > PICKED_MAX {
+        return Err(format!("The file is too large to read back ({PICKED_MAX} bytes are the limit)."));
+    }
+    String::from_utf8(bytes).map_err(|_| "The file is not UTF-8 text.".to_string())
+}
+
+/// `POST /api/studio/pick-file` with `{kind: "model" | "gguf" | "file" | "folder"}` (`model` and `gguf` choose a model file: .gguf, .safetensors or config.json; `file` chooses any file and
+/// answers its text as well, which is how a window imports an exported assistant; `folder` a folder,
+/// for example a Hugging Face model): opens the dialog of the operating system on this machine and
+/// answers with `{path}` (`null` when the dialog was closed), plus `{text}` for `file`.
 pub(in crate::server) async fn pick_file(Json(body): Json<Value>) -> Response {
     let kind = body.get("kind").and_then(Value::as_str).unwrap_or("gguf").to_owned();
-    if !matches!(kind.as_str(), "model" | "gguf" | "folder") {
-        return api_error(StatusCode::BAD_REQUEST, "kind must be \"model\", \"gguf\" or \"folder\"");
+    if !matches!(kind.as_str(), "model" | "gguf" | "file" | "folder") {
+        return api_error(StatusCode::BAD_REQUEST, "kind must be \"model\", \"gguf\", \"file\" or \"folder\"");
     }
-    match tokio::task::spawn_blocking(move || run_picker(&kind)).await {
+    let for_dialog = kind.clone();
+    match tokio::task::spawn_blocking(move || run_picker(&for_dialog)).await {
+        // the import route: the file is read here, so the window gets its text in one call
+        Ok(Ok(Some(path))) if kind == "file" => match read_picked(&path) {
+            Ok(text) => Json(json!({"path": path, "text": text})).into_response(),
+            Err(e) => api_error(StatusCode::UNPROCESSABLE_ENTITY, &e),
+        },
         Ok(Ok(path)) => Json(json!({"path": path})).into_response(),
         Ok(Err(PickError::Unavailable)) => api_error(
             StatusCode::NOT_IMPLEMENTED,
@@ -1358,6 +1389,36 @@ b"}), json!({"preemption": 3}), json!({"kv_ram_mb": -1}), json!({"kv_ram_mb": 5_
         assert_eq!(linux, ["zenity", "kdialog"]);
         assert!(pick_commands("folder", "linux")[0].args.contains(&"--directory".to_owned()));
         assert!(pick_commands("gguf", "linux")[0].args.iter().any(|a| a.contains("*.gguf")));
+        // kind "file" asks for any file with a JSON filter, not for a model or a folder
+        assert!(pick_commands("file", "windows")[0].args.last().unwrap().contains("*.json"));
+        assert!(pick_commands("file", "windows")[0].args.last().unwrap().contains("Choose a file"));
+        assert!(pick_commands("file", "macos")[0].args[1].contains("Choose a file"));
+        assert!(!pick_commands("file", "macos")[0].args[1].contains("of type"));
+        assert!(pick_commands("file", "linux")[0].args.iter().any(|a| a.contains("*.json")));
+        assert!(pick_commands("file", "linux")[0].args.contains(&"--title=Choose a file".to_owned()));
+    }
+
+    #[test]
+    fn the_text_of_a_picked_file_is_read_with_a_bound() {
+        // named by label and pid (a clock alone collides between tests of one binary)
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let path = |suffix: &str| dir.join(format!("fllm-picked-{pid}-{suffix}.json"));
+        let ok = path("ok");
+        std::fs::write(&ok, "{\"format\":\"fllm-assistant\"}").unwrap();
+        assert_eq!(read_picked(ok.to_str().unwrap()).unwrap(), "{\"format\":\"fllm-assistant\"}");
+        assert!(read_picked("/does/not/exist-fllm.json").is_err());
+        let big = path("big");
+        std::fs::write(&big, vec![b'x'; PICKED_MAX + 1]).unwrap();
+        let err = read_picked(big.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+        let raw = path("raw");
+        std::fs::write(&raw, [0xffu8, 0xfe, 0xfd]).unwrap();
+        let err = read_picked(raw.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("UTF-8"), "{err}");
+        for p in [ok, big, raw] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     #[test]

@@ -312,6 +312,36 @@ pub async fn fetch_model(base: &str) -> Result<ModelInfo, String> {
     Ok(info)
 }
 
+/// Lets the server open a file dialog (`POST /api/studio/pick-file` with `kind: "file"`) and reads the
+/// chosen file there, so an exported assistant can be imported. The answer is the text of the file, or
+/// why it could not be read; no timeout, because a dialog waits for the person at the computer.
+pub async fn pick_assistant_file(base: String) -> Result<String, String> {
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!("{base}/api/studio/pick-file"))
+        .json(&serde_json::json!({ "kind": "file" }))
+        .send()
+        .await
+        .map_err(|e| format!("no server at {base}: {e}"))?;
+    let status = resp.status();
+    let data: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if !status.is_success() {
+        let message = data
+            .pointer("/error/message")
+            .or_else(|| data.get("error"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("the server answered {status}"));
+        return Err(message);
+    }
+    match data.get("text").and_then(serde_json::Value::as_str) {
+        Some(text) => Ok(text.to_string()),
+        // the dialog was closed: no file, and no line about it (the Studio is silent then too)
+        None if data.get("path").is_some_and(serde_json::Value::is_null) => Err(String::new()),
+        None => Err("The server did not send the file.".into()),
+    }
+}
+
 type ByteStream = Pin<Box<dyn Stream<Item = reqwest::Result<Vec<u8>>> + Send>>;
 
 /// Starts a chat request and gives the events of its stream. The request is dropped, and the server stops generating, when the stream is dropped.

@@ -22,7 +22,8 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 - Chat with streaming answers, Markdown (headings, lists, tables, quotes, code blocks with highlighting and a copy button, inline code),
   stop, copy, the reasoning of thinking models kept apart, tokens per second and prompt speed under every answer.
 - Chats on disk (`~/.local/share/fllm-app/chats.json`, `$FLLM_APP_DATA` moves it), written after every change, a damaged file is moved aside
-  instead of overwritten. Title from the first message, delete, open, new chat.
+  instead of overwritten. Title from the first message; the sidebar opens, renames, duplicates, exports, deletes and searches them, groups
+  them by the day they were last used, pins and archives them, and *Select* takes many at once.
 - The design system of the Studio (`design-system/fllm-studio/MASTER.md`): the same tokens in both themes (copper accent, system grays,
   hairlines), Inter shipped inside the program, a context meter with a track, 780-pixel reading column shared by messages and composer.
 - No server: a clear screen with the address and a retry every four seconds. A server without a model has its own screen that leads to Models.
@@ -36,6 +37,16 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 - The model name in the top bar of the chat is a picker: the models on this computer with the loaded one marked, a click loads another
   (a file from a folder by its path, a downloaded one by its name), "Manage models…" opens the Models page. While the server switches its model
   (it restarts its engine for a load, an unload and a settings restart) the window says "Loading …" instead of "No server" and looks every second.
+- The assistant beside the model name in the top bar (the Studio's presets as assistants): six built-ins — Standard, Precise and brief,
+  Creative, Programmer, Translator, Editor — with their icon, colour and four starter suggestions, your own ones below them, and
+  *New* / *Import* / *Save current*. Choosing one stores it on the open chat and for new chats, sends its sampling values (temperature,
+  top-p, top-k; the sampler switches to manual, an assistant brings its own), loads its model when it is on this computer (a missing one
+  keeps the current model and says so) and shows its suggestions on the empty chat. The editor window has the name, eight icons, twelve
+  colours, the instructions, the three sampling values, the model as a select of this computer's models, up to four starters, and how the
+  assistant treats the default system prompt (*Use the global setting*, *Add to the default prompt*, *Replace the default prompt*, with
+  `{{date}}` / `{{time}}` / `{{language}}` filled in). *Export* writes `<name>.assistant.json` to the Downloads folder, *Import* reads one
+  back through `POST /api/studio/pick-file` with `kind: "file"`, which opens the dialog of this machine and answers the text of the file it
+  chose. A built-in is edited as a copy; deleting clears the choice; chats from before the feature load unchanged.
 - Code (sidebar > Code): a coding agent in a folder. Open a folder (type the path, *Choose…* for the folder dialog of the server's computer, or one of the last six), tell the agent what to do; the model
   gets the server's agent tools (read, search, edit, run commands, ...) and answers with tool calls, which the window runs through
   `/api/studio/agent/tool` and feeds back until the model answers without one (at most 30 model calls per message). Every call is a card:
