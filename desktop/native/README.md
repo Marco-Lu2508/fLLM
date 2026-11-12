@@ -4,6 +4,11 @@ The Studio as a real desktop program: one Rust binary, drawn by [iced](https://i
 no Chromium, no Electron and no web view. The Tauri app in `../src-tauri` shows the web Studio in the system web view; this one
 replaces it step by step.
 
+Opening the app is enough: when no server answers, it starts `fllm-rs studio` itself (found by `FLLM_RS`, next to the app, or on the PATH) on a free
+port and stops it when the window closes; a server that is already there (`FLLM_URL`, a Docker container, one on port 8080) is used as it is and left
+alone. If the server cannot be started the "no server" screen says why, and `server.log` in the data folder has its output. The engine moves into
+the app's own process later; the window talks to it the same way.
+
 It talks to an fLLM server over HTTP, the same `/v1` API every other client uses (`GET /v1/models`, `POST /v1/chat/completions` as an event
 stream), so everything the server can do is within reach and the window stays small. The server is not inside the window yet (stage 4).
 
@@ -43,7 +48,7 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 |---|---|
 | 2c | Load options (context, device), the measured prompt speed with the compact prompt, projects and memory, web tools |
 | 3 | Code mode (folder, agent loop, diffs, approvals, terminal) |
-| 4 | The server inside the process (no second program), installers per system, the tray, autostart, updates; then the Tauri app and the web Studio files can go |
+| 4 | The engine inside the process (no second program; for now the app starts the server next to it, see above), installers per system that put both side by side, the tray, autostart, updates; then the Tauri app and the web Studio files can go |
 | later | Voice, artifacts, the research mode, the command palette |
 
 Until stage 4 the Tauri app stays the supported desktop app.
@@ -51,7 +56,7 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 66 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+cargo test --locked      # 70 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
                          # window driven headless (new chat, send, stream, stop, error, delete, theme) and drawn to PNG files
 ```
 

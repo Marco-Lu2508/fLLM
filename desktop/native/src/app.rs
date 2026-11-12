@@ -102,6 +102,9 @@ pub struct App {
     engine: EngineState,
     /// The list of models under the model name in the top bar.
     picker_open: bool,
+    /// The server this app started itself (stopped when the app ends), and why it did not, when it did not.
+    sidecar: Option<crate::sidecar::Sidecar>,
+    sidecar_note: Option<String>,
     /// A load, unload or restart is under way: the server is away for a moment and the window says so instead of "no server".
     switching: bool,
 }
@@ -164,8 +167,19 @@ pub enum Message {
 
 impl App {
     pub fn new() -> (App, Task<Message>) {
-        let base = std::env::var("FLLM_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into()).trim_end_matches('/').to_string();
-        App::with(base, store::data_file())
+        let data = store::data_file();
+        let (base, sidecar, note) = crate::sidecar::choose(&data.with_file_name("server.log"));
+        let (mut app, task) = App::with(base, data);
+        app.sidecar = sidecar;
+        app.sidecar_note = note;
+        // a server the app just started needs a moment: look every second until it answers
+        app.switching = app.sidecar.is_some();
+        (app, task)
+    }
+
+    /// Whether this app started the server it talks to.
+    pub fn owns_server(&self) -> bool {
+        self.sidecar.is_some()
     }
 
     pub fn with(base: String, data_file: PathBuf) -> (App, Task<Message>) {
@@ -192,6 +206,8 @@ impl App {
             engine: EngineState::default(),
             picker_open: false,
             switching: false,
+            sidecar: None,
+            sidecar_note: None,
         };
         app.system_editor = Content::with_text(&app.store.prefs.system_prompt);
         app.max_tokens_text = if app.store.prefs.max_tokens > 0 { app.store.prefs.max_tokens.to_string() } else { String::new() };
@@ -338,6 +354,14 @@ impl App {
                 Task::perform(async move { api::fetch_model(&base).await }, Message::Connected)
             }
             Message::Tick => {
+                // the server that the app started may have ended on its own (a port taken, a binary that refuses its arguments)
+                if let Some(s) = self.sidecar.as_mut() {
+                    if !s.running() {
+                        self.sidecar = None;
+                        self.switching = false;
+                        self.sidecar_note = Some(format!("The server that the app started has ended. Its output is in {}.", self.data_file.with_file_name("server.log").display()));
+                    }
+                }
                 if matches!(self.server, Server::Down(_)) {
                     return self.update(Message::Retry);
                 }
@@ -855,7 +879,7 @@ impl App {
         let what = match self.models.busy.as_deref() {
             Some("") => "Unloading the model…".to_string(),
             Some(r) => format!("Loading {}…", r.rsplit(['/', '\\']).next().unwrap_or(r)),
-            None => "The server is restarting…".to_string(),
+            None => "The server is starting…".to_string(),
         };
         let card = column![text(what).size(22).font(bold()), text("The server restarts its engine for this. It takes a few seconds, larger models longer.").size(14).color(t.fg_soft)].spacing(10).max_width(520);
         container(card).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill).padding(24).into()
@@ -985,6 +1009,7 @@ impl App {
             text("No fLLM server found").size(22).font(bold()),
             text(format!("The window needs a running server at {}. Start one with `fllm-rs studio` (or `fllm-rs serve --model …`), or point the window at another with FLLM_URL.", self.base)).size(14).color(t.fg_soft),
             text(reason).size(12).color(t.muted),
+            text(self.sidecar_note.clone().unwrap_or_default()).size(12).color(t.muted),
             button(text("Try again").size(14)).on_press(Message::Retry).padding([8, 18]).style(theme::primary_button(t)),
         ]
         .spacing(10)
