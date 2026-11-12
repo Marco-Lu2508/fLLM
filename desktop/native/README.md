@@ -42,7 +42,7 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   an edit shows the lines it removes and adds on tinted bands before it runs, a command shows itself, the result follows. Reading and the
   agent's own notes run alone; the rest asks (*Allow* / *Deny*; a denial goes back to the model) unless you pick *Edit freely* or *Everything*,
   and switching the mode releases the calls that wait. *Stop* ends the stream and the running commands. The bar under the conversation counts
-  the file changes and undoes the last one or all of them. *Plan* is the plan agent: it is offered only the tools that read, refuses anything else, and answers with a plan; *Carry out the plan* then goes back to the mode you had and tells the agent to do it. Not yet: sub-agents, MCP tools, hooks. The conversation of each folder is kept (`code-sessions.json` next to the chats, the newest 200 items; a call that had not finished comes back as interrupted) and returns when the folder is opened again; *New session* forgets it.
+  the file changes and undoes the last one or all of them. *Plan* is the plan agent: it is offered only the tools that read, refuses anything else, and answers with a plan; *Carry out the plan* then goes back to the mode you had and tells the agent to do it. The instructions of the folder (`AGENTS.md`, `CLAUDE.md` and the like, nearest first), the notes the agent kept and your profile are read from the server and are part of the model's instructions (the empty screen names the files it read). Besides the server's tools the model has `todo_write` / `todo_read` (a task list that the window keeps and shows above the box) and `ask_user` (a question with answer buttons; you can also type the answer in the box), and the tools of the connected MCP servers (`/api/studio/mcp/tools`, named `mcp__server__tool`; they ask first like a command). The screen and input tools are not offered. Not yet: sub-agents (`task`), hooks. The conversation of each folder is kept (`code-sessions.json` next to the chats, the newest 200 items; a call that had not finished comes back as interrupted) and returns when the folder is opened again; *New session* forgets it.
 - Long chats: the conversation draws the newest 60 messages; *Show 60 earlier messages* adds the next older ones. Laying out every message on every
   frame of a stream cost 63 ms for 800 messages (release build, `cargo run --release --example view_bench -- 50 200 800`); with the window the
   build and layout of the view stay at about 6 ms however long the chat is (opening an 800-message chat still parses its markdown once, 124 ms).
@@ -57,7 +57,7 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 | Stage | Content |
 |---|---|
 | 2c | Load options (context, device), the measured prompt speed with the compact prompt, projects and memory, web tools |
-| 3b | Code mode: sub-agents, MCP tools, a terminal view |
+| 3b | Code mode: sub-agents, a terminal view |
 | 4a | One download per system with the app and the engine side by side: the `native-bundle` workflow (started by hand with a release tag; it takes the engine of that release, checks its checksum, adds the app and, with `upload`, signs and attaches the archives) |
 | 4 | The engine inside the process (no second program; for now the app starts the server next to it, see above), installers per system that put both side by side, the tray, autostart, updates; then the Tauri app and the web Studio files can go |
 | later | Voice, artifacts, the research mode, the command palette |
@@ -67,7 +67,7 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 95 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+cargo test --locked      # 101 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
                          # window driven headless (new chat, send, stream, stop, error, delete, theme) and drawn to PNG files
 ```
 

@@ -15,6 +15,9 @@ async fn main() {
     println!("workspace: {w:?}");
     let (tools, for_model) = code::fetch_tools(base.clone()).await.expect("tools");
     println!("{} tools; first: {:?}", tools.len(), tools.first());
+    println!("tools: {} in the window, kinds: {:?}", tools.len(), tools.iter().filter(|t| t.kind != code::ToolKind::Server).map(|t| t.name.as_str()).collect::<Vec<_>>());
+    let ctx = code::fetch_context(base.clone()).await.expect("context");
+    println!("instructions: {:?}, memory notes: {}, prompt block: {} chars", ctx.files.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ctx.memory_workspace.len() + ctx.memory_global.len(), ctx.prompt().len());
     let model = fllm_app::api::fetch_model(&base).await.expect("model").id;
     println!("{} tools in the list for the model", for_model.as_array().map_or(0, |a| a.len()));
     let wire = vec![WireMessage::new("system", "You are a coding agent. Use the tools."), WireMessage::new("user", task)];

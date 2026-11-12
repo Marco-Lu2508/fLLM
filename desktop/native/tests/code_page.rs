@@ -29,7 +29,7 @@ fn code(app: &mut App, m: CodeMsg) {
 
 fn open_folder(app: &mut App) {
     code(app, CodeMsg::Opened(Ok(Workspace { root: "/home/marco/projects/fllm".into(), name: "fllm".into(), branch: Some("main".into()) })));
-    let tools: Vec<Tool> = [("read_file", Permission::Read), ("grep", Permission::Read), ("edit_file", Permission::Edit), ("bash", Permission::Command)].into_iter().map(|(n, p)| Tool { name: n.into(), permission: p }).collect();
+    let tools: Vec<Tool> = [("read_file", Permission::Read), ("grep", Permission::Read), ("edit_file", Permission::Edit), ("bash", Permission::Command)].into_iter().map(|(n, p)| Tool::server(n, p)).collect();
     code(app, CodeMsg::ToolsLoaded(Ok((tools, json!([])))));
 }
 
@@ -222,4 +222,36 @@ fn the_plan_mode_is_a_choice_of_the_bar_and_its_plan_can_be_carried_out_from_a_b
     assert!(msgs.iter().any(|m| matches!(m, Message::Code(CodeMsg::ExecutePlan))), "{msgs:?}");
     code(&mut app, CodeMsg::ExecutePlan);
     assert!(app.code().running && app.code().mode == fllm_app::code::Mode::Ask);
+}
+
+#[test]
+fn a_question_of_the_agent_the_task_list_and_the_instructions_are_in_the_window() {
+    let (mut app, _dir) = app("light");
+    open_folder(&mut app);
+    code(&mut app, CodeMsg::ContextLoaded(Ok(fllm_app::code::Context { files: vec![("AGENTS.md".into(), "Run cargo test.".into())], memory_workspace: vec!["uses tabs".into()], ..Default::default() })));
+    // before the first request the window says which instructions it read
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 1000.0), app.view());
+    ui.find("Project instructions read: AGENTS.md").expect("the instruction files are named");
+    ui.find("1 saved memory note are part of the instructions.").expect("and the notes");
+    drop(ui);
+    say(&mut app, "Add a --json flag");
+    let tools: Vec<Tool> = fllm_app::code::client_tools().0;
+    code(&mut app, CodeMsg::ToolsLoaded(Ok((tools, json!([])))));
+    tool_call(&mut app, 0, "t1", "todo_write", r#"{"todos":[{"content":"Read cli.rs","status":"completed"},{"content":"Add the flag","status":"in_progress"},{"content":"Run the tests","status":"pending"}]}"#);
+    tool_call(&mut app, 1, "q1", "ask_user", r#"{"question":"Should the JSON go to stdout or to a file?","options":["stdout","a file"]}"#);
+    code(&mut app, CodeMsg::Stream(StreamEvent::Done));
+    assert_eq!(app.code().todos.len(), 3);
+    assert!(app.code().pending_ask().is_some());
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 1000.0), app.view());
+    ui.find("Tasks · 1 of 3 done").expect("the list counts what is done");
+    ui.find("Add the flag").expect("and shows the tasks");
+    ui.find("Should the JSON go to stdout or to a file?").expect("the question is on its card");
+    assert!(ui.find("Allow").is_err(), "a question has answers, not Allow and Deny");
+    ui.find("Answer").expect("the button of the box answers");
+    drop(ui);
+    picture(&app, "code-agent-asks-light");
+    let msgs = click(&app, "a file");
+    assert!(msgs.iter().any(|m| matches!(m, Message::Code(CodeMsg::Answer(id, a)) if id == "q1" && a == "a file")), "{msgs:?}");
+    let msgs = click(&app, "Skip");
+    assert!(msgs.iter().any(|m| matches!(m, Message::Code(CodeMsg::Deny(id)) if id == "q1")), "{msgs:?}");
 }

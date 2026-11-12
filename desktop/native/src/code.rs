@@ -32,6 +32,8 @@ pub enum Permission {
     Command,
     Memory,
     Network,
+    /// Operating the screen: only offered when computer use is switched on, which this window does not do.
+    Computer,
     Other,
 }
 
@@ -43,6 +45,7 @@ impl Permission {
             "command" => Permission::Command,
             "memory" => Permission::Memory,
             "network" => Permission::Network,
+            "computer" => Permission::Computer,
             _ => Permission::Other,
         }
     }
@@ -66,15 +69,58 @@ impl Mode {
         match p {
             Permission::Read | Permission::Memory => true,
             Permission::Edit => matches!(self, Mode::AutoEdit | Mode::Auto),
-            Permission::Command | Permission::Network | Permission::Other => self == Mode::Auto,
+            Permission::Command | Permission::Network | Permission::Computer | Permission::Other => self == Mode::Auto,
         }
     }
+}
+
+/// Where a tool runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolKind {
+    /// On the server (`/api/studio/agent/tool`).
+    Server,
+    /// A tool of an MCP server, called through `/api/studio/mcp/call`.
+    Mcp { server: String, tool: String },
+    /// The task list of the session, kept in the window (`todo_write` replaces it, `todo_read` reads it).
+    Todo { write: bool },
+    /// A question to you with a few answers; your answer is the result.
+    Ask,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tool {
     pub name: String,
     pub permission: Permission,
+    pub kind: ToolKind,
+}
+
+impl Tool {
+    pub fn server(name: &str, permission: Permission) -> Tool {
+        Tool { name: name.into(), permission, kind: ToolKind::Server }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Todo {
+    pub content: String,
+    pub status: TodoStatus,
+}
+
+/// What the server knows about the folder and you: the project's instruction files (AGENTS.md and the like, the nearest first), the notes the
+/// agent kept in earlier sessions and the short profile of you; all of it goes into the instructions of the model.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Context {
+    pub files: Vec<(String, String)>,
+    pub memory_workspace: Vec<String>,
+    pub memory_global: Vec<String>,
+    pub profile: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -106,6 +152,7 @@ pub struct Call {
     /// The arguments as the model wrote them (JSON text).
     pub args: String,
     pub permission: Permission,
+    pub kind: ToolKind,
     pub state: CallState,
 }
 
@@ -136,6 +183,7 @@ fn permission_name(p: Permission) -> &'static str {
         Permission::Command => "command",
         Permission::Memory => "memory",
         Permission::Network => "network",
+        Permission::Computer => "computer",
         Permission::Other => "other",
     }
 }
@@ -183,6 +231,9 @@ pub enum CodeMsg {
     Opened(Result<Workspace, String>),
     ToolsLoaded(Result<(Vec<Tool>, Value), String>),
     ChangesLoaded(Result<Vec<Change>, String>),
+    ContextLoaded(Result<Context, String>),
+    /// Your answer to a question of the agent (`ask_user`).
+    Answer(String, String),
     Edit(Action),
     Send,
     Stop,
@@ -220,6 +271,8 @@ pub struct CodeState {
     pub running: bool,
     pub steps: usize,
     pub changes: Vec<Change>,
+    pub context: Context,
+    pub todos: Vec<Todo>,
     pub error: Option<String>,
     acc: Vec<Partial>,
     handle: Option<task::Handle>,
@@ -239,6 +292,8 @@ impl Default for CodeState {
             running: false,
             steps: 0,
             changes: Vec::new(),
+            context: Context::default(),
+            todos: Vec::new(),
             error: None,
             acc: Vec::new(),
             handle: None,
@@ -258,10 +313,11 @@ pub fn parse_workspace(v: &Value) -> Result<Workspace, String> {
 
 /// The tools of the agent: the OpenAI-format list for the model, and name and permission of each for the window.
 pub fn parse_tools(v: &Value) -> (Vec<Tool>, Value) {
-    let list = v.get("tools").and_then(Value::as_array).cloned().unwrap_or_default();
+    // the screen and input tools are for computer use, which is not switched on here: the model is not offered them
+    let list: Vec<Value> = v.get("tools").and_then(Value::as_array).cloned().unwrap_or_default().into_iter().filter(|t| t.get("permission").and_then(Value::as_str) != Some("computer")).collect();
     let tools = list
         .iter()
-        .filter_map(|t| Some(Tool { name: t.pointer("/function/name")?.as_str()?.to_string(), permission: Permission::parse(t.get("permission").and_then(Value::as_str).unwrap_or("")) }))
+        .filter_map(|t| Some(Tool::server(t.pointer("/function/name")?.as_str()?, Permission::parse(t.get("permission").and_then(Value::as_str).unwrap_or("")))))
         .collect();
     // the model gets the OpenAI shape only; "permission" is ours
     let for_model: Vec<Value> = list.iter().map(|t| json!({"type": "function", "function": t.get("function").cloned().unwrap_or(Value::Null)})).collect();
@@ -275,6 +331,99 @@ pub fn parse_changes(v: &Value) -> Vec<Change> {
         .flatten()
         .map(|c| Change { id: c.get("id").and_then(Value::as_u64).unwrap_or(0), path: c.get("path").and_then(Value::as_str).unwrap_or_default().to_string(), kind: c.get("kind").and_then(Value::as_str).unwrap_or("edit").to_string() })
         .collect()
+}
+
+/// The tools the window itself provides: a task list and questions to you.
+pub fn client_tools() -> (Vec<Tool>, Vec<Value>) {
+    let def = |name: &str, description: &str, properties: Value, required: Value| json!({"type": "function", "function": {"name": name, "description": description, "parameters": {"type": "object", "properties": properties, "required": required}}});
+    let tools = vec![
+        Tool { name: "todo_write".into(), permission: Permission::Read, kind: ToolKind::Todo { write: true } },
+        Tool { name: "todo_read".into(), permission: Permission::Read, kind: ToolKind::Todo { write: false } },
+        Tool { name: "ask_user".into(), permission: Permission::Read, kind: ToolKind::Ask },
+    ];
+    let defs = vec![
+        def(
+            "todo_write",
+            "Keep a task list for work with several steps. Send the complete list every time; exactly one task should be in_progress.",
+            json!({"todos": {"type": "array", "items": {"type": "object", "properties": {"content": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["content", "status"]}}}),
+            json!(["todos"]),
+        ),
+        def("todo_read", "Read the current task list (use it when you have lost track of the plan).", json!({}), json!([])),
+        def(
+            "ask_user",
+            "Ask the user a question with a few answer choices when a decision is theirs and you cannot find the answer yourself. The answer comes back as the result.",
+            json!({"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "description": "Two to five short choices."}}),
+            json!(["question"]),
+        ),
+    ];
+    (tools, defs)
+}
+
+/// The name a model can use for a tool of an MCP server: letters, digits, `_` and `-`, at most 64 characters.
+pub fn mcp_name(server: &str, tool: &str) -> String {
+    format!("mcp__{server}__{tool}").chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).take(64).collect()
+}
+
+/// The tools of the connected MCP servers (`/api/studio/mcp/tools`): each asks first, like a command.
+pub fn parse_mcp_tools(v: &Value) -> (Vec<Tool>, Vec<Value>) {
+    let mut tools = Vec::new();
+    let mut defs = Vec::new();
+    for t in v.get("tools").and_then(Value::as_array).into_iter().flatten() {
+        let (Some(server), Some(tool)) = (t.get("server").and_then(Value::as_str), t.get("name").and_then(Value::as_str)) else { continue };
+        let name = mcp_name(server, tool);
+        let description = format!("[{server}] {}", t.get("description").and_then(Value::as_str).unwrap_or_default()).trim().to_string();
+        let parameters = t.get("input_schema").filter(|s| s.is_object()).cloned().unwrap_or_else(|| json!({"type": "object", "properties": {}}));
+        tools.push(Tool { name: name.clone(), permission: Permission::Command, kind: ToolKind::Mcp { server: server.into(), tool: tool.into() } });
+        defs.push(json!({"type": "function", "function": {"name": name, "description": description, "parameters": parameters}}));
+    }
+    (tools, defs)
+}
+
+pub fn parse_context(v: &Value) -> Context {
+    let strings = |p: &str| v.pointer(p).and_then(Value::as_array).into_iter().flatten().filter_map(|e| e.as_str().map(str::to_string)).collect::<Vec<_>>();
+    Context {
+        files: v.get("files").and_then(Value::as_array).into_iter().flatten().filter_map(|f| Some((f.get("file")?.as_str()?.to_string(), f.get("text")?.as_str()?.to_string()))).collect(),
+        memory_workspace: strings("/memory/workspace"),
+        memory_global: strings("/memory/global"),
+        profile: v.get("profile").and_then(Value::as_str).unwrap_or_default().to_string(),
+    }
+}
+
+fn capped(text: &str, max: usize) -> String {
+    if text.chars().count() > max {
+        format!("{}\n...", text.chars().take(max).collect::<String>())
+    } else {
+        text.to_string()
+    }
+}
+
+impl Context {
+    /// The part of the instructions that comes from the folder and from you, capped like the Studio caps it.
+    pub fn prompt(&self) -> String {
+        let mut out: Vec<String> = Vec::new();
+        let (mut used, mut parts) = (0usize, Vec::new());
+        for (file, text) in &self.files {
+            let room = 9000usize.saturating_sub(used);
+            if room < 200 {
+                break;
+            }
+            let text = capped(text, room);
+            used += text.chars().count();
+            parts.push(format!("({file})\n{text}"));
+        }
+        if !parts.is_empty() {
+            out.push(format!("Instructions of this project (follow them; the first is the most specific)\n{}", parts.join("\n\n")));
+        }
+        let list = |title: &str, items: &[String]| if items.is_empty() { String::new() } else { format!("{title}\n{}", items.iter().map(|e| format!("- {e}")).collect::<Vec<_>>().join("\n")) };
+        let memory = [list("About this workspace:", &self.memory_workspace), list("About the user (all workspaces):", &self.memory_global)].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("\n");
+        if !memory.is_empty() {
+            out.push(format!("Memory (facts saved in earlier sessions)\n{}", capped(&memory, 3000)));
+        }
+        if !self.profile.trim().is_empty() {
+            out.push(format!("About the user (notes from earlier sessions and the user's own edits; adapt to them, do not mention them unless asked)\n{}", capped(self.profile.trim(), 1200)));
+        }
+        out.join("\n\n")
+    }
 }
 
 /// The text a tool answer carries: its output, or its error.
@@ -314,7 +463,37 @@ pub async fn pick_folder(base: String) -> Result<Option<String>, String> {
 }
 
 pub async fn fetch_tools(base: String) -> Result<(Vec<Tool>, Value), String> {
-    call(&base, reqwest::Method::GET, "/api/studio/agent/tools", None).await.map(|v| parse_tools(&v))
+    let (mut tools, for_model) = call(&base, reqwest::Method::GET, "/api/studio/agent/tools", None).await.map(|v| parse_tools(&v))?;
+    let mut defs = for_model.as_array().cloned().unwrap_or_default();
+    let (client, client_defs) = client_tools();
+    tools.extend(client);
+    defs.extend(client_defs);
+    // no MCP client or no server connected: no MCP tools
+    if let Ok(v) = call(&base, reqwest::Method::GET, "/api/studio/mcp/tools", None).await {
+        let (mcp, mcp_defs) = parse_mcp_tools(&v);
+        tools.extend(mcp);
+        defs.extend(mcp_defs);
+    }
+    Ok((tools, Value::Array(defs)))
+}
+
+pub async fn fetch_context(base: String) -> Result<Context, String> {
+    call(&base, reqwest::Method::POST, "/api/studio/agent/instructions", Some(json!({}))).await.map(|v| parse_context(&v))
+}
+
+/// A tool of an MCP server: its answer is text, or an error.
+pub async fn call_mcp(base: String, server: String, tool: String, args: Value) -> Result<String, String> {
+    let v = call(&base, reqwest::Method::POST, "/api/studio/mcp/call", Some(json!({"server": server, "name": tool, "arguments": args}))).await?;
+    let content = match v.get("content") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Null) | None => String::new(),
+        Some(other) => other.to_string(),
+    };
+    if v.get("is_error").and_then(Value::as_bool) == Some(true) {
+        Err(if content.is_empty() { "The tool failed.".into() } else { content })
+    } else {
+        Ok(content)
+    }
 }
 
 pub async fn fetch_changes(base: String) -> Result<Vec<Change>, String> {
@@ -389,6 +568,30 @@ pub fn preview(name: &str, args: &Value) -> Vec<(Line, String)> {
     out
 }
 
+/// The list `todo_write` sends: `{todos: [{content, status}]}`.
+pub fn parse_todos(args: &Value) -> Result<Vec<Todo>, String> {
+    let list = args.get("todos").and_then(Value::as_array).ok_or("todos must be a list of {content, status}.")?;
+    list.iter()
+        .map(|t| {
+            let content = t.get("content").and_then(Value::as_str).filter(|c| !c.trim().is_empty()).ok_or("every task needs a content.")?.to_string();
+            let status = match t.get("status").and_then(Value::as_str) {
+                Some("pending") => TodoStatus::Pending,
+                Some("in_progress") => TodoStatus::InProgress,
+                Some("completed") => TodoStatus::Completed,
+                _ => return Err("status must be pending, in_progress or completed.".to_string()),
+            };
+            Ok(Todo { content, status })
+        })
+        .collect()
+}
+
+pub fn todo_text(todos: &[Todo]) -> String {
+    if todos.is_empty() {
+        return "The task list is empty.".into();
+    }
+    todos.iter().enumerate().map(|(i, t)| format!("{}. [{}] {}", i + 1, match t.status { TodoStatus::Pending => " ", TodoStatus::InProgress => "~", TodoStatus::Completed => "x" }, t.content)).collect::<Vec<_>>().join("\n")
+}
+
 impl CodeState {
     /// The session as it is kept on disk: a call that had not finished is kept as interrupted.
     pub fn saved(&self) -> Vec<Saved> {
@@ -429,7 +632,7 @@ impl CodeState {
                     md.push_str(&text);
                     Item::Assistant { text, md: Box::new(md) }
                 }
-                Saved::Call { id, name, args, permission, ok, output } => Item::Call(Call { id, name, args, permission: Permission::parse(&permission), state: CallState::Done { ok, output } }),
+                Saved::Call { id, name, args, permission, ok, output } => Item::Call(Call { id, name, args, permission: Permission::parse(&permission), kind: ToolKind::Server, state: CallState::Done { ok, output } }),
                 Saved::Note { text } => Item::Note(text),
             })
             .collect();
@@ -445,6 +648,14 @@ impl CodeState {
         self.items[start..].iter().filter_map(|i| if let Item::Call(c) = i { Some(c) } else { None })
     }
 
+    /// The question of the agent that waits for your answer.
+    pub fn pending_ask(&self) -> Option<&Call> {
+        self.items.iter().rev().find_map(|i| match i {
+            Item::Call(c) if c.kind == ToolKind::Ask && c.state == CallState::Pending => Some(c),
+            _ => None,
+        })
+    }
+
     fn call_mut(&mut self, id: &str) -> Option<&mut Call> {
         self.items.iter_mut().find_map(|i| match i {
             Item::Call(c) if c.id == id => Some(c),
@@ -457,6 +668,11 @@ impl CodeState {
         let mut system = if self.mode == Mode::Plan { PLAN_PROMPT } else { CODE_PROMPT }.to_string();
         if let Some(w) = &self.workspace {
             system.push_str(&format!("\n\nThe project folder is {} (tool paths are relative to it).", w.root));
+        }
+        let context = self.context.prompt();
+        if !context.is_empty() {
+            system.push_str("\n\n");
+            system.push_str(&context);
         }
         if let Some(x) = extra.filter(|x| !x.trim().is_empty()) {
             system.push_str("\n\n");
@@ -529,16 +745,54 @@ impl CodeState {
 
     fn run(&mut self, base: &str, id: &str) -> Task<Message> {
         let Some(c) = self.call_mut(id) else { return Task::none() };
+        if c.kind == ToolKind::Ask {
+            // only your answer finishes this call
+            return Task::none();
+        }
         let parsed = serde_json::from_str::<Value>(if c.args.trim().is_empty() { "{}" } else { &c.args });
-        match parsed {
-            Ok(args) => {
-                c.state = CallState::Running;
-                let (base, name, id) = (base.to_string(), c.name.clone(), id.to_string());
-                Task::perform(run_tool(base, name, args), move |r| Message::Code(CodeMsg::ToolDone(id.clone(), r)))
-            }
+        let args = match parsed {
+            Ok(args) => args,
             Err(e) => {
                 c.state = CallState::Done { ok: false, output: format!("The arguments are not valid JSON ({e}). Call the tool again with a JSON object.") };
+                return Task::none();
+            }
+        };
+        let kind = c.kind.clone();
+        let (base, name, id) = (base.to_string(), c.name.clone(), id.to_string());
+        match kind {
+            ToolKind::Todo { write } => {
+                let output = if write {
+                    match parse_todos(&args) {
+                        Ok(list) => {
+                            self.todos = list;
+                            format!("The task list was updated ({} tasks).", self.todos.len())
+                        }
+                        Err(e) => {
+                            if let Some(c) = self.call_mut(&id) {
+                                c.state = CallState::Done { ok: false, output: e };
+                            }
+                            return Task::none();
+                        }
+                    }
+                } else {
+                    todo_text(&self.todos)
+                };
+                if let Some(c) = self.call_mut(&id) {
+                    c.state = CallState::Done { ok: true, output };
+                }
                 Task::none()
+            }
+            ToolKind::Mcp { server, tool } => {
+                if let Some(c) = self.call_mut(&id) {
+                    c.state = CallState::Running;
+                }
+                Task::perform(call_mcp(base, server, tool, args), move |r| Message::Code(CodeMsg::ToolDone(id.clone(), r)))
+            }
+            ToolKind::Server | ToolKind::Ask => {
+                if let Some(c) = self.call_mut(&id) {
+                    c.state = CallState::Running;
+                }
+                Task::perform(run_tool(base, name, args), move |r| Message::Code(CodeMsg::ToolDone(id.clone(), r)))
             }
         }
     }
@@ -557,8 +811,12 @@ impl CodeState {
             let id = if p.id.is_empty() { format!("call_{}_{n}", self.steps) } else { p.id };
             let tool = self.tool(&p.name).cloned();
             let permission = tool.as_ref().map_or(Permission::Other, |t| t.permission);
+            let kind = tool.as_ref().map_or(ToolKind::Server, |t| t.kind.clone());
             let state = if tool.is_none() {
                 CallState::Done { ok: false, output: format!("There is no tool called {}.", p.name) }
+            } else if kind == ToolKind::Ask {
+                // a question is for you in every mode
+                CallState::Pending
             } else if self.mode.allows(permission) {
                 CallState::Running
             } else if self.mode == Mode::Plan {
@@ -567,7 +825,7 @@ impl CodeState {
                 CallState::Pending
             };
             let run_now = state == CallState::Running;
-            self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, state }));
+            self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state }));
             if run_now {
                 ids.push(id);
             }
@@ -613,6 +871,8 @@ impl CodeState {
             }
             CodeMsg::Close => {
                 self.workspace = None;
+                self.context = Context::default();
+                self.todos.clear();
                 self.items.clear();
                 self.changes.clear();
                 self.running = false;
@@ -626,8 +886,20 @@ impl CodeState {
                 let base = env.base.to_string();
                 Task::batch([
                     Task::perform(fetch_tools(base.clone()), |r| Message::Code(CodeMsg::ToolsLoaded(r))),
-                    Task::perform(fetch_changes(base), |r| Message::Code(CodeMsg::ChangesLoaded(r))),
+                    Task::perform(fetch_changes(base.clone()), |r| Message::Code(CodeMsg::ChangesLoaded(r))),
+                    Task::perform(fetch_context(base), |r| Message::Code(CodeMsg::ContextLoaded(r))),
                 ])
+            }
+            CodeMsg::ContextLoaded(Ok(c)) => {
+                self.context = c;
+                Task::none()
+            }
+            CodeMsg::ContextLoaded(Err(_)) => Task::none(),
+            CodeMsg::Answer(id, answer) => {
+                if let Some(c) = self.call_mut(&id).filter(|c| c.kind == ToolKind::Ask && c.state == CallState::Pending) {
+                    c.state = CallState::Done { ok: true, output: answer };
+                }
+                self.continue_if_done(env)
             }
             CodeMsg::Opened(Err(e)) => {
                 self.error = Some(e);
@@ -652,6 +924,15 @@ impl CodeState {
                 Task::none()
             }
             CodeMsg::Send => {
+                // a question of the agent is waiting: what you write is the answer
+                if let Some(id) = self.pending_ask().map(|c| c.id.clone()) {
+                    let answer = self.editor.text().trim().to_string();
+                    if answer.is_empty() {
+                        return Task::none();
+                    }
+                    self.editor = Content::new();
+                    return self.update(CodeMsg::Answer(id, answer), env);
+                }
                 let prompt = self.editor.text().trim().to_string();
                 if prompt.is_empty() || self.running || self.workspace.is_none() || env.model.is_none() {
                     return Task::none();
@@ -728,7 +1009,8 @@ impl CodeState {
             }
             CodeMsg::Deny(id) => {
                 if let Some(c) = self.call_mut(&id).filter(|c| c.state == CallState::Pending) {
-                    c.state = CallState::Done { ok: false, output: "The user declined this call. Do not repeat it; ask what to do instead or take another way.".into() };
+                    let output = if c.kind == ToolKind::Ask { "The user did not answer. Decide yourself or go on without it." } else { "The user declined this call. Do not repeat it; ask what to do instead or take another way." };
+                    c.state = CallState::Done { ok: false, output: output.into() };
                 }
                 self.continue_if_done(env)
             }
@@ -763,14 +1045,14 @@ impl CodeState {
                     // a plan changes nothing: what waited for approval is refused
                     for i in self.items.iter_mut() {
                         if let Item::Call(c) = i {
-                            if c.state == CallState::Pending {
+                            if c.state == CallState::Pending && c.kind != ToolKind::Ask {
                                 c.state = CallState::Done { ok: false, output: "Plan mode only allows reading. Write the plan instead.".into() };
                             }
                         }
                     }
                 }
                 // calls that wait now may be allowed
-                let ids: Vec<String> = self.items.iter().filter_map(|i| if let Item::Call(c) = i { (c.state == CallState::Pending && m.allows(c.permission)).then(|| c.id.clone()) } else { None }).collect();
+                let ids: Vec<String> = self.items.iter().filter_map(|i| if let Item::Call(c) = i { (c.state == CallState::Pending && c.kind != ToolKind::Ask && m.allows(c.permission)).then(|| c.id.clone()) } else { None }).collect();
                 let mut tasks = Vec::new();
                 for id in ids {
                     tasks.push(self.run(env.base, &id));
@@ -805,6 +1087,7 @@ impl CodeState {
                     return Task::none();
                 }
                 self.items.clear();
+                self.todos.clear();
                 self.steps = 0;
                 Task::none()
             }
@@ -863,7 +1146,16 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
             body = body.push(mono_box(t, text(shown).size(12).font(Font::MONOSPACE).color(if *ok { t.fg_soft } else { t.danger }).into()));
         }
     }
-    if c.state == CallState::Pending {
+    if c.state == CallState::Pending && c.kind == ToolKind::Ask {
+        let question = args.get("question").and_then(Value::as_str).unwrap_or("The agent has a question.").to_string();
+        body = body.push(text(question).size(14));
+        let mut options = row![].spacing(8);
+        for o in args.get("options").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+            options = options.push(button(text(o.to_string()).size(13)).on_press(Message::Code(CodeMsg::Answer(c.id.clone(), o.to_string()))).padding([5, 14]).style(theme::primary_button(t)));
+        }
+        body = body.push(options.push(button(text("Skip").size(13)).on_press(Message::Code(CodeMsg::Deny(c.id.clone()))).padding([5, 14]).style(theme::secondary_button(t))));
+        body = body.push(text("Or type your answer below and press Enter.").size(12).color(t.muted));
+    } else if c.state == CallState::Pending {
         body = body.push(row![
             button(text("Allow").size(13)).on_press(Message::Code(CodeMsg::Approve(c.id.clone()))).padding([5, 16]).style(theme::primary_button(t)),
             button(text("Deny").size(13)).on_press(Message::Code(CodeMsg::Deny(c.id.clone()))).padding([5, 16]).style(theme::secondary_button(t)),
@@ -876,7 +1168,15 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
 fn timeline<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme) -> Element<'a, Message> {
     let mut col = column![].spacing(12).width(Length::Fill);
     if s.items.is_empty() {
-        col = col.push(container(text("Tell the agent what to do in this folder: explain the code, find a bug, add a test, rename something.").size(14).color(t.muted)).padding([24, 4]));
+        let mut intro = column![text("Tell the agent what to do in this folder: explain the code, find a bug, add a test, rename something.").size(14).color(t.muted)].spacing(6);
+        if !s.context.files.is_empty() {
+            intro = intro.push(text(format!("Project instructions read: {}", s.context.files.iter().map(|f| f.0.as_str()).collect::<Vec<_>>().join(", "))).size(12).color(t.muted));
+        }
+        let notes = s.context.memory_workspace.len() + s.context.memory_global.len();
+        if notes > 0 {
+            intro = intro.push(text(format!("{notes} saved memory note{} are part of the instructions.", if notes == 1 { "" } else { "s" })).size(12).color(t.muted));
+        }
+        col = col.push(container(intro).padding([24, 4]));
     }
     for (i, item) in s.items.iter().enumerate() {
         let element: Element<'a, Message> = match item {
@@ -958,6 +1258,19 @@ pub fn page<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, can_send: bool
     let header = container(container(header).max_width(820).width(Length::Fill)).center_x(Length::Fill).padding([10, 24]);
 
     let mut bar = column![].spacing(6);
+    if !s.todos.is_empty() {
+        let done = s.todos.iter().filter(|t| t.status == TodoStatus::Completed).count();
+        let mut list = column![text(format!("Tasks · {done} of {} done", s.todos.len())).size(12).color(t.muted)].spacing(3);
+        for todo in &s.todos {
+            let (mark, color) = match todo.status {
+                TodoStatus::Pending => ("[ ]", t.fg_soft),
+                TodoStatus::InProgress => ("[~]", t.primary),
+                TodoStatus::Completed => ("[x]", t.muted),
+            };
+            list = list.push(row![text(mark).size(12).font(Font::MONOSPACE).color(color), text(todo.content.as_str()).size(13).color(color)].spacing(8));
+        }
+        bar = bar.push(container(list).padding([8, 12]).width(Length::Fill).style(theme::inset(t)));
+    }
     if let Some(e) = &s.error {
         bar = bar.push(text(e.as_str()).size(13).color(t.danger));
     }
@@ -986,7 +1299,7 @@ pub fn page<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, can_send: bool
     }
 
     let editor = text_editor(&s.editor)
-        .placeholder(if can_send { "Tell the agent what to do" } else { "Load a model first" })
+        .placeholder(if s.pending_ask().is_some() { "Type your answer" } else if can_send { "Tell the agent what to do" } else { "Load a model first" })
         .on_action(|a| Message::Code(CodeMsg::Edit(a)))
         .key_binding(|kp: KeyPress| match kp.key.as_ref() {
             keyboard::Key::Named(keyboard::key::Named::Enter) if !kp.modifiers.shift() && matches!(kp.status, Status::Focused { .. }) => Some(Binding::Custom(Message::Code(CodeMsg::Send))),
@@ -998,7 +1311,10 @@ pub fn page<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, can_send: bool
         .min_height(44)
         .max_height(160)
         .style(move |_, _| text_editor::Style { background: iced::Background::Color(iced::Color::TRANSPARENT), border: iced::Border { width: 0.0, ..Default::default() }, placeholder: t.muted, value: t.fg, selection: iced::Color { a: 0.35, ..t.primary } });
-    let action = if s.running {
+    let asking = s.pending_ask().is_some();
+    let action = if asking {
+        button(text("Answer").size(13)).on_press_maybe((!s.editor.text().trim().is_empty()).then_some(Message::Code(CodeMsg::Send))).padding([6, 16]).style(theme::primary_button(t))
+    } else if s.running {
         button(text("Stop").size(13)).on_press(Message::Code(CodeMsg::Stop)).padding([6, 16]).style(theme::primary_button(t))
     } else {
         button(text("Send").size(13)).on_press_maybe((can_send && !s.editor.text().trim().is_empty()).then_some(Message::Code(CodeMsg::Send))).padding([6, 16]).style(theme::primary_button(t))
@@ -1017,13 +1333,16 @@ mod tests {
     use super::*;
 
     fn tools() -> Vec<Tool> {
-        ["read_file:read", "grep:read", "edit_file:edit", "write_file:edit", "bash:command", "web_fetch:network"]
+        let mut list: Vec<Tool> = ["read_file:read", "grep:read", "edit_file:edit", "write_file:edit", "bash:command", "web_fetch:network"]
             .iter()
             .map(|s| {
                 let (n, p) = s.split_once(':').unwrap();
-                Tool { name: n.into(), permission: Permission::parse(p) }
+                Tool::server(n, Permission::parse(p))
             })
-            .collect()
+            .collect();
+        list.extend(client_tools().0);
+        list.extend(parse_mcp_tools(&json!({"tools": [{"server": "github", "name": "list_issues", "description": "d"}]})).0);
+        list
     }
 
     fn state(mode: Mode) -> CodeState {
@@ -1296,6 +1615,127 @@ mod tests {
         let _ = s.update(CodeMsg::SetMode(Mode::AutoEdit), &env());
         let _ = s.update(CodeMsg::SetMode(Mode::Plan), &env());
         assert_eq!(s.build_mode, Mode::AutoEdit);
+    }
+
+    #[test]
+    fn the_screen_tools_are_not_offered_and_mcp_tools_get_safe_names() {
+        let (list, for_model) = parse_tools(&json!({"tools": [
+            {"type": "function", "function": {"name": "read_file"}, "permission": "read"},
+            {"type": "function", "function": {"name": "computer_click"}, "permission": "computer"}
+        ]}));
+        assert_eq!(list.len(), 1);
+        assert_eq!(for_model.as_array().unwrap().len(), 1, "the model does not hear of computer use");
+        assert_eq!(mcp_name("my.server", "do thing"), "mcp__my_server__do_thing");
+        assert_eq!(mcp_name(&"s".repeat(40), &"t".repeat(40)).len(), 64);
+        let (tools, defs) = parse_mcp_tools(&json!({"tools": [
+            {"server": "fs", "name": "read", "description": "Reads", "input_schema": {"type": "object", "properties": {"p": {"type": "string"}}}},
+            {"server": "fs", "name": "list"},
+            {"nonsense": 1}
+        ]}));
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].kind, ToolKind::Mcp { server: "fs".into(), tool: "read".into() });
+        assert_eq!(tools[0].permission, Permission::Command, "an MCP tool asks first, like a command");
+        assert_eq!(defs[0]["function"]["description"], "[fs] Reads");
+        assert_eq!(defs[1]["function"]["parameters"], json!({"type": "object", "properties": {}}), "a tool without a schema takes no arguments");
+    }
+
+    #[test]
+    fn the_instructions_of_the_folder_the_notes_and_the_profile_reach_the_model() {
+        let ctx = parse_context(&json!({
+            "files": [{"file": "AGENTS.md", "text": "Always run cargo test."}, {"file": "../CLAUDE.md", "text": "Be brief."}],
+            "memory": {"workspace": ["uses tabs"], "global": ["prefers German"]},
+            "profile": "  likes short answers  "
+        }));
+        assert_eq!(ctx.files.len(), 2);
+        let mut s = state(Mode::Ask);
+        s.context = ctx.clone();
+        let system = s.wire(Some("Custom line.")).remove(0).content;
+        assert!(system.contains("Instructions of this project (follow them; the first is the most specific)\n(AGENTS.md)\nAlways run cargo test.\n\n(../CLAUDE.md)\nBe brief."), "{system}");
+        assert!(system.contains("Memory (facts saved in earlier sessions)\nAbout this workspace:\n- uses tabs\nAbout the user (all workspaces):\n- prefers German"));
+        assert!(system.contains("likes short answers"));
+        assert!(system.find("Instructions of this project").unwrap() < system.find("Custom line.").unwrap(), "your own prompt comes last");
+        assert_eq!(Context::default().prompt(), "");
+        // a very long file is cut, and the next file only gets what is left
+        let long = Context { files: vec![("A.md".into(), "x".repeat(20_000)), ("B.md".into(), "y".repeat(500))], ..Default::default() };
+        let p = long.prompt();
+        assert!(p.chars().count() < 9_400 && p.contains("..."), "{}", p.chars().count());
+        assert!(!p.contains("B.md"), "nothing is left for the second file");
+    }
+
+    #[test]
+    fn the_task_list_is_kept_by_the_window_and_the_model_can_read_it_back() {
+        let mut s = state(Mode::Ask);
+        say(&mut s, "x");
+        let todos = r#"{"todos":[{"content":"read the code","status":"completed"},{"content":"fix it","status":"in_progress"},{"content":"test it","status":"pending"}]}"#;
+        answer(&mut s, "", &[("t1", "todo_write", todos)]);
+        assert!(matches!(call(&s, "t1").state, CallState::Done { ok: true, .. }), "no approval, no server");
+        assert_eq!(s.todos.len(), 3);
+        assert_eq!(s.todos[1], Todo { content: "fix it".into(), status: TodoStatus::InProgress });
+        assert_eq!(assistants(&s), 2, "the model goes on at once");
+        answer(&mut s, "", &[("t2", "todo_read", "")]);
+        assert!(matches!(&call(&s, "t2").state, CallState::Done { ok: true, output } if output == "1. [x] read the code\n2. [~] fix it\n3. [ ] test it"));
+        answer(&mut s, "", &[("t3", "todo_write", r#"{"todos":[{"content":"a","status":"nearly"}]}"#)]);
+        assert!(matches!(&call(&s, "t3").state, CallState::Done { ok: false, output } if output.contains("status must be")));
+        assert_eq!(s.todos.len(), 3, "a wrong list changes nothing");
+        // a new session starts without the list
+        let _ = s.update(CodeMsg::Stop, &env());
+        let _ = s.update(CodeMsg::NewSession, &env());
+        assert!(s.todos.is_empty());
+    }
+
+    #[test]
+    fn a_question_of_the_agent_waits_for_you_in_every_mode_and_your_words_are_the_answer() {
+        for mode in [Mode::Ask, Mode::Auto, Mode::Plan] {
+            let mut s = state(mode);
+            say(&mut s, "x");
+            answer(&mut s, "", &[("q1", "ask_user", r#"{"question":"Which file?","options":["a.rs","b.rs"]}"#)]);
+            assert_eq!(call(&s, "q1").state, CallState::Pending, "{mode:?}");
+            assert_eq!(assistants(&s), 1, "the model waits for the answer");
+            assert_eq!(s.pending_ask().map(|c| c.id.as_str()), Some("q1"));
+            // allowing is not answering
+            let _ = s.update(CodeMsg::Approve("q1".into()), &env());
+            assert_eq!(call(&s, "q1").state, CallState::Pending);
+            let _ = s.update(CodeMsg::SetMode(Mode::Auto), &env());
+            assert_eq!(call(&s, "q1").state, CallState::Pending, "a freer mode does not answer for you");
+            let _ = s.update(CodeMsg::SetMode(mode), &env());
+            // typing in the box answers
+            s.editor = Content::with_text("a.rs please");
+            let _ = s.update(CodeMsg::Send, &env());
+            assert_eq!(call(&s, "q1").state, CallState::Done { ok: true, output: "a.rs please".into() });
+            assert_eq!(assistants(&s), 2);
+            assert!(s.pending_ask().is_none());
+            assert!(!s.items.iter().any(|i| matches!(i, Item::User(t) if t == "a.rs please")), "it is not a new request");
+        }
+        // an option, and skipping
+        let mut s = state(Mode::Ask);
+        say(&mut s, "x");
+        answer(&mut s, "", &[("q1", "ask_user", r#"{"question":"Q?","options":["yes","no"]}"#)]);
+        let _ = s.update(CodeMsg::Answer("q1".into(), "no".into()), &env());
+        assert_eq!(call(&s, "q1").state, CallState::Done { ok: true, output: "no".into() });
+        let _ = s.update(CodeMsg::Answer("q1".into(), "yes".into()), &env());
+        assert_eq!(call(&s, "q1").state, CallState::Done { ok: true, output: "no".into() }, "answered once");
+        answer(&mut s, "", &[("q2", "ask_user", r#"{"question":"Q2?"}"#)]);
+        let _ = s.update(CodeMsg::Deny("q2".into()), &env());
+        assert!(matches!(&call(&s, "q2").state, CallState::Done { ok: false, output } if output.contains("did not answer")));
+        // an empty box does not answer
+        answer(&mut s, "", &[("q3", "ask_user", r#"{"question":"Q3?"}"#)]);
+        s.editor = Content::with_text("   ");
+        let _ = s.update(CodeMsg::Send, &env());
+        assert_eq!(call(&s, "q3").state, CallState::Pending);
+    }
+
+    #[test]
+    fn an_mcp_tool_asks_like_a_command() {
+        let mut s = state(Mode::Ask);
+        say(&mut s, "x");
+        answer(&mut s, "", &[("m1", "mcp__github__list_issues", r#"{"repo":"a/b"}"#)]);
+        assert_eq!(call(&s, "m1").state, CallState::Pending);
+        assert_eq!(call(&s, "m1").kind, ToolKind::Mcp { server: "github".into(), tool: "list_issues".into() });
+        let _ = s.update(CodeMsg::Approve("m1".into()), &env());
+        assert_eq!(call(&s, "m1").state, CallState::Running);
+        let _ = s.update(CodeMsg::ToolDone("m1".into(), Err("The server is not connected.".into())), &env());
+        assert!(matches!(&call(&s, "m1").state, CallState::Done { ok: false, output } if output.contains("not connected")));
+        assert_eq!(assistants(&s), 2, "the model hears about it");
     }
 
     #[test]
