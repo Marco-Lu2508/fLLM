@@ -100,8 +100,9 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
   server now copies that state at the last full block of every prompt it has read (about 100 MB for a 9B model, kept in host memory, the
   oldest copy goes first when the limit of 1 GB is reached) and puts it back when a later prompt starts with exactly the same tokens: the
   next chat turn reads only its last partial block, the answer of the model and the new message. It is automatic (on by default) and
-  manual (off, or a size in MB). Two prompts that share only a start but differ before the end of the earlier prompt do not share a state
-  (a state cannot be cut back); the shared system prompt of two different chats is therefore read again once per chat. The live numbers are
+  manual (off, or a size in MB). A state cannot be cut back, so two prompts that share only a start would not share anything; for that
+  case every chat request announces where its fixed start ends (the system prompt, the tool schemas, the opening of the first user turn) and a
+  second copy is kept there: the first message of a new chat does not read the system prompt again either. The live numbers are
   on the same page; `GET /admin/prefix-cache` reports them under `state_checkpoints`.
 * **Personalization and memory** (Settings > Personalization). *About me and how to answer* is put in front of the instructions of every
   chat (2,000 characters; switch it off for one chat in the chat menu). Memory holds short facts about you. The model manages it itself

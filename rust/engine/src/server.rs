@@ -2072,7 +2072,7 @@ async fn completions(State(state): State<Arc<AppState>>, Json(body): Json<Value>
             )
         }
     };
-    openai_generate(state, body, prompt_ids, false, None, ImageOverrides::default()).await
+    openai_generate(state, body, prompt_ids, false, None, ImageOverrides::default(), 0).await
 }
 
 async fn chat_completions(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
@@ -2101,7 +2101,7 @@ async fn chat_completions(State(state): State<Arc<AppState>>, Json(body): Json<V
             Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
         };
         let reasoning = ReasoningSpec::for_request(&state, &prompt, &vision_tools);
-        return openai_generate(state, body, ids, true, Some(reasoning), images).await;
+        return openai_generate(state, body, ids, true, Some(reasoning), images, 0).await;
     }
     let tools = body.get("tools");
     if tools.is_some_and(|v| !v.is_array()) {
@@ -2156,14 +2156,12 @@ async fn chat_completions(State(state): State<Arc<AppState>>, Json(body): Json<V
             template_kwargs.insert(state.thinking.variable.into(), json!(!off));
         }
     }
+    let head_tools = if tool_spec.disabled { None } else { tools.cloned() };
+    let head_kwargs = template_kwargs.clone();
     let mut prompt = match render_messages(
         &state,
         Value::Array(messages.clone()),
-        if tool_spec.disabled {
-            None
-        } else {
-            tools.cloned()
-        },
+        head_tools.clone(),
         Some(template_kwargs),
     ) {
         Ok(prompt) => prompt,
@@ -2183,6 +2181,7 @@ async fn chat_completions(State(state): State<Arc<AppState>>, Json(body): Json<V
         Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
     };
     reasoning.budget = thinking_budget;
+    let share_prefix = shared_head_tokens(&state, messages, head_tools, head_kwargs, &prompt_ids);
     openai_generate(
         state,
         body,
@@ -2190,8 +2189,33 @@ async fn chat_completions(State(state): State<Arc<AppState>>, Json(body): Json<V
         true,
         Some(reasoning),
         ImageOverrides::default(),
+        share_prefix,
     )
     .await
+}
+
+/// How many tokens at the start of a chat prompt every conversation of this kind shares: everything the template writes before the content of
+/// the first user message (the system prompt, the tool schemas, the opening of the user turn). The content of that message is replaced by a
+/// marker, the prompt is rendered again, and what stands before the marker is tokenized; the answer is that many tokens when they are the
+/// first tokens of the real prompt, else 0. A model with recurrent layers keeps a state checkpoint there, so that a new conversation does
+/// not read its system prompt again (see `SamplingParams::share_prefix_tokens`); it is a hint and never changes a result.
+fn shared_head_tokens(
+    state: &AppState,
+    messages: &[Value],
+    tools: Option<Value>,
+    kwargs: Map<String, Value>,
+    prompt_ids: &[i64],
+) -> usize {
+    const MARKER: &str = "\u{1}fllm-head-marker\u{1}";
+    let Some(first_user) = messages.iter().position(|m| m.get("role").and_then(Value::as_str) == Some("user")) else { return 0 };
+    let mut probe = messages.to_vec();
+    probe[first_user]["content"] = Value::String(MARKER.to_owned());
+    probe.truncate(first_user + 1);
+    let Ok(rendered) = render_messages(state, Value::Array(probe), tools, Some(kwargs)) else { return 0 };
+    let Some(at) = rendered.find(MARKER) else { return 0 };
+    let Ok(head) = state.tokenizer.encode(&rendered[..at]) else { return 0 };
+    let head: Vec<i64> = head.into_iter().map(i64::from).collect();
+    if !head.is_empty() && prompt_ids.starts_with(&head) { head.len() } else { 0 }
 }
 
 async fn image_embeddings(
@@ -2769,6 +2793,7 @@ async fn openai_generate(
     is_chat: bool,
     reasoning: Option<ReasoningSpec>,
     images: ImageOverrides,
+    share_prefix: usize,
 ) -> Response {
     // a draining server takes no new inference work, on any route
     if let Some(refusal) = state.draining_response() {
@@ -2927,6 +2952,7 @@ async fn openai_generate(
         Ok(params) => params,
         Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
     };
+    sampling.share_prefix_tokens = share_prefix;
     if let Err(error) =
         openai_sampling_controls(&body, is_chat, state.tokenizer.vocab_size(), &mut sampling)
     {

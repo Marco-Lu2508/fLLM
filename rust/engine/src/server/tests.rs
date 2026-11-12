@@ -2430,6 +2430,30 @@ async fn the_prefix_cache_can_be_inspected_while_the_worker_runs() {
 }
 
 #[tokio::test]
+async fn the_shared_head_of_a_chat_prompt_ends_where_the_first_user_message_begins() {
+    let h = start(Settings::default());
+    let system = "You answer in short sentences and you never guess. ".repeat(3);
+    let ids = |user: &str, extra: bool| {
+        let mut messages = vec![json!({"role": "system", "content": system}), json!({"role": "user", "content": user})];
+        if extra {
+            messages.extend([json!({"role": "assistant", "content": "ok"}), json!({"role": "user", "content": "and more"})]);
+        }
+        let text = render_messages(&h.state, Value::Array(messages.clone()), None, Some(Map::new())).unwrap();
+        let ids: Vec<i64> = h.state.tokenizer.encode(&text).unwrap().into_iter().map(i64::from).collect();
+        (messages, ids)
+    };
+    let (m1, p1) = ids("hello there", false);
+    let (m2, p2) = ids("what is the capital of a small country in the north of europe", true);
+    let head1 = shared_head_tokens(&h.state, &m1, None, Map::new(), &p1);
+    let head2 = shared_head_tokens(&h.state, &m2, None, Map::new(), &p2);
+    assert!(head1 > 30 && head1 < p1.len(), "the system prompt is most of the head: {head1} of {}", p1.len());
+    assert_eq!(head1, head2, "the head does not depend on what the user wrote or on later turns");
+    assert_eq!(p1[..head1], p2[..head2], "and it is the same tokens");
+    assert_eq!(shared_head_tokens(&h.state, &m1, None, Map::new(), &p2[1..]), 0, "tokens that do not start with the head give no hint");
+    assert_eq!(shared_head_tokens(&h.state, &[json!({"role": "system", "content": "only a system message"})], None, Map::new(), &p1), 0, "no user message, nothing to share yet");
+}
+
+#[tokio::test]
 async fn the_prefix_cache_can_be_emptied() {
     let h = start(Settings::default());
     let _ = h.chat(json!({"max_tokens": 2, "ignore_eos": true})).await;

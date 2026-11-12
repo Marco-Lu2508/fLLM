@@ -25,7 +25,12 @@ fn prompt(seed: i64, len: usize, vocab: i64) -> Vec<i64> {
 
 /// Serves the prompts together, greedy, `tokens` each, and returns the tokens of every prompt.
 fn serve(rt: &mut InferenceRuntime, prompts: &[Vec<i64>], tokens: usize) -> Vec<Vec<i64>> {
-    let params = SamplingParams { ignore_eos: true, ..Default::default() };
+    serve_hinted(rt, prompts, tokens, 0)
+}
+
+/// `serve` for requests that announce that their first `share` tokens are shared with other requests (a system prompt).
+fn serve_hinted(rt: &mut InferenceRuntime, prompts: &[Vec<i64>], tokens: usize, share: usize) -> Vec<Vec<i64>> {
+    let params = SamplingParams { ignore_eos: true, share_prefix_tokens: share, ..Default::default() };
     for (i, p) in prompts.iter().enumerate() {
         rt.submit_with_sampling(format!("r{i}"), p.clone(), tokens, params.clone()).unwrap();
     }
@@ -91,7 +96,19 @@ fn check(label: &str, gguf: &Path, vocab: i64) {
     assert_eq!((&got[0], &got[1], &got[2]), (&want_a, &want_a, &want_other), "{label}: sequences that restore the same checkpoint at once");
     assert!(states(&rt).0 >= before_hits + 2, "{label}: both copies of the prompt restore it");
 
+    // requests that announce a shared start (a system prompt): a new conversation with another end restores the state at that start
+    let mut rt = runtime(gguf);
+    assert_eq!(serve_hinted(&mut rt, std::slice::from_ref(&a), 14, 56).remove(0), want_a, "{label}: first prompt with a hint");
+    assert_eq!(states(&rt).2, 2, "{label}: a checkpoint at the end of the shared start and one at the end of the prompt");
+    assert_eq!(serve_hinted(&mut rt, std::slice::from_ref(&shares_start), 14, 56).remove(0), want_shares, "{label}: shared start restored");
+    let (hits, skipped, ..) = states(&rt);
+    assert_eq!(hits, 1, "{label}: the second conversation starts from the checkpoint at the shared start");
+    assert_eq!(skipped, 48, "{label}: 56 shared tokens are 3 full blocks of 16");
+
     // and again after all of them are gone: the state of a finished sequence did not stay behind in the shared block
+    let mut rt = runtime(gguf);
+    serve(&mut rt, std::slice::from_ref(&a), 14);
+    serve(&mut rt, &[a.clone(), a.clone(), other.clone()], 14);
     assert_eq!(serve(&mut rt, std::slice::from_ref(&a), 14).remove(0), want_a, "{label}: after the concurrent ones");
 }
 

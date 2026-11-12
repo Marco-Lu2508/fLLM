@@ -66,9 +66,10 @@ pub struct Sequence {
     /// The runtime copies the KV of the cached block into the own one and puts the checkpoint into the sequence's state before its first
     /// forward pass (the decoder keeps the state under the id of the first block, so that block must belong to this sequence alone).
     pub state_restore: Option<(u64, i64, i64)>,
-    /// A model with recurrent layers: the block boundary (tokens, chain hash) at which the state of this prompt is worth keeping; the
-    /// scheduler ends a prompt chunk exactly there, and the runtime copies the state out when the chunk is done.
-    pub ckpt_target: Option<(usize, u64)>,
+    /// A model with recurrent layers: the block boundaries (tokens, chain hash; ascending) at which the state of this prompt is worth keeping:
+    /// the end of the shared start the request announced (`share_prefix_tokens`) and the end of the prompt. The scheduler ends a prompt chunk
+    /// exactly on each, and the runtime copies the state out when the chunk is done.
+    pub ckpt_targets: Vec<(usize, u64)>,
     ngram_index: Option<HashMap<Vec<i64>, Vec<usize>>>,
     ngram_upto: usize,
 }
@@ -126,7 +127,7 @@ impl Sequence {
             deadline: None,
             swapped_blocks: 0,
             state_restore: None,
-            ckpt_target: None,
+            ckpt_targets: Vec::new(),
             ngram_index: None,
             ngram_upto: 0,
         }
@@ -380,8 +381,8 @@ impl Scheduler {
                 }
                 let mut chunk = todo.min(prefill_budget);
                 // the state of a recurrent model can only be copied out between two chunks: end one exactly on the boundary that is worth keeping
-                if let Some((boundary, _)) = seq.ckpt_target {
-                    if start < boundary && start + chunk > boundary {
+                if let Some(&(boundary, _)) = seq.ckpt_targets.iter().find(|(b, _)| *b > start) {
+                    if start + chunk > boundary {
                         chunk = boundary - start;
                     }
                 }
@@ -590,16 +591,24 @@ impl Scheduler {
         }
         self.prefix_cache_hits += u64::from(reused > 0);
         seq.state_restore = restore;
-        seq.ckpt_target = None;
+        seq.ckpt_targets.clear();
         if restore.is_some() {
             self.state_cache_hits += 1;
             self.state_cache_tokens += (reused * self.cfg.block_size) as u64;
         }
-        // keep the state at the end of this prompt (its last full block) for the next one that starts the same way
+        // keep the state at the end of the shared start the request announced and at the end of this prompt (its last full block), for the
+        // next prompt that starts the same way
         if self.cfg.state_checkpoints && self.cfg.prefix_cache && !has_media && n_full > 0 {
-            let boundary = n_full * self.cfg.block_size;
-            if seq.num_computed < boundary && !self.ckpt_index.contains_key(&hashes[n_full - 1]) {
-                seq.ckpt_target = Some((boundary, hashes[n_full - 1]));
+            let shared_blocks = (seq.sampling.share_prefix_tokens / self.cfg.block_size).min(n_full);
+            for blocks in [shared_blocks, n_full] {
+                let boundary = blocks * self.cfg.block_size;
+                if blocks > 0
+                    && seq.num_computed < boundary
+                    && !self.ckpt_index.contains_key(&hashes[blocks - 1])
+                    && seq.ckpt_targets.last().is_none_or(|(b, _)| *b < boundary)
+                {
+                    seq.ckpt_targets.push((boundary, hashes[blocks - 1]));
+                }
             }
         }
         seq.block_hashes = hashes
@@ -964,12 +973,14 @@ impl Scheduler {
         let table = self.bm.get_table_mut(sid)?;
         table.num_tokens = table.num_tokens.max(nt as i64);
         seq.blocks = table.blocks.clone();
-        if let Some((boundary, hash)) = seq.ckpt_target {
+        // a boundary that a chunk went past (a preempted sequence started again) is dropped: its state cannot be copied any more
+        while let Some(&(boundary, hash)) = seq.ckpt_targets.first() {
+            if seq.num_computed < boundary {
+                break;
+            }
+            seq.ckpt_targets.remove(0);
             if seq.num_computed == boundary {
-                seq.ckpt_target = None;
                 self.ckpt_wanted.push((sid, hash, boundary));
-            } else if seq.num_computed > boundary {
-                seq.ckpt_target = None; // a chunk went past it (a preempted sequence started again): nothing to copy any more
             }
         }
         self.insert_full_blocks(sid)

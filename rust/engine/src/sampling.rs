@@ -42,6 +42,10 @@ pub struct SamplingParams {
     pub priority: i32,
     /// Seconds after which the request is aborted (queue time included).
     pub timeout_secs: Option<f64>,
+    /// Tokens at the start of the prompt that other requests of the same kind will share too (the system prompt and the tool schemas of a
+    /// chat). A model with recurrent layers keeps a state checkpoint at the last block boundary inside them, so that a new conversation
+    /// does not read them again. 0: no hint. It never changes the result of a request.
+    pub share_prefix_tokens: usize,
 }
 
 impl Default for SamplingParams {
@@ -77,6 +81,7 @@ impl Default for SamplingParams {
             logprobs_processed: false,
             priority: 0,
             timeout_secs: None,
+            share_prefix_tokens: 0,
         }
     }
 }
