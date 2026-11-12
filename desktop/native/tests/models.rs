@@ -104,7 +104,7 @@ async fn a_server_without_a_model_is_told_apart_from_no_server() {
 fn app(theme: &str) -> (App, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chats.json");
-    fllm_app::store::Store { chats: vec![], next_id: 0, theme: theme.into() }.save(&path).unwrap();
+    fllm_app::store::Store { next_id: 0, theme: theme.into(), ..Default::default() }.save(&path).unwrap();
     let (mut app, _task) = App::with("http://127.0.0.1:9".into(), path);
     let _ = app.update(Message::Connected(Ok(ModelInfo { id: "qwen2.5-0.5b-instruct".into(), max_context: 8192 })));
     let o = models::parse_overview(&serde_json::from_str(OVERVIEW).unwrap());

@@ -5,8 +5,10 @@
 
 pub mod api;
 pub mod app;
+pub mod engine_settings;
 pub mod md;
 pub mod models;
+pub mod settings;
 pub mod store;
 pub mod theme;
 

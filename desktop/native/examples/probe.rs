@@ -11,7 +11,7 @@ async fn main() {
     let limit: usize = args.next().and_then(|n| n.parse().ok()).unwrap_or(12);
     let model = fetch_model(&base).await.expect("a server is running");
     println!("model: {} (context {})", model.id, model.max_context);
-    let mut events = Box::pin(chat_stream(base, model.id, vec![WireMessage { role: "user".into(), content: prompt }]));
+    let mut events = Box::pin(chat_stream(base, model.id, vec![WireMessage { role: "user".into(), content: prompt }], Default::default()));
     let mut seen = 0;
     while let Some(ev) = events.next().await {
         println!("{ev:?}");

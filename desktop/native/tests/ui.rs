@@ -26,7 +26,7 @@ fn app_with(chats: Vec<ChatRecord>, theme: &str, connected: bool) -> (App, tempf
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chats.json");
     let next_id = chats.iter().map(|c| c.id + 1).max().unwrap_or(0);
-    Store { chats, next_id, theme: theme.into() }.save(&path).unwrap();
+    Store { chats, next_id, theme: theme.into(), ..Default::default() }.save(&path).unwrap();
     let (mut app, _task) = App::with("http://127.0.0.1:9".into(), path);
     if connected {
         let _ = app.update(Message::Connected(Ok(model())));

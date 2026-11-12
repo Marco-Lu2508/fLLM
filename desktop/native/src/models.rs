@@ -255,11 +255,11 @@ pub async fn download_action(base: String, id: u64, action: &'static str) -> Res
 
 // ---- the page --------------------------------------------------------------------------------------------------------------------
 
-fn bold() -> Font {
+pub(crate) fn bold() -> Font {
     Font { weight: iced::font::Weight::Semibold, ..UI_FONT }
 }
 
-fn card<'a>(t: Tokens, title: &'a str, body: Element<'a, Message>) -> Element<'a, Message> {
+pub(crate) fn card<'a>(t: Tokens, title: &'a str, body: Element<'a, Message>) -> Element<'a, Message> {
     container(column![text(title).size(13).font(bold()).color(t.fg_soft), body].spacing(12))
         .padding(16)
         .width(Length::Fill)
@@ -267,7 +267,7 @@ fn card<'a>(t: Tokens, title: &'a str, body: Element<'a, Message>) -> Element<'a
         .into()
 }
 
-fn line<'a>(t: Tokens, title: String, detail: String, action: Element<'a, Message>) -> Element<'a, Message> {
+pub(crate) fn line<'a>(t: Tokens, title: String, detail: String, action: Element<'a, Message>) -> Element<'a, Message> {
     row![
         column![text(title).size(14).font(Font::MONOSPACE), text(detail).size(12).color(t.muted)].spacing(2).width(Length::Fill),
         action
@@ -277,7 +277,7 @@ fn line<'a>(t: Tokens, title: String, detail: String, action: Element<'a, Messag
     .into()
 }
 
-fn small_button<'a>(t: Tokens, label: &'a str, message: Option<Message>, primary: bool) -> Element<'a, Message> {
+pub(crate) fn small_button<'a>(t: Tokens, label: &'a str, message: Option<Message>, primary: bool) -> Element<'a, Message> {
     let b = button(text(label).size(13)).on_press_maybe(message).padding([5, 14]);
     if primary {
         b.style(theme::primary_button(t)).into()
@@ -287,7 +287,7 @@ fn small_button<'a>(t: Tokens, label: &'a str, message: Option<Message>, primary
 }
 
 /// A hairline between two rows of a list.
-fn rule<'a>(t: Tokens) -> Element<'a, Message> {
+pub(crate) fn rule<'a>(t: Tokens) -> Element<'a, Message> {
     container(Space::new()).width(Length::Fill).height(1).style(move |_| container::Style { background: Some(iced::Background::Color(t.separator)), ..Default::default() }).into()
 }
 

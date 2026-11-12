@@ -12,6 +12,34 @@ pub struct ModelInfo {
     pub max_context: u64,
 }
 
+/// The sampling settings of a request. `None` leaves the choice to the server (the defaults the model ships with).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ChatParams {
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub max_tokens: Option<u32>,
+}
+
+/// The JSON of a streamed chat request.
+pub fn chat_body(model: &str, messages: &[WireMessage], params: ChatParams) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+        "stream_options": { "include_usage": true },
+    });
+    if let Some(t) = params.temperature {
+        body["temperature"] = serde_json::json!(t);
+    }
+    if let Some(p) = params.top_p {
+        body["top_p"] = serde_json::json!(p);
+    }
+    if let Some(n) = params.max_tokens {
+        body["max_tokens"] = serde_json::json!(n);
+    }
+    body
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WireMessage {
     pub role: String,
@@ -109,7 +137,7 @@ pub async fn fetch_model(base: &str) -> Result<ModelInfo, String> {
 type ByteStream = Pin<Box<dyn Stream<Item = reqwest::Result<Vec<u8>>> + Send>>;
 
 /// Starts a chat request and gives the events of its stream. The request is dropped, and the server stops generating, when the stream is dropped.
-pub fn chat_stream(base: String, model: String, messages: Vec<WireMessage>) -> impl Stream<Item = StreamEvent> + Send {
+pub fn chat_stream(base: String, model: String, messages: Vec<WireMessage>, params: ChatParams) -> impl Stream<Item = StreamEvent> + Send {
     struct State {
         bytes: Option<ByteStream>,
         request: Option<(String, serde_json::Value)>,
@@ -117,13 +145,7 @@ pub fn chat_stream(base: String, model: String, messages: Vec<WireMessage>) -> i
         queue: VecDeque<StreamEvent>,
         finished: bool,
     }
-    let body = serde_json::json!({
-        "model": model,
-        "messages": messages,
-        "stream": true,
-        "stream_options": { "include_usage": true },
-        "temperature": 0.7,
-    });
+    let body = chat_body(&model, &messages, params);
     let state = State { bytes: None, request: Some((format!("{base}/v1/chat/completions"), body)), lines: LineBuffer::default(), queue: VecDeque::new(), finished: false };
     stream::unfold(state, |mut st| async move {
         loop {
@@ -174,6 +196,16 @@ pub fn chat_stream(base: String, model: String, messages: Vec<WireMessage>) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_sampling_sends_nothing_and_manual_sampling_sends_what_was_set() {
+        let m = [WireMessage { role: "user".into(), content: "Hi".into() }];
+        let auto = chat_body("tiny", &m, ChatParams::default());
+        assert!(auto.get("temperature").is_none() && auto.get("top_p").is_none() && auto.get("max_tokens").is_none(), "{auto}");
+        assert_eq!(auto["stream"], true);
+        let manual = chat_body("tiny", &m, ChatParams { temperature: Some(0.25), top_p: Some(0.5), max_tokens: Some(300) });
+        assert_eq!((manual["temperature"].as_f64(), manual["top_p"].as_f64(), manual["max_tokens"].as_u64()), (Some(0.25), Some(0.5), Some(300)));
+    }
 
     #[test]
     fn a_content_delta_is_text() {

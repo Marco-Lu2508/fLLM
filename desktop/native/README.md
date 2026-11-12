@@ -12,7 +12,7 @@ fllm-rs studio --no-open --port 8080 --model model.gguf     # or any fLLM server
 cd desktop/native && cargo run --release                    # FLLM_URL=http://host:port points the window elsewhere
 ```
 
-## What is built (stage 1: the chat, stage 2a: Models)
+## What is built (stage 1: the chat, stage 2: Models and Settings)
 
 - Chat with streaming answers, Markdown (headings, lists, tables, quotes, code blocks with highlighting and a copy button, inline code),
   stop, copy, the reasoning of thinking models kept apart, tokens per second and prompt speed under every answer.
@@ -21,6 +21,13 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 - The design system of the Studio (`design-system/fllm-studio/MASTER.md`): the same tokens in both themes (copper accent, system grays,
   hairlines), Inter shipped inside the program, a context meter with a track, 780-pixel reading column shared by messages and composer.
 - No server: a clear screen with the address and a retry every four seconds. A server without a model has its own screen that leads to Models.
+- Settings (sidebar > Settings). Everything is *Automatic* until you switch it to *Manual*; a manual value is sent with every message, an
+  automatic one is left to the server and the model. Answers: sampling (temperature, top-p), the system prompt (the short built-in one or your own
+  text), the longest answer; kept in the chat file, "Reset all answer settings" puts them back. The engine of the server (the Studio's own
+  routes `/api/studio/engine` and `/api/studio/settings`): sharing the start of prompts, the state checkpoints of Qwen3.5 / Mamba / RWKV and their
+  memory, prompt blocks in RAM or on disk, what happens when memory runs out, saved answers and who shares them, loading the last model at start,
+  unloading when idle. A switch or choice is written at once, a number or text when you press Enter (checked first); the server says which
+  options its environment fixes; engine options apply after a restart, which the page offers ("Restart now") and waits for.
 - Models (sidebar > Models): what is loaded (Unload), the downloads with progress, speed, time left and Pause / Resume / Cancel / Remove, the
   models on this computer (Load: a file from a folder by its path, a downloaded one by its name), and the catalog with a search field, the
   quantizations as chips (the recommended one is chosen; you pick another before you press Download), the size of the chosen one and whether
@@ -31,7 +38,7 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 
 | Stage | Content |
 |---|---|
-| 2b | Settings (sampling, system prompt with the measured prompt speed, engine), load options (context, device), the model picker in the chat bar, projects and memory, web tools |
+| 2c | Load options (context, device), the model picker in the chat bar, the measured prompt speed with the compact prompt, projects and memory, web tools |
 | 3 | Code mode (folder, agent loop, diffs, approvals, terminal) |
 | 4 | The server inside the process (no second program), installers per system, the tray, autostart, updates; then the Tauri app and the web Studio files can go |
 | later | Voice, artifacts, the research mode, the command palette |
@@ -41,7 +48,7 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 42 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+cargo test --locked      # 61 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
                          # window driven headless (new chat, send, stream, stop, error, delete, theme) and drawn to PNG files
 ```
 

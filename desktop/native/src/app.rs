@@ -3,7 +3,9 @@
 use crate::api::{self, ModelInfo, StreamEvent, WireMessage};
 use crate::store::{self, ChatRecord, Record, Role, Stats, Store};
 use crate::md;
+use crate::engine_settings::{self, EngineState};
 use crate::models::{self, ModelsState};
+use crate::settings;
 use crate::theme::{self, Tokens};
 use iced::widget::text_editor::{Action, Binding, Content, KeyPress, Status};
 use iced::widget::{button, column, container, markdown, mouse_area, row, scrollable, svg, text, text_editor, Space};
@@ -11,7 +13,6 @@ use iced::{keyboard, task, time, Alignment, Element, Font, Length, Padding, Subs
 use std::path::PathBuf;
 use std::time::Duration;
 
-const SYSTEM_PROMPT: &str = "You are a helpful assistant running locally on the user's computer. Answer in the language of the user. Be concise. Use Markdown only where it helps. If you are not sure, say so. Never invent facts, quotes, links or sources.";
 const STARTERS: [&str; 4] = [
     "Explain in simple words how a language model writes a text word by word.",
     "Write a fast Rust function for the dot product of two f32 slices.",
@@ -64,6 +65,7 @@ pub enum Server {
 pub enum View {
     Chat,
     Models,
+    Settings,
 }
 
 /// The reply that is being written right now.
@@ -92,6 +94,10 @@ pub struct App {
     hover: Option<u64>,
     page: View,
     models: ModelsState,
+    /// The text box of the custom system prompt, and the text of the "longest answer" box.
+    system_editor: Content,
+    max_tokens_text: String,
+    engine: EngineState,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +131,27 @@ pub enum Message {
     DownloadAction(u64, &'static str),
     /// A load, unload, download or download action is done (or failed with this message).
     ModelAction(Result<String, String>),
+    SamplingManual(bool),
+    Temperature(f32),
+    TopP(f32),
+    SystemCustom(bool),
+    SystemEdit(Action),
+    MaxTokensText(String),
+    /// Write the answer settings to the disk (after a slider is let go, a box is submitted, a choice is made).
+    SavePrefs,
+    ResetPrefs,
+    EngineLoaded(Result<(engine_settings::EngineData, engine_settings::ServerData), String>),
+    /// A switch or a choice changed: written at once.
+    EngineSet(String, serde_json::Value),
+    EngineDraft(String, String),
+    /// Enter in a number or text box.
+    EngineSubmit(String),
+    ServerSet(String, serde_json::Value),
+    /// An engine or server setting was written (or refused with this message).
+    EngineSaved(Result<(), String>),
+    EngineReset,
+    RestartServer,
+    RestartDone(Result<(), String>),
 }
 
 impl App {
@@ -152,7 +179,12 @@ impl App {
             hover: None,
             page: View::Chat,
             models: ModelsState::default(),
+            system_editor: Content::new(),
+            max_tokens_text: String::new(),
+            engine: EngineState::default(),
         };
+        app.system_editor = Content::with_text(&app.store.prefs.system_prompt);
+        app.max_tokens_text = if app.store.prefs.max_tokens > 0 { app.store.prefs.max_tokens.to_string() } else { String::new() };
         if let Some(first) = app.store.chats.first().map(|c| c.id) {
             app.open(first);
         }
@@ -256,10 +288,8 @@ impl App {
         self.error = None;
         self.editor = Content::new();
 
-        let mut wire = vec![WireMessage { role: "system".into(), content: SYSTEM_PROMPT.into() }];
-        // everything but the empty answer that was just added
-        wire.extend(self.messages[..self.messages.len() - 1].iter().map(|m| WireMessage { role: m.role.wire().into(), content: m.content.clone() }));
-        let events = api::chat_stream(self.base.clone(), model.id, wire);
+        let wire = self.wire_messages();
+        let events = api::chat_stream(self.base.clone(), model.id, wire, self.chat_params());
         let (task, handle) = Task::stream(events).map(move |ev| Message::Stream(id, ev)).abortable();
         self.live = Some(Live { chat: id, _handle: handle.abort_on_drop() });
         task
@@ -369,7 +399,110 @@ impl App {
                 if page == View::Models {
                     return self.refresh_models();
                 }
+                if page == View::Settings && !matches!(self.server, Server::Down(_)) {
+                    return Task::perform(engine_settings::fetch(self.base.clone()), Message::EngineLoaded);
+                }
                 Task::none()
+            }
+            Message::EngineLoaded(Ok((engine, server))) => {
+                self.engine.engine = engine;
+                self.engine.server = server;
+                self.engine.loaded = true;
+                self.engine.error = None;
+                self.engine.drafts.clear();
+                Task::none()
+            }
+            Message::EngineLoaded(Err(e)) => {
+                self.engine.error = Some(e);
+                Task::none()
+            }
+            Message::EngineSet(key, value) => {
+                if self.engine.locked(&key) {
+                    return Task::none();
+                }
+                self.engine.engine.values.insert(key.clone(), value.clone());
+                self.engine.restart_needed = true;
+                Task::perform(engine_settings::save_engine(self.base.clone(), serde_json::json!({ key: value })), Message::EngineSaved)
+            }
+            Message::EngineDraft(key, text) => {
+                self.engine.drafts.insert(key, text);
+                Task::none()
+            }
+            Message::EngineSubmit(key) => {
+                let Some(text) = self.engine.drafts.remove(&key) else { return Task::none() };
+                if key == "idle_unload_minutes" {
+                    return match text.trim().parse::<u64>() {
+                        Ok(m) if m <= 10_080 => {
+                            self.engine.server.idle_unload_minutes = m;
+                            Task::perform(engine_settings::save_server(self.base.clone(), serde_json::json!({ key: m })), Message::EngineSaved)
+                        }
+                        _ => {
+                            self.engine.error = Some("The idle time is a whole number of minutes from 0 (never) to 10080.".into());
+                            Task::none()
+                        }
+                    };
+                }
+                let Some(field) = engine_settings::field(&key) else { return Task::none() };
+                match engine_settings::value_from_text(field, &text) {
+                    Ok(value) => {
+                        self.engine.error = None;
+                        self.engine.engine.values.insert(key.clone(), value.clone());
+                        self.engine.restart_needed = true;
+                        Task::perform(engine_settings::save_engine(self.base.clone(), serde_json::json!({ key: value })), Message::EngineSaved)
+                    }
+                    Err(e) => {
+                        self.engine.drafts.insert(key, text);
+                        self.engine.error = Some(e);
+                        Task::none()
+                    }
+                }
+            }
+            Message::ServerSet(key, value) => {
+                if key == "load_on_start" {
+                    self.engine.server.load_on_start = value.as_bool().unwrap_or(false);
+                }
+                Task::perform(engine_settings::save_server(self.base.clone(), serde_json::json!({ key: value })), Message::EngineSaved)
+            }
+            Message::EngineSaved(Ok(())) => {
+                self.engine.error = None;
+                Task::none()
+            }
+            Message::EngineSaved(Err(e)) => {
+                self.engine.error = Some(e);
+                // what the page shows must be what the server has
+                Task::perform(engine_settings::fetch(self.base.clone()), Message::EngineLoaded)
+            }
+            Message::EngineReset => {
+                let body = self.engine.reset_body();
+                if let Some(map) = body.as_object() {
+                    for (k, v) in map {
+                        self.engine.engine.values.insert(k.clone(), v.clone());
+                    }
+                }
+                self.engine.drafts.clear();
+                self.engine.restart_needed = true;
+                Task::perform(engine_settings::save_engine(self.base.clone(), body), Message::EngineSaved)
+            }
+            Message::RestartServer => {
+                self.engine.restarting = true;
+                Task::perform(engine_settings::restart(self.base.clone()), Message::RestartDone)
+            }
+            Message::RestartDone(result) => {
+                self.engine.restarting = false;
+                match result {
+                    Ok(()) => {
+                        // the server is gone for a moment: the window waits for it like for any server that is not there yet
+                        self.engine.restart_needed = false;
+                        self.engine.loaded = false;
+                        self.server = Server::Connecting;
+                        let base = self.base.clone();
+                        Task::perform(async move { api::fetch_model(&base).await }, Message::Connected)
+                    }
+                    Err(e) => {
+                        self.engine.error = Some(e);
+                        Task::none()
+                    }
+                }
             }
             Message::Poll => {
                 let base = self.base.clone();
@@ -447,6 +580,50 @@ impl App {
             Message::ModelAction(Err(e)) => {
                 self.models.busy = None;
                 self.models.error = Some(e);
+                Task::none()
+            }
+            Message::SamplingManual(on) => {
+                self.store.prefs.manual_sampling = on;
+                self.save();
+                Task::none()
+            }
+            Message::Temperature(v) => {
+                self.store.prefs.temperature = v;
+                Task::none()
+            }
+            Message::TopP(v) => {
+                self.store.prefs.top_p = v;
+                Task::none()
+            }
+            Message::SystemCustom(on) => {
+                self.store.prefs.custom_system = on;
+                self.save();
+                Task::none()
+            }
+            Message::SystemEdit(action) => {
+                let edit = action.is_edit();
+                self.system_editor.perform(action);
+                if edit {
+                    self.store.prefs.system_prompt = self.system_editor.text().trim_end_matches('\n').to_string();
+                    self.save();
+                }
+                Task::none()
+            }
+            Message::MaxTokensText(text) => {
+                let digits: String = text.chars().filter(char::is_ascii_digit).take(6).collect();
+                self.store.prefs.max_tokens = digits.parse().unwrap_or(0);
+                self.max_tokens_text = digits;
+                Task::none()
+            }
+            Message::SavePrefs => {
+                self.save();
+                Task::none()
+            }
+            Message::ResetPrefs => {
+                self.store.prefs = store::Prefs::default();
+                self.system_editor = Content::new();
+                self.max_tokens_text.clear();
+                self.save();
                 Task::none()
             }
         }
@@ -560,7 +737,7 @@ impl App {
         let nav = column![
             nav_item(t, ICON_CHAT, "Chat", self.page == View::Chat, Some(Message::Go(View::Chat))),
             nav_item(t, ICON_CUBE, "Models", self.page == View::Models, Some(Message::Go(View::Models))),
-            nav_item(t, ICON_SETTINGS, "Settings", false, None),
+            nav_item(t, ICON_SETTINGS, "Settings", self.page == View::Settings, Some(Message::Go(View::Settings))),
         ]
         .spacing(2);
 
@@ -624,6 +801,9 @@ impl App {
     fn main(&self, t: Tokens) -> Element<'_, Message> {
         if self.page == View::Models && !matches!(self.server, Server::Down(_)) {
             return models::page(&self.models, t, matches!(self.server, Server::NoModel));
+        }
+        if self.page == View::Settings {
+            return settings::page(t, &self.store.prefs, &self.system_editor, &self.max_tokens_text, engine_settings::view(t, &self.engine, !matches!(self.server, Server::Down(_))));
         }
         let content: Element<'_, Message> = match &self.server {
             Server::Down(reason) => self.offline(t, reason),
@@ -743,9 +923,45 @@ impl App {
         container(card).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill).padding(24).into()
     }
 
+    /// The messages of the next request: the system prompt, then the chat without the empty answer that is about to be written.
+    pub fn wire_messages(&self) -> Vec<WireMessage> {
+        let mut wire = vec![WireMessage { role: "system".into(), content: self.store.prefs.system().into() }];
+        let upto = match self.messages.last() {
+            Some(last) if last.role == Role::Assistant && last.content.is_empty() => self.messages.len() - 1,
+            _ => self.messages.len(),
+        };
+        wire.extend(self.messages[..upto].iter().map(|m| WireMessage { role: m.role.wire().into(), content: m.content.clone() }));
+        wire
+    }
+
+    /// The sampling settings the next request carries: nothing while they are automatic.
+    pub fn chat_params(&self) -> api::ChatParams {
+        let p = &self.store.prefs;
+        api::ChatParams {
+            temperature: p.manual_sampling.then_some(p.temperature),
+            top_p: p.manual_sampling.then_some(p.top_p),
+            max_tokens: (p.max_tokens > 0).then_some(p.max_tokens),
+        }
+    }
+
+    /// The system prompt the next request carries.
+    pub fn system_prompt(&self) -> &str {
+        self.store.prefs.system()
+    }
+
+    /// The answer settings.
+    pub fn prefs(&self) -> &store::Prefs {
+        &self.store.prefs
+    }
+
     /// The page on the right now.
     pub fn page(&self) -> View {
         self.page
+    }
+
+    /// The engine and server settings as the page shows them.
+    pub fn engine(&self) -> &EngineState {
+        &self.engine
     }
 
     /// The state of the Models page.

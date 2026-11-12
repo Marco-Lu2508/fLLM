@@ -44,8 +44,57 @@ pub struct ChatRecord {
     pub messages: Vec<Record>,
 }
 
+/// What the person chose for the answers. Everything is automatic until it is switched to manual: then the value is sent with every request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Prefs {
+    /// false: the server and the model decide (nothing is sent); true: `temperature` and `top_p` are sent.
+    #[serde(default)]
+    pub manual_sampling: bool,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_top_p")]
+    pub top_p: f32,
+    /// false: the built-in system prompt; true: `system_prompt` (an empty text falls back to the built-in one).
+    #[serde(default)]
+    pub custom_system: bool,
+    #[serde(default)]
+    pub system_prompt: String,
+    /// The longest answer in tokens; 0 lets the server decide.
+    #[serde(default)]
+    pub max_tokens: u32,
+}
+
+fn default_temperature() -> f32 {
+    0.7
+}
+
+fn default_top_p() -> f32 {
+    0.95
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Prefs { manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0 }
+    }
+}
+
+impl Prefs {
+    /// The system prompt a request carries.
+    pub fn system(&self) -> &str {
+        if self.custom_system && !self.system_prompt.trim().is_empty() {
+            self.system_prompt.trim()
+        } else {
+            BUILT_IN_SYSTEM_PROMPT
+        }
+    }
+}
+
+pub const BUILT_IN_SYSTEM_PROMPT: &str = "You are a helpful assistant running locally on the user's computer. Answer in the language of the user. Be concise. Use Markdown only where it helps. If you are not sure, say so. Never invent facts, quotes, links or sources.";
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Store {
+    #[serde(default)]
+    pub prefs: Prefs,
     pub chats: Vec<ChatRecord>,
     #[serde(default)]
     pub next_id: u64,

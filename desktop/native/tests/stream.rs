@@ -1,6 +1,6 @@
 //! The streaming client against a small server of our own that speaks the same SSE as an fLLM server.
 
-use fllm_app::api::{chat_stream, fetch_model, StreamEvent, WireMessage};
+use fllm_app::api::{chat_stream, fetch_model, ChatParams, StreamEvent, WireMessage};
 use futures::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -65,7 +65,7 @@ async fn a_stream_cut_in_the_middle_of_a_line_and_of_a_character_gives_the_whole
     let cut_b = cut_a + 40;
     let parts = vec![text[..cut_a].to_vec(), text[cut_a..cut_b].to_vec(), text[cut_b..].to_vec()];
     let base = serve(parts, 200).await;
-    let events: Vec<StreamEvent> = chat_stream(base, "tiny".into(), msgs()).collect().await;
+    let events: Vec<StreamEvent> = chat_stream(base, "tiny".into(), msgs(), ChatParams::default()).collect().await;
     let answer: String = events.iter().filter_map(|e| if let StreamEvent::Delta(s) = e { Some(s.as_str()) } else { None }).collect();
     assert_eq!(answer, "Grüße Welt");
     assert!(events.contains(&StreamEvent::Usage { prompt: 5, completion: 3 }));
@@ -75,20 +75,20 @@ async fn a_stream_cut_in_the_middle_of_a_line_and_of_a_character_gives_the_whole
 #[tokio::test]
 async fn a_server_error_becomes_one_error_event_with_its_message() {
     let base = serve(vec![], 400).await;
-    let events: Vec<StreamEvent> = chat_stream(base, "tiny".into(), msgs()).collect().await;
+    let events: Vec<StreamEvent> = chat_stream(base, "tiny".into(), msgs(), ChatParams::default()).collect().await;
     assert_eq!(events, vec![StreamEvent::Error("context length exceeded".into())]);
 }
 
 #[tokio::test]
 async fn a_connection_that_ends_without_done_still_ends_the_stream() {
     let base = serve(vec![b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n".to_vec()], 200).await;
-    let events: Vec<StreamEvent> = chat_stream(base, "tiny".into(), msgs()).collect().await;
+    let events: Vec<StreamEvent> = chat_stream(base, "tiny".into(), msgs(), ChatParams::default()).collect().await;
     assert_eq!(events, vec![StreamEvent::Delta("Hi".into()), StreamEvent::Done]);
 }
 
 #[tokio::test]
 async fn an_unreachable_server_is_an_error_event_and_the_stream_ends() {
-    let events: Vec<StreamEvent> = chat_stream("http://127.0.0.1:9".into(), "tiny".into(), msgs()).collect().await;
+    let events: Vec<StreamEvent> = chat_stream("http://127.0.0.1:9".into(), "tiny".into(), msgs(), ChatParams::default()).collect().await;
     assert_eq!(events.len(), 1);
     assert!(matches!(&events[0], StreamEvent::Error(e) if e.contains("could not be reached")), "{events:?}");
 }
