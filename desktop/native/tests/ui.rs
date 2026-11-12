@@ -49,6 +49,10 @@ fn sample_chats() -> Vec<ChatRecord> {
     ]
 }
 
+fn settings() -> iced::Settings {
+    iced::Settings { fonts: vec![fllm_app::app::FONT_REGULAR.into(), fllm_app::app::FONT_SEMIBOLD.into()], default_font: fllm_app::app::UI_FONT, ..Default::default() }
+}
+
 fn save_png(app: &App, name: &str) -> PathBuf {
     let theme = app.theme();
     let settings = iced::Settings { fonts: vec![fllm_app::app::FONT_REGULAR.into(), fllm_app::app::FONT_SEMIBOLD.into()], default_font: fllm_app::app::UI_FONT, ..Default::default() };
@@ -200,4 +204,29 @@ fn stop_keeps_what_was_written_so_far() {
     assert_eq!(Store::load(&dir.path().join("chats.json")).chat(id).unwrap().messages[1].content, "Once upon");
     let _ = app.update(Message::Stream(id, StreamEvent::Delta(" a time".into())));
     assert_eq!(app.last_text(), Some("Once upon"), "a stopped reply does not grow");
+}
+
+#[test]
+fn a_long_chat_draws_only_the_newest_messages_until_more_are_asked_for() {
+    use fllm_app::app::CHAT_WINDOW;
+    let messages: Vec<Record> = (0..200).map(|i| rec(if i % 2 == 0 { Role::User } else { Role::Assistant }, &format!("message number {i:03}"), None)).collect();
+    let (mut app, _dir) = app_with(vec![ChatRecord { id: 0, title: "long".into(), messages }], "light", true);
+    let _ = app.update(Message::OpenChat(0));
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1100.0, 12000.0), app.view());
+    ui.find("Show 60 earlier messages").expect("older messages are one click away");
+    assert!(ui.find("message number 198").is_ok());
+    assert!(ui.find("message number 140").is_ok(), "the window starts at the 61st message from the end");
+    assert!(ui.find("message number 138").is_err());
+    assert!(ui.find("message number 100").is_err(), "an older message is not built");
+    ui.click("Show 60 earlier messages").unwrap();
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(m, Message::ShowEarlier)));
+    // asking again twice reaches the start; the button is gone when nothing is left
+    for _ in 0..3 {
+        let _ = app.update(Message::ShowEarlier);
+    }
+    assert_eq!(CHAT_WINDOW, 60);
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1100.0, 12000.0), app.view());
+    assert!(ui.find("message number 000").is_ok());
+    assert!(ui.find("Show 60 earlier messages").is_err() && ui.find("Show 1 earlier message").is_err());
 }

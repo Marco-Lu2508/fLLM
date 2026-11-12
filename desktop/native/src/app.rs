@@ -32,6 +32,9 @@ const ICON_TRASH: &[u8] = include_bytes!("../icons/trash.svg");
 const ICON_CHAT: &[u8] = include_bytes!("../icons/chat.svg");
 const ICON_CUBE: &[u8] = include_bytes!("../icons/cube.svg");
 const ICON_SETTINGS: &[u8] = include_bytes!("../icons/settings.svg");
+/// How many of the newest messages a chat draws before "Show earlier messages" asks for more.
+pub const CHAT_WINDOW: usize = 60;
+
 const ICON_CODE: &[u8] = include_bytes!("../icons/code.svg");
 const ICON_CHEVRON: &[u8] = include_bytes!("../icons/chevron-down.svg");
 const ICON_CHECK: &[u8] = include_bytes!("../icons/check.svg");
@@ -106,6 +109,8 @@ pub struct App {
     /// The list of models under the model name in the top bar.
     picker_open: bool,
     code: CodeState,
+    /// How many of the newest messages the conversation draws: laying out hundreds of messages on every frame of a stream would stall the window.
+    window: usize,
     /// The server this app started itself (stopped when the app ends), and why it did not, when it did not.
     sidecar: Option<crate::sidecar::Sidecar>,
     sidecar_note: Option<String>,
@@ -167,6 +172,8 @@ pub enum Message {
     RestartDone(Result<(), String>),
     TogglePicker,
     ClosePicker,
+    /// Draw the next older messages of a long chat too.
+    ShowEarlier,
     Code(code::CodeMsg),
 }
 
@@ -211,6 +218,7 @@ impl App {
             engine: EngineState::default(),
             picker_open: false,
             code: CodeState::default(),
+            window: CHAT_WINDOW,
             switching: false,
             sidecar: None,
             sidecar_note: None,
@@ -273,6 +281,7 @@ impl App {
     fn open(&mut self, id: u64) {
         if let Some(chat) = self.store.chat(id) {
             self.messages = chat.messages.iter().map(Msg::from_record).collect();
+            self.window = CHAT_WINDOW;
             self.current = Some(id);
             self.used_tokens = estimate_tokens(&self.messages);
             self.used_exact = false;
@@ -374,6 +383,10 @@ impl App {
                 }
                 task
             }
+            Message::ShowEarlier => {
+                self.window += CHAT_WINDOW;
+                Task::none()
+            }
             Message::TogglePicker => {
                 self.picker_open = !self.picker_open;
                 if self.picker_open && !self.models.fetched {
@@ -414,6 +427,7 @@ impl App {
                 }
                 self.current = None;
                 self.messages.clear();
+                self.window = CHAT_WINDOW;
                 self.used_tokens = 0;
                 self.error = None;
                 Task::none()
@@ -1139,7 +1153,14 @@ impl App {
 
     fn conversation(&self, t: Tokens) -> Element<'_, Message> {
         let mut col = column![].spacing(22).max_width(780).width(Length::Fill);
-        for (i, m) in self.messages.iter().enumerate() {
+        let start = self.messages.len().saturating_sub(self.window);
+        if start > 0 {
+            let more = start.min(CHAT_WINDOW);
+            col = col.push(
+                container(button(text(format!("Show {more} earlier message{}", if more == 1 { "" } else { "s" })).size(13)).on_press(Message::ShowEarlier).padding([6, 16]).style(theme::secondary_button(t))).width(Length::Fill).center_x(Length::Fill),
+            );
+        }
+        for (i, m) in self.messages.iter().enumerate().skip(start) {
             col = col.push(self.message(t, i, m));
         }
         if let Some(e) = &self.error {

@@ -43,6 +43,9 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   agent's own notes run alone; the rest asks (*Allow* / *Deny*; a denial goes back to the model) unless you pick *Edit freely* or *Everything*,
   and switching the mode releases the calls that wait. *Stop* ends the stream and the running commands. The bar under the conversation counts
   the file changes and undoes the last one or all of them. *Plan* is the plan agent: it is offered only the tools that read, refuses anything else, and answers with a plan; *Carry out the plan* then goes back to the mode you had and tells the agent to do it. Not yet: sub-agents, MCP tools, hooks. The conversation of each folder is kept (`code-sessions.json` next to the chats, the newest 200 items; a call that had not finished comes back as interrupted) and returns when the folder is opened again; *New session* forgets it.
+- Long chats: the conversation draws the newest 60 messages; *Show 60 earlier messages* adds the next older ones. Laying out every message on every
+  frame of a stream cost 63 ms for 800 messages (release build, `cargo run --release --example view_bench -- 50 200 800`); with the window the
+  build and layout of the view stay at about 6 ms however long the chat is (opening an 800-message chat still parses its markdown once, 124 ms).
 - Models (sidebar > Models): what is loaded (Unload), the downloads with progress, speed, time left and Pause / Resume / Cancel / Remove, the
   models on this computer (Load: a file from a folder by its path, a downloaded one by its name), and the catalog with a search field, the
   quantizations as chips (the recommended one is chosen; you pick another before you press Download), the size of the chosen one and whether
@@ -64,7 +67,7 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 94 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+cargo test --locked      # 95 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
                          # window driven headless (new chat, send, stream, stop, error, delete, theme) and drawn to PNG files
 ```
 
