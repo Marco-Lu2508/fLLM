@@ -229,7 +229,9 @@ a { text-underline-offset: 3px; }
 .chat-input-toolbar { padding: 4px 8px 8px; }
 .composer-chip { border-radius: var(--r-pill); background: transparent; border: 0; color: var(--muted-fg); min-height: 28px; font-size: 12.5px; font-weight: 500; }
 .composer-chip:hover { background: var(--fill); color: var(--fg); }
-.composer-chip.active { background: var(--primary-soft); color: var(--primary); }
+/* a chip that is on: a neutral fill and normal text; only its icon carries the accent, so the row does not shout */
+.composer-chip.active { background: var(--fill-hover); color: var(--fg); }
+.composer-chip.active .icon, .composer-chip.active svg { color: var(--primary); }
 .send-circle-btn, .send-btn, #btnSend { border-radius: 50%; width: 32px; height: 32px; min-height: 32px; padding: 0; }
 .send-circle-btn:disabled, #btnSend:disabled { background: var(--fill); color: var(--muted-fg); opacity: 1; }
 .chat-starter-pills { gap: 8px; }
@@ -343,7 +345,8 @@ html.dark { --material-side: color-mix(in oklab, #232326 72%, transparent); }
 
 /* the composer: one clean ring on focus; send is a quiet gray until there is something to send */
 /* the composer is focused when the page opens: a quiet ring, so it does not read as "active, click here" (it competes with the one primary action otherwise) */
-.chat-input-box:focus-within { box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--primary) 34%, var(--border-strong)), var(--shadow-2); }
+/* the composer stays neutral at rest; focus is one neutral hairline (3:1 against the page), not a coloured frame */
+.chat-input-box:focus-within { box-shadow: 0 0 0 1px color-mix(in oklab, var(--fg) 45%, transparent), var(--shadow-2); }
 .chat-textarea:focus, .chat-textarea:focus-visible { outline: 0; box-shadow: none; }
 .chat-input-box:has(.chat-textarea:placeholder-shown) #btnSendChat:not(.stop) { background: var(--fill); color: var(--muted-fg); box-shadow: none; }
 .chat-input-box { --composer-pad: 10px; }

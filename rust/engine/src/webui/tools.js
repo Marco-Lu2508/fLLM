@@ -304,10 +304,12 @@
       if (!(window.fllmRemoteSelected && window.fllmRemoteSelected()) && spSize(state.status?.model) === 'tiny') return none;
       const P = state.prj && state.prj.personal;
       const priv = Boolean(t && (t.temporary || t.noPersonal));
+      // a model that reads under 120 tokens/s (measured on this computer) would spend seconds per turn on the schemas of memory and chat search
+      const slow = !(window.fllmRemoteSelected && window.fllmRemoteSelected()) && spSlowestReader(state.status?.model);
       return {
         web: Boolean(state.useWeb),
-        memory: Boolean(P && P.useMemory && !priv && !(t && t.noMemory)),
-        chats: !priv && state.threads.some((x) => !x.temporary && !(t && x.id === t.id)),
+        memory: Boolean(P && P.useMemory && !priv && !slow && !(t && t.noMemory)),
+        chats: !priv && !slow && state.threads.some((x) => !x.temporary && !(t && x.id === t.id)),
       };
     }
 

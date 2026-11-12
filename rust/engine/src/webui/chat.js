@@ -634,6 +634,9 @@
             tokens: chunk.timings.predicted_n || undefined,
           };
         }
+        if (chunk.timings && chunk.timings.prompt_per_second && !(window.fllmRemoteSelected && window.fllmRemoteSelected())) {
+          spRecordPrefill(state.status?.model?.name, chunk.timings.prompt_n, chunk.timings.prompt_per_second);
+        }
         if (chunk.usage) aNode.usage = chunk.usage;
         if (chunk.usage && typeof window.fllmUsageRecord === 'function') {
           window.fllmUsageRecord(state.selectedModel || state.status?.model?.name, chunk.usage);

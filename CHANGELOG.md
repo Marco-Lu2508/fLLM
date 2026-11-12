@@ -6,6 +6,10 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Changed
+- **A slow reader gets the short prompt (Settings > Personalization > System prompt > Prompt length).** A screenshot of Qwen3.5-9B `IQ3_XXS` on an Intel iGPU (Vulkan) showed 974 tokens of context and 14 s before the first word for "Hi was geht?": about 920 prompt tokens at 66 tokens/s, and a model with recurrent layers has no prefix cache, so it reads them again at every turn. The default system prompt and the tool schemas (memory, chat search) are about 900 tokens in the full size. The Studio now remembers how fast each model read its last real prompt (at least 64 prompt tokens, the last two measurements averaged) and in *Automatic* mode uses the compact prompt below 300 tokens/s and offers no memory and chat-search tools below 120 tokens/s (about 190 tokens left by the count on the test model, a few seconds instead of 14 s at 66 tokens/s); *Always the short prompt* and *Always the full prompt* override it, and the card says what is in use. Not measured on the 9B model (no such GPU here): the token counts come from the Qwen2.5 template of the tiny test model (system prompt 157, memory tool 248 of 438), the 9B figures from the screenshot. A prefix cache for recurrent models is the real fix and is not built.
+- **The composer is calm: neutral at rest, one neutral hairline on focus, and a chip that is on (Thinking, Web access) has a neutral fill with the accent only on its icon.** The frame and the chip were copper and orange at the same time as the send button.
+
 ### Fixed
 - **The CUDA and ROCm Docker images build again.** Their dependency layer copied only `Cargo.toml` and `build.rs` into the stub
   tree, but `build.rs` reads `rust/engine/hip/default_archs.txt` with `include_str!` at every feature set (the arch list moved into

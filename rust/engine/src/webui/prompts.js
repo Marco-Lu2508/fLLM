@@ -7,7 +7,10 @@
     const SP_KEY = 'fllm.studio.sysprompt.v1';
 
     // @pure-begin
-    const SP_LIMITS = { custom: 6000, compactContext: 12288, compactParams: 3.5e9, tinyContext: 2048 };
+    // slowPrefill / slowestPrefill: tokens per second at which the model reads a prompt. The fixed part of a chat (system prompt and tool
+    // schemas) is about 900 tokens for a full prompt and about 400 for a compact one, and a model with recurrent layers (Qwen3.5, Mamba)
+    // reads it again at every turn: at 66 tokens/s that is 14 s before the first word, so a slow reader gets the short prompt.
+    const SP_LIMITS = { custom: 6000, compactContext: 12288, compactParams: 3.5e9, tinyContext: 2048, slowPrefill: 300, slowestPrefill: 120 };
 
     /** The model family, from the name, the architecture and the chat template of the loaded model. */
     function spFamily(model) {
@@ -36,7 +39,17 @@
       const ctx = Number(m.max_context) || 4096;
       const params = Number(m.parameters) || 0;
       if (ctx < SP_LIMITS.tinyContext) return 'tiny';
-      return ctx < SP_LIMITS.compactContext || (params > 0 && params < SP_LIMITS.compactParams) ? 'compact' : 'full';
+      if (ctx < SP_LIMITS.compactContext || (params > 0 && params < SP_LIMITS.compactParams)) return 'compact';
+      const pf = typeof spPrefillNow === 'function' ? spPrefillNow(m) : null; // { rate (tokens/s, 0 = not measured yet), pref: auto | short | full }
+      if (pf && pf.pref === 'short') return 'compact';
+      if (pf && pf.pref === 'auto' && pf.rate > 0 && pf.rate < SP_LIMITS.slowPrefill) return 'compact';
+      return 'full';
+    }
+
+    /** True when the model reads so slowly that even the compact tool schemas (memory, chat search) are not worth their tokens. */
+    function spSlowestReader(model) {
+      const pf = typeof spPrefillNow === 'function' ? spPrefillNow(model || {}) : null;
+      return Boolean(pf && pf.pref === 'auto' && pf.rate > 0 && pf.rate < SP_LIMITS.slowestPrefill);
     }
 
     const SP_FAMILY_NOTES = {
@@ -177,6 +190,27 @@
     // @pure-end
 
     // ---- state: what the page knows ----------------------------------------------------------------------------
+    // The speed at which each model read its last real prompt, and the choice in Settings > System prompt > Prompt length.
+    const SP_SPEED_KEY = 'fllm.studio.prefill.v1';
+    const SP_SIZE_KEY = 'fllm.studio.promptsize.v1';
+    function spPrefillPref() {
+      try { const v = localStorage.getItem(SP_SIZE_KEY); return v === 'short' || v === 'full' ? v : 'auto'; } catch { return 'auto'; }
+    }
+    function spPrefillNow(model) {
+      let rate = 0;
+      try { rate = Number((JSON.parse(localStorage.getItem(SP_SPEED_KEY) || '{}') || {})[(model && model.name) || ''] || 0); } catch { rate = 0; }
+      return { rate: rate > 0 ? rate : 0, pref: spPrefillPref() };
+    }
+    /** Remember how fast the model read a prompt (timings of a reply). Short prompts are too noisy to say anything. */
+    function spRecordPrefill(modelName, promptTokens, perSecond) {
+      if (!modelName || !(promptTokens >= 64) || !(perSecond > 0)) return;
+      try {
+        const all = JSON.parse(localStorage.getItem(SP_SPEED_KEY) || '{}') || {};
+        const old = Number(all[modelName] || 0);
+        all[modelName] = Math.round(old > 0 ? (old + perSecond) / 2 : perSecond); // the last two measurements, so one stall does not decide
+        localStorage.setItem(SP_SPEED_KEY, JSON.stringify(all));
+      } catch { /* storage full or off: the default prompt stays */ }
+    }
     function spStored() {
       try {
         const v = JSON.parse(localStorage.getItem(SP_KEY) || 'null');

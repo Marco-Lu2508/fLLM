@@ -1062,11 +1062,26 @@
       $('spMode').value = stored.mode;
       const t = currentThread();
       $('spPreview').value = spForChat(t);
+      spRenderSize();
       const model = state.status?.model || {};
       $('spInfo').textContent = window.fllmRemoteSelected && window.fllmRemoteSelected()
         ? 'The selected model runs at an external provider: the full prompt is used and it does not say that the model runs locally.'
         : `Model family: ${spFamily(model)}. Size: ${spSize(model)}${spSize(model) === 'compact' ? ' (small model or small context)' : ''}. Lines about tools appear when web access, memory or chat search are on.`;
     }
+    function spRenderSize() {
+      const model = state.status?.model || {};
+      const pf = spPrefillNow(model);
+      $('spSize').value = pf.pref;
+      const remote = Boolean(window.fllmRemoteSelected && window.fllmRemoteSelected());
+      $('spSizeInfo').textContent = remote ? 'An external provider reads the prompt on its own servers: the full prompt is used.'
+        : pf.rate > 0
+          ? `This computer read the last prompt of ${model.name || 'this model'} at ${pf.rate.toLocaleString('en-US')} tokens/s. ${spSize(model) === 'full' ? 'The full prompt is used.' : 'The short prompt is used, so the wait before the first word is shorter.'}${spSlowestReader(model) ? ' Memory and chat search are not offered to the model at this speed.' : ''}`
+          : 'The speed is measured at the first reply and remembered for this model.';
+    }
+    $('spSize').addEventListener('change', () => {
+      try { localStorage.setItem(SP_SIZE_KEY, $('spSize').value); } catch { /* storage off */ }
+      spRender(); updateContextMeter();
+    });
     $('spMode').addEventListener('change', () => { spSaveStored({ mode: $('spMode').value, text: $('spText').value }); spRender(); updateContextMeter(); });
     $('spText').addEventListener('input', () => { spSaveStored({ mode: $('spMode').value, text: $('spText').value.slice(0, SP_LIMITS.custom) }); $('spPreview').value = spForChat(currentThread()); updateContextMeter(); });
 

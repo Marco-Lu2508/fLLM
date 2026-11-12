@@ -874,6 +874,13 @@
                     <option value="append">Add my text after the default prompt</option>
                     <option value="override">Replace the default prompt with my text</option>
                   </select>
+                  <div class="app-item-title" style="margin-top:6px;">Prompt length</div>
+                  <select id="spSize" class="ui-select">
+                    <option value="auto">Automatic: short when the model reads slowly</option>
+                    <option value="short">Always the short prompt</option>
+                    <option value="full">Always the full prompt</option>
+                  </select>
+                  <div class="app-item-desc" id="spSizeInfo"></div>
                   <textarea id="spText" class="ui-textarea" rows="4" style="width:100%;" placeholder="Your text. {{date}}, {{time}} and {{language}} are filled in."></textarea>
                   <textarea id="spPreview" class="ui-textarea mono" rows="9" style="width:100%;" readonly></textarea>
                   <div class="app-item-desc" id="spInfo"></div>

@@ -14,8 +14,8 @@ const pure = (file) => {
   assert(b >= 0 && e > b, `pure block markers not found in ${file}`);
   return src.slice(b, e);
 };
-const L = new Function(`const SP_KEY = 'x';\n${pure('prompts.js')}\n${pure('projects.js')}
-return { SP_LIMITS, spFamily, spSize, spBuild, spResolve, spFill, spNow, spClock, spTitleMessages, spCleanTitle, composeSystem, PRJ_LIMITS };`)();
+const L = new Function(`const SP_KEY = 'x';\nlet pf = { rate: 0, pref: 'auto' };\nconst spPrefillNow = () => pf;\nconst setPf = (v) => { pf = v; };\n${pure('prompts.js')}\n${pure('projects.js')}
+return { setPf, spSlowestReader, SP_LIMITS, spFamily, spSize, spBuild, spResolve, spFill, spNow, spClock, spTitleMessages, spCleanTitle, composeSystem, PRJ_LIMITS };`)();
 
 let n = 0;
 const test = (name, fn) => { fn(); n++; console.log(`ok - ${name}`); };
@@ -152,3 +152,38 @@ test('every script of the page parses together, with the new files registered', 
 });
 
 console.log(`${n} tests passed`);
+
+test('a model that reads slowly gets the short prompt, a fast one the full prompt, and the choice in Settings wins', () => {
+  const nine = { name: 'Qwen3.5-9B', max_context: 32768, parameters: 9e9 };
+  L.setPf({ rate: 0, pref: 'auto' });
+  assert.strictEqual(L.spSize(nine), 'full', 'nothing measured yet: the full prompt');
+  L.setPf({ rate: 66, pref: 'auto' });
+  assert.strictEqual(L.spSize(nine), 'compact', '66 tokens/s is 14 s for a full prompt');
+  L.setPf({ rate: 299, pref: 'auto' });
+  assert.strictEqual(L.spSize(nine), 'compact');
+  L.setPf({ rate: 300, pref: 'auto' });
+  assert.strictEqual(L.spSize(nine), 'full');
+  L.setPf({ rate: 5000, pref: 'auto' });
+  assert.strictEqual(L.spSize(nine), 'full');
+  L.setPf({ rate: 66, pref: 'full' });
+  assert.strictEqual(L.spSize(nine), 'full', 'always full');
+  L.setPf({ rate: 5000, pref: 'short' });
+  assert.strictEqual(L.spSize(nine), 'compact', 'always short');
+  L.setPf({ rate: 66, pref: 'auto' });
+  assert.strictEqual(L.spSize({ name: 'x', max_context: 1024 }), 'tiny', 'a tiny context stays tiny');
+  assert.strictEqual(L.spSize({ name: 'x', max_context: 32768, parameters: 1e9 }), 'compact');
+  L.setPf({ rate: 0, pref: 'auto' });
+});
+
+test('only the slowest readers lose the memory and chat-search schemas', () => {
+  const m = { name: 'Qwen3.5-9B', max_context: 32768 };
+  L.setPf({ rate: 0, pref: 'auto' });
+  assert.strictEqual(L.spSlowestReader(m), false);
+  L.setPf({ rate: 119, pref: 'auto' });
+  assert.strictEqual(L.spSlowestReader(m), true);
+  L.setPf({ rate: 120, pref: 'auto' });
+  assert.strictEqual(L.spSlowestReader(m), false);
+  L.setPf({ rate: 66, pref: 'full' });
+  assert.strictEqual(L.spSlowestReader(m), false, 'the choice "full" keeps every tool');
+  L.setPf({ rate: 0, pref: 'auto' });
+});
