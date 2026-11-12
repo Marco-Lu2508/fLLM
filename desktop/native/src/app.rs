@@ -3,6 +3,7 @@
 use crate::api::{self, ModelInfo, StreamEvent, WireMessage};
 use crate::store::{self, ChatRecord, Record, Role, Stats, Store};
 use crate::md;
+use crate::models::{self, ModelsState};
 use crate::theme::{self, Tokens};
 use iced::widget::text_editor::{Action, Binding, Content, KeyPress, Status};
 use iced::widget::{button, column, container, markdown, mouse_area, row, scrollable, svg, text, text_editor, Space};
@@ -53,7 +54,16 @@ impl Msg {
 pub enum Server {
     Connecting,
     Ready(ModelInfo),
+    /// The server runs but no model is loaded: the Models page is where to go.
+    NoModel,
     Down(String),
+}
+
+/// The page on the right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Chat,
+    Models,
 }
 
 /// The reply that is being written right now.
@@ -80,6 +90,8 @@ pub struct App {
     error: Option<String>,
     /// The chat row under the pointer (shows its delete button).
     hover: Option<u64>,
+    page: View,
+    models: ModelsState,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +112,19 @@ pub enum Message {
     Hover(Option<u64>),
     ToggleTheme,
     LinkClicked(markdown::Uri),
+    Go(View),
+    /// Once a second while the Models page is open or a download runs.
+    Poll,
+    OverviewLoaded(Result<models::Overview, String>),
+    DownloadsLoaded(Result<Vec<models::Download>, String>),
+    Filter(String),
+    PickQuant(String, String),
+    LoadModel(String),
+    UnloadModel,
+    Pull(String),
+    DownloadAction(u64, &'static str),
+    /// A load, unload, download or download action is done (or failed with this message).
+    ModelAction(Result<String, String>),
 }
 
 impl App {
@@ -125,6 +150,8 @@ impl App {
             used_exact: false,
             error: None,
             hover: None,
+            page: View::Chat,
+            models: ModelsState::default(),
         };
         if let Some(first) = app.store.chats.first().map(|c| c.id) {
             app.open(first);
@@ -244,6 +271,10 @@ impl App {
                 self.server = Server::Ready(model);
                 Task::none()
             }
+            Message::Connected(Err(e)) if e == models::NO_MODEL => {
+                self.server = Server::NoModel;
+                Task::none()
+            }
             Message::Connected(Err(e)) => {
                 self.server = Server::Down(e);
                 Task::none()
@@ -333,7 +364,93 @@ impl App {
                 open_link(&uri);
                 Task::none()
             }
+            Message::Go(page) => {
+                self.page = page;
+                if page == View::Models {
+                    return self.refresh_models();
+                }
+                Task::none()
+            }
+            Message::Poll => {
+                let base = self.base.clone();
+                let mut tasks = vec![Task::perform(models::fetch_downloads(base), Message::DownloadsLoaded)];
+                if self.page == View::Models && !self.models.any_active() {
+                    tasks.push(Task::perform(models::fetch_overview(self.base.clone()), Message::OverviewLoaded));
+                }
+                Task::batch(tasks)
+            }
+            Message::OverviewLoaded(Ok(overview)) => {
+                self.models.overview = overview;
+                self.models.fetched = true;
+                self.models.error = None;
+                Task::none()
+            }
+            Message::OverviewLoaded(Err(e)) => {
+                self.models.fetched = true;
+                self.models.error = Some(e);
+                Task::none()
+            }
+            Message::DownloadsLoaded(Ok(list)) => {
+                // a download that finished: the file is in the list of this computer now
+                let finished = self.models.downloads.iter().any(|old| old.active() && list.iter().any(|d| d.id == old.id && d.state == "done"));
+                self.models.downloads = list;
+                if finished {
+                    return Task::perform(models::fetch_overview(self.base.clone()), Message::OverviewLoaded);
+                }
+                Task::none()
+            }
+            Message::DownloadsLoaded(Err(_)) => Task::none(),
+            Message::Filter(text) => {
+                self.models.filter = text;
+                Task::none()
+            }
+            Message::PickQuant(id, quant) => {
+                self.models.quant.insert(id, quant);
+                Task::none()
+            }
+            Message::LoadModel(reference) => {
+                if self.models.busy.is_some() || self.live.is_some() {
+                    return Task::none();
+                }
+                self.models.busy = Some(reference.clone());
+                self.models.error = None;
+                Task::perform(models::load(self.base.clone(), reference), Message::ModelAction)
+            }
+            Message::UnloadModel => {
+                if self.models.busy.is_some() || self.live.is_some() {
+                    return Task::none();
+                }
+                self.models.busy = Some(String::new());
+                self.models.error = None;
+                Task::perform(models::unload(self.base.clone()), Message::ModelAction)
+            }
+            Message::Pull(id) => {
+                let Some(entry) = self.models.overview.catalog.iter().find(|e| e.id == id) else { return Task::none() };
+                let quant = self.models.chosen_quant(entry);
+                self.models.error = None;
+                Task::perform(models::pull(self.base.clone(), id, quant), Message::ModelAction)
+            }
+            Message::DownloadAction(id, action) => Task::perform(models::download_action(self.base.clone(), id, action), Message::ModelAction),
+            Message::ModelAction(Ok(_)) => {
+                self.models.busy = None;
+                let base = self.base.clone();
+                Task::batch([
+                    Task::perform(models::fetch_overview(base.clone()), Message::OverviewLoaded),
+                    Task::perform(models::fetch_downloads(base.clone()), Message::DownloadsLoaded),
+                    Task::perform(async move { api::fetch_model(&base).await }, Message::Connected),
+                ])
+            }
+            Message::ModelAction(Err(e)) => {
+                self.models.busy = None;
+                self.models.error = Some(e);
+                Task::none()
+            }
         }
+    }
+
+    fn refresh_models(&self) -> Task<Message> {
+        let base = self.base.clone();
+        Task::batch([Task::perform(models::fetch_overview(base.clone()), Message::OverviewLoaded), Task::perform(models::fetch_downloads(base), Message::DownloadsLoaded)])
     }
 
     fn on_event(&mut self, ev: StreamEvent) {
@@ -375,11 +492,13 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        if matches!(self.server, Server::Down(_)) {
-            time::every(Duration::from_secs(4)).map(|_| Message::Tick)
+        let retry = if matches!(self.server, Server::Down(_)) { time::every(Duration::from_secs(4)).map(|_| Message::Tick) } else { Subscription::none() };
+        let poll = if (self.page == View::Models && !matches!(self.server, Server::Down(_))) || self.models.any_active() {
+            time::every(Duration::from_secs(1)).map(|_| Message::Poll)
         } else {
             Subscription::none()
-        }
+        };
+        Subscription::batch([retry, poll])
     }
 
     // ---- view ------------------------------------------------------------------------------------------------------------
@@ -435,9 +554,9 @@ impl App {
         .padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0 });
 
         let nav = column![
-            nav_item(t, ICON_CHAT, "Chat", false),
-            nav_item(t, ICON_CUBE, "Models", false),
-            nav_item(t, ICON_SETTINGS, "Settings", false),
+            nav_item(t, ICON_CHAT, "Chat", self.page == View::Chat, Some(Message::Go(View::Chat))),
+            nav_item(t, ICON_CUBE, "Models", self.page == View::Models, Some(Message::Go(View::Models))),
+            nav_item(t, ICON_SETTINGS, "Settings", false, None),
         ]
         .spacing(2);
 
@@ -463,6 +582,7 @@ impl App {
         match &self.server {
             Server::Connecting => "Connecting…".into(),
             Server::Ready(_) => "Connected".into(),
+            Server::NoModel => "No model loaded".into(),
             Server::Down(_) => "No server".into(),
         }
     }
@@ -498,8 +618,12 @@ impl App {
     }
 
     fn main(&self, t: Tokens) -> Element<'_, Message> {
+        if self.page == View::Models && !matches!(self.server, Server::Down(_)) {
+            return models::page(&self.models, t, matches!(self.server, Server::NoModel));
+        }
         let content: Element<'_, Message> = match &self.server {
             Server::Down(reason) => self.offline(t, reason),
+            Server::NoModel => self.no_model(t),
             _ if self.messages.is_empty() => self.welcome(t),
             _ => self.conversation(t),
         };
@@ -510,7 +634,7 @@ impl App {
         let (name, max) = match &self.server {
             Server::Ready(m) => (m.id.clone(), m.max_context),
             Server::Connecting => ("Connecting…".into(), 0),
-            Server::Down(_) => ("No model".into(), 0),
+            Server::NoModel | Server::Down(_) => ("No model".into(), 0),
         };
         let pill = container(row![svg(icon(ICON_CUBE)).width(15).height(15).style(accent_svg(t)), text(name).size(13).font(Font::MONOSPACE)].spacing(8).align_y(Alignment::Center))
             .padding([5, 12])
@@ -601,6 +725,28 @@ impl App {
         .align_x(Alignment::Start)
         .max_width(520);
         container(card).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill).padding(24).into()
+    }
+
+    fn no_model(&self, t: Tokens) -> Element<'_, Message> {
+        let card = column![
+            text("No model is loaded").size(22).font(bold()),
+            text("The server is running, but it has nothing to answer with. Pick a model you have already, or download one.").size(14).color(t.fg_soft),
+            button(text("Open Models").size(14)).on_press(Message::Go(View::Models)).padding([8, 18]).style(theme::primary_button(t)),
+        ]
+        .spacing(10)
+        .align_x(Alignment::Start)
+        .max_width(520);
+        container(card).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill).padding(24).into()
+    }
+
+    /// The page on the right now.
+    pub fn page(&self) -> View {
+        self.page
+    }
+
+    /// The state of the Models page.
+    pub fn models(&self) -> &ModelsState {
+        &self.models
     }
 
     fn conversation(&self, t: Tokens) -> Element<'_, Message> {
@@ -731,8 +877,9 @@ fn accent_svg(t: Tokens) -> impl Fn(&Theme, svg::Status) -> svg::Style {
     move |_, _| svg::Style { color: Some(t.primary) }
 }
 
-fn nav_item<'a>(t: Tokens, bytes: &'static [u8], label: &'a str, selected: bool) -> Element<'a, Message> {
+fn nav_item<'a>(t: Tokens, bytes: &'static [u8], label: &'a str, selected: bool, on_press: Option<Message>) -> Element<'a, Message> {
     button(row![svg(icon(bytes)).width(16).height(16).style(muted_svg(t)), text(label).size(14)].spacing(10).align_y(Alignment::Center))
+        .on_press_maybe(on_press)
         .padding([7, 10])
         .width(Length::Fill)
         .style(theme::nav_button(t, selected))

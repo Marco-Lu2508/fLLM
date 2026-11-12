@@ -12,7 +12,7 @@ fllm-rs studio --no-open --port 8080 --model model.gguf     # or any fLLM server
 cd desktop/native && cargo run --release                    # FLLM_URL=http://host:port points the window elsewhere
 ```
 
-## What is built (stage 1: the chat)
+## What is built (stage 1: the chat, stage 2a: Models)
 
 - Chat with streaming answers, Markdown (headings, lists, tables, quotes, code blocks with highlighting and a copy button, inline code),
   stop, copy, the reasoning of thinking models kept apart, tokens per second and prompt speed under every answer.
@@ -20,13 +20,18 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   instead of overwritten. Title from the first message, delete, open, new chat.
 - The design system of the Studio (`design-system/fllm-studio/MASTER.md`): the same tokens in both themes (copper accent, system grays,
   hairlines), Inter shipped inside the program, a context meter with a track, 780-pixel reading column shared by messages and composer.
-- No server: a clear screen with the address and a retry every four seconds.
+- No server: a clear screen with the address and a retry every four seconds. A server without a model has its own screen that leads to Models.
+- Models (sidebar > Models): what is loaded (Unload), the downloads with progress, speed, time left and Pause / Resume / Cancel / Remove, the
+  models on this computer (Load: a file from a folder by its path, a downloaded one by its name), and the catalog with a search field, the
+  quantizations as chips (the recommended one is chosen; you pick another before you press Download), the size of the chosen one and whether
+  it fits in the memory of this computer. Everything is the Studio's own routes (`/api/studio/models`, `.../load`, `.../unload`, `.../pull`,
+  `.../progress`, `.../downloads`); a refused load shows the message of the server. The page polls once a second while it is open or a download runs.
 
 ## What is not built yet
 
 | Stage | Content |
 |---|---|
-| 2 | Models (download, load, quantization, hardware plan), Settings (sampling, system prompt with the measured prompt speed, engine), the model picker, projects and memory, web tools |
+| 2b | Settings (sampling, system prompt with the measured prompt speed, engine), load options (context, device), the model picker in the chat bar, projects and memory, web tools |
 | 3 | Code mode (folder, agent loop, diffs, approvals, terminal) |
 | 4 | The server inside the process (no second program), installers per system, the tray, autostart, updates; then the Tauri app and the web Studio files can go |
 | later | Voice, artifacts, the research mode, the command palette |
@@ -36,7 +41,7 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 28 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+cargo test --locked      # 42 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
                          # window driven headless (new chat, send, stream, stop, error, delete, theme) and drawn to PNG files
 ```
 

@@ -200,6 +200,19 @@ pub fn primary_button(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::S
     }
 }
 
+/// The quiet action next to a row (Unload, Pause, Cancel): a gray fill, so it reads as a button and not as a label.
+pub fn secondary_button(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let (bg, fg) = match status {
+            button::Status::Disabled => (t.fill, alpha(t.muted, 0.6)),
+            button::Status::Hovered => (t.fill_hover, t.fg),
+            button::Status::Pressed => (t.fill_hover, t.fg),
+            button::Status::Active => (t.fill, t.fg),
+        };
+        button::Style { background: Some(Background::Color(bg)), text_color: fg, border: border(999.0, 0.0, Color::TRANSPARENT), ..Default::default() }
+    }
+}
+
 /// Contrast ratio of two opaque colors (WCAG 2.x), for the tests that guard the palette.
 pub fn contrast(a: Color, b: Color) -> f32 {
     fn lum(c: Color) -> f32 {

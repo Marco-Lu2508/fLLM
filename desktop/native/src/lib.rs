@@ -6,6 +6,7 @@
 pub mod api;
 pub mod app;
 pub mod md;
+pub mod models;
 pub mod store;
 pub mod theme;
 

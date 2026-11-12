@@ -103,7 +103,7 @@ pub async fn fetch_model(base: &str) -> Result<ModelInfo, String> {
         .json()
         .await
         .map_err(|e| e.to_string())?;
-    let first = v.pointer("/data/0").ok_or("the server has no model loaded")?;
+    let first = v.pointer("/data/0").ok_or(crate::models::NO_MODEL)?;
     Ok(ModelInfo {
         id: first.get("id").and_then(|s| s.as_str()).ok_or("the model has no id")?.to_string(),
         max_context: first.get("max_model_len").and_then(|n| n.as_u64()).unwrap_or(4096),
