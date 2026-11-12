@@ -62,6 +62,13 @@ pub struct Sequence {
     pub deadline: Option<std::time::Instant>,
     /// Blocks of this sequence that wait in host memory (preemption by swap); 0 when its KV is on the device or was dropped.
     pub swapped_blocks: usize,
+    /// A model with recurrent layers: `(chain hash of the state checkpoint, the shared cached first block, the sequence's own first block)`.
+    /// The runtime copies the KV of the cached block into the own one and puts the checkpoint into the sequence's state before its first
+    /// forward pass (the decoder keeps the state under the id of the first block, so that block must belong to this sequence alone).
+    pub state_restore: Option<(u64, i64, i64)>,
+    /// A model with recurrent layers: the block boundary (tokens, chain hash) at which the state of this prompt is worth keeping; the
+    /// scheduler ends a prompt chunk exactly there, and the runtime copies the state out when the chunk is done.
+    pub ckpt_target: Option<(usize, u64)>,
     ngram_index: Option<HashMap<Vec<i64>, Vec<usize>>>,
     ngram_upto: usize,
 }
@@ -118,6 +125,8 @@ impl Sequence {
             enqueued: std::time::Instant::now(),
             deadline: None,
             swapped_blocks: 0,
+            state_restore: None,
+            ckpt_target: None,
             ngram_index: None,
             ngram_upto: 0,
         }
@@ -188,6 +197,9 @@ pub struct SchedulerConfig {
     /// At most this share of the KV pool (percent) may be pinned (`FLLM_PIN_MAX_PERCENT`, default 50; 0 switches pinning off). A pool
     /// that is pinned full leaves nothing for the requests that run.
     pub pin_max_percent: usize,
+    /// A model with recurrent layers keeps checkpoints of its state (`mem::state_cache`), so a prompt that starts like an earlier one
+    /// reads only what is new. Without it such a model has no prefix cache at all.
+    pub state_checkpoints: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,6 +241,7 @@ impl Default for SchedulerConfig {
             decode_first: false,
             multi_step: 1,
             pin_max_percent: 50,
+            state_checkpoints: false,
         }
     }
 }
@@ -260,6 +273,14 @@ pub struct Scheduler {
     dropped_swaps: Vec<i64>,
     /// Blocks of host swap space in use.
     pub swap_used: usize,
+    /// State checkpoints the runtime holds: chain hash of the tokens before the checkpoint -> number of tokens. The scheduler decides with
+    /// this index at admission (how much of a prompt can be skipped); the runtime keeps the snapshots themselves.
+    pub ckpt_index: HashMap<u64, usize>,
+    /// Checkpoints to take now: a prompt chunk ended on the boundary a sequence asked for. Drained by the runtime (sequence, hash, tokens).
+    ckpt_wanted: Vec<(i64, u64, usize)>,
+    /// Prompts that started from a state checkpoint, and the prompt tokens they did not read again because of it.
+    pub state_cache_hits: u64,
+    pub state_cache_tokens: u64,
 }
 
 /// Swap work for the KV pool's owner (see `Scheduler::take_swaps`).
@@ -296,6 +317,10 @@ impl Scheduler {
             pending_swap_in: Vec::new(),
             dropped_swaps: Vec::new(),
             swap_used: 0,
+            ckpt_index: HashMap::new(),
+            ckpt_wanted: Vec::new(),
+            state_cache_hits: 0,
+            state_cache_tokens: 0,
         }
     }
     pub fn add_request(&mut self, req_id: String, sequences: Vec<Sequence>) {
@@ -353,7 +378,13 @@ impl Scheduler {
                 if long && long_prefills >= self.cfg.max_long_partial_prefills.max(1) {
                     continue;
                 }
-                let chunk = todo.min(prefill_budget);
+                let mut chunk = todo.min(prefill_budget);
+                // the state of a recurrent model can only be copied out between two chunks: end one exactly on the boundary that is worth keeping
+                if let Some((boundary, _)) = seq.ckpt_target {
+                    if start < boundary && start + chunk > boundary {
+                        chunk = boundary - start;
+                    }
+                }
                 let table = self.bm.get_table(sid)?;
                 let need = (start + chunk).div_ceil(self.cfg.block_size);
                 let need = need.saturating_sub(table.blocks.len());
@@ -496,17 +527,39 @@ impl Scheduler {
             toks.push(seg);
         }
         let mut reused = 0;
-        if self.cfg.prefix_cache && self.pc.is_some() && !self.sequences[&sid].has_media {
-            let (pc, bm) = (&mut self.pc, &mut self.bm);
-            reused = pc
-                .as_mut()
-                .unwrap()
-                .match_blocks(&hashes, &toks, &mut |bid| {
-                    bm.claim_block_for(sid, bid).map_err(PrefixCacheError::from)
-                })?;
+        let mut restore = None;
+        let has_media = self.sequences[&sid].has_media;
+        if self.cfg.prefix_cache && self.pc.is_some() && !has_media {
+            // A model with recurrent layers can skip a prompt start only where it has a checkpoint of its state: the longest block boundary
+            // whose chain hash is in the index. Its KV blocks (the attention layers of a hybrid model) must all still be in the prefix cache.
+            let limit = if self.cfg.state_checkpoints {
+                (1..=n_full).rev().find(|&k| self.ckpt_index.get(&hashes[k - 1]) == Some(&(k * self.cfg.block_size))).unwrap_or(0)
+            } else {
+                n_full
+            };
+            if limit > 0 {
+                let (pc, bm) = (&mut self.pc, &mut self.bm);
+                reused = pc
+                    .as_mut()
+                    .unwrap()
+                    .match_blocks(&hashes[..limit], &toks[..limit], &mut |bid| {
+                        bm.claim_block_for(sid, bid).map_err(PrefixCacheError::from)
+                    })?;
+                if self.cfg.state_checkpoints {
+                    if reused == limit {
+                        restore = Some(hashes[limit - 1]);
+                    } else if reused > 0 {
+                        // a block of the checkpointed start was evicted: the state cannot be used, read the prompt from the start
+                        self.bm.drop_table(sid)?;
+                        self.bm.new_table(sid)?;
+                        reused = 0;
+                    }
+                }
+            }
         }
         let fresh = prompt.len().saturating_sub(reused * self.cfg.block_size);
-        let need = (fresh + 1).div_ceil(self.cfg.block_size);
+        // one block more for a sequence that starts from a state checkpoint: its first block is a private copy of the cached one
+        let need = (fresh + 1).div_ceil(self.cfg.block_size) + usize::from(restore.is_some());
         let watermark = if self.running.is_empty() { 0 } else { self.cfg.watermark_blocks };
         if self.bm.allocator.available() < need + watermark {
             self.bm.drop_table(sid)?;
@@ -518,6 +571,16 @@ impl Scheduler {
         }
         self.bm.ensure_blocks(sid, (fresh + 1) as i64)?;
         self.bm.get_table_mut(sid)?.num_tokens = prompt.len() as i64;
+        // the recurrent state is kept under the id of the sequence's first block: that block must not be one that other sequences share
+        let restore = match restore {
+            Some(hash) => {
+                let shared = self.bm.get_table(sid)?.blocks[0] as i64;
+                let own = self.bm.allocator.alloc()?;
+                self.bm.get_table_mut(sid)?.blocks[0] = own;
+                Some((hash, shared, own as i64))
+            }
+            None => None,
+        };
         let blocks = self.bm.get_table(sid)?.blocks.clone();
         let seq = self.sequences.get_mut(&sid).unwrap();
         seq.blocks = blocks;
@@ -526,6 +589,19 @@ impl Scheduler {
             seq.cached_prompt_tokens = seq.num_computed;
         }
         self.prefix_cache_hits += u64::from(reused > 0);
+        seq.state_restore = restore;
+        seq.ckpt_target = None;
+        if restore.is_some() {
+            self.state_cache_hits += 1;
+            self.state_cache_tokens += (reused * self.cfg.block_size) as u64;
+        }
+        // keep the state at the end of this prompt (its last full block) for the next one that starts the same way
+        if self.cfg.state_checkpoints && self.cfg.prefix_cache && !has_media && n_full > 0 {
+            let boundary = n_full * self.cfg.block_size;
+            if seq.num_computed < boundary && !self.ckpt_index.contains_key(&hashes[n_full - 1]) {
+                seq.ckpt_target = Some((boundary, hashes[n_full - 1]));
+            }
+        }
         seq.block_hashes = hashes
             .iter()
             .take(reused)
@@ -828,6 +904,7 @@ impl Scheduler {
 
     /// Empties the prefix cache and gives the blocks back to the allocator. Returns how many entries were dropped.
     pub fn clear_prefix_cache(&mut self) -> Result<usize, SchedulerError> {
+        self.ckpt_index.clear();
         let Some(pc) = self.pc.as_mut() else {
             return Ok(0);
         };
@@ -887,7 +964,27 @@ impl Scheduler {
         let table = self.bm.get_table_mut(sid)?;
         table.num_tokens = table.num_tokens.max(nt as i64);
         seq.blocks = table.blocks.clone();
+        if let Some((boundary, hash)) = seq.ckpt_target {
+            if seq.num_computed == boundary {
+                seq.ckpt_target = None;
+                self.ckpt_wanted.push((sid, hash, boundary));
+            } else if seq.num_computed > boundary {
+                seq.ckpt_target = None; // a chunk went past it (a preempted sequence started again): nothing to copy any more
+            }
+        }
         self.insert_full_blocks(sid)
+    }
+    /// State checkpoints to copy out now (sequence, chain hash, tokens); the runtime calls this right after `commit_chunk`.
+    pub fn take_ckpt_wanted(&mut self) -> Vec<(i64, u64, usize)> {
+        std::mem::take(&mut self.ckpt_wanted)
+    }
+    /// The runtime holds a checkpoint now.
+    pub fn note_checkpoint(&mut self, hash: u64, tokens: usize) {
+        self.ckpt_index.insert(hash, tokens);
+    }
+    /// The runtime dropped a checkpoint.
+    pub fn forget_checkpoint(&mut self, hash: u64) {
+        self.ckpt_index.remove(&hash);
     }
     pub fn commit_decode(&mut self, sid: i64) -> Result<(), SchedulerError> {
         let nt = self.sequences[&sid].num_tokens();

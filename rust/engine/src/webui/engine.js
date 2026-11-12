@@ -36,6 +36,9 @@
         '</div>' +
         '<div class="app-card" style="margin-top:12px;"><div class="app-card-title">Speed and memory</div>' +
         row('', 'Share the start of prompts', 'Requests that begin with the same text (a system prompt, a long document) reuse the work already done for it. Turn it off if people on this server must not share anything.', toggle('engPrefixCache')) +
+        row('', 'Remember the start of a conversation (Qwen3.5, Mamba, RWKV)', 'Models with recurrent layers cannot point at old work like other models, so they read the whole conversation again on every message. With this on, the server keeps a copy of the model’s state at the end of each prompt and continues from it when the next prompt starts the same way. Automatic: on. Turn it off to save memory.', toggle('engStateCache')) +
+        row('', 'Memory for those copies', 'One copy of a 9B model takes about 100 MB. The oldest copy goes first when the limit is reached.', number('engStateMb', 1) + ' <span class=\"app-item-desc\">MB</span>') +
+        '<div class=\"app-item-desc mono\" id=\"engStateStats\" style=\"padding:8px 4px 0;font-size:11px;\"></div>' +
         row('', 'Separate this installation', 'A text that keeps the shared prompt blocks of this server apart from those of another server. Leave it empty unless you run several.', '<input type="text" id="engPrefixSalt" class="ui-input mono" style="width:180px;" autocomplete="off">') +
         row('', 'When memory runs out', '“Recompute” drops the work of a waiting request and does it again later (saves memory). “Move to RAM” keeps it in the main memory (faster to continue, needs RAM).', select('engPreemption', [['recompute', 'Recompute'], ['swap', 'Move to RAM']])) +
         '</div>' +
@@ -67,7 +70,7 @@
       const FIELDS = {
         output_cache: ['engOutputCache', 'value'], output_cache_mb: ['engCacheMb', 'value'], output_cache_ttl: ['engCacheTtl', 'value'],
         cache_scope: ['engCacheScope', 'value'], prefix_cache: ['engPrefixCache', 'checked'], prefix_salt: ['engPrefixSalt', 'value'],
-        preemption: ['engPreemption', 'value'], kv_disk_dir: ['engKvDir', 'value'], kv_disk_mb: ['engKvMb', 'value'], kv_ram_mb: ['engKvRam', 'value'], otel_endpoint: ['engOtelEndpoint', 'value'], otel_service: ['engOtelService', 'value'],
+        preemption: ['engPreemption', 'value'], kv_disk_dir: ['engKvDir', 'value'], kv_disk_mb: ['engKvMb', 'value'], kv_ram_mb: ['engKvRam', 'value'], state_cache: ['engStateCache', 'checked'], state_cache_mb: ['engStateMb', 'value'], otel_endpoint: ['engOtelEndpoint', 'value'], otel_service: ['engOtelService', 'value'],
       };
       let defaults = {};
       let saved = {};
@@ -112,6 +115,12 @@
           el('engKvStats').textContent = t.enabled === false ? 'The disk copy is off.' : `now: ${t.dir ? `${formatBytes(t.used_bytes || 0)} of ${formatBytes(t.max_bytes || 0)} on disk` : 'no folder'}${t.ram_max_bytes ? ` · ${formatBytes(t.ram_used_bytes || 0)} of ${formatBytes(t.ram_max_bytes)} in memory (${t.ram_blocks ?? 0} blocks, ${t.ram_hits ?? 0} read from there)` : ''} · ${t.hits ?? 0} blocks read back, ${t.spills ?? 0} written, ${t.drops ?? 0} skipped`;
           el('engKvClear').disabled = false;
           el('engPrefixClear').disabled = false;
+          try {
+            const pr = await apiFetch('/admin/prefix-cache');
+            const st = pr.ok ? (await pr.json()).state_checkpoints : null;
+            el('engStateStats').textContent = !st ? '' : !st.enabled ? 'This model does not need copies of its state (or they are off).'
+              : `now: ${st.entries} copies, ${formatBytes(st.bytes || 0)} of ${formatBytes(st.budget_bytes || 0)} · ${st.hits} messages continued from one, ${st.tokens_skipped} prompt tokens not read again`;
+          } catch { el('engStateStats').textContent = ''; }
         } catch {
           el('engKvStats').textContent = 'Load a model to see the live numbers.';
           el('engKvClear').disabled = true;

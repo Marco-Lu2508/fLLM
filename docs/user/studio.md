@@ -91,9 +91,18 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
   wait before the first word (66 tokens/s on an Intel iGPU: 14 s for "Hi"). The Studio remembers how fast each model read its last real
   prompt (a reply that processed at least 64 prompt tokens; the last two measurements are averaged); *The full prompt* is the default and nothing changes by itself; *Automatic* (your choice) switches to the compact
   prompt below 300 tokens/s and also stops offering the memory and chat-search tools below 120 tokens/s, *Always the short prompt* and
-  *The full prompt* ignore the measurement. The same card says which size is in use and what it saves. What is not built: a
-  prefix cache for recurrent models (their state would have to be stored at the end of the shared start), which would remove the
-  wait instead of shortening the prompt.
+  *The full prompt* ignore the measurement. The same card says which size is in use and what it saves. Since the server keeps
+  *state checkpoints* (below), only the first message of a conversation pays this wait; after that the model continues from the state it had
+  at the end of the previous prompt.
+* **State checkpoints for models with recurrent layers** (Settings > Engine > Speed and memory: *Remember the start of a conversation* and
+  *Memory for those copies*; `FLLM_STATE_CACHE=auto|off|<size>`). A model with Gated DeltaNet, Mamba or RWKV layers folds its whole history
+  into a small state and cannot point at old KV blocks like other models, so it read the whole conversation again on every message. The
+  server now copies that state at the last full block of every prompt it has read (about 100 MB for a 9B model, kept in host memory, the
+  oldest copy goes first when the limit of 1 GB is reached) and puts it back when a later prompt starts with exactly the same tokens: the
+  next chat turn reads only its last partial block, the answer of the model and the new message. It is automatic (on by default) and
+  manual (off, or a size in MB). Two prompts that share only a start but differ before the end of the earlier prompt do not share a state
+  (a state cannot be cut back); the shared system prompt of two different chats is therefore read again once per chat. The live numbers are
+  on the same page; `GET /admin/prefix-cache` reports them under `state_checkpoints`.
 * **Personalization and memory** (Settings > Personalization). *About me and how to answer* is put in front of the instructions of every
   chat (2,000 characters; switch it off for one chat in the chat menu). Memory holds short facts about you. The model manages it itself
   with a `memory` tool (add, update, remove, list): when it learns something durable (name, preferences, projects, constraints) a card

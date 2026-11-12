@@ -1784,7 +1784,7 @@ pub fn idle_unload_minutes() -> u64 {
 
 /// The engine options of the Studio page (`studio.json`, key `engine`) and the environment variable each one sets. The page writes
 /// them; they take effect when the server starts again.
-pub const ENGINE_OPTIONS: [(&str, &str); 12] = [
+pub const ENGINE_OPTIONS: [(&str, &str); 14] = [
     ("output_cache", "FLLM_OUTPUT_CACHE"),
     ("output_cache_mb", "FLLM_OUTPUT_CACHE_BYTES"),
     ("output_cache_ttl", "FLLM_OUTPUT_CACHE_TTL"),
@@ -1797,6 +1797,8 @@ pub const ENGINE_OPTIONS: [(&str, &str); 12] = [
     ("kv_disk_dir", "FLLM_KV_DISK_DIR"),
     ("kv_disk_mb", "FLLM_KV_DISK_BYTES"),
     ("kv_ram_mb", "FLLM_KV_RAM_BYTES"),
+    ("state_cache", "FLLM_STATE_CACHE"),
+    ("state_cache_mb", "FLLM_STATE_CACHE_BYTES"),
 ];
 
 /// The engine options saved by the page (empty when none).
@@ -1808,7 +1810,7 @@ pub fn engine_settings() -> serde_json::Map<String, Value> {
 fn engine_env_value(key: &str, value: &Value) -> Option<String> {
     let text = match value {
         Value::Bool(on) => if *on { "on" } else { "off" }.to_owned(),
-        Value::Number(n) if key == "output_cache_mb" || key == "kv_disk_mb" || key == "kv_ram_mb" => (n.as_u64()? << 20).to_string(),
+        Value::Number(n) if key == "output_cache_mb" || key == "kv_disk_mb" || key == "kv_ram_mb" || key == "state_cache_mb" => (n.as_u64()? << 20).to_string(),
         Value::Number(n) => n.to_string(),
         Value::String(s) => s.trim().to_owned(),
         _ => return None,
@@ -2039,6 +2041,15 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_state_cache_options_become_the_variables_the_scheduler_reads() {
+        assert_eq!(engine_env_value("state_cache", &serde_json::json!(false)).as_deref(), Some("off"));
+        assert_eq!(engine_env_value("state_cache", &serde_json::json!(true)).as_deref(), Some("on"));
+        assert_eq!(engine_env_value("state_cache_mb", &serde_json::json!(512)).as_deref(), Some("536870912"));
+        let names: Vec<&str> = ENGINE_OPTIONS.iter().filter(|(k, _)| k.starts_with("state_cache")).map(|(_, n)| *n).collect();
+        assert_eq!(names, ["FLLM_STATE_CACHE", "FLLM_STATE_CACHE_BYTES"]);
+    }
     #[test]
     fn references_reject_traversal_and_ambiguous_paths() {
         for value in [

@@ -115,6 +115,8 @@ pub struct InferenceRuntime {
     decoder: Option<crate::rust_decoder::RustDecoder>,
     /// The disk tier for cached prefix blocks (off unless `FLLM_KV_DISK_DIR` is set).
     kv_tier: std::sync::Arc<crate::mem::kv_tier::KvTier>,
+    /// Copies of the recurrent state at block boundaries of prompts read before (`mem::state_cache`); empty for a model without such layers.
+    state_ckpts: crate::mem::state_cache::StateCheckpoints<crate::rust_decoder::SequenceSnapshot>,
     /// Blocks the disk tier gave back to a waiting request after the prefix cache had dropped them (`reload_for_waiting`).
     kv_reloaded: u64,
     /// Writes for the disk tier, off the step path: file I/O must never delay a token.
@@ -188,17 +190,21 @@ impl InferenceRuntime {
             bm.allocator.refcounts[null_block] = 1;
         }
         let stateful = model.is_stateful();
+        // FLLM_PREFIX_CACHE=off: no shared KV blocks between requests (a tenant that must not share)
+        let prefix_off = matches!(
+            std::env::var("FLLM_PREFIX_CACHE").unwrap_or_default().trim().to_ascii_lowercase().as_str(),
+            "off" | "0" | "no" | "false"
+        );
+        // FLLM_STATE_CACHE=auto|off|<size>: a model with recurrent layers keeps checkpoints of its state, so that it reads only what is new
+        let state_mode = crate::mem::state_cache::StateCacheMode::from_env();
         let pc = PrefixCache::new(pool_blocks as i64, true, true).map_err(|e| e.to_string())?;
         let config = SchedulerConfig {
             block_size,
             max_num_seqs: max_sequences,
             max_num_batched_tokens: max_batched_tokens,
-            // FLLM_PREFIX_CACHE=off: no shared KV blocks between requests (a tenant that must not share)
-            prefix_cache: !stateful
-                && !matches!(
-                    std::env::var("FLLM_PREFIX_CACHE").unwrap_or_default().trim().to_ascii_lowercase().as_str(),
-                    "off" | "0" | "no" | "false"
-                ),
+            // a model with recurrent layers shares a prompt start only through a state checkpoint (see `SchedulerConfig::state_checkpoints`)
+            prefix_cache: (!stateful || state_mode.enabled()) && !prefix_off,
+            state_checkpoints: stateful && state_mode.enabled() && !prefix_off,
             // FLLM_PREEMPTION=swap: a preempted sequence's KV goes to host memory instead of being recomputed
             preemption: match std::env::var("FLLM_PREEMPTION").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
                 "swap" => "swap".to_string(),
@@ -254,6 +260,7 @@ impl InferenceRuntime {
             spec_delta: Default::default(),
             decoder: None,
             kv_tier,
+            state_ckpts: crate::mem::state_cache::StateCheckpoints::new(state_mode.budget()),
             kv_reloaded: 0,
             spill_tx,
             prefetch_tx,
@@ -917,17 +924,29 @@ impl InferenceRuntime {
 
     /// The pieces of block `block` in the host arrays.
     fn host_block_pieces(&self, block: usize) -> Result<crate::kv_blocks::BlockPieces, String> {
+        // layer by layer: a model with layers that have no cache of their own (the recurrent layers of Qwen3.5 and the hybrids) or with a
+        // different geometry per layer has a pool that is not `layers` equal slices
         let cfg = self.model.config();
         let (fmt_k, fmt_v) = self.model.kv_formats();
         let slots = self.model.pool_blocks() * self.model.block_size();
-        Ok(crate::kv_blocks::BlockPieces::new(
-            cfg.layers,
-            fmt_k.layer_words(slots, cfg.kv_heads, cfg.head_dim),
-            &self.kv_block_regions(true)?,
-            fmt_v.layer_words(slots, cfg.kv_heads, cfg.value_dim),
-            &self.kv_block_regions(false)?,
-            block,
-        ))
+        let layout = self.model.kv_pool_layout_for(cfg);
+        let mut out = crate::kv_blocks::BlockPieces { keys: Vec::new(), values: Vec::new() };
+        for layer in 0..cfg.layers {
+            if layout.key_words.get(layer).copied().unwrap_or(0) == 0 {
+                continue;
+            }
+            let heads = cfg.layer_kv_heads(layer);
+            for (pieces, fmt, dim, start) in [
+                (&mut out.keys, fmt_k, cfg.layer_head_dim(layer), layout.key_offsets[layer]),
+                (&mut out.values, fmt_v, cfg.layer_value_dim(layer), layout.value_offsets[layer]),
+            ] {
+                let regions = crate::kv_format::KvLayout::new(fmt, slots, heads, dim)
+                    .block_regions(self.model.block_size())
+                    .ok_or_else(|| format!("shared choices need KV blocks of whole words for {}", fmt.name()))?;
+                pieces.extend(regions.iter().map(|&(offset, per_block)| (start + offset + block * per_block, per_block)));
+            }
+        }
+        Ok(out)
     }
     /// Export the KV data of a block (all layers, keys and values) to host memory.
     fn kv_export_block(&mut self, block: usize) -> Result<Vec<u8>, String> {
@@ -957,6 +976,40 @@ impl InferenceRuntime {
     }
     /// Carry out the swap traffic of the scheduler: exports first (the freed blocks may be rewritten by this step's forward pass), then
     /// imports into the newly allocated blocks.
+    /// A prompt that starts like an earlier one on a model with recurrent layers: its first block becomes a private copy of the cached one
+    /// (the decoder keeps the recurrent state under the id of that block, and other sequences may share the cached block), and the state
+    /// the earlier prompt had at that point goes back in. Runs right after the scheduler admitted the sequence, before any forward pass.
+    fn restore_state_checkpoints(&mut self) -> Result<(), String> {
+        if !self.scheduler.cfg.state_checkpoints {
+            return Ok(());
+        }
+        let pending: Vec<(i64, u64, i64, i64)> =
+            self.scheduler.sequences.iter().filter_map(|(sid, seq)| seq.state_restore.map(|(hash, shared, own)| (*sid, hash, shared, own))).collect();
+        for (sid, hash, shared, own) in pending {
+            let bytes = self.kv_export_block(shared as usize)?;
+            self.kv_import_block(own as usize, &bytes)?;
+            self.scheduler.free_block(shared);
+            let (snapshot, _tokens) = self.state_ckpts.take_copy(hash).ok_or("a state checkpoint went missing")?;
+            Self::decoder(&self.decoder)?.restore_state(own, &snapshot)?;
+            if let Some(seq) = self.scheduler.sequences.get_mut(&sid) {
+                seq.state_restore = None;
+            }
+        }
+        Ok(())
+    }
+    /// A prompt chunk ended on the block boundary that was worth keeping: copy the recurrent state of that sequence out.
+    fn take_state_checkpoints(&mut self) -> Result<(), String> {
+        for (sid, hash, tokens) in self.scheduler.take_ckpt_wanted() {
+            let Some(first) = self.scheduler.sequences.get(&sid).and_then(|seq| seq.blocks.first().copied()) else { continue };
+            let Some(snapshot) = Self::decoder(&self.decoder)?.snapshot_state(first as i64)? else { continue };
+            let bytes = snapshot.bytes();
+            for gone in self.state_ckpts.insert(hash, tokens, bytes, snapshot) {
+                self.scheduler.forget_checkpoint(gone);
+            }
+            self.scheduler.note_checkpoint(hash, tokens);
+        }
+        Ok(())
+    }
     fn carry_out_swaps(&mut self) -> Result<(), String> {
         let work = self.scheduler.take_swaps();
         for (sid, blocks) in work.out {
@@ -1121,6 +1174,7 @@ impl InferenceRuntime {
 
     pub fn clear_prefix_cache(&mut self) -> Result<usize, String> {
         let dropped = self.scheduler.clear_prefix_cache().map_err(|e| e.to_string())?;
+        self.state_ckpts.clear();
         self.save_pins();
         Ok(dropped)
     }
@@ -1128,9 +1182,21 @@ impl InferenceRuntime {
     /// What the prefix cache holds, for `GET /admin/prefix-cache`.
     pub fn prefix_cache_report(&self) -> serde_json::Value {
         let hits = self.scheduler.prefix_cache_hits;
+        // a model with recurrent layers: how many prompt starts came from a state checkpoint and what the checkpoints weigh
+        let states = serde_json::json!({
+            "enabled": self.scheduler.cfg.state_checkpoints,
+            "entries": self.state_ckpts.len(),
+            "bytes": self.state_ckpts.bytes(),
+            "budget_bytes": self.state_ckpts.budget(),
+            "hits": self.scheduler.state_cache_hits,
+            "tokens_skipped": self.scheduler.state_cache_tokens,
+            "stored": self.state_ckpts.stored,
+            "evicted": self.state_ckpts.evicted,
+        });
         match self.scheduler.pc.as_ref() {
-            None => serde_json::json!({"enabled": false, "hits": hits}),
+            None => serde_json::json!({"enabled": false, "hits": hits, "state_checkpoints": states}),
             Some(pc) => serde_json::json!({
+                "state_checkpoints": states,
                 "enabled": self.scheduler.cfg.prefix_cache,
                 "entries": pc.len(),
                 "pinned": pc.pinned_len(),
@@ -2259,6 +2325,7 @@ impl InferenceRuntime {
             None => self.scheduler.schedule().map_err(|e| e.to_string())?,
         };
         self.carry_out_swaps()?;
+        self.restore_state_checkpoints()?;
         if let Some(metrics) = &self.metrics {
             let (running, waiting, free, total, hits) = self.metrics_snapshot();
             metrics.snapshot(running, waiting, free, total, hits);
@@ -2626,6 +2693,7 @@ impl InferenceRuntime {
                 self.fork_prompt_choices(sid)?;
             }
         }
+        self.take_state_checkpoints()?;
 
         let vocab = self.model.vocab_size();
         let mut events = Vec::new();
