@@ -5,7 +5,7 @@
 
 use crate::app::Message;
 use crate::models::{bold, card, rule};
-use crate::store::{Prefs, BUILT_IN_SYSTEM_PROMPT};
+use crate::store::{Prefs, Sampling, BUILT_IN_SYSTEM_PROMPT};
 use crate::theme::{self, Tokens};
 use iced::widget::text_editor::{Content, Status};
 use iced::widget::{button, column, container, row, scrollable, slider, text, text_editor, text_input, Space};
@@ -34,6 +34,121 @@ pub fn segmented<'a>(t: Tokens, options: Vec<(&'a str, bool, Message)>) -> Eleme
     container(r).padding(2).style(move |_| container::Style { background: Some(iced::Background::Color(t.fill)), border: iced::border::rounded(10), ..Default::default() }).into()
 }
 
+/// The advanced sampling values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    TopK,
+    MinP,
+    RepetitionPenalty,
+    PresencePenalty,
+    FrequencyPenalty,
+    DryMultiplier,
+    Mirostat,
+    Seed,
+    Stop,
+}
+
+/// The texts of the boxes of those values: what you type is kept as typed, and applied to the settings when it is a valid number.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SamplingTexts {
+    pub top_k: String,
+    pub min_p: String,
+    pub repetition_penalty: String,
+    pub presence_penalty: String,
+    pub frequency_penalty: String,
+    pub dry_multiplier: String,
+    pub mirostat: String,
+    pub seed: String,
+    pub stop: String,
+}
+
+impl SamplingTexts {
+    pub fn from(s: &Sampling) -> SamplingTexts {
+        let num = |v: f32, neutral: f32| if (v - neutral).abs() < 1e-6 { String::new() } else { format!("{v}") };
+        SamplingTexts {
+            top_k: if s.top_k == 0 { String::new() } else { s.top_k.to_string() },
+            min_p: num(s.min_p, 0.0),
+            repetition_penalty: num(s.repetition_penalty, 1.0),
+            presence_penalty: num(s.presence_penalty, 0.0),
+            frequency_penalty: num(s.frequency_penalty, 0.0),
+            dry_multiplier: num(s.dry_multiplier, 0.0),
+            mirostat: if s.mirostat == 0 { String::new() } else { s.mirostat.to_string() },
+            seed: s.seed.map(|v| v.to_string()).unwrap_or_default(),
+            stop: s.stop.clone(),
+        }
+    }
+
+    pub fn text(&self, f: Field) -> &str {
+        match f {
+            Field::TopK => &self.top_k,
+            Field::MinP => &self.min_p,
+            Field::RepetitionPenalty => &self.repetition_penalty,
+            Field::PresencePenalty => &self.presence_penalty,
+            Field::FrequencyPenalty => &self.frequency_penalty,
+            Field::DryMultiplier => &self.dry_multiplier,
+            Field::Mirostat => &self.mirostat,
+            Field::Seed => &self.seed,
+            Field::Stop => &self.stop,
+        }
+    }
+
+    /// Takes what was typed into the box and the settings: an empty box is the neutral value, a text that is not a number changes nothing.
+    pub fn apply(&mut self, f: Field, typed: String, s: &mut Sampling) {
+        let float = |t: &str, neutral: f32, min: f32, max: f32| -> Option<f32> {
+            if t.trim().is_empty() {
+                Some(neutral)
+            } else {
+                t.trim().parse::<f32>().ok().filter(|v| v.is_finite() && (min..=max).contains(v))
+            }
+        };
+        let ok = match f {
+            Field::TopK => (typed.trim().is_empty() || typed.trim().parse::<u32>().is_ok_and(|v| v <= 100_000)).then(|| s.top_k = typed.trim().parse().unwrap_or(0)).is_some(),
+            Field::MinP => float(&typed, 0.0, 0.0, 1.0).map(|v| s.min_p = v).is_some(),
+            Field::RepetitionPenalty => float(&typed, 1.0, 0.0, 4.0).map(|v| s.repetition_penalty = v).is_some(),
+            Field::PresencePenalty => float(&typed, 0.0, -2.0, 2.0).map(|v| s.presence_penalty = v).is_some(),
+            Field::FrequencyPenalty => float(&typed, 0.0, -2.0, 2.0).map(|v| s.frequency_penalty = v).is_some(),
+            Field::DryMultiplier => float(&typed, 0.0, 0.0, 10.0).map(|v| s.dry_multiplier = v).is_some(),
+            Field::Mirostat => (typed.trim().is_empty() || typed.trim().parse::<u8>().is_ok_and(|v| v <= 2)).then(|| s.mirostat = typed.trim().parse().unwrap_or(0)).is_some(),
+            Field::Seed => (typed.trim().is_empty() || typed.trim().parse::<i64>().is_ok()).then(|| s.seed = typed.trim().parse().ok().filter(|v: &i64| *v >= 0)).is_some(),
+            Field::Stop => {
+                s.stop = typed.clone();
+                true
+            }
+        };
+        // a box keeps what was typed even when it is not (yet) valid, like "0." on the way to "0.5"
+        let _ = ok;
+        match f {
+            Field::TopK => self.top_k = typed,
+            Field::MinP => self.min_p = typed,
+            Field::RepetitionPenalty => self.repetition_penalty = typed,
+            Field::PresencePenalty => self.presence_penalty = typed,
+            Field::FrequencyPenalty => self.frequency_penalty = typed,
+            Field::DryMultiplier => self.dry_multiplier = typed,
+            Field::Mirostat => self.mirostat = typed,
+            Field::Seed => self.seed = typed,
+            Field::Stop => self.stop = typed,
+        }
+    }
+}
+
+fn small_input<'a>(t: Tokens, placeholder: &'a str, value: &'a str, field: Field, width: f32) -> Element<'a, Message> {
+    text_input(placeholder, value)
+        .on_input(move |v| Message::SamplingField(field, v))
+        .on_submit(Message::SavePrefs)
+        .size(14)
+        .padding([6, 10])
+        .width(width)
+        .style(move |_, status| text_input::Style {
+            background: iced::Background::Color(t.surface_2),
+            border: iced::Border { radius: 8.0.into(), width: 1.0, color: if matches!(status, text_input::Status::Focused { .. }) { t.fg_soft } else { t.separator } },
+            icon: t.muted,
+            placeholder: t.muted,
+            value: t.fg,
+            selection: t.primary_soft,
+        })
+        .into()
+}
+
 /// A setting with a title and a sentence of help on the left and its control on the right.
 pub fn setting<'a>(t: Tokens, title: &'a str, help: &'a str, control: Element<'a, Message>) -> Element<'a, Message> {
     row![column![text(title).size(14), text(help).size(12).color(t.muted)].spacing(3).width(Length::Fill), container(control).width(280).align_x(iced::alignment::Horizontal::Right)]
@@ -50,7 +165,7 @@ fn value_slider<'a>(t: Tokens, range: std::ops::RangeInclusive<f32>, value: f32,
     row![s, text(format!("{value:.2}")).size(13).font(iced::Font::MONOSPACE).width(44)].spacing(10).align_y(Alignment::Center).into()
 }
 
-pub fn page<'a>(t: Tokens, prefs: &'a Prefs, system_editor: &'a Content, max_tokens_text: &'a str, engine: Element<'a, Message>) -> Element<'a, Message> {
+pub fn page<'a>(t: Tokens, prefs: &'a Prefs, system_editor: &'a Content, max_tokens_text: &'a str, sampling: &'a SamplingTexts, engine: Element<'a, Message>) -> Element<'a, Message> {
     let mut answers = column![].spacing(14);
     answers = answers.push(setting(
         t,
@@ -61,15 +176,39 @@ pub fn page<'a>(t: Tokens, prefs: &'a Prefs, system_editor: &'a Content, max_tok
     if prefs.manual_sampling {
         answers = answers
             .push(setting(t, "Temperature", "Low: steady and predictable. High: varied and surprising.", value_slider(t, 0.0..=2.0, prefs.temperature, 0.05, Message::Temperature)))
-            .push(setting(t, "Top-p", "Only the most likely words that together make up this share are considered.", value_slider(t, 0.05..=1.0, prefs.top_p, 0.05, Message::TopP)));
+            .push(setting(t, "Top-p", "Only the most likely words that together make up this share are considered.", value_slider(t, 0.05..=1.0, prefs.top_p, 0.05, Message::TopP)))
+            .push(setting(t, "Top-k", "Only this many most likely words are considered. Empty: no limit.", small_input(t, "off", &sampling.top_k, Field::TopK, 110.0)))
+            .push(setting(t, "Min-p", "Drops words that are much less likely than the best one (0 to 1). Empty: off.", small_input(t, "off", &sampling.min_p, Field::MinP, 110.0)))
+            .push(setting(t, "Repetition penalty", "Above 1 makes the model repeat itself less. Empty: 1.", small_input(t, "1", &sampling.repetition_penalty, Field::RepetitionPenalty, 110.0)))
+            .push(setting(t, "Presence penalty", "Positive: new topics. Negative: stay on topic (-2 to 2). Empty: 0.", small_input(t, "0", &sampling.presence_penalty, Field::PresencePenalty, 110.0)))
+            .push(setting(t, "Frequency penalty", "Positive: fewer repeated words (-2 to 2). Empty: 0.", small_input(t, "0", &sampling.frequency_penalty, Field::FrequencyPenalty, 110.0)))
+            .push(setting(t, "DRY multiplier", "Penalizes repeated phrases, not only words. Empty: off.", small_input(t, "off", &sampling.dry_multiplier, Field::DryMultiplier, 110.0)))
+            .push(setting(t, "Mirostat", "0 off, 1 or 2: the model aims at a steady level of surprise. Empty: off.", small_input(t, "off", &sampling.mirostat, Field::Mirostat, 110.0)))
+            .push(setting(t, "Seed", "The same seed and settings give the same answer. Empty: random.", small_input(t, "random", &sampling.seed, Field::Seed, 140.0)))
+            .push(setting(t, "Stop words", "The answer ends when one of these appears; separate them with commas.", small_input(t, "none", &sampling.stop, Field::Stop, 240.0)));
     }
     answers = answers.push(rule(t));
     answers = answers.push(setting(
         t,
         "System prompt",
-        "What the model is told before every chat. Automatic is a short built-in prompt.",
+        "What the model is told before every chat. Automatic is built from the date, your language, the model and what it can do.",
         segmented(t, vec![("Automatic", !prefs.custom_system, Message::SystemCustom(false)), ("Custom", prefs.custom_system, Message::SystemCustom(true))]),
     ));
+    if !prefs.custom_system {
+        answers = answers.push(setting(
+            t,
+            "Length of the automatic prompt",
+            "Short saves reading time on a slow computer. Small models and small contexts always get the short one.",
+            segmented(
+                t,
+                vec![
+                    ("Full", prefs.prompt_length == crate::prompts::Length::Full, Message::PromptLength(crate::prompts::Length::Full)),
+                    ("Short", prefs.prompt_length == crate::prompts::Length::Short, Message::PromptLength(crate::prompts::Length::Short)),
+                    ("By speed", prefs.prompt_length == crate::prompts::Length::Auto, Message::PromptLength(crate::prompts::Length::Auto)),
+                ],
+            ),
+        ));
+    }
     if prefs.custom_system {
         let editor = text_editor(system_editor)
             .placeholder(BUILT_IN_SYSTEM_PROMPT)
@@ -86,8 +225,14 @@ pub fn page<'a>(t: Tokens, prefs: &'a Prefs, system_editor: &'a Content, max_tok
                 value: t.fg,
                 selection: iced::Color { a: 0.35, ..t.primary },
             });
+        answers = answers.push(setting(
+            t,
+            "Your text",
+            "Replace the automatic prompt, or add yours after it. {{date}}, {{time}} and {{language}} are filled in.",
+            segmented(t, vec![("Replace", !prefs.system_append, Message::SystemAppend(false)), ("Add after", prefs.system_append, Message::SystemAppend(true))]),
+        ));
         answers = answers.push(editor);
-        answers = answers.push(text("An empty text falls back to the automatic prompt.").size(12).color(t.muted));
+        answers = answers.push(text("An empty text leaves the automatic prompt as it is.").size(12).color(t.muted));
     }
     answers = answers.push(rule(t));
     let limit = text_input("automatic", max_tokens_text)

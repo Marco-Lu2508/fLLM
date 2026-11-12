@@ -3,6 +3,7 @@
 use crate::api::{self, ModelInfo, StreamEvent, WireMessage};
 use crate::store::{self, ChatRecord, Record, Role, Stats, Store};
 use crate::md;
+use crate::prompts;
 use crate::code::{self, CodeState};
 use crate::engine_settings::{self, EngineState};
 use crate::models::{self, ModelsState};
@@ -111,6 +112,9 @@ pub struct App {
     code: CodeState,
     /// How many of the newest messages the conversation draws: laying out hundreds of messages on every frame of a stream would stall the window.
     window: usize,
+    /// The clock the model was told in this chat (held for 30 minutes, so that the start of the prompt stays the same and can be cached).
+    clock: Option<(u64, i64)>,
+    sampling_text: settings::SamplingTexts,
     /// The message of yours that the box is changing (the answer to it is written again as a new version).
     editing: Option<usize>,
     /// The server this app started itself (stopped when the app ends), and why it did not, when it did not.
@@ -176,6 +180,11 @@ pub enum Message {
     ClosePicker,
     /// Draw the next older messages of a long chat too.
     ShowEarlier,
+    /// The thinking chip: the next level of the model.
+    CycleThinking,
+    PromptLength(crate::prompts::Length),
+    SystemAppend(bool),
+    SamplingField(settings::Field, String),
     /// Write the answer at this position again; the old one stays as a version.
     Regenerate(usize),
     /// Change this message of yours: it goes into the box.
@@ -228,12 +237,15 @@ impl App {
             picker_open: false,
             code: CodeState::default(),
             window: CHAT_WINDOW,
+            clock: None,
+            sampling_text: settings::SamplingTexts::default(),
             editing: None,
             switching: false,
             sidecar: None,
             sidecar_note: None,
         };
         app.system_editor = Content::with_text(&app.store.prefs.system_prompt);
+        app.sampling_text = settings::SamplingTexts::from(&app.store.prefs.sampling);
         app.max_tokens_text = if app.store.prefs.max_tokens > 0 { app.store.prefs.max_tokens.to_string() } else { String::new() };
         if let Some(first) = app.store.chats.first().map(|c| c.id) {
             app.open(first);
@@ -365,6 +377,7 @@ impl App {
 
     /// Starts the answer to the messages as they are (the last one is the empty answer).
     fn stream(&mut self, id: u64, model: String) -> Task<Message> {
+        self.hold_clock(id);
         let wire = self.wire_messages();
         let events = api::chat_stream(self.base.clone(), model, wire, self.chat_params());
         let (task, handle) = Task::stream(events).map(move |ev| Message::Stream(id, ev)).abortable();
@@ -471,6 +484,26 @@ impl App {
                     self.reload_messages(id);
                     self.save();
                 }
+                Task::none()
+            }
+            Message::CycleThinking => {
+                let m = self.model_info();
+                self.store.prefs.thinking_level = m.thinking.next(&m.thinking.level_for(&self.store.prefs.thinking_level));
+                self.save();
+                Task::none()
+            }
+            Message::PromptLength(l) => {
+                self.store.prefs.prompt_length = l;
+                self.save();
+                Task::none()
+            }
+            Message::SystemAppend(on) => {
+                self.store.prefs.system_append = on;
+                self.save();
+                Task::none()
+            }
+            Message::SamplingField(field, typed) => {
+                self.sampling_text.apply(field, typed, &mut self.store.prefs.sampling);
                 Task::none()
             }
             Message::ShowEarlier => {
@@ -821,6 +854,7 @@ impl App {
             }
             Message::ResetPrefs => {
                 self.store.prefs = store::Prefs::default();
+                self.sampling_text = settings::SamplingTexts::default();
                 self.system_editor = Content::new();
                 self.max_tokens_text.clear();
                 self.save();
@@ -1013,7 +1047,7 @@ impl App {
             return code::page(&self.code, t, &self.theme(), matches!(self.server, Server::Ready(_)), &self.store.prefs.recent_folders);
         }
         if self.page == View::Settings {
-            return settings::page(t, &self.store.prefs, &self.system_editor, &self.max_tokens_text, engine_settings::view(t, &self.engine, !matches!(self.server, Server::Down(_))));
+            return settings::page(t, &self.store.prefs, &self.system_editor, &self.max_tokens_text, &self.sampling_text, engine_settings::view(t, &self.engine, !matches!(self.server, Server::Down(_))));
         }
         let content: Element<'_, Message> = match &self.server {
             Server::Down(_) | Server::Connecting if self.switching => self.switching_card(t),
@@ -1108,7 +1142,30 @@ impl App {
         } else {
             Space::new().into()
         };
-        let inner = container(row![pill, Space::new().width(Length::Fill), meter].align_y(Alignment::Center)).max_width(780).width(Length::Fill);
+        // the thinking chip: only for a model that can think; a click steps to the next level
+        let model = self.model_info();
+        let chip: Element<'_, Message> = if model.thinking.supported() {
+            let level = self.thinking_level();
+            let (label, _help) = model.thinking.chip(&level);
+            let active = level != "off";
+            let can_switch = model.thinking.control != api::ThinkControl::Always && self.live.is_none();
+            button(text(label).size(13))
+                .on_press_maybe(can_switch.then_some(Message::CycleThinking))
+                .padding([5, 12])
+                .style(move |_, status| {
+                    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                    button::Style {
+                        background: Some(iced::Background::Color(if active { t.primary_soft } else if hovered { t.fill_hover } else { t.fill })),
+                        text_color: if active { t.primary } else { t.fg_soft },
+                        border: iced::border::rounded(999),
+                        ..Default::default()
+                    }
+                })
+                .into()
+        } else {
+            Space::new().into()
+        };
+        let inner = container(row![pill, Space::new().width(10), chip, Space::new().width(Length::Fill), meter].align_y(Alignment::Center)).max_width(780).width(Length::Fill);
         container(inner)
             .center_x(Length::Fill)
             .padding([0, 24])
@@ -1186,7 +1243,7 @@ impl App {
 
     /// The messages of the next request: the system prompt, then the chat without the empty answer that is about to be written.
     pub fn wire_messages(&self) -> Vec<WireMessage> {
-        let mut wire = vec![WireMessage::new("system", self.store.prefs.system())];
+        let mut wire = vec![WireMessage::new("system", self.system_prompt())];
         let upto = match self.messages.last() {
             Some(last) if last.role == Role::Assistant && last.content.is_empty() => self.messages.len() - 1,
             _ => self.messages.len(),
@@ -1198,16 +1255,77 @@ impl App {
     /// The sampling settings the next request carries: nothing while they are automatic.
     pub fn chat_params(&self) -> api::ChatParams {
         let p = &self.store.prefs;
+        let mut extra = if p.manual_sampling { p.sampling.fields() } else { serde_json::Map::new() };
+        let model = self.model_info();
+        for (k, v) in model.thinking.fields(&model.thinking.level_for(&p.thinking_level)) {
+            extra.insert(k, v);
+        }
         api::ChatParams {
             temperature: p.manual_sampling.then_some(p.temperature),
             top_p: p.manual_sampling.then_some(p.top_p),
             max_tokens: (p.max_tokens > 0).then_some(p.max_tokens),
+            extra,
         }
     }
 
-    /// The system prompt the next request carries.
-    pub fn system_prompt(&self) -> &str {
-        self.store.prefs.system()
+    /// The language of the computer, as a tag (`de-DE`).
+    pub fn locale() -> String {
+        for var in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+            if let Ok(v) = std::env::var(var) {
+                let tag = v.split('.').next().unwrap_or("").replace('_', "-");
+                if !tag.is_empty() && tag != "C" && tag != "POSIX" {
+                    return tag;
+                }
+            }
+        }
+        "en".into()
+    }
+
+    /// The model in use (a default one while none is loaded).
+    pub fn model_info(&self) -> ModelInfo {
+        match &self.server {
+            Server::Ready(m) => m.clone(),
+            _ => ModelInfo::default(),
+        }
+    }
+
+    /// The level of the thinking chip for the loaded model.
+    pub fn thinking_level(&self) -> String {
+        self.model_info().thinking.level_for(&self.store.prefs.thinking_level)
+    }
+
+    /// How fast the model read its last prompt (tokens per second; 0 when unknown).
+    fn last_prompt_speed(&self) -> f64 {
+        self.messages.iter().rev().find_map(|m| m.stats.as_ref().map(|s| s.prompt_per_second).filter(|v| *v > 0.0)).unwrap_or(0.0)
+    }
+
+    /// The system prompt the next request carries: built from the facts about the model and the computer, then your text applied.
+    pub fn system_prompt(&self) -> String {
+        let p = &self.store.prefs;
+        let model = self.model_info();
+        let now_secs = chrono::Local::now().timestamp();
+        let held = self.clock.filter(|(c, _)| Some(*c) == self.current).map(|(_, t)| t);
+        let now = prompts::local_time(prompts::frozen_clock(held, now_secs));
+        let locale = Self::locale();
+        let level = model.thinking.level_for(&p.thinking_level);
+        let facts = prompts::Facts {
+            size: prompts::size(model.max_context, model.detail.parameters, p.prompt_length, self.last_prompt_speed()),
+            family: prompts::family(&model.detail),
+            now,
+            locale: locale.clone(),
+            local: true,
+            model_name: model.detail.name.clone(),
+            thinking: model.thinking.supported() && level != "off",
+            tools: prompts::Tools::default(),
+        };
+        prompts::resolve(&prompts::build(&facts), &[(p.system_mode(), p.system_prompt.as_str())], &now, &locale)
+    }
+
+    /// The clock of the open chat is held from its first request for 30 minutes.
+    fn hold_clock(&mut self, id: u64) {
+        let now = chrono::Local::now().timestamp();
+        let held = self.clock.filter(|(c, _)| *c == id).map(|(_, t)| t);
+        self.clock = Some((id, prompts::frozen_clock(held, now)));
     }
 
     /// The answer settings.

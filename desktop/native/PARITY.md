@@ -17,13 +17,13 @@ checks at the bottom pass.
 | Stop | done (Esc: todo) |
 | Chat list, rename, delete, search over chats | part (list and delete; rename and search: todo) |
 | Conversation tree: edit a message / regenerate keeps the old version, arrows between versions | todo |
-| Thinking chip (off/low/medium/high, per model), collapsible reasoning | part (reasoning shown; the chip: todo) |
-| Default system prompt builder (date, language, model family, tools), response style | todo |
+| Thinking chip (off/low/medium/high, per model), collapsible reasoning | part (chip done, one level for all chats; reasoning shown, collapsing: todo) |
+| Default system prompt builder (date, language, model family, tools), response style | part (built from date, language, model family and size, prompt length auto/full/short, your text replaces or is added, clock held 30 min; tools and response style: todo) |
 | Assistants (name, icon, color, instructions, sampling, model, suggestions; import/export) | todo |
 | Projects (instructions + knowledge base, move chats) | todo |
 | Presets / prompt library (`/` in the box) | todo |
 | Personalization and memory | todo |
-| Sampling panel (temperature, top-p/k, min-p, penalties, mirostat, ...) | part (temperature, top-p, longest answer) |
+| Sampling panel (temperature, top-p/k, min-p, penalties, mirostat, ...) | done (constraint/grammar and logprobs: todo) |
 | Attach images (vision), text files, documents (PDF, DOCX, ... via `/api/studio/extract`) + passage search (BM25) | todo |
 | Use the web / Allow web access (tools) / Research mode | todo |
 | Message actions (copy, copy Markdown, read aloud, rewind) | part (copy) |

@@ -728,7 +728,7 @@ impl CodeState {
         let wire = self.wire(env.extra);
         self.items.push(Item::Assistant { text: String::new(), md: Box::new(markdown::Content::new()) });
         self.running = true;
-        let events = api::chat_stream_with_tools(env.base.to_string(), model.to_string(), wire, env.params, Some(self.tools_for_model()));
+        let events = api::chat_stream_with_tools(env.base.to_string(), model.to_string(), wire, env.params.clone(), Some(self.tools_for_model()));
         let (task, handle) = Task::stream(events).map(|ev| Message::Code(CodeMsg::Stream(ev))).abortable();
         self.handle = Some(handle.abort_on_drop());
         task

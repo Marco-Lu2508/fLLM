@@ -6,18 +6,142 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 
 /// The loaded model, as the server lists it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModelInfo {
     pub id: String,
     pub max_context: u64,
+    /// What the model can do with its thinking: nothing, a switch, an effort.
+    pub thinking: Thinking,
+    pub vision: bool,
+    /// Name, architecture, size and template, for the system prompt.
+    pub detail: crate::prompts::ModelDetail,
 }
 
-/// The sampling settings of a request. `None` leaves the choice to the server (the defaults the model ships with).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+impl ModelInfo {
+    pub fn new(id: &str, max_context: u64) -> ModelInfo {
+        ModelInfo { id: id.into(), max_context, ..Default::default() }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ThinkControl {
+    #[default]
+    None,
+    /// A switch in the chat template (`enable_thinking`), with levels that cut the thinking off after a number of tokens.
+    Toggle,
+    /// The model takes a reasoning effort.
+    Effort,
+    /// The model always thinks; nothing to switch.
+    Always,
+}
+
+/// What the loaded model can do with thinking (`capabilities.thinking` of `/v1/models`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Thinking {
+    pub control: ThinkControl,
+    pub variable: String,
+    pub levels: Vec<String>,
+    pub default: String,
+}
+
+pub const THINKING_LEVELS: [&str; 4] = ["off", "low", "medium", "high"];
+
+impl Thinking {
+    pub fn from_caps(raw: Option<&serde_json::Value>) -> Thinking {
+        let Some(raw) = raw else { return Thinking::default() };
+        if raw.as_bool() == Some(true) {
+            // an older server only said that the template mentions thinking: a plain switch
+            return Thinking { control: ThinkControl::Toggle, variable: "enable_thinking".into(), levels: vec!["off".into(), "high".into()], default: "off".into() };
+        }
+        let Some(o) = raw.as_object() else { return Thinking::default() };
+        let supported = o.get("supported").and_then(|b| b.as_bool()).unwrap_or(false);
+        let control = match o.get("control").and_then(|s| s.as_str()) {
+            Some("toggle") => ThinkControl::Toggle,
+            Some("effort") => ThinkControl::Effort,
+            Some("always") => ThinkControl::Always,
+            Some("none") => ThinkControl::None,
+            _ if supported => ThinkControl::Toggle,
+            _ => ThinkControl::None,
+        };
+        let levels: Vec<String> = o.get("levels").and_then(|l| l.as_array()).into_iter().flatten().filter_map(|l| l.as_str()).filter(|l| THINKING_LEVELS.contains(l)).map(str::to_string).collect();
+        if !supported || control == ThinkControl::None || levels.is_empty() {
+            return Thinking::default();
+        }
+        let default = o.get("default").and_then(|d| d.as_str()).filter(|d| levels.iter().any(|l| l == d)).map(str::to_string).unwrap_or_else(|| levels[0].clone());
+        Thinking { control, variable: o.get("variable").and_then(|v| v.as_str()).unwrap_or_default().to_string(), levels, default }
+    }
+
+    pub fn supported(&self) -> bool {
+        self.control != ThinkControl::None
+    }
+
+    /// The level to use: the saved one when this model has it, else the model's default.
+    pub fn level_for(&self, saved: &str) -> String {
+        if self.levels.iter().any(|l| l == saved) {
+            saved.to_string()
+        } else {
+            self.default.clone()
+        }
+    }
+
+    /// The level after `level` in the list (the chip steps through them).
+    pub fn next(&self, level: &str) -> String {
+        if !self.supported() || self.levels.len() < 2 {
+            return level.to_string();
+        }
+        let i = self.levels.iter().position(|l| l == level).unwrap_or(0);
+        self.levels[(i + 1) % self.levels.len()].clone()
+    }
+
+    /// The fields of a request that carry the level; only what the model understands.
+    pub fn fields(&self, level: &str) -> serde_json::Map<String, serde_json::Value> {
+        let mut out = serde_json::Map::new();
+        if level.is_empty() {
+            return out;
+        }
+        match self.control {
+            ThinkControl::Effort => {
+                out.insert("reasoning_effort".into(), level.into());
+            }
+            ThinkControl::Toggle => {
+                if level != "off" {
+                    out.insert("reasoning_effort".into(), level.into());
+                }
+                if !self.variable.is_empty() {
+                    out.insert("chat_template_kwargs".into(), serde_json::json!({ self.variable.clone(): level != "off" }));
+                }
+            }
+            ThinkControl::None | ThinkControl::Always => {}
+        }
+        out
+    }
+
+    /// The label of the chip and its help.
+    pub fn chip(&self, level: &str) -> (String, String) {
+        if self.control == ThinkControl::Always {
+            return ("Thinking".into(), "This model always thinks before it answers; there is nothing to switch.".into());
+        }
+        let name = match level {
+            "off" => "Off",
+            "low" => "Low",
+            "medium" => "Medium",
+            "high" => "High",
+            _ => "",
+        };
+        let label = if level == "off" || name.is_empty() { "Thinking".to_string() } else { format!("Thinking: {name}") };
+        let budgets = if self.control == ThinkControl::Toggle { " Low and Medium stop the thinking after about 512 and 2048 tokens and let the model answer." } else { "" };
+        (label, format!("Thinking: {}. Click to change.{budgets}", if name.is_empty() { "default" } else { name }))
+    }
+}
+
+/// The settings of a request. `None` leaves the choice to the server (the defaults the model ships with).
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ChatParams {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub max_tokens: Option<u32>,
+    /// More fields of the request, put in as they are: top_k, min_p, penalties, seed, stop, the thinking fields.
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The JSON of a streamed chat request.
@@ -41,6 +165,9 @@ pub fn chat_body_with_tools(model: &str, messages: &[WireMessage], params: ChatP
     }
     if let Some(n) = params.max_tokens {
         body["max_tokens"] = serde_json::json!(n);
+    }
+    for (k, v) in &params.extra {
+        body[k.as_str()] = v.clone();
     }
     if let Some(tools) = tools.filter(|t| t.as_array().is_some_and(|a| !a.is_empty())) {
         body["tools"] = tools.clone();
@@ -159,10 +286,30 @@ pub async fn fetch_model(base: &str) -> Result<ModelInfo, String> {
     }
     let v: serde_json::Value = resp.error_for_status().map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
     let first = v.pointer("/data/0").ok_or(crate::models::NO_MODEL)?;
-    Ok(ModelInfo {
-        id: first.get("id").and_then(|s| s.as_str()).ok_or("the model has no id")?.to_string(),
+    let id = first.get("id").and_then(|s| s.as_str()).ok_or("the model has no id")?.to_string();
+    let caps = first.get("capabilities");
+    let mut info = ModelInfo {
         max_context: first.get("max_model_len").and_then(|n| n.as_u64()).unwrap_or(4096),
-    })
+        thinking: Thinking::from_caps(caps.and_then(|c| c.get("thinking"))),
+        vision: caps.and_then(|c| c.get("vision")).and_then(|b| b.as_bool()).unwrap_or(false),
+        detail: crate::prompts::ModelDetail { name: id.clone(), ..Default::default() },
+        id,
+    };
+    // name, architecture, size and template: for the system prompt; a server without the route just gives less
+    if let Ok(resp) = http.get(format!("{base}/api/studio/status")).send().await {
+        if let Ok(v) = resp.json::<serde_json::Value>().await {
+            if let Some(m) = v.get("model") {
+                info.detail = crate::prompts::ModelDetail {
+                    name: m.get("name").and_then(|s| s.as_str()).unwrap_or(&info.id).to_string(),
+                    arch: m.get("arch").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
+                    parameters: m.get("parameters").and_then(|n| n.as_f64()).unwrap_or(0.0),
+                    chat_template: m.get("chat_template").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
+                    thinks: info.thinking.supported(),
+                };
+            }
+        }
+    }
+    Ok(info)
 }
 
 type ByteStream = Pin<Box<dyn Stream<Item = reqwest::Result<Vec<u8>>> + Send>>;
@@ -239,7 +386,7 @@ mod tests {
         let auto = chat_body("tiny", &m, ChatParams::default());
         assert!(auto.get("temperature").is_none() && auto.get("top_p").is_none() && auto.get("max_tokens").is_none(), "{auto}");
         assert_eq!(auto["stream"], true);
-        let manual = chat_body("tiny", &m, ChatParams { temperature: Some(0.25), top_p: Some(0.5), max_tokens: Some(300) });
+        let manual = chat_body("tiny", &m, ChatParams { temperature: Some(0.25), top_p: Some(0.5), max_tokens: Some(300), ..Default::default() });
         assert_eq!((manual["temperature"].as_f64(), manual["top_p"].as_f64(), manual["max_tokens"].as_u64()), (Some(0.25), Some(0.5), Some(300)));
     }
 

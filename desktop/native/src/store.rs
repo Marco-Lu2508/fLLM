@@ -164,6 +164,89 @@ pub struct Prefs {
     /// The folders Code mode opened last, newest first.
     #[serde(default)]
     pub recent_folders: Vec<String>,
+    /// With a custom system prompt: false replaces the automatic prompt, true is added after it.
+    #[serde(default)]
+    pub system_append: bool,
+    /// How long the automatic system prompt is: always the full one, the short one, or by how fast the model reads.
+    #[serde(default)]
+    pub prompt_length: crate::prompts::Length,
+    /// The sampling values besides temperature and top-p; sent when sampling is manual.
+    #[serde(default)]
+    pub sampling: Sampling,
+    /// The level of the thinking chip (off, low, medium, high); a model that has no such level uses its own default.
+    #[serde(default)]
+    pub thinking_level: String,
+}
+
+/// The more advanced sampling values. The neutral value of each is the default, and a neutral value is not sent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Sampling {
+    #[serde(default)]
+    pub top_k: u32,
+    #[serde(default)]
+    pub min_p: f32,
+    #[serde(default = "one")]
+    pub repetition_penalty: f32,
+    #[serde(default)]
+    pub presence_penalty: f32,
+    #[serde(default)]
+    pub frequency_penalty: f32,
+    #[serde(default)]
+    pub dry_multiplier: f32,
+    #[serde(default)]
+    pub mirostat: u8,
+    #[serde(default)]
+    pub seed: Option<i64>,
+    /// Words that end the answer, separated by commas.
+    #[serde(default)]
+    pub stop: String,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+impl Default for Sampling {
+    fn default() -> Self {
+        Sampling { top_k: 0, min_p: 0.0, repetition_penalty: 1.0, presence_penalty: 0.0, frequency_penalty: 0.0, dry_multiplier: 0.0, mirostat: 0, seed: None, stop: String::new() }
+    }
+}
+
+impl Sampling {
+    /// The request fields for the values that are not neutral.
+    pub fn fields(&self) -> serde_json::Map<String, serde_json::Value> {
+        use serde_json::json;
+        let mut m = serde_json::Map::new();
+        if self.top_k > 0 {
+            m.insert("top_k".into(), json!(self.top_k));
+        }
+        if self.min_p > 0.0 {
+            m.insert("min_p".into(), json!(self.min_p));
+        }
+        if (self.repetition_penalty - 1.0).abs() > 1e-6 {
+            m.insert("repetition_penalty".into(), json!(self.repetition_penalty));
+        }
+        if self.presence_penalty != 0.0 {
+            m.insert("presence_penalty".into(), json!(self.presence_penalty));
+        }
+        if self.frequency_penalty != 0.0 {
+            m.insert("frequency_penalty".into(), json!(self.frequency_penalty));
+        }
+        if self.dry_multiplier > 0.0 {
+            m.insert("dry_multiplier".into(), json!(self.dry_multiplier));
+        }
+        if self.mirostat > 0 {
+            m.insert("mirostat".into(), json!(self.mirostat));
+        }
+        if let Some(seed) = self.seed {
+            m.insert("seed".into(), json!(seed));
+        }
+        let stop: Vec<&str> = self.stop.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        if !stop.is_empty() {
+            m.insert("stop".into(), json!(stop));
+        }
+        m
+    }
 }
 
 fn default_temperature() -> f32 {
@@ -176,7 +259,7 @@ fn default_top_p() -> f32 {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new() }
+        Prefs { manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new() }
     }
 }
 
@@ -191,12 +274,14 @@ impl Prefs {
         self.recent_folders.truncate(RECENT_FOLDERS);
     }
 
-    /// The system prompt a request carries.
-    pub fn system(&self) -> &str {
-        if self.custom_system && !self.system_prompt.trim().is_empty() {
-            self.system_prompt.trim()
+    /// How your own prompt is applied to the automatic one.
+    pub fn system_mode(&self) -> crate::prompts::Mode {
+        if !self.custom_system {
+            crate::prompts::Mode::Default
+        } else if self.system_append {
+            crate::prompts::Mode::Append
         } else {
-            BUILT_IN_SYSTEM_PROMPT
+            crate::prompts::Mode::Override
         }
     }
 }

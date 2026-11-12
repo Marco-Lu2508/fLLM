@@ -16,7 +16,7 @@ fn app(theme: &str) -> (App, tempfile::TempDir) {
     let path = dir.path().join("chats.json");
     Store { theme: theme.into(), ..Default::default() }.save(&path).unwrap();
     let (mut app, _task) = App::with("http://127.0.0.1:9".into(), path);
-    let _ = app.update(Message::Connected(Ok(ModelInfo { id: "qwen2.5-0.5b-instruct".into(), max_context: 8192 })));
+    let _ = app.update(Message::Connected(Ok(ModelInfo::new("qwen2.5-0.5b-instruct", 8192))));
     let o = parse_overview(&json!({
         "loaded": {"name": "qwen2.5-0.5b-instruct"},
         "local": [{"name": "my-model.gguf", "path": "/models/my-model.gguf", "size_bytes": 2_000_000_000u64}],
@@ -93,7 +93,7 @@ fn while_the_server_switches_the_window_says_so_instead_of_no_server() {
     assert!(ui.find("No fLLM server found").is_err(), "and does not claim that there is no server");
     drop(ui);
     // back with the new model
-    let _ = app.update(Message::Connected(Ok(ModelInfo { id: "my-model".into(), max_context: 4096 })));
+    let _ = app.update(Message::Connected(Ok(ModelInfo::new("my-model", 4096))));
     assert!(!app.switching());
     let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 800.0), app.view());
     assert!(ui.find("Loading my-model.gguf…").is_err());

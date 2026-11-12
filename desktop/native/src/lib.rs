@@ -9,6 +9,7 @@ pub mod code;
 pub mod engine_settings;
 pub mod md;
 pub mod models;
+pub mod prompts;
 pub mod settings;
 pub mod sidecar;
 pub mod store;

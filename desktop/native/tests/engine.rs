@@ -71,7 +71,7 @@ fn app(theme: &str) -> (App, tempfile::TempDir) {
     let path = dir.path().join("chats.json");
     Store { theme: theme.into(), ..Default::default() }.save(&path).unwrap();
     let (mut app, _task) = App::with("http://127.0.0.1:9".into(), path);
-    let _ = app.update(Message::Connected(Ok(ModelInfo { id: "tiny".into(), max_context: 4096 })));
+    let _ = app.update(Message::Connected(Ok(ModelInfo::new("tiny", 4096))));
     let _ = app.update(Message::EngineLoaded(Ok((parse_engine(&serde_json::from_str::<Value>(ENGINE).unwrap()), parse_server(&serde_json::from_str::<Value>(SERVER).unwrap())))));
     let _ = app.update(Message::Go(View::Settings));
     (app, dir)

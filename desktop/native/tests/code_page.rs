@@ -18,7 +18,7 @@ fn app(theme: &str) -> (App, tempfile::TempDir) {
     let path = dir.path().join("chats.json");
     Store { theme: theme.into(), ..Default::default() }.save(&path).unwrap();
     let (mut app, _task) = App::with("http://127.0.0.1:9".into(), path);
-    let _ = app.update(Message::Connected(Ok(ModelInfo { id: "qwen".into(), max_context: 8192 })));
+    let _ = app.update(Message::Connected(Ok(ModelInfo::new("qwen", 8192))));
     let _ = app.update(Message::Go(View::Code));
     (app, dir)
 }
@@ -173,7 +173,7 @@ fn a_session_is_kept_per_folder_and_comes_back_when_the_folder_is_opened_again()
     Store::default().save(&path).unwrap();
     let boot = || {
         let (mut app, _t) = App::with("http://127.0.0.1:9".into(), path.clone());
-        let _ = app.update(Message::Connected(Ok(ModelInfo { id: "qwen".into(), max_context: 8192 })));
+        let _ = app.update(Message::Connected(Ok(ModelInfo::new("qwen", 8192))));
         let _ = app.update(Message::Go(View::Code));
         app
     };

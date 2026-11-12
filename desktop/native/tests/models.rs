@@ -106,7 +106,7 @@ fn app(theme: &str) -> (App, tempfile::TempDir) {
     let path = dir.path().join("chats.json");
     fllm_app::store::Store { next_id: 0, theme: theme.into(), ..Default::default() }.save(&path).unwrap();
     let (mut app, _task) = App::with("http://127.0.0.1:9".into(), path);
-    let _ = app.update(Message::Connected(Ok(ModelInfo { id: "qwen2.5-0.5b-instruct".into(), max_context: 8192 })));
+    let _ = app.update(Message::Connected(Ok(ModelInfo::new("qwen2.5-0.5b-instruct", 8192))));
     let o = models::parse_overview(&serde_json::from_str(OVERVIEW).unwrap());
     let d = models::parse_downloads(&serde_json::from_str(DOWNLOADS).unwrap());
     let _ = app.update(Message::OverviewLoaded(Ok(o)));

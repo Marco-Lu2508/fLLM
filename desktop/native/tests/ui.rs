@@ -14,7 +14,7 @@ fn snapshot_dir() -> PathBuf {
 }
 
 fn model() -> ModelInfo {
-    ModelInfo { id: "qwen2.5-0.5b-instruct".into(), max_context: 8192 }
+    ModelInfo::new("qwen2.5-0.5b-instruct", 8192)
 }
 
 fn rec(role: Role, content: &str, stats: Option<Stats>) -> Record {
@@ -211,7 +211,7 @@ fn stop_keeps_what_was_written_so_far() {
 fn a_long_chat_draws_only_the_newest_messages_until_more_are_asked_for() {
     use fllm_app::app::CHAT_WINDOW;
     let messages: Vec<Record> = (0..200).map(|i| rec(if i % 2 == 0 { Role::User } else { Role::Assistant }, &format!("message number {i:03}"), None)).collect();
-    let (mut app, _dir) = app_with(vec![ChatRecord::new(0, "long".into(), messages)], "light", true);
+    let (mut app, _dir) = app_with(vec![ChatRecord::new(0, "long", messages)], "light", true);
     let _ = app.update(Message::OpenChat(0));
     let mut ui = Simulator::with_size(settings(), iced::Size::new(1100.0, 12000.0), app.view());
     ui.find("Show 60 earlier messages").expect("older messages are one click away");
