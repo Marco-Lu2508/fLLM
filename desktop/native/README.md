@@ -55,6 +55,7 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 |---|---|
 | 2c | Load options (context, device), the measured prompt speed with the compact prompt, projects and memory, web tools |
 | 3b | Code mode: sub-agents, MCP tools, a terminal view |
+| 4a | One download per system with the app and the engine side by side: the `native-bundle` workflow (started by hand with a release tag; it takes the engine of that release, checks its checksum, adds the app and, with `upload`, signs and attaches the archives) |
 | 4 | The engine inside the process (no second program; for now the app starts the server next to it, see above), installers per system that put both side by side, the tray, autostart, updates; then the Tauri app and the web Studio files can go |
 | later | Voice, artifacts, the research mode, the command palette |
 

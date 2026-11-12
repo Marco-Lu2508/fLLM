@@ -1,0 +1,145 @@
+# The native desktop app (desktop/native) together with the engine, as one download per system: the app finds `fllm-rs` next to itself and
+# starts it when no server answers, so unpacking the archive is the whole installation.
+#
+# Started by hand with the tag of a release (the engine binaries of that release are used as they are, checked against their checksums).
+# Without `upload` the archives are only kept as workflow artifacts, to try them first; with it they are signed like the engine archives and
+# attached to that release.
+name: native-bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release whose engine binaries go into the bundles (for example v0.2.2)"
+        required: true
+        type: string
+      upload:
+        description: "Sign the bundles and attach them to that release"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bundle:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: fllm-desktop-linux-x86_64.tar.gz
+            engine: fllm-linux-x86_64-gnu.tar.gz
+            os: ubuntu-26.04
+            exe: ""
+          - asset: fllm-desktop-windows-x86_64.zip
+            engine: fllm-windows-x86_64-msvc.zip
+            os: windows-2025
+            exe: ".exe"
+          - asset: fllm-desktop-macos-aarch64.tar.gz
+            engine: fllm-macos-aarch64.tar.gz
+            os: macos-26
+            exe: ""
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ inputs.tag }}
+      ASSET: ${{ matrix.asset }}
+      ENGINE: ${{ matrix.engine }}
+      EXE: ${{ matrix.exe }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: desktop/native
+
+      - name: Build the app
+        working-directory: desktop/native
+        run: cargo build --release --locked
+
+      - name: Fetch the engine of the release and check it
+        run: |
+          set -e
+          gh release download "$TAG" --pattern "$ENGINE" --pattern "$ENGINE.sha256"
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "$ENGINE.sha256"; else shasum -a 256 -c "$ENGINE.sha256"; fi
+
+      - name: Put the app and the engine side by side
+        run: |
+          set -e
+          rm -rf fllm-desktop && mkdir fllm-desktop
+          case "$ENGINE" in
+            *.zip) python -m zipfile -e "$ENGINE" fllm-desktop ;;
+            *) tar -xzf "$ENGINE" -C fllm-desktop ;;
+          esac
+          test -f "fllm-desktop/fllm-rs$EXE" || { echo "the engine archive has no fllm-rs$EXE"; ls -R fllm-desktop; exit 1; }
+          cp "desktop/native/target/release/fllm-app$EXE" fllm-desktop/
+          chmod +x "fllm-desktop/fllm-app$EXE" "fllm-desktop/fllm-rs$EXE"
+          cat > fllm-desktop/README.txt <<'TXT'
+          fLLM desktop app
+
+          Start fllm-app. When no server answers it starts the engine (fllm-rs, in this folder) by itself and stops it again when the
+          window is closed. A server that is already running (FLLM_URL, a Docker container, port 8080) is used as it is.
+          The engine alone: fllm-rs --help
+          TXT
+          "fllm-desktop/fllm-rs$EXE" --help > /dev/null
+
+      - name: Pack
+        run: |
+          set -e
+          case "$ASSET" in
+            *.zip) python -c "import shutil; shutil.make_archive('fllm-desktop-windows-x86_64', 'zip', root_dir='fllm-desktop')" ;;
+            *) tar -czf "$ASSET" -C fllm-desktop . ;;
+          esac
+          ls -l "$ASSET"
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum "$ASSET" > "$ASSET.sha256"; else shasum -a 256 "$ASSET" > "$ASSET.sha256"; fi
+          cat "$ASSET.sha256"
+
+      - name: Keep the bundle as an artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
+          retention-days: 7
+
+      - name: Install Cosign
+        if: inputs.upload
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign the archive with Cosign (keyless OIDC)
+        if: inputs.upload
+        run: for attempt in 1 2 3; do cosign sign-blob --yes --bundle "$ASSET.sigstore.json" "$ASSET" && break; [ "$attempt" = 3 ] && exit 1; sleep $((attempt * 30)); done
+
+      - name: Attest build provenance
+        if: inputs.upload
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ matrix.asset }}
+
+      - name: Upload to the release
+        if: inputs.upload
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" "$ASSET.sigstore.json" --clobber
