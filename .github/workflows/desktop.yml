@@ -12,6 +12,7 @@ on:
     paths:
       - ".github/workflows/desktop.yml"
       - "desktop/**"
+      - "!desktop/native/**"
   workflow_dispatch:
 
 permissions:

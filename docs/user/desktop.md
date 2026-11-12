@@ -14,6 +14,13 @@ How it works: the app starts the `fllm-rs` program that is installed next to it 
 your computer) and shows its page. Closing the app stops the server. Models, chats and settings are kept between starts; the models are
 stored in the usual fLLM model folder, shared with the command line.
 
+## The native app (in progress)
+
+`desktop/native` is the same program written entirely in Rust (iced, no web view); the installers above stay the supported app until it
+has caught up. Stage 1, the chat with streaming Markdown answers, saved chats and the design of the Studio, is built and tested without a
+display; Models, Settings, Code mode, the server inside the process and installers are not. What is built, what is not and how to try
+it: [desktop/native/README.md](../../desktop/native/README.md).
+
 ## Server builds (variants)
 
 The server program comes in builds for different graphics backends:

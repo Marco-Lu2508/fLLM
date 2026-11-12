@@ -1,0 +1,48 @@
+# fLLM app, native (Rust, no web view)
+
+The Studio as a real desktop program: one Rust binary, drawn by [iced](https://iced.rs) (wgpu, with a software renderer as fallback),
+no Chromium, no Electron and no web view. The Tauri app in `../src-tauri` shows the web Studio in the system web view; this one
+replaces it step by step.
+
+It talks to an fLLM server over HTTP, the same `/v1` API every other client uses (`GET /v1/models`, `POST /v1/chat/completions` as an event
+stream), so everything the server can do is within reach and the window stays small. The server is not inside the window yet (stage 4).
+
+```sh
+fllm-rs studio --no-open --port 8080 --model model.gguf     # or any fLLM server
+cd desktop/native && cargo run --release                    # FLLM_URL=http://host:port points the window elsewhere
+```
+
+## What is built (stage 1: the chat)
+
+- Chat with streaming answers, Markdown (headings, lists, tables, quotes, code blocks with highlighting and a copy button, inline code),
+  stop, copy, the reasoning of thinking models kept apart, tokens per second and prompt speed under every answer.
+- Chats on disk (`~/.local/share/fllm-app/chats.json`, `$FLLM_APP_DATA` moves it), written after every change, a damaged file is moved aside
+  instead of overwritten. Title from the first message, delete, open, new chat.
+- The design system of the Studio (`design-system/fllm-studio/MASTER.md`): the same tokens in both themes (copper accent, system grays,
+  hairlines), Inter shipped inside the program, a context meter with a track, 780-pixel reading column shared by messages and composer.
+- No server: a clear screen with the address and a retry every four seconds.
+
+## What is not built yet
+
+| Stage | Content |
+|---|---|
+| 2 | Models (download, load, quantization, hardware plan), Settings (sampling, system prompt with the measured prompt speed, engine), the model picker, projects and memory, web tools |
+| 3 | Code mode (folder, agent loop, diffs, approvals, terminal) |
+| 4 | The server inside the process (no second program), installers per system, the tray, autostart, updates; then the Tauri app and the web Studio files can go |
+| later | Voice, artifacts, the research mode, the command palette |
+
+Until stage 4 the Tauri app stays the supported desktop app.
+
+## Tests
+
+```sh
+cargo test --locked      # 28 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+                         # window driven headless (new chat, send, stream, stop, error, delete, theme) and drawn to PNG files
+```
+
+The window tests use iced's software renderer, so they need no display and no GPU. The pictures go to
+`target/tmp/ui-snapshots/` (conversation, start screen and offline screen, light and dark). A mutation of the line buffer, of the save in
+`finish` and of the guard against late events each turn a test red.
+
+Not checked: a window on a real screen (this machine has none), scaling on a HiDPI display, input methods, the macOS and Windows builds
+(the CI workflow `native-app` builds and tests all three).

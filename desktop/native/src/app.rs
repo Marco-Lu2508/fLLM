@@ -1,0 +1,804 @@
+//! The window: state, messages, update and view.
+
+use crate::api::{self, ModelInfo, StreamEvent, WireMessage};
+use crate::store::{self, ChatRecord, Record, Role, Stats, Store};
+use crate::md;
+use crate::theme::{self, Tokens};
+use iced::widget::text_editor::{Action, Binding, Content, KeyPress, Status};
+use iced::widget::{button, column, container, markdown, mouse_area, row, scrollable, svg, text, text_editor, Space};
+use iced::{keyboard, task, time, Alignment, Element, Font, Length, Padding, Subscription, Task, Theme};
+use std::path::PathBuf;
+use std::time::Duration;
+
+const SYSTEM_PROMPT: &str = "You are a helpful assistant running locally on the user's computer. Answer in the language of the user. Be concise. Use Markdown only where it helps. If you are not sure, say so. Never invent facts, quotes, links or sources.";
+const STARTERS: [&str; 4] = [
+    "Explain in simple words how a language model writes a text word by word.",
+    "Write a fast Rust function for the dot product of two f32 slices.",
+    "Help me plan my week: ask me what I need to get done.",
+    "Summarize a topic I name in five bullet points.",
+];
+
+fn icon(bytes: &'static [u8]) -> svg::Handle {
+    svg::Handle::from_memory(bytes)
+}
+
+const ICON_PLUS: &[u8] = include_bytes!("../icons/plus.svg");
+const ICON_SEND: &[u8] = include_bytes!("../icons/arrow-up.svg");
+const ICON_STOP: &[u8] = include_bytes!("../icons/stop.svg");
+const ICON_TRASH: &[u8] = include_bytes!("../icons/trash.svg");
+const ICON_CHAT: &[u8] = include_bytes!("../icons/chat.svg");
+const ICON_CUBE: &[u8] = include_bytes!("../icons/cube.svg");
+const ICON_SETTINGS: &[u8] = include_bytes!("../icons/settings.svg");
+
+/// A message with its rendered Markdown.
+pub struct Msg {
+    pub role: Role,
+    pub content: String,
+    pub reasoning: String,
+    pub stats: Option<Stats>,
+    pub md: markdown::Content,
+}
+
+impl Msg {
+    fn from_record(r: &Record) -> Msg {
+        Msg { role: r.role, content: r.content.clone(), reasoning: r.reasoning.clone(), stats: r.stats.clone(), md: markdown::Content::parse(&r.content) }
+    }
+
+    fn record(&self) -> Record {
+        Record { role: self.role, content: self.content.clone(), reasoning: self.reasoning.clone(), stats: self.stats.clone() }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Server {
+    Connecting,
+    Ready(ModelInfo),
+    Down(String),
+}
+
+/// The reply that is being written right now.
+struct Live {
+    chat: u64,
+    _handle: task::Handle,
+}
+
+pub struct App {
+    base: String,
+    data_file: PathBuf,
+    store: Store,
+    system_dark: bool,
+    server: Server,
+    current: Option<u64>,
+    /// The messages of the open chat.
+    messages: Vec<Msg>,
+    editor: Content,
+    live: Option<Live>,
+    /// Tokens used by the open chat (prompt + answer of the last reply), for the context meter.
+    used_tokens: u64,
+    /// Whether `used_tokens` was counted by the server (else it is an estimate and the meter shows a tilde).
+    used_exact: bool,
+    error: Option<String>,
+    /// The chat row under the pointer (shows its delete button).
+    hover: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    Connected(Result<ModelInfo, String>),
+    Retry,
+    Tick,
+    NewChat,
+    OpenChat(u64),
+    DeleteChat(u64),
+    Edit(Action),
+    Send,
+    Stop,
+    Starter(usize),
+    Stream(u64, StreamEvent),
+    Copy(usize),
+    CopyText(String),
+    Hover(Option<u64>),
+    ToggleTheme,
+    LinkClicked(markdown::Uri),
+}
+
+impl App {
+    pub fn new() -> (App, Task<Message>) {
+        let base = std::env::var("FLLM_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into()).trim_end_matches('/').to_string();
+        App::with(base, store::data_file())
+    }
+
+    pub fn with(base: String, data_file: PathBuf) -> (App, Task<Message>) {
+        let store = Store::load(&data_file);
+        let system_dark = std::env::var("FLLM_THEME").map(|v| v == "dark").unwrap_or(false);
+        let mut app = App {
+            base: base.clone(),
+            data_file,
+            store,
+            system_dark,
+            server: Server::Connecting,
+            current: None,
+            messages: Vec::new(),
+            editor: Content::new(),
+            live: None,
+            used_tokens: 0,
+            used_exact: false,
+            error: None,
+            hover: None,
+        };
+        if let Some(first) = app.store.chats.first().map(|c| c.id) {
+            app.open(first);
+        }
+        (app, Task::perform(async move { api::fetch_model(&base).await }, Message::Connected))
+    }
+
+    /// What the server connection looks like now (for tests and for the status line).
+    pub fn server_state(&self) -> &Server {
+        &self.server
+    }
+
+    /// The id of the open chat, `None` for a chat that has not started.
+    pub fn open_chat(&self) -> Option<u64> {
+        self.current
+    }
+
+    /// The text of the last message of the open chat.
+    pub fn last_text(&self) -> Option<&str> {
+        self.messages.last().map(|m| m.content.as_str())
+    }
+
+    /// Whether a reply is being written.
+    pub fn is_streaming(&self) -> bool {
+        self.live.is_some()
+    }
+
+    /// How many messages the open chat shows.
+    pub fn message_count(&self) -> usize {
+        self.messages.len()
+    }
+
+    fn dark(&self) -> bool {
+        match self.store.theme.as_str() {
+            "dark" => true,
+            "light" => false,
+            _ => self.system_dark,
+        }
+    }
+
+    pub fn tokens(&self) -> Tokens {
+        Tokens::new(self.dark())
+    }
+
+    pub fn theme(&self) -> Theme {
+        self.tokens().iced_theme()
+    }
+
+    fn save(&self) {
+        if let Err(e) = self.store.save(&self.data_file) {
+            eprintln!("fllm-app: the chats could not be saved: {e}");
+        }
+    }
+
+    fn open(&mut self, id: u64) {
+        if let Some(chat) = self.store.chat(id) {
+            self.messages = chat.messages.iter().map(Msg::from_record).collect();
+            self.current = Some(id);
+            self.used_tokens = estimate_tokens(&self.messages);
+            self.used_exact = false;
+            self.error = None;
+        }
+    }
+
+    /// Writes the open chat back to the store.
+    fn sync_current(&mut self) {
+        if let Some(id) = self.current {
+            let records: Vec<Record> = self.messages.iter().map(Msg::record).collect();
+            if let Some(chat) = self.store.chat_mut(id) {
+                chat.messages = records;
+            }
+        }
+    }
+
+    fn can_send(&self) -> bool {
+        matches!(self.server, Server::Ready(_)) && self.live.is_none() && !self.editor.text().trim().is_empty()
+    }
+
+    fn send(&mut self, prompt: String) -> Task<Message> {
+        let Server::Ready(model) = self.server.clone() else { return Task::none() };
+        if self.live.is_some() || prompt.trim().is_empty() {
+            return Task::none();
+        }
+        let id = match self.current {
+            Some(id) => id,
+            None => {
+                let id = self.store.new_chat();
+                self.current = Some(id);
+                id
+            }
+        };
+        let first = self.messages.is_empty();
+        self.messages.push(Msg { role: Role::User, md: markdown::Content::parse(&prompt), content: prompt.clone(), reasoning: String::new(), stats: None });
+        self.messages.push(Msg { role: Role::Assistant, content: String::new(), reasoning: String::new(), stats: None, md: markdown::Content::new() });
+        if first {
+            if let Some(chat) = self.store.chat_mut(id) {
+                chat.title = store::title_from(&prompt);
+            }
+        }
+        self.sync_current();
+        self.save();
+        self.error = None;
+        self.editor = Content::new();
+
+        let mut wire = vec![WireMessage { role: "system".into(), content: SYSTEM_PROMPT.into() }];
+        // everything but the empty answer that was just added
+        wire.extend(self.messages[..self.messages.len() - 1].iter().map(|m| WireMessage { role: m.role.wire().into(), content: m.content.clone() }));
+        let events = api::chat_stream(self.base.clone(), model.id, wire);
+        let (task, handle) = Task::stream(events).map(move |ev| Message::Stream(id, ev)).abortable();
+        self.live = Some(Live { chat: id, _handle: handle.abort_on_drop() });
+        task
+    }
+
+    pub fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::Connected(Ok(model)) => {
+                self.server = Server::Ready(model);
+                Task::none()
+            }
+            Message::Connected(Err(e)) => {
+                self.server = Server::Down(e);
+                Task::none()
+            }
+            Message::Retry => {
+                self.server = Server::Connecting;
+                let base = self.base.clone();
+                Task::perform(async move { api::fetch_model(&base).await }, Message::Connected)
+            }
+            Message::Tick => {
+                if matches!(self.server, Server::Down(_)) {
+                    return self.update(Message::Retry);
+                }
+                Task::none()
+            }
+            Message::NewChat => {
+                if self.live.is_some() {
+                    return Task::none();
+                }
+                self.current = None;
+                self.messages.clear();
+                self.used_tokens = 0;
+                self.error = None;
+                Task::none()
+            }
+            Message::OpenChat(id) => {
+                if self.live.is_none() {
+                    self.open(id);
+                }
+                Task::none()
+            }
+            Message::DeleteChat(id) => {
+                if self.live.as_ref().is_some_and(|l| l.chat == id) {
+                    return Task::none();
+                }
+                self.store.chats.retain(|c| c.id != id);
+                if self.current == Some(id) {
+                    self.current = None;
+                    self.messages.clear();
+                }
+                self.save();
+                Task::none()
+            }
+            Message::Edit(action) => {
+                self.editor.perform(action);
+                Task::none()
+            }
+            Message::Send => {
+                if !self.can_send() {
+                    return Task::none();
+                }
+                let prompt = self.editor.text().trim().to_string();
+                self.send(prompt)
+            }
+            Message::Starter(i) => {
+                if matches!(self.server, Server::Ready(_)) {
+                    return self.send(STARTERS[i].to_string());
+                }
+                Task::none()
+            }
+            Message::Stop => {
+                self.finish();
+                Task::none()
+            }
+            Message::Stream(chat, ev) => {
+                if self.live.as_ref().map(|l| l.chat) != Some(chat) {
+                    return Task::none();
+                }
+                self.on_event(ev);
+                Task::none()
+            }
+            Message::Copy(i) => match self.messages.get(i) {
+                Some(m) => iced::clipboard::write(m.content.clone()),
+                None => Task::none(),
+            },
+            Message::CopyText(s) => iced::clipboard::write(s),
+            Message::Hover(id) => {
+                self.hover = id;
+                Task::none()
+            }
+            Message::ToggleTheme => {
+                self.store.theme = if self.dark() { "light" } else { "dark" }.into();
+                self.save();
+                Task::none()
+            }
+            Message::LinkClicked(uri) => {
+                open_link(&uri);
+                Task::none()
+            }
+        }
+    }
+
+    fn on_event(&mut self, ev: StreamEvent) {
+        let Some(last) = self.messages.last_mut() else { return };
+        match ev {
+            StreamEvent::Delta(s) => {
+                last.content.push_str(&s);
+                last.md.push_str(&s);
+            }
+            StreamEvent::Reasoning(s) => last.reasoning.push_str(&s),
+            StreamEvent::Usage { prompt, completion } => {
+                self.used_tokens = prompt + completion;
+                self.used_exact = true;
+                last.stats.get_or_insert_with(Stats::default).completion_tokens = completion;
+            }
+            StreamEvent::Timings { tokens_per_second, prompt_per_second, .. } => {
+                let s = last.stats.get_or_insert_with(Stats::default);
+                s.tokens_per_second = tokens_per_second;
+                s.prompt_per_second = prompt_per_second;
+            }
+            StreamEvent::Done => self.finish(),
+            StreamEvent::Error(e) => {
+                self.error = Some(e);
+                // an answer that never started is not kept
+                if self.messages.last().is_some_and(|m| m.role == Role::Assistant && m.content.is_empty() && m.reasoning.is_empty()) {
+                    self.messages.pop();
+                }
+                self.finish();
+            }
+        }
+    }
+
+    /// The reply is over (finished, stopped or failed): save it and free the composer.
+    fn finish(&mut self) {
+        if self.live.take().is_some() {
+            self.sync_current();
+            self.save();
+        }
+    }
+
+    pub fn subscription(&self) -> Subscription<Message> {
+        if matches!(self.server, Server::Down(_)) {
+            time::every(Duration::from_secs(4)).map(|_| Message::Tick)
+        } else {
+            Subscription::none()
+        }
+    }
+
+    // ---- view ------------------------------------------------------------------------------------------------------------
+
+    pub fn view(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let body = row![self.sidebar(t), self.main(t)];
+        container(body).width(Length::Fill).height(Length::Fill).style(theme::page(t)).into()
+    }
+
+    fn sidebar(&self, t: Tokens) -> Element<'_, Message> {
+        let brand = row![
+            container(Space::new().width(10).height(10)).style(move |_| container::Style {
+                background: Some(iced::Background::Color(t.primary)),
+                border: iced::Border { radius: 5.0.into(), ..Default::default() },
+                ..Default::default()
+            }),
+            text("fLLM").size(15).font(bold()),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+        let new_chat = button(row![svg(icon(ICON_PLUS)).width(16).height(16).style(accent_svg(t)), text("New chat").size(14)].spacing(10).align_y(Alignment::Center))
+            .on_press_maybe(self.live.is_none().then_some(Message::NewChat))
+            .padding([7, 10])
+            .width(Length::Fill)
+            .style(theme::row_button(t, false));
+
+        let mut chats = column![].spacing(2);
+        if self.store.chats.is_empty() {
+            chats = chats.push(container(text("No chats yet").size(13).color(t.muted)).padding([6, 10]));
+        }
+        for c in &self.store.chats {
+            chats = chats.push(self.chat_row(t, c));
+        }
+
+        let footer = container(
+            row![
+                container(Space::new().width(7).height(7)).style(move |_| container::Style {
+                    background: Some(iced::Background::Color(if matches!(self.server, Server::Ready(_)) { t.ok } else { t.muted })),
+                    border: iced::border::rounded(4),
+                    ..Default::default()
+                }),
+                Space::new().width(8),
+                text(self.status_line()).size(12).color(t.muted).width(Length::Fill),
+                button(text(if self.dark() { "Switch to light" } else { "Switch to dark" }).size(12))
+                    .on_press(Message::ToggleTheme)
+                    .padding([3, 8])
+                    .style(theme::ghost_button(t)),
+            ]
+            .align_y(Alignment::Center),
+        )
+        .padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0 });
+
+        let nav = column![
+            nav_item(t, ICON_CHAT, "Chat", false),
+            nav_item(t, ICON_CUBE, "Models", false),
+            nav_item(t, ICON_SETTINGS, "Settings", false),
+        ]
+        .spacing(2);
+
+        container(
+            column![
+                container(brand).padding(Padding { top: 0.0, right: 10.0, bottom: 0.0, left: 10.0 }).height(52).align_y(Alignment::Center),
+                new_chat,
+                nav,
+                container(text("Chats").size(12).font(bold()).color(t.muted)).padding(Padding { top: 16.0, right: 10.0, bottom: 4.0, left: 10.0 }),
+                scrollable(chats).height(Length::Fill),
+                footer,
+            ]
+            .spacing(4)
+            .padding(12),
+        )
+        .width(248)
+        .height(Length::Fill)
+        .style(theme::sidebar(t))
+        .into()
+    }
+
+    fn status_line(&self) -> String {
+        match &self.server {
+            Server::Connecting => "Connecting…".into(),
+            Server::Ready(_) => "Connected".into(),
+            Server::Down(_) => "No server".into(),
+        }
+    }
+
+    fn chat_row<'a>(&'a self, t: Tokens, c: &'a ChatRecord) -> Element<'a, Message> {
+        let selected = self.current == Some(c.id);
+        let hovered = self.hover == Some(c.id);
+        let can_act = self.live.is_none();
+        let delete: Element<'a, Message> = if (selected || hovered) && can_act {
+            button(svg(icon(ICON_TRASH)).width(14).height(14).style(muted_svg(t)))
+                .on_press(Message::DeleteChat(c.id))
+                .padding(5)
+                .style(theme::ghost_button(t))
+                .into()
+        } else {
+            Space::new().width(24).height(24).into()
+        };
+        let line = row![
+            button(text(ellipsize(&c.title, 26)).size(14).wrapping(text::Wrapping::None))
+                .on_press_maybe(can_act.then_some(Message::OpenChat(c.id)))
+                .padding([7, 10])
+                .width(Length::Fill)
+                .style(theme::plain_button(t)),
+            delete,
+        ]
+        .align_y(Alignment::Center);
+        let framed = container(line).padding(Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 0.0 }).style(move |_| container::Style {
+            background: if selected { Some(iced::Background::Color(t.primary_soft)) } else if hovered { Some(iced::Background::Color(t.fill)) } else { None },
+            border: iced::border::rounded(theme::R_SM),
+            ..Default::default()
+        });
+        mouse_area(framed).on_enter(Message::Hover(Some(c.id))).on_exit(Message::Hover(None)).into()
+    }
+
+    fn main(&self, t: Tokens) -> Element<'_, Message> {
+        let content: Element<'_, Message> = match &self.server {
+            Server::Down(reason) => self.offline(t, reason),
+            _ if self.messages.is_empty() => self.welcome(t),
+            _ => self.conversation(t),
+        };
+        column![self.topbar(t), content, self.composer(t)].width(Length::Fill).height(Length::Fill).into()
+    }
+
+    fn topbar(&self, t: Tokens) -> Element<'_, Message> {
+        let (name, max) = match &self.server {
+            Server::Ready(m) => (m.id.clone(), m.max_context),
+            Server::Connecting => ("Connecting…".into(), 0),
+            Server::Down(_) => ("No model".into(), 0),
+        };
+        let pill = container(row![svg(icon(ICON_CUBE)).width(15).height(15).style(accent_svg(t)), text(name).size(13).font(Font::MONOSPACE)].spacing(8).align_y(Alignment::Center))
+            .padding([5, 12])
+            .style(theme::chip(t));
+        let meter: Element<'_, Message> = if max > 0 {
+            let ratio = (self.used_tokens as f32 / max as f32).clamp(0.0, 1.0);
+            let used_part = ((ratio * 1000.0).round() as u16).max(if self.used_tokens > 0 { 8 } else { 0 });
+            let free_part = 1000 - used_part.min(1000);
+            let mut bar = row![].width(80).height(4);
+            if used_part > 0 {
+                bar = bar.push(container(Space::new()).width(Length::FillPortion(used_part)).height(4).style(move |_| container::Style {
+                    background: Some(iced::Background::Color(if ratio > 0.8 { t.danger } else { t.primary })),
+                    border: iced::border::rounded(2),
+                    ..Default::default()
+                }));
+            }
+            if free_part > 0 {
+                bar = bar.push(Space::new().width(Length::FillPortion(free_part)).height(4));
+            }
+            row![
+                container(bar).style(move |_| container::Style { background: Some(iced::Background::Color(t.fill_hover)), border: iced::border::rounded(2), ..Default::default() }),
+                text(format!("{}{} / {}", if self.used_exact || self.used_tokens == 0 { "" } else { "~" }, group(self.used_tokens), group(max))).size(12).color(t.muted),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into()
+        } else {
+            Space::new().into()
+        };
+        let inner = container(row![pill, Space::new().width(Length::Fill), meter].align_y(Alignment::Center)).max_width(780).width(Length::Fill);
+        container(inner)
+            .center_x(Length::Fill)
+            .padding([0, 24])
+            .height(52)
+            .align_y(Alignment::Center)
+            .style(move |_| container::Style {
+                border: iced::Border { color: t.separator, width: 0.0, radius: 0.0.into() },
+                ..Default::default()
+            })
+            .into()
+    }
+
+    fn welcome(&self, t: Tokens) -> Element<'_, Message> {
+        let model = match &self.server {
+            Server::Ready(m) => format!("Running locally on this computer · {} tokens of context.", group(m.max_context)),
+            _ => "Connecting to the server…".into(),
+        };
+        let name = match &self.server {
+            Server::Ready(m) => m.id.clone(),
+            _ => "fLLM".into(),
+        };
+        let mut starters = column![].spacing(10);
+        for pair in STARTERS.chunks(2).enumerate() {
+            let (row_i, chunk) = pair;
+            let mut r = row![].spacing(10);
+            for (j, s) in chunk.iter().enumerate() {
+                let i = row_i * 2 + j;
+                r = r.push(
+                    button(text(*s).size(13).color(t.fg_soft))
+                        .on_press_maybe(matches!(self.server, Server::Ready(_)).then_some(Message::Starter(i)))
+                        .padding([12, 14])
+                        .width(Length::FillPortion(1))
+                        .style(starter_style(t)),
+                );
+            }
+            starters = starters.push(r);
+        }
+        let hero = column![
+            text(name).size(30).font(bold()),
+            text(model).size(14).color(t.muted),
+            Space::new().height(18),
+            starters,
+        ]
+        .spacing(6)
+        .align_x(Alignment::Center)
+        .max_width(680);
+        container(hero).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill).padding(24).into()
+    }
+
+    fn offline<'a>(&'a self, t: Tokens, reason: &'a str) -> Element<'a, Message> {
+        let card = column![
+            text("No fLLM server found").size(22).font(bold()),
+            text(format!("The window needs a running server at {}. Start one with `fllm-rs studio` (or `fllm-rs serve --model …`), or point the window at another with FLLM_URL.", self.base)).size(14).color(t.fg_soft),
+            text(reason).size(12).color(t.muted),
+            button(text("Try again").size(14)).on_press(Message::Retry).padding([8, 18]).style(theme::primary_button(t)),
+        ]
+        .spacing(10)
+        .align_x(Alignment::Start)
+        .max_width(520);
+        container(card).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill).padding(24).into()
+    }
+
+    fn conversation(&self, t: Tokens) -> Element<'_, Message> {
+        let mut col = column![].spacing(22).max_width(780).width(Length::Fill);
+        for (i, m) in self.messages.iter().enumerate() {
+            col = col.push(self.message(t, i, m));
+        }
+        if let Some(e) = &self.error {
+            col = col.push(container(text(e).size(13).color(t.danger)).padding([8, 12]).style(theme::inset(t)));
+        }
+        scrollable(container(col.padding([20, 0])).width(Length::Fill).center_x(Length::Fill))
+            .anchor_bottom()
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn message<'a>(&'a self, t: Tokens, i: usize, m: &'a Msg) -> Element<'a, Message> {
+        match m.role {
+            Role::User => {
+                let bubble = container(text(&m.content).size(15)).padding([9, 15]).max_width(560).style(theme::bubble(t));
+                row![Space::new().width(Length::Fill), bubble].into()
+            }
+            Role::Assistant => {
+                let live = self.live.is_some() && i + 1 == self.messages.len();
+                let mut col = column![].spacing(8);
+                if !m.reasoning.is_empty() {
+                    col = col.push(text(format!("Thought process · {} characters", m.reasoning.chars().count())).size(12).color(t.muted));
+                }
+                if !m.content.is_empty() {
+                    col = col.push(md::view(&m.md, t, &self.theme()));
+                } else if live {
+                    col = col.push(text("…").size(15).color(t.muted));
+                }
+                if !live && !m.content.is_empty() {
+                    let mut meta = row![button(text("Copy answer").size(12)).on_press(Message::Copy(i)).padding([3, 0]).style(theme::ghost_button(t))].spacing(14).align_y(Alignment::Center);
+                    if let Some(s) = &m.stats {
+                        if s.tokens_per_second > 0.0 {
+                            meta = meta.push(
+                                text(format!("{:.1} tokens/s · {} tokens{}", s.tokens_per_second, s.completion_tokens, if s.prompt_per_second > 0.0 { format!(" · prompt {:.0} tokens/s", s.prompt_per_second) } else { String::new() }))
+                                    .size(12)
+                                    .color(t.muted),
+                            );
+                        }
+                    }
+                    col = col.push(meta);
+                }
+                col.into()
+            }
+        }
+    }
+
+    fn composer(&self, t: Tokens) -> Element<'_, Message> {
+        let editor = text_editor(&self.editor)
+            .placeholder("Ask anything or give an instruction")
+            .on_action(Message::Edit)
+            .key_binding(|kp: KeyPress| match kp.key.as_ref() {
+                keyboard::Key::Named(keyboard::key::Named::Enter) if !kp.modifiers.shift() && matches!(kp.status, Status::Focused { .. }) => Some(Binding::Custom(Message::Send)),
+                _ => Binding::from_key_press(kp),
+            })
+            .padding(Padding { top: 14.0, right: 16.0, bottom: 6.0, left: 16.0 })
+            .size(15)
+            .height(Length::Shrink)
+            .min_height(44)
+            .max_height(180)
+            .style(move |_, _| text_editor::Style {
+                background: iced::Background::Color(iced::Color::TRANSPARENT),
+                border: iced::Border { width: 0.0, ..Default::default() },
+                placeholder: t.muted,
+                value: t.fg,
+                selection: iced::Color { a: 0.35, ..t.primary },
+            });
+        let busy = self.live.is_some();
+        let action = if busy {
+            button(svg(icon(ICON_STOP)).width(14).height(14).style(move |_, _| svg::Style { color: Some(t.on_primary) }))
+                .on_press(Message::Stop)
+                .padding(10)
+                .style(theme::primary_button(t))
+        } else {
+            button(svg(icon(ICON_SEND)).width(16).height(16).style(move |_, _| svg::Style { color: Some(if self.can_send() { t.on_primary } else { t.muted }) }))
+                .on_press_maybe(self.can_send().then_some(Message::Send))
+                .padding(9)
+                .style(theme::primary_button(t))
+        };
+        let hint = text("Enter sends, Shift+Enter adds a new line").size(12).color(t.muted);
+        let card = container(column![editor, row![hint, Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 16.0 })])
+            .style(theme::card(t, theme::R_XL, false))
+            .max_width(780);
+        container(card).width(Length::Fill).center_x(Length::Fill).padding(Padding { top: 8.0, right: 24.0, bottom: 20.0, left: 24.0 }).into()
+    }
+}
+
+/// A rough count of the tokens of a chat (four characters to a token) until the server has counted the real ones. The meter says so with a tilde.
+fn estimate_tokens(messages: &[Msg]) -> u64 {
+    messages.iter().map(|m| m.content.chars().count() as u64 / 4 + 4).sum()
+}
+
+/// `text` cut to `max` characters with an ellipsis (iced has no text overflow of its own).
+pub fn ellipsize(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// The interface font: Inter, shipped inside the program, so the window looks the same on every system (and in the headless tests).
+pub const UI_FONT: Font = Font::with_name("Inter");
+pub const FONT_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.otf");
+pub const FONT_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.otf");
+
+fn bold() -> Font {
+    Font { weight: iced::font::Weight::Semibold, ..UI_FONT }
+}
+
+/// 8192 -> "8,192".
+pub fn group(n: u64) -> String {
+    let digits = n.to_string();
+    let mut parts: Vec<&str> = digits.as_bytes().rchunks(3).map(|c| std::str::from_utf8(c).unwrap_or("")).collect();
+    parts.reverse();
+    parts.join(",")
+}
+
+fn muted_svg(t: Tokens) -> impl Fn(&Theme, svg::Status) -> svg::Style {
+    move |_, _| svg::Style { color: Some(t.muted) }
+}
+
+fn accent_svg(t: Tokens) -> impl Fn(&Theme, svg::Status) -> svg::Style {
+    move |_, _| svg::Style { color: Some(t.primary) }
+}
+
+fn nav_item<'a>(t: Tokens, bytes: &'static [u8], label: &'a str, selected: bool) -> Element<'a, Message> {
+    button(row![svg(icon(bytes)).width(16).height(16).style(muted_svg(t)), text(label).size(14)].spacing(10).align_y(Alignment::Center))
+        .padding([7, 10])
+        .width(Length::Fill)
+        .style(theme::nav_button(t, selected))
+        .into()
+}
+
+fn starter_style(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| button::Style {
+        background: Some(iced::Background::Color(match status {
+            button::Status::Hovered | button::Status::Pressed => t.fill,
+            _ => t.surface,
+        })),
+        text_color: t.fg_soft,
+        border: iced::Border { color: t.separator, width: 0.5, radius: theme::R_LG.into() },
+        ..Default::default()
+    }
+}
+
+/// Opens a link in the system browser.
+fn open_link(uri: &str) {
+    if !(uri.starts_with("http://") || uri.starts_with("https://")) {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    let cmd = "xdg-open";
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(target_os = "windows")]
+    let cmd = "explorer";
+    let _ = std::process::Command::new(cmd).arg(uri).spawn();
+}
+
+pub fn run() -> iced::Result {
+    iced::application(App::new, App::update, App::view)
+        .title("fLLM")
+        .font(FONT_REGULAR)
+        .font(FONT_SEMIBOLD)
+        .default_font(UI_FONT)
+        .theme(App::theme)
+        .subscription(App::subscription)
+        .window_size((1280.0, 820.0))
+        .antialiasing(true)
+        .run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numbers_are_grouped_in_thousands() {
+        assert_eq!([0, 7, 999, 1000, 8192, 32768, 1234567].map(group), ["0", "7", "999", "1,000", "8,192", "32,768", "1,234,567"]);
+    }
+
+    #[test]
+    fn long_titles_are_cut_with_a_real_ellipsis() {
+        assert_eq!(ellipsize("short", 26), "short");
+        let cut = ellipsize("Explain in simple words how a language model writes", 26);
+        assert!(cut.ends_with('…') && cut.chars().count() <= 26, "{cut}");
+        assert_eq!(ellipsize("äöüäöü", 4), "äöü…");
+    }
+
+    #[test]
+    fn the_estimate_is_four_characters_to_a_token_plus_a_little_for_the_frame() {
+        let m = |c: &str| Msg { role: Role::User, content: c.into(), reasoning: String::new(), stats: None, md: markdown::Content::new() };
+        assert_eq!(estimate_tokens(&[m(&"a".repeat(40))]), 14);
+        assert_eq!(estimate_tokens(&[]), 0);
+    }
+}
