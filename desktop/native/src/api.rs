@@ -22,6 +22,11 @@ pub struct ChatParams {
 
 /// The JSON of a streamed chat request.
 pub fn chat_body(model: &str, messages: &[WireMessage], params: ChatParams) -> serde_json::Value {
+    chat_body_with_tools(model, messages, params, None)
+}
+
+/// The same with the tools the model may call (the list the server's agent offers, in the OpenAI `tools` format).
+pub fn chat_body_with_tools(model: &str, messages: &[WireMessage], params: ChatParams, tools: Option<&serde_json::Value>) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
@@ -37,6 +42,10 @@ pub fn chat_body(model: &str, messages: &[WireMessage], params: ChatParams) -> s
     if let Some(n) = params.max_tokens {
         body["max_tokens"] = serde_json::json!(n);
     }
+    if let Some(tools) = tools.filter(|t| t.as_array().is_some_and(|a| !a.is_empty())) {
+        body["tools"] = tools.clone();
+        body["tool_choice"] = serde_json::json!("auto");
+    }
     body
 }
 
@@ -44,6 +53,18 @@ pub fn chat_body(model: &str, messages: &[WireMessage], params: ChatParams) -> s
 pub struct WireMessage {
     pub role: String,
     pub content: String,
+    /// On an assistant message: the calls the model made (OpenAI format).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<serde_json::Value>,
+    /// On a `tool` message: the call it answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl WireMessage {
+    pub fn new(role: &str, content: impl Into<String>) -> WireMessage {
+        WireMessage { role: role.into(), content: content.into(), tool_calls: None, tool_call_id: None }
+    }
 }
 
 /// One step of a streamed reply.
@@ -53,6 +74,8 @@ pub enum StreamEvent {
     Delta(String),
     /// Text of the reasoning (`reasoning_content`), shown apart from the answer.
     Reasoning(String),
+    /// A piece of a tool call: the calls arrive in parts, `index` says which call a part belongs to (the id and the name come with the first).
+    ToolCall { index: usize, id: Option<String>, name: Option<String>, arguments: String },
     /// Token counts at the end (`stream_options.include_usage`).
     Usage { prompt: u64, completion: u64 },
     /// The server's own timings: tokens per second of the answer, and of reading the prompt.
@@ -82,6 +105,14 @@ pub fn parse_sse_line(line: &str) -> Option<Vec<StreamEvent>> {
         }
         if let Some(c) = delta.get("content").and_then(|c| c.as_str()).filter(|s| !s.is_empty()) {
             out.push(StreamEvent::Delta(c.to_string()));
+        }
+        for (i, call) in delta.get("tool_calls").and_then(|c| c.as_array()).into_iter().flatten().enumerate() {
+            out.push(StreamEvent::ToolCall {
+                index: call.get("index").and_then(|n| n.as_u64()).map(|n| n as usize).unwrap_or(i),
+                id: call.get("id").and_then(|s| s.as_str()).filter(|s| !s.is_empty()).map(str::to_string),
+                name: call.pointer("/function/name").and_then(|s| s.as_str()).filter(|s| !s.is_empty()).map(str::to_string),
+                arguments: call.pointer("/function/arguments").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
+            });
         }
     }
     if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
@@ -138,6 +169,11 @@ type ByteStream = Pin<Box<dyn Stream<Item = reqwest::Result<Vec<u8>>> + Send>>;
 
 /// Starts a chat request and gives the events of its stream. The request is dropped, and the server stops generating, when the stream is dropped.
 pub fn chat_stream(base: String, model: String, messages: Vec<WireMessage>, params: ChatParams) -> impl Stream<Item = StreamEvent> + Send {
+    chat_stream_with_tools(base, model, messages, params, None)
+}
+
+/// `chat_stream` with tools the model may call: its calls arrive as `StreamEvent::ToolCall` parts.
+pub fn chat_stream_with_tools(base: String, model: String, messages: Vec<WireMessage>, params: ChatParams, tools: Option<serde_json::Value>) -> impl Stream<Item = StreamEvent> + Send {
     struct State {
         bytes: Option<ByteStream>,
         request: Option<(String, serde_json::Value)>,
@@ -145,7 +181,7 @@ pub fn chat_stream(base: String, model: String, messages: Vec<WireMessage>, para
         queue: VecDeque<StreamEvent>,
         finished: bool,
     }
-    let body = chat_body(&model, &messages, params);
+    let body = chat_body_with_tools(&model, &messages, params, tools.as_ref());
     let state = State { bytes: None, request: Some((format!("{base}/v1/chat/completions"), body)), lines: LineBuffer::default(), queue: VecDeque::new(), finished: false };
     stream::unfold(state, |mut st| async move {
         loop {
@@ -199,7 +235,7 @@ mod tests {
 
     #[test]
     fn automatic_sampling_sends_nothing_and_manual_sampling_sends_what_was_set() {
-        let m = [WireMessage { role: "user".into(), content: "Hi".into() }];
+        let m = [WireMessage::new("user", "Hi")];
         let auto = chat_body("tiny", &m, ChatParams::default());
         assert!(auto.get("temperature").is_none() && auto.get("top_p").is_none() && auto.get("max_tokens").is_none(), "{auto}");
         assert_eq!(auto["stream"], true);

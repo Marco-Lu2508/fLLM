@@ -3,6 +3,7 @@
 use crate::api::{self, ModelInfo, StreamEvent, WireMessage};
 use crate::store::{self, ChatRecord, Record, Role, Stats, Store};
 use crate::md;
+use crate::code::{self, CodeState};
 use crate::engine_settings::{self, EngineState};
 use crate::models::{self, ModelsState};
 use crate::settings;
@@ -31,6 +32,7 @@ const ICON_TRASH: &[u8] = include_bytes!("../icons/trash.svg");
 const ICON_CHAT: &[u8] = include_bytes!("../icons/chat.svg");
 const ICON_CUBE: &[u8] = include_bytes!("../icons/cube.svg");
 const ICON_SETTINGS: &[u8] = include_bytes!("../icons/settings.svg");
+const ICON_CODE: &[u8] = include_bytes!("../icons/code.svg");
 const ICON_CHEVRON: &[u8] = include_bytes!("../icons/chevron-down.svg");
 const ICON_CHECK: &[u8] = include_bytes!("../icons/check.svg");
 
@@ -68,6 +70,7 @@ pub enum View {
     Chat,
     Models,
     Settings,
+    Code,
 }
 
 /// The reply that is being written right now.
@@ -102,6 +105,7 @@ pub struct App {
     engine: EngineState,
     /// The list of models under the model name in the top bar.
     picker_open: bool,
+    code: CodeState,
     /// The server this app started itself (stopped when the app ends), and why it did not, when it did not.
     sidecar: Option<crate::sidecar::Sidecar>,
     sidecar_note: Option<String>,
@@ -163,6 +167,7 @@ pub enum Message {
     RestartDone(Result<(), String>),
     TogglePicker,
     ClosePicker,
+    Code(code::CodeMsg),
 }
 
 impl App {
@@ -205,6 +210,7 @@ impl App {
             max_tokens_text: String::new(),
             engine: EngineState::default(),
             picker_open: false,
+            code: CodeState::default(),
             switching: false,
             sidecar: None,
             sidecar_note: None,
@@ -332,6 +338,13 @@ impl App {
                 self.server = Server::NoModel;
                 self.switching = false;
                 Task::none()
+            }
+            Message::Code(msg) => {
+                let model = if let Server::Ready(m) = &self.server { Some(m.id.clone()) } else { None };
+                let extra = (self.store.prefs.custom_system && !self.store.prefs.system_prompt.trim().is_empty()).then(|| self.store.prefs.system_prompt.clone());
+                let base = self.base.clone();
+                let env = code::Env { base: &base, model: model.as_deref(), params: self.chat_params(), extra: extra.as_deref() };
+                self.code.update(msg, &env)
             }
             Message::TogglePicker => {
                 self.picker_open = !self.picker_open;
@@ -696,6 +709,7 @@ impl App {
                 last.md.push_str(&s);
             }
             StreamEvent::Reasoning(s) => last.reasoning.push_str(&s),
+            StreamEvent::ToolCall { .. } => {}
             StreamEvent::Usage { prompt, completion } => {
                 self.used_tokens = prompt + completion;
                 self.used_exact = true;
@@ -792,6 +806,7 @@ impl App {
 
         let nav = column![
             nav_item(t, ICON_CHAT, "Chat", self.page == View::Chat, Some(Message::Go(View::Chat))),
+            nav_item(t, ICON_CODE, "Code", self.page == View::Code, Some(Message::Go(View::Code))),
             nav_item(t, ICON_CUBE, "Models", self.page == View::Models, Some(Message::Go(View::Models))),
             nav_item(t, ICON_SETTINGS, "Settings", self.page == View::Settings, Some(Message::Go(View::Settings))),
         ]
@@ -857,6 +872,9 @@ impl App {
     fn main(&self, t: Tokens) -> Element<'_, Message> {
         if self.page == View::Models && !matches!(self.server, Server::Down(_)) {
             return models::page(&self.models, t, matches!(self.server, Server::NoModel));
+        }
+        if self.page == View::Code && !matches!(self.server, Server::Down(_)) {
+            return code::page(&self.code, t, &self.theme(), matches!(self.server, Server::Ready(_)));
         }
         if self.page == View::Settings {
             return settings::page(t, &self.store.prefs, &self.system_editor, &self.max_tokens_text, engine_settings::view(t, &self.engine, !matches!(self.server, Server::Down(_))));
@@ -1032,12 +1050,12 @@ impl App {
 
     /// The messages of the next request: the system prompt, then the chat without the empty answer that is about to be written.
     pub fn wire_messages(&self) -> Vec<WireMessage> {
-        let mut wire = vec![WireMessage { role: "system".into(), content: self.store.prefs.system().into() }];
+        let mut wire = vec![WireMessage::new("system", self.store.prefs.system())];
         let upto = match self.messages.last() {
             Some(last) if last.role == Role::Assistant && last.content.is_empty() => self.messages.len() - 1,
             _ => self.messages.len(),
         };
-        wire.extend(self.messages[..upto].iter().map(|m| WireMessage { role: m.role.wire().into(), content: m.content.clone() }));
+        wire.extend(self.messages[..upto].iter().map(|m| WireMessage::new(m.role.wire(), m.content.clone())));
         wire
     }
 
@@ -1064,6 +1082,11 @@ impl App {
     /// The page on the right now.
     pub fn page(&self) -> View {
         self.page
+    }
+
+    /// The state of Code mode.
+    pub fn code(&self) -> &CodeState {
+        &self.code
     }
 
     /// The engine and server settings as the page shows them.

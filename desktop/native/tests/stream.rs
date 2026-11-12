@@ -41,7 +41,7 @@ async fn serve(sse: Vec<Vec<u8>>, status: u16) -> String {
 }
 
 fn msgs() -> Vec<WireMessage> {
-    vec![WireMessage { role: "user".into(), content: "Hi".into() }]
+    vec![WireMessage::new("user", "Hi")]
 }
 
 #[tokio::test]

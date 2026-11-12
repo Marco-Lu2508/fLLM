@@ -36,6 +36,13 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 - The model name in the top bar of the chat is a picker: the models on this computer with the loaded one marked, a click loads another
   (a file from a folder by its path, a downloaded one by its name), "Manage models…" opens the Models page. While the server switches its model
   (it restarts its engine for a load, an unload and a settings restart) the window says "Loading …" instead of "No server" and looks every second.
+- Code (sidebar > Code): a coding agent in a folder. Open a folder (the server's `/api/studio/agent/workspace`), tell the agent what to do; the model
+  gets the server's agent tools (read, search, edit, run commands, ...) and answers with tool calls, which the window runs through
+  `/api/studio/agent/tool` and feeds back until the model answers without one (at most 30 model calls per message). Every call is a card:
+  an edit shows the lines it removes and adds on tinted bands before it runs, a command shows itself, the result follows. Reading and the
+  agent's own notes run alone; the rest asks (*Allow* / *Deny*; a denial goes back to the model) unless you pick *Edit freely* or *Everything*,
+  and switching the mode releases the calls that wait. *Stop* ends the stream and the running commands. The bar under the conversation counts
+  the file changes and undoes the last one or all of them. Not yet: sub-agents, plan mode, MCP tools, hooks, sessions that survive a restart.
 - Models (sidebar > Models): what is loaded (Unload), the downloads with progress, speed, time left and Pause / Resume / Cancel / Remove, the
   models on this computer (Load: a file from a folder by its path, a downloaded one by its name), and the catalog with a search field, the
   quantizations as chips (the recommended one is chosen; you pick another before you press Download), the size of the chosen one and whether
@@ -47,7 +54,7 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 | Stage | Content |
 |---|---|
 | 2c | Load options (context, device), the measured prompt speed with the compact prompt, projects and memory, web tools |
-| 3 | Code mode (folder, agent loop, diffs, approvals, terminal) |
+| 3b | Code mode: sessions that survive a restart, sub-agents and plan mode, MCP tools, a folder picker, a terminal view |
 | 4 | The engine inside the process (no second program; for now the app starts the server next to it, see above), installers per system that put both side by side, the tray, autostart, updates; then the Tauri app and the web Studio files can go |
 | later | Voice, artifacts, the research mode, the command palette |
 
@@ -56,7 +63,7 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 70 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+cargo test --locked      # 87 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
                          # window driven headless (new chat, send, stream, stop, error, delete, theme) and drawn to PNG files
 ```
 
