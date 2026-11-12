@@ -194,7 +194,8 @@
     const SP_SPEED_KEY = 'fllm.studio.prefill.v1';
     const SP_SIZE_KEY = 'fllm.studio.promptsize.v1';
     function spPrefillPref() {
-      try { const v = localStorage.getItem(SP_SIZE_KEY); return v === 'short' || v === 'full' ? v : 'auto'; } catch { return 'auto'; }
+      // nothing changes behind your back: the full prompt unless you chose "Automatic" or "Always the short prompt"
+      try { const v = localStorage.getItem(SP_SIZE_KEY); return v === 'short' || v === 'auto' ? v : 'full'; } catch { return 'full'; }
     }
     function spPrefillNow(model) {
       let rate = 0;

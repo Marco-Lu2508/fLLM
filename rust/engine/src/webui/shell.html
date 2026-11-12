@@ -876,9 +876,9 @@
                   </select>
                   <div class="app-item-title" style="margin-top:6px;">Prompt length</div>
                   <select id="spSize" class="ui-select">
-                    <option value="auto">Automatic: short when the model reads slowly</option>
+                    <option value="full">The full prompt (default)</option>
+                    <option value="auto">Automatic: the short prompt when the model reads slowly</option>
                     <option value="short">Always the short prompt</option>
-                    <option value="full">Always the full prompt</option>
                   </select>
                   <div class="app-item-desc" id="spSizeInfo"></div>
                   <textarea id="spText" class="ui-textarea" rows="4" style="width:100%;" placeholder="Your text. {{date}}, {{time}} and {{language}} are filled in."></textarea>

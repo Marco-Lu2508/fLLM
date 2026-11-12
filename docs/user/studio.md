@@ -89,9 +89,9 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
   **Prompt length** (same card): the fixed part of a chat (this prompt and the tool schemas) is about 900 tokens in the full size, about 440 in the compact
   one and about 190 in the compact one without tools (the last two counted on the Qwen2.5 template of the test model). A model with recurrent layers (Qwen3.5, Mamba) reads it again at every turn, and on a slow reader that is the
   wait before the first word (66 tokens/s on an Intel iGPU: 14 s for "Hi"). The Studio remembers how fast each model read its last real
-  prompt (a reply that processed at least 64 prompt tokens; the last two measurements are averaged); *Automatic* switches to the compact
+  prompt (a reply that processed at least 64 prompt tokens; the last two measurements are averaged); *The full prompt* is the default and nothing changes by itself; *Automatic* (your choice) switches to the compact
   prompt below 300 tokens/s and also stops offering the memory and chat-search tools below 120 tokens/s, *Always the short prompt* and
-  *Always the full prompt* ignore the measurement. The same card says which size is in use and what it saves. What is not built: a
+  *The full prompt* ignore the measurement. The same card says which size is in use and what it saves. What is not built: a
   prefix cache for recurrent models (their state would have to be stored at the end of the shared start), which would remove the
   wait instead of shortening the prompt.
 * **Personalization and memory** (Settings > Personalization). *About me and how to answer* is put in front of the instructions of every

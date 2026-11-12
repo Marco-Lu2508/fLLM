@@ -493,6 +493,20 @@ html.dark .seg button.active { background: var(--surface-3); box-shadow: 0 0 0 0
 /* the tokens-per-second trace only means something while the model is generating */
 .header-trace:not(.is-busy) { display: none; }
 
+/* ---- the reasoning of a thinking model: a quiet disclosure, not a framed box ------------------------------------------ */
+.cot-box { border: 0; border-radius: var(--r-md); background: var(--fill); width: fit-content; max-width: 100%; margin-bottom: 12px; }
+.cot-box[open] { width: 100%; }
+.cot-box summary { padding: 6px 12px; font-size: 12.5px; font-weight: 500; color: var(--fg-soft); gap: 8px; user-select: none; }
+.cot-box summary:hover { color: var(--fg); }
+.cot-box summary::after {
+  content: ""; width: 12px; height: 12px; margin-left: 2px; background: currentColor; flex: none;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+  transition: transform var(--normal) var(--spring);
+}
+.cot-box[open] summary::after { transform: rotate(180deg); }
+.cot-body { border-top: 0; margin: 0 12px 10px 14px; padding: 0 0 0 12px; border-left: 2px solid var(--separator); color: var(--fg-soft); font-size: 13px; }
+
 /* ---- small screens keep the drawer behaviour of the older sheets ----------------------------------------- */
 @media (max-width: 860px) {
   .sidebar-floating { background: var(--material-thick); border-right: 0; }
