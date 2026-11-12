@@ -424,8 +424,8 @@ fllm_spec_speedup_estimate {:.6}",
         let rate = tokens as f64 / now.as_secs_f64().clamp(1.0, 10.0);
         let _ = writeln!(out, "# HELP fllm_tokens_per_second Generated tokens per second over the last ten seconds\n# TYPE fllm_tokens_per_second gauge\nfllm_tokens_per_second {rate:.6}");
         out.push_str("# HELP fllm_request_errors_total API responses with HTTP error status\n# TYPE fllm_request_errors_total counter\n");
-        for status in 400..600 {
-            let n = self.errors[status].load(Relaxed);
+        for (status, e) in self.errors.iter().enumerate().skip(400) {
+            let n = e.load(Relaxed);
             if n > 0 {
                 let _ = writeln!(out, "fllm_request_errors_total{{status=\"{status}\"}} {n}");
             }

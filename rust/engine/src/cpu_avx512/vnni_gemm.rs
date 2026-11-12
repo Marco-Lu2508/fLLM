@@ -338,10 +338,10 @@ unsafe fn panel_job(
             // The chunk may reach past the batch: those lanes hold zero activations and are not
             // stored.
             kernel(&refs, a, tile, n0, &mut state.tmp[..tokens]);
-            for t in 0..tokens.min(in_tile - n0) {
+            for (t, tmp) in state.tmp.iter().enumerate().take(tokens.min(in_tile - n0)) {
                 let row = out.row(16 * tile + n0 + t);
                 for (r, y) in row.iter_mut().enumerate().take(valid) {
-                    *y = state.tmp[t][r] + m.bias.map_or(0.0, |b| b[first + r]);
+                    *y = tmp[r] + m.bias.map_or(0.0, |b| b[first + r]);
                 }
             }
             n0 += tokens;

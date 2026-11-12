@@ -290,8 +290,8 @@ impl Tester<'_> {
                         _ => (0..count).collect(),
                     };
                     let mut keys: Vec<&Vec<f64>> = Vec::new();
-                    for pp in (p + 1).saturating_sub(window)..=p {
-                        keys.push(&sq.kv[pp]);
+                    for kv in sq.kv.iter().take(p + 1).skip((p + 1).saturating_sub(window)) {
+                        keys.push(kv);
                     }
                     for &e in &picked {
                         keys.push(&entries[e]);

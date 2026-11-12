@@ -1104,7 +1104,6 @@ impl Stream for CpuStream {
     }
 
     #[allow(clippy::too_many_arguments)]
-        #[allow(clippy::too_many_arguments)]
     fn attn_encoder(
         &mut self,
         out: &mut DeviceBuffer,
