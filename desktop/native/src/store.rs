@@ -62,6 +62,9 @@ pub struct Prefs {
     /// The longest answer in tokens; 0 lets the server decide.
     #[serde(default)]
     pub max_tokens: u32,
+    /// The folders Code mode opened last, newest first.
+    #[serde(default)]
+    pub recent_folders: Vec<String>,
 }
 
 fn default_temperature() -> f32 {
@@ -74,11 +77,21 @@ fn default_top_p() -> f32 {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0 }
+        Prefs { manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new() }
     }
 }
 
+/// How many folders Code mode remembers.
+pub const RECENT_FOLDERS: usize = 6;
+
 impl Prefs {
+    /// Puts `folder` first in the list of recent folders (once), keeping the newest few.
+    pub fn remember_folder(&mut self, folder: &str) {
+        self.recent_folders.retain(|f| f != folder);
+        self.recent_folders.insert(0, folder.to_string());
+        self.recent_folders.truncate(RECENT_FOLDERS);
+    }
+
     /// The system prompt a request carries.
     pub fn system(&self) -> &str {
         if self.custom_system && !self.system_prompt.trim().is_empty() {

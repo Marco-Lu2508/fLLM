@@ -137,3 +137,31 @@ fn without_a_model_the_agent_cannot_be_started() {
     say(&mut app, "hello");
     assert!(app.code().items.is_empty() && !app.code().running);
 }
+
+#[test]
+fn the_folder_screen_has_a_dialog_and_the_recent_folders() {
+    let (mut app, _dir) = app("light");
+    // a folder that was opened is remembered, once, newest first, at most six, and kept on disk
+    for f in ["/a/one", "/a/two", "/a/three", "/a/four", "/a/five", "/a/six", "/a/seven", "/a/three"] {
+        code(&mut app, CodeMsg::Opened(Ok(Workspace { root: f.into(), name: f.into(), branch: None })));
+    }
+    assert_eq!(app.prefs().recent_folders, ["/a/three", "/a/seven", "/a/six", "/a/five", "/a/four", "/a/two"]);
+    code(&mut app, CodeMsg::Close);
+    let msgs = click(&app, "Choose…");
+    assert!(msgs.iter().any(|m| matches!(m, Message::Code(CodeMsg::Pick))), "{msgs:?}");
+    let msgs = click(&app, "seven");
+    assert!(msgs.iter().any(|m| matches!(m, Message::Code(CodeMsg::OpenPath(p)) if p == "/a/seven")), "{msgs:?}");
+    picture(&app, "code-folder-recent-light");
+}
+
+#[test]
+fn the_dialog_fills_the_path_and_a_closed_dialog_changes_nothing() {
+    let (mut app, _dir) = app("light");
+    code(&mut app, CodeMsg::PathInput("/typed".into()));
+    code(&mut app, CodeMsg::Picked(Ok(None)));
+    assert_eq!(app.code().path_input, "/typed");
+    code(&mut app, CodeMsg::Picked(Err("This computer has no program that can open a file dialog".into())));
+    assert!(app.code().error.as_deref().unwrap().contains("no program"));
+    code(&mut app, CodeMsg::Picked(Ok(Some("/chosen".into()))));
+    assert_eq!(app.code().path_input, "/chosen", "a chosen folder is opened at once");
+}

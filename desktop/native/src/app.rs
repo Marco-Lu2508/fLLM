@@ -340,6 +340,10 @@ impl App {
                 Task::none()
             }
             Message::Code(msg) => {
+                if let code::CodeMsg::Opened(Ok(w)) = &msg {
+                    self.store.prefs.remember_folder(&w.root);
+                    self.save();
+                }
                 let model = if let Server::Ready(m) = &self.server { Some(m.id.clone()) } else { None };
                 let extra = (self.store.prefs.custom_system && !self.store.prefs.system_prompt.trim().is_empty()).then(|| self.store.prefs.system_prompt.clone());
                 let base = self.base.clone();
@@ -874,7 +878,7 @@ impl App {
             return models::page(&self.models, t, matches!(self.server, Server::NoModel));
         }
         if self.page == View::Code && !matches!(self.server, Server::Down(_)) {
-            return code::page(&self.code, t, &self.theme(), matches!(self.server, Server::Ready(_)));
+            return code::page(&self.code, t, &self.theme(), matches!(self.server, Server::Ready(_)), &self.store.prefs.recent_folders);
         }
         if self.page == View::Settings {
             return settings::page(t, &self.store.prefs, &self.system_editor, &self.max_tokens_text, engine_settings::view(t, &self.engine, !matches!(self.server, Server::Down(_))));

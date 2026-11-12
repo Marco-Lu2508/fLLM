@@ -120,6 +120,11 @@ struct Partial {
 pub enum CodeMsg {
     PathInput(String),
     Open,
+    /// Open this folder (from the list of recent ones).
+    OpenPath(String),
+    /// Ask the server for its folder dialog.
+    Pick,
+    Picked(Result<Option<String>, String>),
     Close,
     Opened(Result<Workspace, String>),
     ToolsLoaded(Result<(Vec<Tool>, Value), String>),
@@ -241,6 +246,12 @@ async fn call(base: &str, method: reqwest::Method, path: &str, body: Option<Valu
 
 pub async fn open_workspace(base: String, path: String) -> Result<Workspace, String> {
     parse_workspace(&call(&base, reqwest::Method::POST, "/api/studio/agent/workspace", Some(json!({ "path": path }))).await?)
+}
+
+/// The folder dialog of the server's computer: `None` when it was closed without a choice.
+pub async fn pick_folder(base: String) -> Result<Option<String>, String> {
+    let v = call(&base, reqwest::Method::POST, "/api/studio/pick-file", Some(json!({ "kind": "folder" }))).await?;
+    Ok(v.get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).map(str::to_string))
 }
 
 pub async fn fetch_tools(base: String) -> Result<(Vec<Tool>, Value), String> {
@@ -464,6 +475,20 @@ impl CodeState {
             CodeMsg::Open => {
                 self.error = None;
                 Task::perform(open_workspace(env.base.to_string(), self.path_input.trim().to_string()), |r| Message::Code(CodeMsg::Opened(r)))
+            }
+            CodeMsg::OpenPath(p) => {
+                self.path_input = p;
+                self.update(CodeMsg::Open, env)
+            }
+            CodeMsg::Pick => {
+                self.error = None;
+                Task::perform(pick_folder(env.base.to_string()), |r| Message::Code(CodeMsg::Picked(r)))
+            }
+            CodeMsg::Picked(Ok(Some(p))) => self.update(CodeMsg::OpenPath(p), env),
+            CodeMsg::Picked(Ok(None)) => Task::none(),
+            CodeMsg::Picked(Err(e)) => {
+                self.error = Some(e);
+                Task::none()
             }
             CodeMsg::Close => {
                 self.workspace = None;
@@ -729,7 +754,7 @@ fn timeline<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme) -> Element<'a,
     scrollable(container(column_).center_x(Length::Fill).width(Length::Fill)).anchor_bottom().height(Length::Fill).into()
 }
 
-pub fn page<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, can_send: bool) -> Element<'a, Message> {
+pub fn page<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, can_send: bool, recent: &'a [String]) -> Element<'a, Message> {
     let Some(w) = &s.workspace else {
         let input = text_input("/path/to/your/project", &s.path_input)
             .on_input(|v| Message::Code(CodeMsg::PathInput(v)))
@@ -747,10 +772,29 @@ pub fn page<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, can_send: bool
         let mut card = column![
             text("Code").size(26).font(bold()),
             text("The agent reads, searches and changes the files of one folder, and can run commands there. Edits and commands ask you first, unless you let it.").size(14).color(t.fg_soft),
-            row![input, button(text("Open").size(14)).on_press(Message::Code(CodeMsg::Open)).padding([8, 18]).style(theme::primary_button(t))].spacing(10).align_y(Alignment::Center),
+            row![
+                input,
+                button(text("Open").size(14)).on_press(Message::Code(CodeMsg::Open)).padding([8, 18]).style(theme::primary_button(t)),
+                button(text("Choose…").size(14)).on_press(Message::Code(CodeMsg::Pick)).padding([8, 18]).style(theme::secondary_button(t)),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
         ]
         .spacing(12)
         .max_width(560);
+        if !recent.is_empty() {
+            card = card.push(text("Recent").size(12).color(t.muted));
+            for f in recent {
+                let name = std::path::Path::new(f).file_name().map_or(f.clone(), |n| n.to_string_lossy().into_owned());
+                card = card.push(
+                    button(row![text(name).size(14).font(bold()), text(f.as_str()).size(12).font(Font::MONOSPACE).color(t.muted).wrapping(text::Wrapping::None)].spacing(10).align_y(Alignment::Center))
+                        .on_press(Message::Code(CodeMsg::OpenPath(f.clone())))
+                        .width(Length::Fill)
+                        .padding([7, 12])
+                        .style(theme::secondary_button(t)),
+                );
+            }
+        }
         if let Some(e) = &s.error {
             card = card.push(text(e.as_str()).size(13).color(t.danger));
         }
