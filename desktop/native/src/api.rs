@@ -93,16 +93,12 @@ impl LineBuffer {
 
 pub async fn fetch_model(base: &str) -> Result<ModelInfo, String> {
     let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build().map_err(|e| e.to_string())?;
-    let v: serde_json::Value = http
-        .get(format!("{base}/v1/models"))
-        .send()
-        .await
-        .map_err(|e| format!("no server at {base}: {e}"))?
-        .error_for_status()
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+    let resp = http.get(format!("{base}/v1/models")).send().await.map_err(|e| format!("no server at {base}: {e}"))?;
+    // the Studio of an fLLM server that has unloaded its model answers only its own pages: `/v1/models` is not a route then
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(crate::models::NO_MODEL.into());
+    }
+    let v: serde_json::Value = resp.error_for_status().map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
     let first = v.pointer("/data/0").ok_or(crate::models::NO_MODEL)?;
     Ok(ModelInfo {
         id: first.get("id").and_then(|s| s.as_str()).ok_or("the model has no id")?.to_string(),

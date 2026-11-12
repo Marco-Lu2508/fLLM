@@ -43,6 +43,7 @@ async fn serve(models_json: &'static str) -> (String, Log) {
                 let (method, path) = (first.next().unwrap_or("").to_string(), first.next().unwrap_or("").to_string());
                 seen.lock().unwrap().push((method.clone(), path.clone(), body.to_string()));
                 match (method.as_str(), path.as_str()) {
+                    ("GET", "/v1/models") if models_json.is_empty() => respond(&mut sock, "404 Not Found", r#"{"error":{"message":"unknown route /v1/models","code":"not_found"}}"#).await,
                     ("GET", "/v1/models") => respond(&mut sock, "200 OK", models_json).await,
                     ("GET", "/api/studio/models") => respond(&mut sock, "200 OK", OVERVIEW).await,
                     ("GET", "/api/studio/models/progress") => respond(&mut sock, "200 OK", DOWNLOADS).await,
@@ -92,6 +93,9 @@ async fn a_refused_load_shows_the_message_of_the_server() {
 async fn a_server_without_a_model_is_told_apart_from_no_server() {
     let (base, _log) = serve(r#"{"object":"list","data":[]}"#).await;
     assert_eq!(fetch_model(&base).await.unwrap_err(), NO_MODEL);
+    // the Studio of a server that unloaded its model has no /v1/models route at all
+    let (studio_only, _log) = serve("").await;
+    assert_eq!(fetch_model(&studio_only).await.unwrap_err(), NO_MODEL);
     assert!(fetch_model("http://127.0.0.1:9").await.unwrap_err().contains("127.0.0.1:9"));
 }
 

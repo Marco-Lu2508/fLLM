@@ -373,7 +373,11 @@ impl App {
             }
             Message::Poll => {
                 let base = self.base.clone();
-                let mut tasks = vec![Task::perform(models::fetch_downloads(base), Message::DownloadsLoaded)];
+                let mut tasks = vec![Task::perform(models::fetch_downloads(base.clone()), Message::DownloadsLoaded)];
+                // the server may have switched its model since (a load or unload takes a moment, the Studio restarts its engine for it)
+                if self.page == View::Models && self.live.is_none() {
+                    tasks.push(Task::perform(async move { api::fetch_model(&base).await }, Message::Connected));
+                }
                 if self.page == View::Models && !self.models.any_active() {
                     tasks.push(Task::perform(models::fetch_overview(self.base.clone()), Message::OverviewLoaded));
                 }
