@@ -111,6 +111,8 @@ pub struct App {
     code: CodeState,
     /// How many of the newest messages the conversation draws: laying out hundreds of messages on every frame of a stream would stall the window.
     window: usize,
+    /// The message of yours that the box is changing (the answer to it is written again as a new version).
+    editing: Option<usize>,
     /// The server this app started itself (stopped when the app ends), and why it did not, when it did not.
     sidecar: Option<crate::sidecar::Sidecar>,
     sidecar_note: Option<String>,
@@ -174,6 +176,13 @@ pub enum Message {
     ClosePicker,
     /// Draw the next older messages of a long chat too.
     ShowEarlier,
+    /// Write the answer at this position again; the old one stays as a version.
+    Regenerate(usize),
+    /// Change this message of yours: it goes into the box.
+    EditMessage(usize),
+    CancelEdit,
+    /// Show another version of the message at this position.
+    SwitchVersion(usize, usize),
     Code(code::CodeMsg),
 }
 
@@ -219,6 +228,7 @@ impl App {
             picker_open: false,
             code: CodeState::default(),
             window: CHAT_WINDOW,
+            editing: None,
             switching: false,
             sidecar: None,
             sidecar_note: None,
@@ -247,6 +257,16 @@ impl App {
     }
 
     /// Whether a reply is being written.
+    /// The text of the message at `i` of the open chat.
+    pub fn message_text(&self, i: usize) -> Option<&str> {
+        self.messages.get(i).map(|m| m.content.as_str())
+    }
+
+    /// What is in the message box.
+    pub fn editor_text(&self) -> String {
+        self.editor.text()
+    }
+
     pub fn is_streaming(&self) -> bool {
         self.live.is_some()
     }
@@ -282,6 +302,7 @@ impl App {
         if let Some(chat) = self.store.chat(id) {
             self.messages = chat.messages.iter().map(Msg::from_record).collect();
             self.window = CHAT_WINDOW;
+            self.editing = None;
             self.current = Some(id);
             self.used_tokens = estimate_tokens(&self.messages);
             self.used_exact = false;
@@ -316,6 +337,16 @@ impl App {
                 id
             }
         };
+        if let Some(i) = self.editing.take() {
+            // the changed message starts a new version of everything after it
+            if i < self.messages.len() {
+                self.sync_current();
+                if let Some(chat) = self.store.chat_mut(id) {
+                    chat.branch_at(i);
+                }
+                self.messages.truncate(i);
+            }
+        }
         let first = self.messages.is_empty();
         self.messages.push(Msg { role: Role::User, md: markdown::Content::parse(&prompt), content: prompt.clone(), reasoning: String::new(), stats: None });
         self.messages.push(Msg { role: Role::Assistant, content: String::new(), reasoning: String::new(), stats: None, md: markdown::Content::new() });
@@ -329,11 +360,25 @@ impl App {
         self.error = None;
         self.editor = Content::new();
 
+        self.stream(id, model.id)
+    }
+
+    /// Starts the answer to the messages as they are (the last one is the empty answer).
+    fn stream(&mut self, id: u64, model: String) -> Task<Message> {
         let wire = self.wire_messages();
-        let events = api::chat_stream(self.base.clone(), model.id, wire, self.chat_params());
+        let events = api::chat_stream(self.base.clone(), model, wire, self.chat_params());
         let (task, handle) = Task::stream(events).map(move |ev| Message::Stream(id, ev)).abortable();
         self.live = Some(Live { chat: id, _handle: handle.abort_on_drop() });
         task
+    }
+
+    /// Takes the shown conversation of a chat from the store again (after another version was chosen).
+    fn reload_messages(&mut self, id: u64) {
+        if let Some(chat) = self.store.chat(id) {
+            self.messages = chat.messages.iter().map(Msg::from_record).collect();
+            self.used_tokens = estimate_tokens(&self.messages);
+            self.used_exact = false;
+        }
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -383,6 +428,51 @@ impl App {
                 }
                 task
             }
+            Message::Regenerate(i) => {
+                if self.live.is_some() || !self.messages.get(i).is_some_and(|m| m.role == Role::Assistant) {
+                    return Task::none();
+                }
+                let (Some(id), Server::Ready(model)) = (self.current, self.server.clone()) else { return Task::none() };
+                self.sync_current();
+                if let Some(chat) = self.store.chat_mut(id) {
+                    chat.branch_at(i);
+                }
+                self.messages.truncate(i);
+                self.messages.push(Msg { role: Role::Assistant, content: String::new(), reasoning: String::new(), stats: None, md: markdown::Content::new() });
+                self.sync_current();
+                self.save();
+                self.error = None;
+                self.editing = None;
+                self.stream(id, model.id)
+            }
+            Message::EditMessage(i) => {
+                if self.live.is_some() {
+                    return Task::none();
+                }
+                if let Some(m) = self.messages.get(i).filter(|m| m.role == Role::User) {
+                    self.editor = Content::with_text(&m.content);
+                    self.editing = Some(i);
+                }
+                Task::none()
+            }
+            Message::CancelEdit => {
+                if self.editing.take().is_some() {
+                    self.editor = Content::new();
+                }
+                Task::none()
+            }
+            Message::SwitchVersion(i, k) => {
+                if self.live.is_some() {
+                    return Task::none();
+                }
+                let Some(id) = self.current else { return Task::none() };
+                self.sync_current();
+                if self.store.chat_mut(id).is_some_and(|c| c.switch_version(i, k)) {
+                    self.reload_messages(id);
+                    self.save();
+                }
+                Task::none()
+            }
             Message::ShowEarlier => {
                 self.window += CHAT_WINDOW;
                 Task::none()
@@ -428,6 +518,7 @@ impl App {
                 self.current = None;
                 self.messages.clear();
                 self.window = CHAT_WINDOW;
+                self.editing = None;
                 self.used_tokens = 0;
                 self.error = None;
                 Task::none()
@@ -778,6 +869,9 @@ impl App {
     fn finish(&mut self) {
         if self.live.take().is_some() {
             self.sync_current();
+            if let Some(chat) = self.current.and_then(|id| self.store.chat_mut(id)) {
+                chat.forget_duplicates();
+            }
             self.save();
         }
     }
@@ -1172,11 +1266,33 @@ impl App {
             .into()
     }
 
+    /// The arrows under a message that has more than one version: "‹ 2 / 3 ›".
+    fn version_switch(&self, t: Tokens, i: usize) -> Option<Element<'_, Message>> {
+        let v = self.current.and_then(|id| self.store.chat(id))?.versions_at(i);
+        if v.count < 2 {
+            return None;
+        }
+        let step = |label: &'static str, to: Option<usize>| button(text(label).size(13)).on_press_maybe(to.filter(|_| self.live.is_none()).map(|k| Message::SwitchVersion(i, k))).padding([0, 6]).style(theme::ghost_button(t));
+        Some(
+            row![step("‹", v.current.checked_sub(1)), text(format!("{} / {}", v.current + 1, v.count)).size(12).color(t.muted), step("›", (v.current + 1 < v.count).then_some(v.current + 1))]
+                .spacing(2)
+                .align_y(Alignment::Center)
+                .into(),
+        )
+    }
+
     fn message<'a>(&'a self, t: Tokens, i: usize, m: &'a Msg) -> Element<'a, Message> {
         match m.role {
             Role::User => {
                 let bubble = container(text(&m.content).size(15)).padding([9, 15]).max_width(560).style(theme::bubble(t));
-                row![Space::new().width(Length::Fill), bubble].into()
+                let mut line = row![].spacing(14).align_y(Alignment::Center);
+                if let Some(v) = self.version_switch(t, i) {
+                    line = line.push(v);
+                }
+                if self.live.is_none() {
+                    line = line.push(button(text("Edit").size(12)).on_press(Message::EditMessage(i)).padding([3, 0]).style(theme::ghost_button(t)));
+                }
+                column![row![Space::new().width(Length::Fill), bubble], row![Space::new().width(Length::Fill), line]].spacing(4).into()
             }
             Role::Assistant => {
                 let live = self.live.is_some() && i + 1 == self.messages.len();
@@ -1191,6 +1307,10 @@ impl App {
                 }
                 if !live && !m.content.is_empty() {
                     let mut meta = row![button(text("Copy answer").size(12)).on_press(Message::Copy(i)).padding([3, 0]).style(theme::ghost_button(t))].spacing(14).align_y(Alignment::Center);
+                    meta = meta.push(button(text("Retry").size(12)).on_press(Message::Regenerate(i)).padding([3, 0]).style(theme::ghost_button(t)));
+                    if let Some(v) = self.version_switch(t, i) {
+                        meta = meta.push(v);
+                    }
                     if let Some(s) = &m.stats {
                         if s.tokens_per_second > 0.0 {
                             meta = meta.push(
@@ -1240,7 +1360,15 @@ impl App {
                 .style(theme::primary_button(t))
         };
         let hint = text("Enter sends, Shift+Enter adds a new line").size(12).color(t.muted);
-        let card = container(column![editor, row![hint, Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 16.0 })])
+        let banner: Element<'_, Message> = if self.editing.is_some() {
+            row![text("Changing a message: the answers after it are written again, the old ones stay as a version.").size(12).color(t.muted).width(Length::Fill), button(text("Cancel").size(12)).on_press(Message::CancelEdit).padding([2, 8]).style(theme::ghost_button(t))]
+                .align_y(Alignment::Center)
+                .padding(Padding { top: 8.0, right: 10.0, bottom: 0.0, left: 16.0 })
+                .into()
+        } else {
+            Space::new().height(0).into()
+        };
+        let card = container(column![banner, editor, row![hint, Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 16.0 })])
             .style(theme::card(t, theme::R_XL, false))
             .max_width(780);
         container(card).width(Length::Fill).center_x(Length::Fill).padding(Padding { top: 8.0, right: 24.0, bottom: 20.0, left: 24.0 }).into()

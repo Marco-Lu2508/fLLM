@@ -37,11 +37,110 @@ pub struct Record {
     pub stats: Option<Stats>,
 }
 
+/// Another way the conversation went: editing a message or asking for a new answer keeps the old version.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Variant {
+    /// Where the version stands in the row of versions (the arrows under a message go through them in this order).
+    pub slot: u32,
+    pub messages: Vec<Record>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ChatRecord {
     pub id: u64,
     pub title: String,
+    /// The conversation as it is shown now.
     pub messages: Vec<Record>,
+    /// The slot of the shown conversation.
+    #[serde(default)]
+    pub slot: u32,
+    #[serde(default)]
+    pub next_slot: u32,
+    /// The other versions, whole conversations that share their beginning with the shown one.
+    #[serde(default)]
+    pub variants: Vec<Variant>,
+}
+
+/// Which version of a message is shown out of how many.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Versions {
+    pub count: usize,
+    /// 0-based.
+    pub current: usize,
+}
+
+fn same(a: &Record, b: &Record) -> bool {
+    a.role == b.role && a.content == b.content
+}
+
+impl ChatRecord {
+    pub fn new(id: u64, title: &str, messages: Vec<Record>) -> ChatRecord {
+        ChatRecord { id, title: title.into(), messages, ..Default::default() }
+    }
+
+    /// The versions of the message at `i`: the conversations that begin like the shown one and have a different message there.
+    /// Two conversations with the same message at `i` count as one version (the newest of them is the one a switch shows).
+    fn candidates_at(&self, i: usize) -> Vec<(u32, Option<usize>)> {
+        let mut all: Vec<(u32, Option<usize>, &[Record])> = vec![(self.slot, None, &self.messages)];
+        all.extend(self.variants.iter().enumerate().map(|(n, v)| (v.slot, Some(n), v.messages.as_slice())));
+        all.retain(|(_, _, m)| m.len() > i && self.messages.len() > i && m[..i].iter().zip(&self.messages[..i]).all(|(a, b)| same(a, b)));
+        all.sort_by_key(|(slot, _, _)| *slot);
+        // one entry per distinct message at i; the newest conversation represents it
+        let mut out: Vec<(u32, Option<usize>)> = Vec::new();
+        let mut kinds: Vec<&Record> = Vec::new();
+        for (slot, which, m) in &all {
+            match kinds.iter().position(|k| same(k, &m[i])) {
+                Some(k) => out[k] = (*slot, *which),
+                None => {
+                    kinds.push(&m[i]);
+                    out.push((*slot, *which));
+                }
+            }
+        }
+        out
+    }
+
+    pub fn versions_at(&self, i: usize) -> Versions {
+        let c = self.candidates_at(i);
+        if c.is_empty() {
+            return Versions { count: 1, current: 0 };
+        }
+        let mine = self.messages.get(i);
+        let current = mine.and_then(|m| c.iter().position(|(_, which)| match which {
+            None => true,
+            Some(n) => self.variants[*n].messages.get(i).is_some_and(|x| same(x, m)),
+        })).unwrap_or(0);
+        Versions { count: c.len(), current }
+    }
+
+    /// Shows version `k` of the message at `i` (the conversation that has it replaces the shown one; the shown one is kept).
+    pub fn switch_version(&mut self, i: usize, k: usize) -> bool {
+        let c = self.candidates_at(i);
+        let Some((_, Some(n))) = c.get(k).copied() else { return false };
+        let v = &mut self.variants[n];
+        std::mem::swap(&mut self.messages, &mut v.messages);
+        std::mem::swap(&mut self.slot, &mut v.slot);
+        true
+    }
+
+    /// The conversation goes another way from message `i` on: what was shown is kept as a version, the shown conversation is cut to
+    /// the messages before `i` (the caller adds the new ones).
+    pub fn branch_at(&mut self, i: usize) {
+        if i >= self.messages.len() {
+            return;
+        }
+        let old = Variant { slot: self.slot, messages: std::mem::take(&mut self.messages) };
+        self.messages = old.messages[..i].to_vec();
+        self.variants.push(old);
+        self.slot = self.next_slot.max(self.variants.iter().map(|v| v.slot + 1).max().unwrap_or(0));
+        self.next_slot = self.slot + 1;
+    }
+
+    /// After a new answer or edit exists, versions that are now identical to the shown one (same messages all the way) are dropped.
+    pub fn forget_duplicates(&mut self) {
+        let shown = self.messages.clone();
+        self.variants.retain(|v| !(v.messages.len() == shown.len() && v.messages.iter().zip(&shown).all(|(a, b)| same(a, b))));
+    }
 }
 
 /// What the person chose for the answers. Everything is automatic until it is switched to manual: then the value is sent with every request.
@@ -151,7 +250,7 @@ impl Store {
     pub fn new_chat(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.chats.insert(0, ChatRecord { id, title: "New chat".into(), messages: Vec::new() });
+        self.chats.insert(0, ChatRecord::new(id, "New chat", Vec::new()));
         id
     }
 
@@ -194,6 +293,96 @@ mod tests {
         assert_eq!(back.chats[0].id, b, "the newest chat is first");
         let mut back = back;
         assert!(back.new_chat() > b, "ids are not reused after a restart");
+    }
+
+    fn rec(role: Role, text: &str) -> Record {
+        Record { role, content: text.into(), reasoning: String::new(), stats: None }
+    }
+
+    fn chat(lines: &[(Role, &str)]) -> ChatRecord {
+        ChatRecord::new(0, "t", lines.iter().map(|(r, t)| rec(*r, t)).collect())
+    }
+
+    fn texts(c: &ChatRecord) -> Vec<&str> {
+        c.messages.iter().map(|m| m.content.as_str()).collect()
+    }
+
+    #[test]
+    fn a_new_answer_keeps_the_old_one_as_a_version() {
+        use Role::*;
+        let mut c = chat(&[(User, "q"), (Assistant, "a1")]);
+        assert_eq!(c.versions_at(1), Versions { count: 1, current: 0 });
+        c.branch_at(1);
+        assert_eq!(texts(&c), vec!["q"]);
+        c.messages.push(rec(Assistant, "a2"));
+        assert_eq!(c.versions_at(1), Versions { count: 2, current: 1 });
+        assert_eq!(c.versions_at(0), Versions { count: 1, current: 0 }, "the question has one version");
+        assert!(c.switch_version(1, 0));
+        assert_eq!(texts(&c), vec!["q", "a1"]);
+        assert_eq!(c.versions_at(1), Versions { count: 2, current: 0 });
+        assert!(c.switch_version(1, 1));
+        assert_eq!(texts(&c), vec!["q", "a2"], "going back and forth loses nothing");
+        assert!(!c.switch_version(1, 1), "the shown version is not a switch");
+        assert!(!c.switch_version(1, 7));
+    }
+
+    #[test]
+    fn editing_a_question_branches_the_whole_rest_and_versions_nest() {
+        use Role::*;
+        let mut c = chat(&[(User, "q1"), (Assistant, "a1"), (User, "q2"), (Assistant, "a2")]);
+        // edit the second question
+        c.branch_at(2);
+        c.messages.extend([rec(User, "q2 edited"), rec(Assistant, "a2 edited")]);
+        assert_eq!(c.versions_at(2), Versions { count: 2, current: 1 });
+        // a new answer to the edited question
+        c.branch_at(3);
+        c.messages.push(rec(Assistant, "a2 edited, again"));
+        assert_eq!(c.versions_at(3), Versions { count: 2, current: 1 }, "the answers of the edited question");
+        assert_eq!(c.versions_at(2), Versions { count: 2, current: 1 }, "the edited question is one version, whatever answer it has");
+        // back to the first version of the question: its answer comes with it
+        assert!(c.switch_version(2, 0));
+        assert_eq!(texts(&c), vec!["q1", "a1", "q2", "a2"]);
+        assert_eq!(c.versions_at(3), Versions { count: 1, current: 0 });
+        // and forward again: the newest answer of the edited question is shown
+        assert!(c.switch_version(2, 1));
+        assert_eq!(texts(&c), vec!["q1", "a1", "q2 edited", "a2 edited, again"]);
+        assert!(c.switch_version(3, 0));
+        assert_eq!(texts(&c), vec!["q1", "a1", "q2 edited", "a2 edited"]);
+        assert_eq!(c.variants.len(), 2);
+    }
+
+    #[test]
+    fn versions_survive_the_file_and_old_files_still_load() {
+        use Role::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chats.json");
+        let mut s = Store::default();
+        let id = s.new_chat();
+        let c = s.chat_mut(id).unwrap();
+        c.messages = vec![rec(User, "q"), rec(Assistant, "a1")];
+        c.branch_at(1);
+        c.messages.push(rec(Assistant, "a2"));
+        s.save(&path).unwrap();
+        let back = Store::load(&path);
+        assert_eq!(back, s);
+        assert_eq!(back.chat(id).unwrap().versions_at(1), Versions { count: 2, current: 1 });
+        // a file from before versions existed
+        std::fs::write(&path, r#"{"chats":[{"id":3,"title":"old","messages":[{"role":"user","content":"hi"}]}],"next_id":4,"theme":"light"}"#).unwrap();
+        let old = Store::load(&path);
+        assert_eq!(old.chat(3).unwrap().messages.len(), 1);
+        assert_eq!(old.chat(3).unwrap().versions_at(0), Versions { count: 1, current: 0 });
+    }
+
+    #[test]
+    fn a_version_that_ends_up_identical_is_not_kept_twice() {
+        use Role::*;
+        let mut c = chat(&[(User, "q"), (Assistant, "same")]);
+        c.branch_at(1);
+        c.messages.push(rec(Assistant, "same"));
+        assert_eq!(c.variants.len(), 1);
+        c.forget_duplicates();
+        assert!(c.variants.is_empty());
+        assert_eq!(c.versions_at(1), Versions { count: 1, current: 0 });
     }
 
     #[test]

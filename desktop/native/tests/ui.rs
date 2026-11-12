@@ -43,9 +43,10 @@ fn sample_chats() -> Vec<ChatRecord> {
                 rec(Role::User, "What is a GGUF file? Give a code sample and a short list.", None),
                 rec(Role::Assistant, MARKDOWN_ANSWER, Some(Stats { tokens_per_second: 41.8, completion_tokens: 164, prompt_per_second: 612.0 })),
             ],
+            ..Default::default()
         },
-        ChatRecord { id: 1, title: "Hi was geht?".into(), messages: vec![rec(Role::User, "Hi was geht?", None), rec(Role::Assistant, "Hallo! Was ist los? Wie kann ich dir helfen?", None)] },
-        ChatRecord { id: 0, title: "Explain in simple words how a language…".into(), messages: vec![] },
+        ChatRecord { id: 1, title: "Hi was geht?".into(), messages: vec![rec(Role::User, "Hi was geht?", None), rec(Role::Assistant, "Hallo! Was ist los? Wie kann ich dir helfen?", None)], ..Default::default() },
+        ChatRecord { id: 0, title: "Explain in simple words how a language…".into(), messages: vec![], ..Default::default() },
     ]
 }
 
@@ -210,7 +211,7 @@ fn stop_keeps_what_was_written_so_far() {
 fn a_long_chat_draws_only_the_newest_messages_until_more_are_asked_for() {
     use fllm_app::app::CHAT_WINDOW;
     let messages: Vec<Record> = (0..200).map(|i| rec(if i % 2 == 0 { Role::User } else { Role::Assistant }, &format!("message number {i:03}"), None)).collect();
-    let (mut app, _dir) = app_with(vec![ChatRecord { id: 0, title: "long".into(), messages }], "light", true);
+    let (mut app, _dir) = app_with(vec![ChatRecord::new(0, "long".into(), messages)], "light", true);
     let _ = app.update(Message::OpenChat(0));
     let mut ui = Simulator::with_size(settings(), iced::Size::new(1100.0, 12000.0), app.view());
     ui.find("Show 60 earlier messages").expect("older messages are one click away");
@@ -229,4 +230,69 @@ fn a_long_chat_draws_only_the_newest_messages_until_more_are_asked_for() {
     let mut ui = Simulator::with_size(settings(), iced::Size::new(1100.0, 12000.0), app.view());
     assert!(ui.find("message number 000").is_ok());
     assert!(ui.find("Show 60 earlier messages").is_err() && ui.find("Show 1 earlier message").is_err());
+}
+
+#[test]
+fn a_new_answer_and_a_changed_question_keep_the_old_ones_as_versions_you_can_switch_between() {
+    use fllm_app::api::StreamEvent;
+    let chats = vec![ChatRecord::new(0, "t", vec![rec(Role::User, "first question", None), rec(Role::Assistant, "first answer", None)])];
+    let (mut app, dir) = app_with(chats, "light", true);
+    let _ = app.update(Message::OpenChat(0));
+    let finish = |app: &mut App, text: &str| {
+        let id = app.open_chat().unwrap();
+        let _ = app.update(Message::Stream(id, StreamEvent::Delta(text.into())));
+        let _ = app.update(Message::Stream(id, StreamEvent::Done));
+    };
+    let texts = |app: &App| (0..app.message_count()).map(|i| app.message_text(i).unwrap().to_string()).collect::<Vec<_>>();
+
+    // Retry writes the answer again
+    let _ = app.update(Message::Regenerate(1));
+    assert!(app.is_streaming());
+    assert_eq!(texts(&app), vec!["first question", ""], "the old answer is out of the way while the new one is written");
+    finish(&mut app, "second answer");
+    assert_eq!(texts(&app), vec!["first question", "second answer"]);
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1100.0, 900.0), app.view());
+    ui.find("2 / 2").expect("the arrows say which version is shown");
+    drop(ui);
+    // the arrow back shows the first answer again, and the second is still there
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1100.0, 900.0), app.view());
+    ui.click("‹").unwrap();
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(m, Message::SwitchVersion(1, 0))), "{msgs:?}");
+    let _ = app.update(Message::SwitchVersion(1, 0));
+    assert_eq!(texts(&app), vec!["first question", "first answer"]);
+    let _ = app.update(Message::SwitchVersion(1, 1));
+    assert_eq!(texts(&app), vec!["first question", "second answer"]);
+
+    // changing the question: the box gets its text, Cancel leaves everything as it was
+    let _ = app.update(Message::EditMessage(0));
+    assert_eq!(app.editor_text(), "first question");
+    let _ = app.update(Message::CancelEdit);
+    assert_eq!(app.editor_text(), "");
+    let _ = app.update(Message::EditMessage(0));
+    let _ = app.update(Message::Edit(iced::widget::text_editor::Action::Move(iced::widget::text_editor::Motion::DocumentEnd)));
+    let _ = app.update(Message::Edit(iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Paste(std::sync::Arc::new(" (changed)".to_string())))));
+    let _ = app.update(Message::Send);
+    assert_eq!(app.message_text(0).unwrap(), "first question (changed)");
+    finish(&mut app, "answer to the changed question");
+    assert_eq!(app.message_count(), 2);
+    assert_eq!(app.message_text(1).unwrap(), "answer to the changed question");
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1100.0, 900.0), app.view());
+    ui.find("2 / 2").expect("the question has two versions now");
+    drop(ui);
+    // everything is on disk: a new start finds all the versions
+    let store = Store::load(&dir.path().join("chats.json"));
+    let chat = store.chat(0).unwrap();
+    assert_eq!(chat.variants.len(), 2, "the first and the second answer");
+    assert_eq!(chat.versions_at(0).count, 2);
+    assert_eq!(chat.versions_at(1).count, 1);
+    // no switching, retrying or changing while an answer is being written
+    let _ = app.update(Message::Regenerate(1));
+    assert!(app.is_streaming());
+    let before = texts(&app);
+    let _ = app.update(Message::SwitchVersion(0, 0));
+    let _ = app.update(Message::EditMessage(0));
+    let _ = app.update(Message::Regenerate(1));
+    assert_eq!(texts(&app), before);
+    assert_eq!(app.editor_text(), "");
 }

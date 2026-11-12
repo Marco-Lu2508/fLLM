@@ -20,7 +20,7 @@ fn main() {
         let messages: Vec<Record> = (0..n)
             .map(|i| Record { role: if i % 2 == 0 { Role::User } else { Role::Assistant }, content: if i % 2 == 0 { format!("Question {i}: what is GGUF and which size should I pick?") } else { ANSWER.into() }, reasoning: String::new(), stats: None })
             .collect();
-        Store { chats: vec![ChatRecord { id: 0, title: "long".into(), messages }], next_id: 1, ..Default::default() }.save(&path).unwrap();
+        Store { chats: vec![ChatRecord::new(0, "long".into(), messages)], next_id: 1, ..Default::default() }.save(&path).unwrap();
         let (mut app, _t) = App::with("http://127.0.0.1:9".into(), path);
         let _ = app.update(Message::Connected(Ok(ModelInfo { id: "m".into(), max_context: 8192 })));
         let t = Instant::now();
@@ -55,7 +55,7 @@ fn stream_cost() {
         let messages: Vec<Record> = (0..prior)
             .map(|i| Record { role: if i % 2 == 0 { Role::User } else { Role::Assistant }, content: if i % 2 == 0 { format!("Question {i}") } else { ANSWER.into() }, reasoning: String::new(), stats: None })
             .collect();
-        let chats = if prior == 0 { vec![] } else { vec![ChatRecord { id: 0, title: "long".into(), messages }] };
+        let chats = if prior == 0 { vec![] } else { vec![ChatRecord::new(0, "long".into(), messages)] };
         Store { chats, next_id: 1, ..Default::default() }.save(&path).unwrap();
         let (mut app, _t) = App::with("http://127.0.0.1:9".into(), path);
         let _ = app.update(Message::Connected(Ok(ModelInfo { id: "m".into(), max_context: 8192 })));
