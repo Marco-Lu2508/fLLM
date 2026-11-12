@@ -42,7 +42,7 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   an edit shows the lines it removes and adds on tinted bands before it runs, a command shows itself, the result follows. Reading and the
   agent's own notes run alone; the rest asks (*Allow* / *Deny*; a denial goes back to the model) unless you pick *Edit freely* or *Everything*,
   and switching the mode releases the calls that wait. *Stop* ends the stream and the running commands. The bar under the conversation counts
-  the file changes and undoes the last one or all of them. Not yet: sub-agents, plan mode, MCP tools, hooks, sessions that survive a restart.
+  the file changes and undoes the last one or all of them. Not yet: sub-agents, plan mode, MCP tools, hooks. The conversation of each folder is kept (`code-sessions.json` next to the chats, the newest 200 items; a call that had not finished comes back as interrupted) and returns when the folder is opened again; *New session* forgets it.
 - Models (sidebar > Models): what is loaded (Unload), the downloads with progress, speed, time left and Pause / Resume / Cancel / Remove, the
   models on this computer (Load: a file from a folder by its path, a downloaded one by its name), and the catalog with a search field, the
   quantizations as chips (the recommended one is chosen; you pick another before you press Download), the size of the chosen one and whether
@@ -54,7 +54,7 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 | Stage | Content |
 |---|---|
 | 2c | Load options (context, device), the measured prompt speed with the compact prompt, projects and memory, web tools |
-| 3b | Code mode: sessions that survive a restart, sub-agents and plan mode, MCP tools, a terminal view |
+| 3b | Code mode: sub-agents and plan mode, MCP tools, a terminal view |
 | 4 | The engine inside the process (no second program; for now the app starts the server next to it, see above), installers per system that put both side by side, the tray, autostart, updates; then the Tauri app and the web Studio files can go |
 | later | Voice, artifacts, the research mode, the command palette |
 
@@ -63,7 +63,7 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 89 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+cargo test --locked      # 91 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
                          # window driven headless (new chat, send, stream, stop, error, delete, theme) and drawn to PNG files
 ```
 

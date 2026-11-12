@@ -13,7 +13,10 @@ use crate::theme::{self, Tokens};
 use iced::widget::text_editor::{Action, Binding, Content, KeyPress, Status};
 use iced::widget::{button, column, container, markdown, row, scrollable, text, text_editor, text_input, Space};
 use iced::{keyboard, task, Alignment, Element, Font, Length, Padding, Task};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::path::Path;
 
 /// The most model calls one request of yours may take: a loop that never ends is stopped here.
 pub const MAX_STEPS: usize = 30;
@@ -107,6 +110,53 @@ pub enum Item {
     Assistant { text: String, md: Box<markdown::Content> },
     Call(Call),
     Note(String),
+}
+
+/// An item of a session as it is kept on disk.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Saved {
+    User { text: String },
+    Assistant { text: String },
+    Call { id: String, name: String, args: String, permission: String, ok: bool, output: String },
+    Note { text: String },
+}
+
+/// The most items kept per folder: the newest ones.
+pub const SAVED_ITEMS: usize = 200;
+
+fn permission_name(p: Permission) -> &'static str {
+    match p {
+        Permission::Read => "read",
+        Permission::Edit => "edit",
+        Permission::Command => "command",
+        Permission::Memory => "memory",
+        Permission::Network => "network",
+        Permission::Other => "other",
+    }
+}
+
+/// Sessions by folder, in one file next to the chats.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Sessions(pub BTreeMap<String, Vec<Saved>>);
+
+impl Sessions {
+    pub fn load(path: &Path) -> Sessions {
+        let Ok(text) = std::fs::read_to_string(path) else { return Sessions::default() };
+        match serde_json::from_str(&text) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = std::fs::rename(path, path.with_extension("damaged.json"));
+                Sessions::default()
+            }
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(self).map_err(std::io::Error::other)?)?;
+        std::fs::rename(tmp, path)
+    }
 }
 
 #[derive(Default)]
@@ -331,6 +381,51 @@ pub fn preview(name: &str, args: &Value) -> Vec<(Line, String)> {
 }
 
 impl CodeState {
+    /// The session as it is kept on disk: a call that had not finished is kept as interrupted.
+    pub fn saved(&self) -> Vec<Saved> {
+        let mut out: Vec<Saved> = self
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::User(t) => Some(Saved::User { text: t.clone() }),
+                Item::Assistant { text, .. } => (!text.is_empty()).then(|| Saved::Assistant { text: text.clone() }),
+                Item::Note(t) => Some(Saved::Note { text: t.clone() }),
+                Item::Call(c) => {
+                    let (ok, output) = match &c.state {
+                        CallState::Done { ok, output } => (*ok, output.clone()),
+                        _ => (false, "Interrupted.".to_string()),
+                    };
+                    Some(Saved::Call { id: c.id.clone(), name: c.name.clone(), args: c.args.clone(), permission: permission_name(c.permission).into(), ok, output })
+                }
+            })
+            .collect();
+        if out.len() > SAVED_ITEMS {
+            out.drain(..out.len() - SAVED_ITEMS);
+            // a call without the answer that announced it would confuse the model: start at a message of yours
+            let first = out.iter().position(|i| matches!(i, Saved::User { .. })).unwrap_or(0);
+            out.drain(..first);
+        }
+        out
+    }
+
+    /// Takes a kept session back as the conversation.
+    pub fn restore(&mut self, saved: Vec<Saved>) {
+        self.steps = 0;
+        self.items = saved
+            .into_iter()
+            .map(|s| match s {
+                Saved::User { text } => Item::User(text),
+                Saved::Assistant { text } => {
+                    let mut md = markdown::Content::new();
+                    md.push_str(&text);
+                    Item::Assistant { text, md: Box::new(md) }
+                }
+                Saved::Call { id, name, args, permission, ok, output } => Item::Call(Call { id, name, args, permission: Permission::parse(&permission), state: CallState::Done { ok, output } }),
+                Saved::Note { text } => Item::Note(text),
+            })
+            .collect();
+    }
+
     fn tool(&self, name: &str) -> Option<&Tool> {
         self.tools.iter().find(|t| t.name == name)
     }
@@ -1063,6 +1158,35 @@ mod tests {
         }
         assert!(!s.running && s.steps == MAX_STEPS);
         assert!(matches!(s.items.last(), Some(Item::Note(n)) if n.contains("Stopped after")));
+    }
+
+    #[test]
+    fn a_kept_session_is_the_same_conversation_again() {
+        let mut s = state(Mode::Ask);
+        say(&mut s, "x");
+        answer(&mut s, "Looking.", &[("c1", "read_file", r#"{"path":"a"}"#), ("c2", "edit_file", r#"{"path":"a","old_string":"1","new_string":"2"}"#)]);
+        let _ = s.update(CodeMsg::ToolDone("c1".into(), Ok("1".into())), &env());
+        let wire_before = s.wire(None);
+        let saved = s.saved();
+        assert!(saved.iter().any(|i| matches!(i, Saved::Call { id, ok: false, output, .. } if id == "c2" && output == "Interrupted.")), "a waiting call is kept as interrupted: {saved:?}");
+        let json = serde_json::to_string(&saved).unwrap();
+        let mut back = state(Mode::Ask);
+        back.restore(serde_json::from_str(&json).unwrap());
+        assert_eq!(back.saved(), saved);
+        // the model sees the same conversation, with the open call answered as an error
+        let wire = back.wire(None);
+        assert_eq!(wire.len(), wire_before.len());
+        assert_eq!(wire.last().unwrap().content, "Error: Interrupted.");
+        assert!(matches!(back.items.get(1), Some(Item::Assistant { text, .. }) if text == "Looking."));
+        // a long session keeps the newest items, starting at a message of the user
+        let mut long = state(Mode::Ask);
+        for i in 0..150 {
+            long.items.push(Item::User(format!("q{i}")));
+            long.items.push(Item::Note(format!("n{i}")));
+        }
+        let kept = long.saved();
+        assert!(kept.len() <= SAVED_ITEMS && matches!(kept.first(), Some(Saved::User { .. })));
+        assert!(matches!(kept.last(), Some(Saved::Note { text }) if text == "n149"));
     }
 
     #[test]

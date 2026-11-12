@@ -344,11 +344,35 @@ impl App {
                     self.store.prefs.remember_folder(&w.root);
                     self.save();
                 }
+                let was_running = self.code.running;
+                let ends_session = matches!(msg, code::CodeMsg::NewSession);
+                let opened = if let code::CodeMsg::Opened(Ok(w)) = &msg { Some(w.root.clone()) } else { None };
                 let model = if let Server::Ready(m) = &self.server { Some(m.id.clone()) } else { None };
                 let extra = (self.store.prefs.custom_system && !self.store.prefs.system_prompt.trim().is_empty()).then(|| self.store.prefs.system_prompt.clone());
                 let base = self.base.clone();
                 let env = code::Env { base: &base, model: model.as_deref(), params: self.chat_params(), extra: extra.as_deref() };
-                self.code.update(msg, &env)
+                let task = self.code.update(msg, &env);
+                // the conversation of a folder is kept: it comes back when the folder is opened again
+                let file = self.data_file.with_file_name("code-sessions.json");
+                if let Some(root) = opened {
+                    if let Some(saved) = code::Sessions::load(&file).0.remove(&root) {
+                        self.code.restore(saved);
+                    }
+                } else if ends_session || (was_running && !self.code.running) {
+                    if let Some(w) = &self.code.workspace {
+                        let mut all = code::Sessions::load(&file);
+                        let saved = self.code.saved();
+                        if saved.is_empty() {
+                            all.0.remove(&w.root);
+                        } else {
+                            all.0.insert(w.root.clone(), saved);
+                        }
+                        if let Err(e) = all.save(&file) {
+                            eprintln!("fllm-app: the code session could not be saved: {e}");
+                        }
+                    }
+                }
+                task
             }
             Message::TogglePicker => {
                 self.picker_open = !self.picker_open;

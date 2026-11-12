@@ -165,3 +165,43 @@ fn the_dialog_fills_the_path_and_a_closed_dialog_changes_nothing() {
     code(&mut app, CodeMsg::Picked(Ok(Some("/chosen".into()))));
     assert_eq!(app.code().path_input, "/chosen", "a chosen folder is opened at once");
 }
+
+#[test]
+fn a_session_is_kept_per_folder_and_comes_back_when_the_folder_is_opened_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chats.json");
+    Store::default().save(&path).unwrap();
+    let boot = || {
+        let (mut app, _t) = App::with("http://127.0.0.1:9".into(), path.clone());
+        let _ = app.update(Message::Connected(Ok(ModelInfo { id: "qwen".into(), max_context: 8192 })));
+        let _ = app.update(Message::Go(View::Code));
+        app
+    };
+    let mut app = boot();
+    session(&mut app);
+    // the agent is stopped half way: the open calls are kept as interrupted, the text as it was
+    code(&mut app, CodeMsg::Stop);
+    let before = app.code().saved();
+    assert!(before.len() >= 5, "{before:?}");
+    assert!(dir.path().join("code-sessions.json").exists());
+    drop(app);
+
+    // a new start of the app, the same folder
+    let mut app = boot();
+    assert!(app.code().items.is_empty());
+    open_folder(&mut app);
+    assert_eq!(app.code().saved(), before, "the conversation is back");
+    // another folder has its own
+    code(&mut app, CodeMsg::Close);
+    code(&mut app, CodeMsg::Opened(Ok(Workspace { root: "/other".into(), name: "other".into(), branch: None })));
+    assert!(app.code().items.is_empty());
+    // and a new session forgets the kept one
+    code(&mut app, CodeMsg::Close);
+    open_folder(&mut app);
+    assert!(!app.code().items.is_empty());
+    code(&mut app, CodeMsg::NewSession);
+    drop(app);
+    let mut app = boot();
+    open_folder(&mut app);
+    assert!(app.code().items.is_empty(), "a session that was cleared stays cleared");
+}
