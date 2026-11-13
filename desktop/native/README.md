@@ -103,6 +103,15 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   memory, chat search, the call line and the line for a chat without tools) are the SP_TOOL_TEXT
   of the Studio word for word — memory is live with the memory round, the web and chat-search
   texts wait for their rounds.
+- Temporary chat: the ghost button in the top bar beside the token counter stages the next chat
+  (the banner of the Studio sits over the messages: "Temporary chat: it is not saved and
+  disappears when you close it or start another chat."), the chat that is made when the first
+  question is sent carries it, and the button is tinted while it is open or staged. Pressing the
+  button on a temporary chat with messages asks first with the Studio's dialog ("Close the
+  temporary chat?" / "It was never saved and will be deleted now." / "Close it"), one without
+  messages is gone at once, and leaving it — another chat or *New chat* — drops it for good
+  without asking. The file never gets one: the save leaves it out the way the Studio's
+  saveThreads does.
 - Code (sidebar > Code): a coding agent in a folder. Open a folder (type the path, *Choose…* for the folder dialog of the server's computer, or one of the last six), tell the agent what to do; the model
   gets the server's agent tools (read, search, edit, run commands, ...) and answers with tool calls, which the window runs through
   `/api/studio/agent/tool` and feeds back until the model answers without one (at most 30 model calls per message). Every call is a card:
@@ -134,9 +143,9 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 196 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+cargo test --locked      # 201 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
                          # window driven headless (new chat, send, stream, stop, error, delete, theme, assistants, projects,
-                         # attachments, personalization, prompt library, response style) and drawn to PNG files
+                         # attachments, personalization, prompt library, response style, temporary chat) and drawn to PNG files
 ```
 
 The window tests use iced's software renderer, so they need no display and no GPU. The pictures go to
@@ -146,8 +155,9 @@ in `finish`, of the guard against late events, of the project filter of the side
 the files in the request, of the image parts, of the documents of the chat in the search, of the personalization in the prompt, of the
 capture of "remember that …", of the saving of the memory tool, of the sort of the library, of
 the menu on every change of the box, of the limit of a hundred prompts, of the style in the
-prompt, of the staged style for a new chat and of the web text of the Studio each turn a test
-red.
+prompt, of the staged style for a new chat, of the web text of the Studio, of the save without
+its filter, of the staging into the chat and of the drop when a temporary chat is left each turn
+a test red.
 
 Not checked: a window on a real screen (this machine has none), scaling on a HiDPI display, input methods, the macOS and Windows builds
 (the CI workflow `native-app` builds and tests all three).

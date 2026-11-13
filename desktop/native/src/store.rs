@@ -117,6 +117,9 @@ pub struct ChatRecord {
     /// The response style of this chat (the Studio's `t.style`; empty means the default).
     #[serde(default)]
     pub style: String,
+    /// A temporary chat: never written to the file, gone when another chat is opened.
+    #[serde(default)]
+    pub temporary: bool,
 }
 
 /// Which version of a message is shown out of how many.
@@ -546,7 +549,16 @@ impl Store {
         }
         // write beside the file and rename: a crash in the middle leaves the old file whole
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?)?;
+        // a temporary chat is never written to the file (the Studio's saveThreads)
+        let bytes = if self.chats.iter().any(|c| c.temporary) {
+            let mut kept = self.clone();
+            kept.chats.retain(|c| !c.temporary);
+            serde_json::to_vec_pretty(&kept)
+        } else {
+            serde_json::to_vec_pretty(self)
+        }
+        .map_err(std::io::Error::other)?;
+        std::fs::write(&tmp, bytes)?;
         std::fs::rename(tmp, path)
     }
 

@@ -46,6 +46,7 @@ pub(crate) const ICON_PIN: &[u8] = include_bytes!("../icons/pin.svg");
 const ICON_CODE: &[u8] = include_bytes!("../icons/code.svg");
 const ICON_CHEVRON: &[u8] = include_bytes!("../icons/chevron-down.svg");
 const ICON_LINES: &[u8] = include_bytes!("../icons/lines.svg");
+const ICON_GHOST: &[u8] = include_bytes!("../icons/ghost.svg");
 const ICON_CHECK: &[u8] = include_bytes!("../icons/check.svg");
 const ICON_FOLDER: &[u8] = include_bytes!("../icons/folder.svg");
 const ICON_CHEVRON_RIGHT: &[u8] = include_bytes!("../icons/chevron-right.svg");
@@ -224,6 +225,10 @@ pub struct App {
     style_menu: bool,
     /// The style staged for the next new chat (the Studio's `state.newStyle`).
     new_style: String,
+    /// The next chat is temporary (the Studio's `state.tempNext`).
+    temp_next: bool,
+    /// The dialog before a temporary chat with messages is gone for good.
+    temp_close: bool,
     /// The text box of a prompt library row per id (so a half-typed row keeps its place).
     plib_texts: std::collections::HashMap<String, Content>,
     /// The copy on the server: the text that is up there, whether it is off, and one request at a time.
@@ -432,6 +437,10 @@ pub enum Message {
     /// The menu of the response styles over the composer.
     StyleMenu,
     StylePick(String),
+    /// The button of the temporary chat in the top bar (the Studio's toggleTemporary).
+    TempToggle,
+    TempCloseOk,
+    TempCloseCancel,
     Code(code::CodeMsg),
 }
 
@@ -500,6 +509,8 @@ impl App {
             slash_index: 0,
             style_menu: false,
             new_style: "default".into(),
+            temp_next: false,
+            temp_close: false,
             plib_texts: std::collections::HashMap::new(),
             mem_synced_text: None,
             mem_sync_off: false,
@@ -548,6 +559,16 @@ impl App {
     /// Whether the menu of the prompt library under a "/" is open.
     pub fn slash_open(&self) -> bool {
         !self.slash.is_empty()
+    }
+
+    /// Whether a temporary chat is staged for the next new chat (the tests read it).
+    pub fn staged_temporary(&self) -> bool {
+        self.temp_next
+    }
+
+    /// How many chats the store holds (the tests count them around a temporary one).
+    pub fn chat_count(&self) -> usize {
+        self.store.chats.len()
     }
 
     /// The text of the last message of the open chat.
@@ -613,6 +634,8 @@ impl App {
     }
 
     fn open(&mut self, id: u64) {
+        // a temporary chat that is left is gone for good (the Studio's leaveThread)
+        self.store.chats.retain(|c| !c.temporary || c.id == id);
         if let Some(chat) = self.store.chat(id) {
             self.messages = chat.messages.iter().map(Msg::from_record).collect();
             self.window = CHAT_WINDOW;
@@ -663,7 +686,10 @@ impl App {
                     chat.assistant = wanted;
                     // the style that was staged for a new chat becomes this chat's (state.newStyle)
                     chat.style = self.new_style.clone();
+                    // and the staging of the temporary chat becomes this chat's (state.tempNext)
+                    chat.temporary = self.temp_next;
                 }
+                self.temp_next = false;
                 if let Some(pid) = self.prj_pending.take().filter(|pid| self.store.projects.iter().any(|p| p.id == *pid)) {
                     if let Some(chat) = self.store.chat_mut(id) {
                         chat.project = Some(pid);
@@ -1601,6 +1627,35 @@ impl App {
                 self.style_menu = !self.style_menu;
                 Task::none()
             }
+            Message::TempToggle => {
+                let temporary_now = self.current.and_then(|id| self.store.chat(id)).is_some_and(|c| c.temporary);
+                if temporary_now {
+                    let has_messages = self.current.and_then(|id| self.store.chat(id)).is_some_and(|c| !c.messages.is_empty());
+                    if has_messages {
+                        // the Studio asks before a temporary chat with messages is gone for good
+                        self.temp_close = true;
+                    } else {
+                        self.close_temporary();
+                    }
+                } else if self.temp_next && self.current.is_none() {
+                    // the staging is taken back before a chat exists
+                    self.temp_next = false;
+                } else {
+                    // start a new chat and stage the next one as temporary (startNewChat + tempNext)
+                    let _ = self.update(Message::NewChat);
+                    self.temp_next = true;
+                }
+                Task::none()
+            }
+            Message::TempCloseOk => {
+                self.temp_close = false;
+                self.close_temporary();
+                Task::none()
+            }
+            Message::TempCloseCancel => {
+                self.temp_close = false;
+                Task::none()
+            }
             Message::StylePick(style) => {
                 self.style_menu = false;
                 // the Studio writes the choice into the chat, or into state.newStyle without one
@@ -1700,6 +1755,8 @@ impl App {
                     return Task::none();
                 }
                 self.current = None;
+                // a temporary chat that is left is gone for good (the Studio's leaveThread)
+                self.store.chats.retain(|c| !c.temporary);
                 self.prj_pending = None;
                 self.messages.clear();
                 self.window = CHAT_WINDOW;
@@ -2387,6 +2444,7 @@ impl App {
             && self.prj_delete.is_none()
             && self.remember.is_none()
             && !self.mem_clear
+            && !self.temp_close
         {
             return page;
         }
@@ -2427,6 +2485,11 @@ impl App {
             layers = layers
                 .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::RememberCancel))
                 .push(self.remember_window(t));
+        }
+        if self.temp_close {
+            layers = layers
+                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::TempCloseCancel))
+                .push(self.temp_close_window(t));
         }
         layers.into()
     }
@@ -2768,6 +2831,35 @@ impl App {
                     Space::new().width(Length::Fill),
                     button(text("Cancel").size(13)).on_press(Message::PrjDeleteCancel).padding([6, 12]).style(theme::ghost_button(t)),
                     button(text("Delete").size(13)).on_press(Message::PrjDeleteOk).padding([6, 12]).style(move |_, status| {
+                        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                        button::Style {
+                            background: Some(iced::Background::Color(if hovered { t.fill_hover } else { t.fill })),
+                            text_color: t.danger,
+                            border: iced::border::rounded(8),
+                            ..Default::default()
+                        }
+                    }),
+                ],
+            ]
+            .spacing(10),
+        )
+        .padding(16)
+        .width(420)
+        .style(theme::card(t, theme::R_LG, false));
+        container(window).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
+    }
+
+    /// The dialog before a temporary chat with messages is gone for good (the Studio's
+    /// askDialog in toggleTemporary).
+    fn temp_close_window(&self, t: Tokens) -> Element<'_, Message> {
+        let window = container(
+            column![
+                text("Close the temporary chat?").size(16).font(bold()),
+                text("It was never saved and will be deleted now.").size(13).color(t.fg_soft),
+                row![
+                    Space::new().width(Length::Fill),
+                    button(text("Cancel").size(13)).on_press(Message::TempCloseCancel).padding([6, 12]).style(theme::ghost_button(t)),
+                    button(text("Close it").size(13)).on_press(Message::TempCloseOk).padding([6, 12]).style(move |_, status| {
                         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
                         button::Style {
                             background: Some(iced::Background::Color(if hovered { t.fill_hover } else { t.fill })),
@@ -3198,7 +3290,18 @@ impl App {
         } else {
             Space::new().into()
         };
-        let inner = container(row![pill, Space::new().width(10), asst_pill, Space::new().width(10), project_badge, Space::new().width(10), chip, Space::new().width(Length::Fill), meter].align_y(Alignment::Center)).max_width(780).width(Length::Fill);
+        // the button of the temporary chat (the Studio's btnTemporary beside the token counter):
+        // tinted while a temporary chat is open, or while one is staged for the next new chat
+        let temp_active = self.current.and_then(|id| self.store.chat(id)).map(|c| c.temporary).unwrap_or(self.temp_next);
+        let temp_button = button(
+            svg(icon(ICON_GHOST)).width(16).height(16).style(move |theme, status| {
+                if temp_active { accent_svg(t)(theme, status) } else { muted_svg(t)(theme, status) }
+            }),
+        )
+        .on_press(Message::TempToggle)
+        .padding(6)
+        .style(slash_button(t, temp_active));
+        let inner = container(row![pill, Space::new().width(10), asst_pill, Space::new().width(10), project_badge, Space::new().width(10), chip, Space::new().width(Length::Fill), meter, Space::new().width(10), temp_button].align_y(Alignment::Center)).max_width(780).width(Length::Fill);
         container(inner)
             .center_x(Length::Fill)
             .padding([0, 24])
@@ -3546,6 +3649,24 @@ impl App {
         }
         self.slash.clear();
         self.slash_index = 0;
+    }
+
+    /// A temporary chat is gone for good: the chat leaves the list, the view is fresh (what the
+    /// Studio's startNewChat does after the dialog of toggleTemporary).
+    fn close_temporary(&mut self) {
+        if self.live.is_some() {
+            return;
+        }
+        if let Some(id) = self.current.take() {
+            self.store.chats.retain(|c| c.id != id);
+        }
+        self.prj_pending = None;
+        self.messages.clear();
+        self.window = CHAT_WINDOW;
+        self.editing = None;
+        self.used_tokens = 0;
+        self.error = None;
+        self.save();
     }
 
     /// Puts a fact into the memory, with the line the Studio shows (memRemember).
@@ -3921,10 +4042,33 @@ impl App {
         if let Some(e) = &self.error {
             col = col.push(container(text(e).size(13).color(t.danger)).padding([8, 12]).style(theme::inset(t)));
         }
-        scrollable(container(col.padding([20, 0])).width(Length::Fill).center_x(Length::Fill))
+        let body: Element<'_, Message> = scrollable(container(col.padding([20, 0])).width(Length::Fill).center_x(Length::Fill))
             .anchor_bottom()
             .height(Length::Fill)
-            .into()
+            .into();
+        // the banner of the Studio over the messages of a temporary chat (also while one is only
+        // staged for the next new chat)
+        let temp = self.current.and_then(|id| self.store.chat(id)).map(|c| c.temporary).unwrap_or(self.temp_next);
+        if !temp {
+            return body;
+        }
+        column![
+            container(
+                text("Temporary chat: it is not saved and disappears when you close it or start another chat.")
+                    .size(12.5)
+                    .color(t.fg)
+            )
+            .width(Length::Fill)
+            .padding([6, 14])
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(iced::Color { a: 0.16, ..t.primary })),
+                border: iced::border::Border { width: 1.0, color: iced::Color { a: 0.4, ..t.primary }, radius: 0.0.into() },
+                ..Default::default()
+            }),
+            body,
+        ]
+        .width(Length::Fill)
+        .into()
     }
 
     /// The chip under a question that was answered with passages (the Studio's `ragChipsHtml`): a line
