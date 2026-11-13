@@ -311,6 +311,10 @@ pub struct App {
     /// The models on this computer for the start screen (asked once, like `heroHubAsked`).
     hero_overview: Option<models::Overview>,
     hero_hub_asked: bool,
+    /// The prices per million tokens (the `prices` of the Studio's usage pane).
+    pub prices: Vec<crate::usage::Price>,
+    /// What the last press of the usage pane said ("Prices saved." ...).
+    pub usage_status: Option<String>,
     /// What the tour has to say (the line about this computer, a model's memory, the loaded model
     /// and the suggestions of the hub).
     pub tour_data: tour::TourData,
@@ -639,6 +643,22 @@ pub enum Message {
     HeroBrowse,
     /// The start screen asks for a model file (`Choose a model file…`).
     HeroChoose,
+    /// The counters of the usage pane are set back to zero (`Reset counters`).
+    UsageReset,
+    /// The price rows came from the server (`loadPrices` of the Studio).
+    PricesLoaded(Result<Vec<crate::usage::Price>, String>),
+    /// The price rows were written back (`savePrices` of the Studio).
+    PricesSaved(Result<Vec<crate::usage::Price>, String>),
+    /// A price row was added (`+ Add price`).
+    PriceAdd,
+    /// A price row was removed (`Remove`).
+    PriceRemove(usize),
+    /// One field of a price row was typed (`data-f` of the Studio).
+    PriceField(usize, &'static str, String),
+    /// What the usage pane says under its buttons (`say` of the Studio).
+    UsageStatus(String),
+    /// The price rows are written back (`Save prices` of the Studio).
+    UsageSave,
     /// One step forward; the last step closes it (*Get started*).
     TourNext,
     /// One step back.
@@ -786,6 +806,8 @@ impl App {
             hero_last: None,
             hero_overview: None,
             hero_hub_asked: false,
+            prices: Vec::new(),
+            usage_status: None,
             tour_data: tour::TourData::default(),
             shortcuts_open: false,
             sc_capture: None,
@@ -2437,6 +2459,68 @@ impl App {
             }
             Message::HeroChosen(Err(_)) => Task::none(),
             Message::HeroBrowse => self.update(Message::Go(View::Models)),
+            Message::UsageReset => {
+                self.store.usage = crate::usage::UsageData::default();
+                self.save();
+                self.usage_status = Some(String::from("Counters reset."));
+                Task::none()
+            }
+            Message::PricesLoaded(Ok(prices)) => {
+                self.prices = prices;
+                Task::none()
+            }
+            Message::PricesLoaded(Err(_)) => Task::none(),
+            Message::PricesSaved(Ok(prices)) => {
+                self.prices = prices;
+                self.usage_status = Some(String::from("Prices saved."));
+                Task::none()
+            }
+            Message::PricesSaved(Err(e)) => {
+                self.usage_status = Some(e);
+                Task::none()
+            }
+            Message::PriceAdd => {
+                // the row the Studio adds: empty pattern, both prices at zero
+                let mut row = crate::usage::Price::default();
+                row.refresh_text();
+                self.prices.push(row);
+                Task::none()
+            }
+            Message::UsageSave => {
+                // savePrices of the Studio: write the rows and show what the server kept
+                self.usage_status = Some(String::from("Saving…"));
+                let prices = self.prices.clone();
+                Task::perform(models::save_prices(self.base.clone(), prices), Message::PricesSaved)
+            }
+            Message::PriceRemove(index) => {
+                if index < self.prices.len() {
+                    self.prices.remove(index);
+                    self.usage_status = Some(String::from("Removed. Press Save prices to write it."));
+                }
+                Task::none()
+            }
+            Message::PriceField(index, field, value) => {
+                if let Some(row) = self.prices.get_mut(index) {
+                    match field {
+                        "pattern" => row.pattern = value,
+                        "input" => {
+                            row.input_per_million = value.parse().unwrap_or(0.0);
+                            row.input_text = value;
+                        }
+                        "output" => {
+                            row.output_per_million = value.parse().unwrap_or(0.0);
+                            row.output_text = value;
+                        }
+                        "note" => row.note = value,
+                        _ => {}
+                    }
+                }
+                Task::none()
+            }
+            Message::UsageStatus(text) => {
+                self.usage_status = Some(text);
+                Task::none()
+            }
             Message::HeroChoose => {
                 let base = self.base.clone();
                 Task::perform(api::pick_file_with_text(base), Message::HeroChosen)
@@ -3014,16 +3098,20 @@ impl App {
                         },
                         |m| m,
                     );
+                    // the prices of the usage pane come with them (loadPrices of usage.js)
+                    let prices =
+                        Task::perform(models::fetch_prices(self.base.clone()), Message::PricesLoaded);
                     if !matches!(self.server, Server::Down(_)) {
                         return Task::batch(vec![
                             voices,
+                            prices,
                             Task::perform(
                                 engine_settings::fetch(self.base.clone()),
                                 Message::EngineLoaded,
                             ),
                         ]);
                     }
-                    return voices;
+                    return Task::batch(vec![voices, prices]);
                 }
                 Task::none()
             }
@@ -3317,6 +3405,14 @@ impl App {
             StreamEvent::Usage { prompt, completion } => {
                 self.used_tokens = prompt + completion;
                 self.used_exact = true;
+                // the counters of the usage pane take every answer (record of usage.js)
+                let name = self
+                    .hero
+                    .as_ref()
+                    .map(|s| s.model_name.clone())
+                    .unwrap_or_default();
+                crate::usage::record(&mut self.store.usage, &name, prompt, completion);
+                self.save();
                 if let Some(last) = self.messages.last_mut() {
                     last.stats.get_or_insert_with(Stats::default).completion_tokens = completion;
                 }
@@ -3759,6 +3855,11 @@ impl App {
                 settings::VoiceView {
                     voices: &self.voice_names,
                     can_notify: self.voice_can_notify,
+                },
+                settings::UsageView {
+                    data: &self.store.usage,
+                    prices: &self.prices,
+                    status: self.usage_status.as_deref(),
                 },
             )
         } else if self.page == View::Project {
@@ -7169,7 +7270,7 @@ fn asst_option(t: Tokens, label: String, selected: bool, on_press: Message) -> E
         .into()
 }
 
-fn starter_style(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Style {
+pub fn starter_style(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| button::Style {
         background: Some(iced::Background::Color(match status {
             button::Status::Hovered | button::Status::Pressed => t.fill,
@@ -7183,7 +7284,7 @@ fn starter_style(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Style 
 
 /// The main button of the start screen (`renderHeroStart` of the Studio): the accent, not a
 /// plain starter button.
-fn primary_style(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Style {
+pub fn primary_style(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| button::Style {
         background: Some(iced::Background::Color(match status {
             button::Status::Hovered | button::Status::Pressed => t.primary_soft,

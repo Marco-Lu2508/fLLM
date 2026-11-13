@@ -238,7 +238,13 @@ fn value_slider<'a>(t: Tokens, range: std::ops::RangeInclusive<f32>, value: f32,
     row![s, text(format!("{value:.2}")).size(13).font(iced::Font::MONOSPACE).width(44)].spacing(10).align_y(Alignment::Center).into()
 }
 
-#[allow(clippy::too_many_arguments)] // a page draws from eight pieces of state
+/// What the usage card shows: the counters, the price rows and the line under its buttons.
+pub struct UsageView<'a> {
+    pub data: &'a crate::usage::UsageData,
+    pub prices: &'a [crate::usage::Price],
+    pub status: Option<&'a str>,
+}
+
 /// What the settings show about this machine in the voice cards: its voices and whether it can
 /// notify (the `fillVoices` and `notifyNote` of `voice.js`).
 #[derive(Debug, Clone, Default)]
@@ -276,6 +282,144 @@ impl std::fmt::Display for VoiceChoice {
 
 // the page of the settings carries every block of it (the Studio reads its rows from the page)
 #[allow(clippy::too_many_arguments)]
+/// The usage card of the Studio (`usage.js`): what has been counted, what it costs with the
+/// prices entered, and the rows themselves.
+fn usage_card<'a>(t: Tokens, view: UsageView<'a>) -> Element<'a, Message> {
+    let mut body = column![].spacing(12);
+    body = body.push(
+        text("Tokens are counted from the usage block of every answer. A local model costs nothing; for a model behind a provider, add its price below and the cost appears here and in /cost.")
+            .size(13)
+            .color(t.muted),
+    );
+    body = body.push(text(crate::usage::totals_text(view.data, view.prices)).size(13));
+    // the table: model, answers, input, output, cost, and the row of everything together
+    if view.data.by_model.is_empty() {
+        body = body.push(
+            text("Nothing counted yet in this browser. Ask something in Chat or run the Code agent.")
+                .size(13)
+                .color(t.muted),
+        );
+    } else {
+        let mut table = column![].spacing(4);
+        table = table.push(
+            row![
+                text("Model").size(12).color(t.muted).width(240),
+                text("Answers").size(12).color(t.muted).width(80),
+                text("Input").size(12).color(t.muted).width(90),
+                text("Output").size(12).color(t.muted).width(90),
+                text("Cost").size(12).color(t.muted).width(90),
+            ]
+            .spacing(8),
+        );
+        for (model, entry) in crate::usage::rows_sorted(view.data) {
+            let cost = crate::usage::cost_of(model, entry, view.prices);
+            table = table.push(
+                row![
+                    text(model.clone()).size(13).width(240),
+                    text(entry.calls.to_string()).size(13).width(80),
+                    text(crate::usage::fmt_tokens(entry.prompt)).size(13).width(90),
+                    text(crate::usage::fmt_tokens(entry.completion)).size(13).width(90),
+                    text(crate::usage::fmt_money(cost)).size(13).width(90),
+                ]
+                .spacing(8),
+            );
+        }
+        let all = crate::usage::totals(view.data, view.prices);
+        table = table.push(
+            row![
+                text("All").size(13).font(bold()).width(240),
+                text(all.calls.to_string()).size(13).font(bold()).width(80),
+                text(crate::usage::fmt_tokens(all.prompt)).size(13).font(bold()).width(90),
+                text(crate::usage::fmt_tokens(all.completion)).size(13).font(bold()).width(90),
+                text(crate::usage::fmt_money(if all.priced > 0 { Some(all.cost) } else { None }))
+                    .size(13)
+                    .font(bold())
+                    .width(90),
+            ]
+            .spacing(8),
+        );
+        body = body.push(table);
+    }
+    body = body.push(
+        button(text("Reset counters").size(13).color(t.fg_soft))
+            .on_press(Message::UsageReset)
+            .padding([8, 14])
+            .style(crate::app::starter_style(t)),
+    );
+    // the prices themselves
+    body = body.push(
+        text("Prices (dollars per million tokens)").size(15).font(bold()),
+    ).push(
+        text("A pattern is matched against the model name; the longest match wins, * matches any tail (for example gpt-6*). Models without a row show tokens only.")
+            .size(13)
+            .color(t.muted),
+    );
+    if view.prices.is_empty() {
+        body = body.push(text("No price rows. Local models need none.").size(13).color(t.muted));
+    }
+    for (i, row) in view.prices.iter().enumerate() {
+        let mut fields = row![].spacing(6).align_y(Alignment::Center);
+        fields = fields.push(price_input(t, "model pattern, e.g. gpt-6*", &row.pattern, i, "pattern", 200.0));
+        fields = fields.push(price_input(t, "0", &row.input_text, i, "input", 110.0));
+        fields = fields.push(price_input(t, "0", &row.output_text, i, "output", 110.0));
+        fields = fields.push(price_input(t, "note (optional)", &row.note, i, "note", 140.0));
+        fields = fields.push(
+            button(text("Remove").size(13).color(t.fg_soft))
+                .on_press(Message::PriceRemove(i))
+                .padding([6, 12])
+                .style(crate::app::starter_style(t)),
+        );
+        body = body.push(fields);
+    }
+    let mut actions = row![].spacing(8).align_y(Alignment::Center);
+    actions = actions.push(
+        button(text("+ Add price").size(13).color(t.fg_soft))
+            .on_press(Message::PriceAdd)
+            .padding([8, 14])
+            .style(crate::app::starter_style(t)),
+    ).push(
+        button(text("Save prices").size(13).font(bold()))
+            .on_press(Message::UsageSave)
+            .padding([8, 14])
+            .style(crate::app::primary_style(t)),
+    );
+    if let Some(status) = view.status {
+        actions = actions.push(text(status).size(12).color(t.muted));
+    }
+    body = body.push(actions);
+    body.into()
+}
+
+/// One field of a price row (the `data-f` inputs of the Studio).
+fn price_input<'a>(
+    t: Tokens,
+    placeholder: &'a str,
+    value: &'a str,
+    index: usize,
+    field: &'static str,
+    width: f32,
+) -> Element<'a, Message> {
+    text_input(placeholder, value)
+        .on_input(move |v| Message::PriceField(index, field, v))
+        .size(14)
+        .padding([6, 10])
+        .width(width)
+        .style(move |_, status| text_input::Style {
+            background: iced::Background::Color(t.surface_2),
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: 1.0,
+                color: if matches!(status, text_input::Status::Focused { .. }) { t.fg_soft } else { t.separator },
+            },
+            icon: t.muted,
+            placeholder: t.muted,
+            value: t.fg,
+            selection: t.primary_soft,
+        })
+        .into()
+}
+
+#[allow(clippy::too_many_arguments)] // a page draws from ten pieces of state
 pub fn page<'a>(
     t: Tokens,
     prefs: &'a Prefs,
@@ -286,6 +430,7 @@ pub fn page<'a>(
     engine: Element<'a, Message>,
     personal: PersonalView<'a>,
     voice: VoiceView<'a>,
+    usage: UsageView<'a>,
 ) -> Element<'a, Message> {
     let mut answers = column![].spacing(14);
     answers = answers.push(setting(
@@ -793,6 +938,7 @@ pub fn page<'a>(
         // the Voice and alerts pane sits last so the cards before it keep their place (the pane
         // of voice.js has its own place in the Studio's menu; the drawing of the settings takes
         // its own height for these)
+        card(t, "Usage and cost", usage_card(t, usage)),
         card(t, "Dictation", dictation.into()),
         card(t, "Reading aloud", reading.into()),
         card(t, "Alerts", alerts.into()),

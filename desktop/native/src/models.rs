@@ -329,6 +329,39 @@ pub async fn fetch_status(base: String) -> Result<Status, String> {
     get_json(&base, "/api/studio/status").await.map(|v| parse_status(&v))
 }
 
+/// The prices per million tokens the user entered (`GET /api/studio/prices`).
+pub async fn fetch_prices(base: String) -> Result<Vec<crate::usage::Price>, String> {
+    get_json(&base, "/api/studio/prices").await.map(|v| parse_prices(&v))
+}
+
+/// Writes the price rows back (`POST /api/studio/prices`) and returns what the server kept.
+pub async fn save_prices(base: String, prices: Vec<crate::usage::Price>) -> Result<Vec<crate::usage::Price>, String> {
+    post(&base, "/api/studio/prices", json!({ "prices": prices }))
+        .await
+        .map(|v| parse_prices(&v))
+}
+
+fn parse_prices(v: &Value) -> Vec<crate::usage::Price> {
+    v.get("prices")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|r| {
+            let mut price = crate::usage::Price {
+                pattern: text_of(r, "pattern"),
+                input_per_million: r.get("input_per_million").and_then(Value::as_f64).unwrap_or(0.0),
+                output_per_million: r.get("output_per_million").and_then(Value::as_f64).unwrap_or(0.0),
+                note: text_of(r, "note"),
+                input_text: String::new(),
+                output_text: String::new(),
+            };
+            price.refresh_text();
+            price
+        })
+        .filter(|p| !p.pattern.is_empty())
+        .collect()
+}
+
 pub async fn fetch_downloads(base: String) -> Result<Vec<Download>, String> {
     get_json(&base, "/api/studio/models/progress").await.map(|v| parse_downloads(&v))
 }

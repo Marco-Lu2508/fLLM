@@ -144,6 +144,11 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   four calls); the sources are numbered `[n]` under the answer (*Sources*, a click opens the page
   in the browser). The texts, cards, budget and error lines are checked against `ctRunTool` of the
   Studio itself — the fixtures are produced by that code.
+- Usage and cost: the settings card counts the tokens of every answer per model and shows what
+  they cost with the prices entered (dollars per million; the longest matching pattern wins, `*`
+  matches any tail). The table carries every model with its answers, input, output and cost plus the
+  row of everything together; *Save prices* writes the rows back to the server, *Reset counters*
+  sets them to zero. Seven unit tests, three window tests with one drawing, four mutations.
 - Start screen: the welcome view says what the engine is doing right now, like the Studio's hero: *No model
   loaded* with the plan of what can be done about it (every model on this computer counts — the one used last first,
   the recommended one when it is on disk, the largest that fits otherwise — or the recommended download when nothing

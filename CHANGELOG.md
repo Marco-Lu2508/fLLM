@@ -53,6 +53,17 @@ behaviour between versions).
   `assistantInner`. Tests: Esc stopping and ignoring, the fold with its click, the open box while it
   thinks, and the research run stopped by the key; four mutations each turn one red; the open box is
   drawn to a PNG and read back.
+- **Usage and cost in the native app.** The Studio counts what its answers weigh and what they
+  cost (`usage.js`); the native app has the card of it in Settings. Every answer's usage block lands
+  in the counters of this machine — at most sixty models, the same keys, the same words: the totals
+  line *1.00M in / 500.0k out in 2 answer(s) · about $2.00* (or *· no prices entered, so no dollar
+  amount*) over the table of every model with answers, input, output and cost and the row of
+  everything together. The prices come from `GET/POST /api/studio/prices`; a pattern is matched
+  against the model name with the longest match winning and `*` standing for any tail, so a model
+  behind a provider gets a dollar amount while local models show tokens only. *+ Add price* adds the
+  empty row of the Studio, *Remove* asks to save, *Save prices* writes them back and *Reset
+  counters* sets everything to zero. Seven unit tests, three window tests with one drawing of the
+  card, four mutations.
 - **The start screen of the native app.** The welcome view is now the hero of the Studio (`panels.js`):
   *No model loaded* with what can be done about it, or the name of the model with its facts. The plan is the
   Studio's `startPlan` — every model on this computer counts (downloads, files the user added, files found in

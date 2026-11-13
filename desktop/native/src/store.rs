@@ -627,6 +627,10 @@ pub struct Store {
     /// "light", "dark" or "" (follow the system).
     #[serde(default)]
     pub theme: String,
+    /// The tokens counted per model and their prices (the `fllm.studio.usage` of the Studio's
+    /// localStorage, saved with everything else here).
+    #[serde(default)]
+    pub usage: crate::usage::UsageData,
 }
 
 /// Where the chats live: `$FLLM_APP_DATA` (tests, portable use), else the user's data folder.

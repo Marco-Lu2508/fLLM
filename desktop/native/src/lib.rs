@@ -19,6 +19,7 @@ pub mod memory;
 pub mod promptlib;
 pub mod speech;
 pub mod tools;
+pub mod usage;
 pub mod research;
 pub mod rag;
 pub mod settings;
