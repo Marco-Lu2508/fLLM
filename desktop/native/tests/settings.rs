@@ -147,7 +147,11 @@ fn the_automatic_prompt_knows_the_model_and_your_text_can_be_added_to_it() {
     let _ = app.update(Message::Connected(Ok(model)));
     let full = app.system_prompt();
     assert!(full.contains("based on the language model Qwen3.5-9B") && full.contains("Format with Markdown only where it helps"), "a big model with room gets the full prompt: {full}");
-    assert!(full.contains("You have no tools in this chat"), "it says what it cannot do");
+    // the memory of the personalization is offered by default and described in the prompt
+    assert!(full.contains("Memory tool (memory)"), "the memory tool is offered and described: {full}");
+    let _ = app.update(Message::UseMemory(false));
+    assert!(app.system_prompt().contains("You have no tools in this chat"), "switched off, it says what it cannot do");
+    let _ = app.update(Message::UseMemory(true));
     let _ = app.update(Message::PromptLength(fllm_app::prompts::Length::Short));
     let short = app.system_prompt();
     assert!(short.len() < full.len() && !short.contains("based on the language model"), "{short}");

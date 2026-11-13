@@ -18,7 +18,7 @@ fn main() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("chats.json");
         let messages: Vec<Record> = (0..n)
-            .map(|i| Record { role: if i % 2 == 0 { Role::User } else { Role::Assistant }, content: if i % 2 == 0 { format!("Question {i}: what is GGUF and which size should I pick?") } else { ANSWER.into() }, reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new() })
+            .map(|i| Record { role: if i % 2 == 0 { Role::User } else { Role::Assistant }, content: if i % 2 == 0 { format!("Question {i}: what is GGUF and which size should I pick?") } else { ANSWER.into() }, reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new() })
             .collect();
         Store { chats: vec![ChatRecord::new(0, "long", messages)], next_id: 1, ..Default::default() }.save(&path).unwrap();
         let (mut app, _t) = App::with("http://127.0.0.1:9".into(), path);
@@ -53,7 +53,7 @@ fn stream_cost() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("chats.json");
         let messages: Vec<Record> = (0..prior)
-            .map(|i| Record { role: if i % 2 == 0 { Role::User } else { Role::Assistant }, content: if i % 2 == 0 { format!("Question {i}") } else { ANSWER.into() }, reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new() })
+            .map(|i| Record { role: if i % 2 == 0 { Role::User } else { Role::Assistant }, content: if i % 2 == 0 { format!("Question {i}") } else { ANSWER.into() }, reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new() })
             .collect();
         let chats = if prior == 0 { vec![] } else { vec![ChatRecord::new(0, "long", messages)] };
         Store { chats, next_id: 1, ..Default::default() }.save(&path).unwrap();

@@ -36,6 +36,10 @@ pub enum ListMsg {
     /// Asks which project these chats go to (the menu asks for one chat, the select row for all).
     MoveAsk,
     MoveSelected,
+    /// The chat menu switches your instructions and memory for this chat (menuPersonal).
+    Personal(u64),
+    /// The chat menu switches memory for this chat (menuMemory).
+    Memory(u64),
     ShowArchived(bool),
 }
 
@@ -51,6 +55,9 @@ pub enum Effect {
     Toast(String),
     /// These chats should be moved to a project: the window opens the picker.
     AskProject(Vec<u64>),
+    /// The switch of the chat menu went the other way: what it now is (PersonalToggled / MemoryToggled).
+    PersonalToggled(bool),
+    MemoryToggled(bool),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -90,6 +97,8 @@ pub fn markdown_of(c: &ChatRecord) -> String {
         out.push_str(match m.role {
             Role::User => "## You\n\n",
             Role::Assistant => "## Assistant\n\n",
+            // a tool answer belongs to the model, not to the exported text
+            Role::Tool => continue,
         });
         out.push_str(m.content.trim());
         out.push_str("\n\n");
@@ -290,6 +299,22 @@ impl ChatList {
                 self.select = false;
                 if ids.is_empty() { Effect::Nothing } else { Effect::AskProject(ids) }
             }
+            ListMsg::Personal(id) => {
+                let off = store.chat_mut(id).map(|c| {
+                    c.no_personal = !c.no_personal;
+                    c.no_personal
+                });
+                self.menu = None;
+                off.map(Effect::PersonalToggled).unwrap_or(Effect::Nothing)
+            }
+            ListMsg::Memory(id) => {
+                let off = store.chat_mut(id).map(|c| {
+                    c.no_memory = !c.no_memory;
+                    c.no_memory
+                });
+                self.menu = None;
+                off.map(Effect::MemoryToggled).unwrap_or(Effect::Nothing)
+            }
             ListMsg::ShowArchived(on) => {
                 self.show_archived = on;
                 Effect::Nothing
@@ -427,6 +452,12 @@ impl ChatList {
                             item("Rename", ListMsg::RenameStart(c.id), true),
                             item(if c.archived { "Unarchive" } else { "Archive" }, ListMsg::Archive(c.id), true),
                             item("Move", ListMsg::MoveAsk, true),
+                            item(
+                                if c.no_personal { "Personalization: off" } else { "Personalization: on" },
+                                ListMsg::Personal(c.id),
+                                true,
+                            ),
+                            item(if c.no_memory { "Memory: off" } else { "Memory: on" }, ListMsg::Memory(c.id), true),
                         ]
                         .spacing(4),
                         row![

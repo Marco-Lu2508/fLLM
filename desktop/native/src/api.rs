@@ -221,6 +221,60 @@ impl serde::Serialize for WireMessage {
     }
 }
 
+/// What a route of the memory copy answered: `Got` it did, `Refused` it answered with an error (the
+/// Studio switches the copy off then), `Unreachable` it could not be reached (the Studio tries again
+/// with the next change).
+#[derive(Debug, Clone)]
+pub enum SyncAnswer<T> {
+    Got(T),
+    Refused,
+    Unreachable,
+}
+
+impl<T> SyncAnswer<T> {
+    /// The same answer with something else inside when it is `Got`.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> SyncAnswer<U> {
+        match self {
+            SyncAnswer::Got(v) => SyncAnswer::Got(f(v)),
+            SyncAnswer::Refused => SyncAnswer::Refused,
+            SyncAnswer::Unreachable => SyncAnswer::Unreachable,
+        }
+    }
+}
+
+/// The copy of the memory the server keeps (`GET /api/studio/memory`): its entries, empty when the
+/// server has none.
+pub async fn get_memory(base: &str) -> SyncAnswer<Vec<serde_json::Value>> {
+    let http = reqwest::Client::new();
+    let resp = match http.get(format!("{base}/api/studio/memory")).send().await {
+        Ok(resp) => resp,
+        Err(_) => return SyncAnswer::Unreachable,
+    };
+    if !resp.status().is_success() {
+        return SyncAnswer::Refused;
+    }
+    let Ok(data) = resp.json::<serde_json::Value>().await else {
+        return SyncAnswer::Refused;
+    };
+    let doc = data.get("memory").cloned().unwrap_or(serde_json::Value::Null);
+    let list = doc.get("memories").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+    SyncAnswer::Got(list)
+}
+
+/// Puts the memory to the server (`PUT /api/studio/memory` with `{version, memories}`), the copy
+/// next to `studio.json` (the Studio's memSyncSoon).
+pub async fn put_memory(base: &str, body: serde_json::Value) -> SyncAnswer<()> {
+    let http = reqwest::Client::new();
+    let resp = match http.put(format!("{base}/api/studio/memory")).json(&body).send().await {
+        Ok(resp) => resp,
+        Err(_) => return SyncAnswer::Unreachable,
+    };
+    if !resp.status().is_success() {
+        return SyncAnswer::Refused;
+    }
+    SyncAnswer::Got(())
+}
+
 /// One step of a streamed reply.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {

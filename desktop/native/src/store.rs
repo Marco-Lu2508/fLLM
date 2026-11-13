@@ -11,12 +11,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub enum Role {
     User,
     Assistant,
+    /// The answer of a tool, sent back to the model after its call (OpenAI's `tool` role).
+    Tool,
 }
 
 impl Role {
     pub fn wire(self) -> &'static str {
         match self {
             Role::User => "user",
+            Role::Tool => "tool",
             Role::Assistant => "assistant",
         }
     }
@@ -56,6 +59,15 @@ pub struct Record {
     /// The files whose text went into this question whole (the Studio's `node.files`).
     #[serde(default)]
     pub files: Vec<MsgFile>,
+    /// On an assistant message: the tool calls it made, as the model sent them.
+    #[serde(default)]
+    pub tool_calls: Option<serde_json::Value>,
+    /// On a tool message: the call it answers.
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    /// What the tools did under the answer (the Studio's `node.tools`).
+    #[serde(default)]
+    pub tool_cards: Vec<crate::memory::ToolCard>,
 }
 
 /// Another way the conversation went: editing a message or asking for a new answer keeps the old version.
@@ -96,6 +108,12 @@ pub struct ChatRecord {
     /// The documents of this chat itself: searched for every question of it (the Studio's `t.docs`).
     #[serde(default)]
     pub docs: Vec<ProjectDoc>,
+    /// The chat menu says: your instructions and memory are not used here (the Studio's `t.noPersonal`).
+    #[serde(default)]
+    pub no_personal: bool,
+    /// The chat menu says: memory is not used or changed here (the Studio's `t.noMemory`).
+    #[serde(default)]
+    pub no_memory: bool,
 }
 
 /// Which version of a message is shown out of how many.
@@ -254,6 +272,11 @@ impl Project {
     }
 }
 
+/// Milliseconds since 1970 (the `Date.now()` of the Studio, what the memory entries keep).
+pub fn now_millis() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
 /// Seconds since 1970 (the `Date.now()` of the Studio, in seconds like the chats keep it).
 pub fn now_secs() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
@@ -269,9 +292,40 @@ pub fn uid(prefix: &str) -> String {
     format!("{prefix}-{:x}-{:x}", nanos, COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
+/// What of yours the model is told: the *About me* text and the remembered facts (the Studio's
+/// personalization, `state.prj.personal`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Personal {
+    #[serde(default)]
+    pub about: String,
+    #[serde(default = "yes")]
+    pub use_about: bool,
+    #[serde(default = "yes")]
+    pub use_memory: bool,
+    #[serde(default)]
+    pub memories: Vec<crate::memory::Memory>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Personal {
+    fn default() -> Personal {
+        Personal { about: String::new(), use_about: true, use_memory: true, memories: Vec::new() }
+    }
+}
+
 /// What the person chose for the answers. Everything is automatic until it is switched to manual: then the value is sent with every request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Prefs {
+    /// What of yours the model is told (about me, remembered facts).
+    #[serde(default)]
+    pub personal: Personal,
+    /// Whether a local copy of the personalization exists (the Studio checks its key: only a first
+    /// run without one takes the memory from the server).
+    #[serde(default)]
+    pub personal_loaded: bool,
     /// false: the server and the model decide (nothing is sent); true: `temperature` and `top_p` are sent.
     #[serde(default)]
     pub manual_sampling: bool,
@@ -388,7 +442,7 @@ fn default_top_p() -> f32 {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
+        Prefs { personal: Personal::default(), personal_loaded: false, manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
     }
 }
 
@@ -529,7 +583,7 @@ mod tests {
         let a = s.new_chat();
         let b = s.new_chat();
         assert_ne!(a, b);
-        s.chat_mut(a).unwrap().messages.push(Record { role: Role::User, content: "Hi".into(), reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new() });
+        s.chat_mut(a).unwrap().messages.push(Record { role: Role::User, content: "Hi".into(), reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new() });
         s.save(&path).unwrap();
         let back = Store::load(&path);
         assert_eq!(back, s);
@@ -539,7 +593,7 @@ mod tests {
     }
 
     fn rec(role: Role, text: &str) -> Record {
-        Record { role, content: text.into(), reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new() }
+        Record { role, content: text.into(), reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new() }
     }
 
     fn chat(lines: &[(Role, &str)]) -> ChatRecord {

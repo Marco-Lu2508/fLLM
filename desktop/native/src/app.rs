@@ -2,6 +2,7 @@
 
 use crate::api::{self, ModelInfo, StreamEvent, WireMessage};
 use crate::assistants::{self, Assistant, SysMode};
+use crate::memory;
 use crate::rag::{self, IndexedDoc};
 use crate::store::{self, Record, Role, Stats, Store};
 use crate::chatlist::{self, ChatList, ListMsg};
@@ -60,6 +61,12 @@ pub struct Msg {
     /// The images of this question as data URLs and the files whose text went in whole.
     pub images: Vec<String>,
     pub files: Vec<store::MsgFile>,
+    /// On an assistant message: the tool calls it made, as the model sent them.
+    pub tool_calls: Option<serde_json::Value>,
+    /// On a tool message: the call it answers.
+    pub tool_call_id: Option<String>,
+    /// What the tools did under the answer (the Studio's node.tools).
+    pub tool_cards: Vec<crate::memory::ToolCard>,
     pub md: markdown::Content,
 }
 
@@ -73,6 +80,9 @@ impl Msg {
             passages: r.passages.clone(),
             images: r.images.clone(),
             files: r.files.clone(),
+            tool_calls: r.tool_calls.clone(),
+            tool_call_id: r.tool_call_id.clone(),
+            tool_cards: r.tool_cards.clone(),
             md: markdown::Content::parse(&r.content),
         }
     }
@@ -86,6 +96,9 @@ impl Msg {
             passages: self.passages.clone(),
             images: self.images.clone(),
             files: self.files.clone(),
+            tool_calls: self.tool_calls.clone(),
+            tool_call_id: self.tool_call_id.clone(),
+            tool_cards: self.tool_cards.clone(),
         }
     }
 }
@@ -108,6 +121,15 @@ pub enum View {
     Code,
     /// The page of one project (the Studio's project window).
     Project,
+}
+
+/// What the copy of the memory on the server gave back (the Studio's memImportFromServer and memSyncSoon).
+#[derive(Debug, Clone)]
+pub enum PersonalSync {
+    /// The entries of the server's copy (a first run without a local one).
+    Import(Vec<serde_json::Value>),
+    /// The text that is on the server now.
+    Stored(String),
 }
 
 /// A file or image chosen for the next question (the Studio's `state.attachments`).
@@ -184,6 +206,21 @@ pub struct App {
     rag_open: std::collections::BTreeSet<usize>,
     /// The images and files chosen for the next question (the Studio's `state.attachments`).
     attachments: Vec<Attachment>,
+    /// The *About me* box of Settings, its text as typed.
+    personal_about: Content,
+    /// The row to add a memory and the memory whose text is being changed.
+    mem_new: String,
+    mem_edit: Option<(String, String)>,
+    /// The dialog that forgets everything, and the dialog of the *Remember* button.
+    mem_clear: bool,
+    remember: Option<usize>,
+    remember_text: String,
+    /// The copy on the server: the text that is up there, whether it is off, and one request at a time.
+    mem_synced_text: Option<String>,
+    mem_sync_off: bool,
+    mem_syncing: bool,
+    /// How many rounds of tool calls the answer of this question has already done.
+    tool_round: u8,
     code: CodeState,
     /// How many of the newest messages the conversation draws: laying out hundreds of messages on every frame of a stream would stall the window.
     window: usize,
@@ -343,6 +380,31 @@ pub enum Message {
     AttachmentRemove(usize),
     /// Removes the document with this id from the knowledge of this chat.
     ChatDocRemove(String),
+    /// The *About me* box of Settings (the Studio's memAbout).
+    AboutEdit(Action),
+    UseAbout(bool),
+    UseMemory(bool),
+    /// The row to add a memory (memNew and memAdd).
+    MemNewInput(String),
+    MemAddNow,
+    /// A memory row: click to change it, Enter or the tick saves, the cross deletes (memList).
+    MemEditStart(String),
+    MemEditInput(String),
+    MemEditEnd(bool),
+    MemDelete(String),
+    /// Forget everything (memClear), asked for first like the Studio.
+    MemClear,
+    MemClearOk,
+    MemClearCancel,
+    /// The *Remember* button under a message (prjDecorateMessages).
+    RememberOpen(usize),
+    RememberEdit(String),
+    RememberOk,
+    RememberCancel,
+    /// The copy of the memory on the server: what it gave back, or that there is none.
+    PersonalSynced(api::SyncAnswer<PersonalSync>),
+    /// Takes the change of a memory tool card back (the Undo under an answer).
+    MemoryUndo(usize, usize),
     Code(code::CodeMsg),
 }
 
@@ -401,6 +463,16 @@ impl App {
             rag_cache: None,
             rag_open: Default::default(),
             attachments: Vec::new(),
+            personal_about: Content::new(),
+            mem_new: String::new(),
+            mem_edit: None,
+            mem_clear: false,
+            remember: None,
+            remember_text: String::new(),
+            mem_synced_text: None,
+            mem_sync_off: false,
+            mem_syncing: false,
+            tool_round: 0,
             code: CodeState::default(),
             window: CHAT_WINDOW,
             list: ChatList::default(),
@@ -413,6 +485,7 @@ impl App {
             sidecar_note: None,
         };
         app.system_editor = Content::with_text(&app.store.prefs.system_prompt);
+        app.personal_about = Content::with_text(&app.store.prefs.personal.about);
         app.sampling_text = settings::SamplingTexts::from(&app.store.prefs.sampling);
         app.max_tokens_text = if app.store.prefs.max_tokens > 0 { app.store.prefs.max_tokens.to_string() } else { String::new() };
         if let Some(first) = app.store.chats.first().map(|c| c.id) {
@@ -528,6 +601,12 @@ impl App {
         if self.live.is_some() || (prompt.trim().is_empty() && self.attachments.is_empty()) {
             return Task::none();
         }
+        // "remember that …" at the start of a message saves the thing (the Studio's prjCaptureMemory)
+        if self.memory_capture_on() {
+            if let Some(fact) = memory::extract(&prompt) {
+                self.remember(fact);
+            }
+        }
         let id = match self.current {
             Some(id) => id,
             None => {
@@ -559,6 +638,7 @@ impl App {
             }
         }
         let first = self.messages.is_empty();
+        self.tool_round = 0;
         // the attachments of this question: images and whole files on the message, texts that do not
         // fit as documents of this chat (the Studio's addChild and ragStoreDocs). Editing a message
         // keeps the images and files it had and leaves the pending attachments where they are.
@@ -590,6 +670,9 @@ impl App {
             passages: None,
             images,
             files,
+            tool_calls: None,
+            tool_call_id: None,
+            tool_cards: Vec::new(),
         });
         self.messages.push(Msg {
             role: Role::Assistant,
@@ -599,6 +682,9 @@ impl App {
             passages: None,
             images: Vec::new(),
             files: Vec::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_cards: Vec::new(),
             md: markdown::Content::new(),
         });
         // the passages of the knowledge travel with this question (the project's documents first,
@@ -706,6 +792,9 @@ impl App {
                     passages: None,
                     images: Vec::new(),
                     files: Vec::new(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    tool_cards: Vec::new(),
                     md: markdown::Content::new(),
                 });
                 self.sync_current();
@@ -1255,6 +1344,175 @@ impl App {
                 }
                 Task::none()
             }
+            Message::AboutEdit(action) => {
+                let edit = action.is_edit();
+                self.personal_about.perform(action);
+                if edit {
+                    let about: String = self.personal_about.text().chars().take(memory::limits::ABOUT).collect();
+                    self.store.prefs.personal.about = about;
+                    self.save();
+                }
+                Task::none()
+            }
+            Message::UseAbout(v) => {
+                self.store.prefs.personal.use_about = v;
+                self.save();
+                Task::none()
+            }
+            Message::UseMemory(v) => {
+                self.store.prefs.personal.use_memory = v;
+                self.save();
+                Task::none()
+            }
+            Message::MemNewInput(v) => {
+                self.mem_new = v.chars().take(memory::limits::MEMORY).collect();
+                Task::none()
+            }
+            Message::MemAddNow => {
+                let text = std::mem::take(&mut self.mem_new);
+                if !text.trim().is_empty() {
+                    self.remember(text);
+                }
+                Task::none()
+            }
+            Message::MemEditStart(id) => {
+                let text = self
+                    .store
+                    .prefs
+                    .personal
+                    .memories
+                    .iter()
+                    .find(|m| m.id == id)
+                    .map(|m| m.text.clone());
+                if let Some(text) = text {
+                    self.mem_edit = Some((id, text));
+                }
+                Task::none()
+            }
+            Message::MemEditInput(v) => {
+                if let Some((_, text)) = &mut self.mem_edit {
+                    *text = v;
+                }
+                Task::none()
+            }
+            Message::MemEditEnd(keep) => {
+                let Some((id, typed)) = self.mem_edit.take() else { return Task::none() };
+                if !keep {
+                    return Task::none();
+                }
+                let text: String = typed.split_whitespace().collect::<Vec<_>>().join(" ");
+                let text: String = text.chars().take(memory::limits::MEMORY).collect();
+                if text.is_empty() {
+                    // an empty row takes the entry out (the Studio's change handler)
+                    self.mem_delete(&id);
+                    return Task::none();
+                }
+                if memory::secret(&text) {
+                    self.toast = Some("That looks like a password, key or card number. It is not saved to memory.".into());
+                    return Task::none();
+                }
+                if let Some(m) = self.store.prefs.personal.memories.iter_mut().find(|m| m.id == id) {
+                    m.text = text;
+                    m.updated_at = store::now_millis();
+                }
+                self.save();
+                Task::none()
+            }
+            Message::MemDelete(id) => {
+                self.mem_delete(&id);
+                Task::none()
+            }
+            Message::MemClear => {
+                if !self.store.prefs.personal.memories.is_empty() {
+                    self.mem_clear = true;
+                }
+                Task::none()
+            }
+            Message::MemClearCancel => {
+                self.mem_clear = false;
+                Task::none()
+            }
+            Message::MemClearOk => {
+                self.mem_clear = false;
+                self.store.prefs.personal.memories.clear();
+                self.save();
+                Task::none()
+            }
+            Message::RememberOpen(i) => {
+                if !self.store.prefs.personal.use_memory {
+                    self.toast = Some("Memory is switched off in Settings > Personalization.".into());
+                    return Task::none();
+                }
+                let text = self.messages.get(i).map(|m| {
+                    m.content
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .chars()
+                        .take(300)
+                        .collect::<String>()
+                });
+                if let Some(text) = text {
+                    self.remember = Some(i);
+                    self.remember_text = text;
+                }
+                Task::none()
+            }
+            Message::RememberEdit(v) => {
+                self.remember_text = v;
+                Task::none()
+            }
+            Message::RememberCancel => {
+                self.remember = None;
+                Task::none()
+            }
+            Message::RememberOk => {
+                let text = std::mem::take(&mut self.remember_text);
+                self.remember = None;
+                if !text.trim().is_empty() {
+                    self.remember(text);
+                }
+                Task::none()
+            }
+            Message::MemoryUndo(mi, ci) => {
+                let change = self.messages.get(mi).and_then(|m| m.tool_cards.get(ci)).and_then(|c| c.change.clone());
+                match change.and_then(|c| memory::undo(&self.store.prefs.personal.memories, &c).map(|list| (c, list))) {
+                    Some((change, list)) => {
+                        self.store.prefs.personal.memories = list;
+                        if let Some(card) = self.messages.get_mut(mi).and_then(|m| m.tool_cards.get_mut(ci)) {
+                            card.undone = true;
+                            let _ = change;
+                        }
+                        self.save();
+                        self.toast = Some("Memory change undone".into());
+                    }
+                    None => self.toast = Some("That memory entry has changed since; it was left as it is.".into()),
+                }
+                Task::none()
+            }
+            Message::PersonalSynced(answer) => {
+                self.mem_syncing = false;
+                match answer {
+                    // the server answered with an error: it has no such route (the Studio switches off)
+                    api::SyncAnswer::Refused => self.mem_sync_off = true,
+                    // it could not be reached: the next tick tries again
+                    api::SyncAnswer::Unreachable => {}
+                    api::SyncAnswer::Got(PersonalSync::Stored(text)) => self.mem_synced_text = Some(text),
+                    api::SyncAnswer::Got(PersonalSync::Import(list)) => {
+                        let list = memory::sanitize(&list, || store::uid("mem"));
+                        if !list.is_empty() {
+                            self.store.prefs.personal.memories = list;
+                            self.store.prefs.personal_loaded = true;
+                            self.save();
+                            let n = self.store.prefs.personal.memories.len();
+                            self.toast =
+                                Some(format!("{} remembered fact{} restored from the copy on this computer.", n, if n == 1 { "" } else { "s" }));
+                            self.mem_synced_text = Some(self.personal_body().to_string());
+                        }
+                    }
+                }
+                Task::none()
+            }
             Message::Connected(Err(e)) => {
                 self.server = Server::Down(e);
                 Task::none()
@@ -1265,6 +1523,27 @@ impl App {
                 Task::perform(async move { api::fetch_model(&base).await }, Message::Connected)
             }
             Message::Tick => {
+                // the copy of the memory on the server: asked for at the start, written when it differs
+                // (the Studio's memImportFromServer and memSyncSoon)
+                let mut sync = Task::none();
+                if !self.mem_sync_off && !self.mem_syncing {
+                    if !self.store.prefs.personal_loaded {
+                        self.mem_syncing = true;
+                        let base = self.base.clone();
+                        sync = Task::perform(async move { api::get_memory(&base).await.map(PersonalSync::Import) }, Message::PersonalSynced);
+                    } else {
+                        let body = self.personal_body();
+                        let text = body.to_string();
+                        if self.mem_synced_text.as_deref() != Some(text.as_str()) {
+                            self.mem_syncing = true;
+                            let base = self.base.clone();
+                            sync = Task::perform(
+                                async move { api::put_memory(&base, body).await.map(|_| PersonalSync::Stored(text)) },
+                                Message::PersonalSynced,
+                            );
+                        }
+                    }
+                }
                 // the server that the app started may have ended on its own (a port taken, a binary that refuses its arguments)
                 if let Some(s) = self.sidecar.as_mut() {
                     if !s.running() {
@@ -1274,9 +1553,9 @@ impl App {
                     }
                 }
                 if matches!(self.server, Server::Down(_)) {
-                    return self.update(Message::Retry);
+                    return Task::batch([sync, self.update(Message::Retry)]);
                 }
-                Task::none()
+                sync
             }
             Message::NewChat => {
                 if self.live.is_some() {
@@ -1317,6 +1596,22 @@ impl App {
                     }
                     chatlist::Effect::Toast(t) => self.toast = Some(t),
                     chatlist::Effect::AskProject(ids) => self.prj_pick = Some(ids),
+                    chatlist::Effect::PersonalToggled(off) => {
+                        self.save();
+                        self.toast = Some(if off {
+                            "Your instructions and memory are not used in this chat.".into()
+                        } else {
+                            "Your instructions and memory are used in this chat.".into()
+                        });
+                    }
+                    chatlist::Effect::MemoryToggled(off) => {
+                        self.save();
+                        self.toast = Some(if off {
+                            "Memory is not used or changed in this chat.".into()
+                        } else {
+                            "Memory is used in this chat.".into()
+                        });
+                    }
                 }
                 Task::none()
             }
@@ -1348,8 +1643,7 @@ impl App {
                 if self.live.as_ref().map(|l| l.chat) != Some(chat) {
                     return Task::none();
                 }
-                self.on_event(ev);
-                Task::none()
+                self.on_event(ev).unwrap_or_else(Task::none)
             }
             Message::Copy(i) => match self.messages.get(i) {
                 Some(m) => iced::clipboard::write(m.content.clone()),
@@ -1622,26 +1916,66 @@ impl App {
         Task::batch([Task::perform(models::fetch_overview(base.clone()), Message::OverviewLoaded), Task::perform(models::fetch_downloads(base), Message::DownloadsLoaded)])
     }
 
-    fn on_event(&mut self, ev: StreamEvent) {
-        let Some(last) = self.messages.last_mut() else { return };
+    /// One event of the answer. The task of the next round comes back when the answer called a tool
+    /// (the Studio's ctGenerate runs the call and asks again).
+    fn on_event(&mut self, ev: StreamEvent) -> Option<Task<Message>> {
+        if self.messages.is_empty() {
+            return None;
+        }
         match ev {
             StreamEvent::Delta(s) => {
-                last.content.push_str(&s);
-                last.md.push_str(&s);
+                if let Some(last) = self.messages.last_mut() {
+                    last.content.push_str(&s);
+                    last.md.push_str(&s);
+                }
             }
-            StreamEvent::Reasoning(s) => last.reasoning.push_str(&s),
-            StreamEvent::ToolCall { .. } => {}
+            StreamEvent::Reasoning(s) => {
+                if let Some(last) = self.messages.last_mut() {
+                    last.reasoning.push_str(&s);
+                }
+            }
+            StreamEvent::ToolCall { index, id, name, arguments } => {
+                // the parts of the calls collect on the answer (the Studio's aNode.tools)
+                if let Some(last) = self.messages.last_mut() {
+                    let calls = last.tool_calls.get_or_insert_with(|| serde_json::json!([]));
+                    let arr = calls.as_array_mut().expect("the tool calls are an array");
+                    while arr.len() <= index {
+                        arr.push(serde_json::json!({ "id": "", "type": "function", "function": { "name": "", "arguments": "" } }));
+                    }
+                    let call = &mut arr[index];
+                    if let Some(id) = id {
+                        call["id"] = serde_json::Value::String(id);
+                    }
+                    if let Some(name) = name {
+                        call["function"]["name"] = serde_json::Value::String(name);
+                    }
+                    if !arguments.is_empty() {
+                        let mut joined = call["function"]["arguments"].as_str().unwrap_or("").to_string();
+                        joined.push_str(&arguments);
+                        call["function"]["arguments"] = serde_json::Value::String(joined);
+                    }
+                }
+            }
             StreamEvent::Usage { prompt, completion } => {
                 self.used_tokens = prompt + completion;
                 self.used_exact = true;
-                last.stats.get_or_insert_with(Stats::default).completion_tokens = completion;
+                if let Some(last) = self.messages.last_mut() {
+                    last.stats.get_or_insert_with(Stats::default).completion_tokens = completion;
+                }
             }
             StreamEvent::Timings { tokens_per_second, prompt_per_second, .. } => {
-                let s = last.stats.get_or_insert_with(Stats::default);
-                s.tokens_per_second = tokens_per_second;
-                s.prompt_per_second = prompt_per_second;
+                if let Some(last) = self.messages.last_mut() {
+                    let s = last.stats.get_or_insert_with(Stats::default);
+                    s.tokens_per_second = tokens_per_second;
+                    s.prompt_per_second = prompt_per_second;
+                }
             }
-            StreamEvent::Done => self.finish(),
+            StreamEvent::Done => {
+                if self.tool_calls_pending() {
+                    return self.run_tool_round();
+                }
+                self.finish();
+            }
             StreamEvent::Error(e) => {
                 self.error = Some(e);
                 // an answer that never started is not kept
@@ -1651,6 +1985,102 @@ impl App {
                 self.finish();
             }
         }
+        None
+    }
+
+    /// Whether the answer that just ended carries tool calls that still have to be answered.
+    fn tool_calls_pending(&self) -> bool {
+        self.messages.last().is_some_and(|m| matches!(m.role, Role::Assistant) && m.tool_calls.is_some())
+    }
+
+    /// The calls of the answer run here (the window offers the memory tool only), the model is told
+    /// what happened and the answer continues (the Studio's ctGenerate with `env.memory`).
+    fn run_tool_round(&mut self) -> Option<Task<Message>> {
+        let chat = self.live.as_ref().map(|l| l.chat)?;
+        if !self.memory_tool_offered() {
+            // the switch went off while the answer ran: the calls are dropped, so no later question
+            // ever carries them without their answers
+            if let Some(last) = self.messages.last_mut() {
+                last.tool_calls = None;
+            }
+            self.finish();
+            return None;
+        }
+        if self.tool_round >= 8 {
+            self.finish();
+            return None;
+        }
+        let calls = self.messages.last().and_then(|m| m.tool_calls.clone()).unwrap_or_else(|| serde_json::json!([]));
+        let now = store::now_millis();
+        let mut results: Vec<(String, String)> = Vec::new();
+        let mut cards: Vec<crate::memory::ToolCard> = Vec::new();
+        for call in calls.as_array().cloned().unwrap_or_default() {
+            let id = call.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+            let name = call.pointer("/function/name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+            let raw_args = call.pointer("/function/arguments").and_then(serde_json::Value::as_str).unwrap_or("{}").to_string();
+            let (text, card) = if name != "memory" {
+                (
+                    format!("Error: unknown tool '{name}'."),
+                    crate::memory::ToolCard { label: name.clone(), status: "error".into(), change: None, undone: false, quiet: false },
+                )
+            } else {
+                match parse_tool_args(&raw_args) {
+                    None => (
+                        "Error: the arguments of memory are not valid JSON. Call it again with a JSON object such as {\"action\": \"add\", \"text\": \"Prefers metric units\"}."
+                            .to_string(),
+                        crate::memory::ToolCard { label: "Memory".into(), status: "error".into(), change: None, undone: false, quiet: false },
+                    ),
+                    Some(args) => {
+                        let outcome = memory::tool_apply(&self.store.prefs.personal.memories, &args, now, || store::uid("mem"));
+                        if outcome.list != self.store.prefs.personal.memories {
+                            self.store.prefs.personal.memories = outcome.list.clone();
+                            self.save();
+                        }
+                        let card = memory_card(&args, &outcome);
+                        (outcome.text, card)
+                    }
+                }
+            };
+            results.push((id, text));
+            cards.push(card);
+        }
+        if let Some(last) = self.messages.last_mut() {
+            last.tool_cards.extend(cards);
+        }
+        for (id, text) in results {
+            self.messages.push(Msg {
+                role: Role::Tool,
+                content: text,
+                reasoning: String::new(),
+                stats: None,
+                passages: None,
+                images: Vec::new(),
+                files: Vec::new(),
+                tool_calls: None,
+                tool_call_id: Some(id),
+                tool_cards: Vec::new(),
+                md: markdown::Content::new(),
+            });
+        }
+        self.messages.push(Msg {
+            role: Role::Assistant,
+            content: String::new(),
+            reasoning: String::new(),
+            stats: None,
+            passages: None,
+            images: Vec::new(),
+            files: Vec::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_cards: Vec::new(),
+            md: markdown::Content::new(),
+        });
+        self.tool_round += 1;
+        let Server::Ready(model) = self.server.clone() else {
+            self.finish();
+            return None;
+        };
+        Some(self.stream(chat, model.id))
     }
 
     /// The reply is over (finished, stopped or failed): save it and free the composer.
@@ -1786,10 +2216,18 @@ impl App {
         if self.page == View::Code && !matches!(self.server, Server::Down(_)) {
             return code::page(&self.code, t, &self.theme(), matches!(self.server, Server::Ready(_)), &self.store.prefs.recent_folders);
         }
-        if self.page == View::Settings {
-            return settings::page(t, &self.store.prefs, &self.system_editor, &self.max_tokens_text, &self.sampling_text, engine_settings::view(t, &self.engine, !matches!(self.server, Server::Down(_))));
-        }
-        let page: Element<'_, Message> = if self.page == View::Project {
+        let page: Element<'_, Message> = if self.page == View::Settings {
+            // the dialogs of this page (forget everything) open over it: it joins the stack below
+            settings::page(
+                t,
+                &self.store.prefs,
+                &self.system_editor,
+                &self.max_tokens_text,
+                &self.sampling_text,
+                engine_settings::view(t, &self.engine, !matches!(self.server, Server::Down(_))),
+                self.personal_view(),
+            )
+        } else if self.page == View::Project {
             // the page of a project sits where the conversation sits, so the dialogs can open over it
             self.project_page(t)
         } else {
@@ -1802,7 +2240,14 @@ impl App {
             };
             column![self.topbar(t), content, self.composer(t)].width(Length::Fill).height(Length::Fill).into()
         };
-        if !self.picker_open && !self.asst_menu && self.asst_edit.is_none() && self.prj_pick.is_none() && self.prj_delete.is_none() {
+        if !self.picker_open
+            && !self.asst_menu
+            && self.asst_edit.is_none()
+            && self.prj_pick.is_none()
+            && self.prj_delete.is_none()
+            && self.remember.is_none()
+            && !self.mem_clear
+        {
             return page;
         }
         let mut layers = stack![page];
@@ -1832,6 +2277,16 @@ impl App {
             layers = layers
                 .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::PrjDeleteCancel))
                 .push(self.prj_delete_window(t));
+        }
+        if self.mem_clear {
+            layers = layers
+                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::MemClearCancel))
+                .push(self.mem_clear_window(t));
+        }
+        if self.remember.is_some() {
+            layers = layers
+                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::RememberCancel))
+                .push(self.remember_window(t));
         }
         layers.into()
     }
@@ -2087,6 +2542,69 @@ impl App {
         let content = column![head, usage, instructions, knowledge, docs, note, text("Chats").size(13).color(t.fg_soft), chat_rows, footer].spacing(12);
         let inner = container(content).max_width(780).width(Length::Fill).padding(Padding { top: 14.0, right: 24.0, bottom: 32.0, left: 24.0 });
         scrollable(container(inner).center_x(Length::Fill).width(Length::Fill)).height(Length::Fill).into()
+    }
+
+    /// The dialog of the *Remember* button under a message (the Studio's askDialog for prjRemember).
+    fn remember_window(&self, t: Tokens) -> Element<'_, Message> {
+        let window = container(
+            column![
+                text("Remember").size(16).font(bold()),
+                text("This is added to the instructions of every chat. Edit it first if you like. Memories stay on this computer.")
+                    .size(13)
+                    .color(t.fg_soft),
+                text_input("Remember", &self.remember_text)
+                    .on_input(Message::RememberEdit)
+                    .on_submit(Message::RememberOk)
+                    .size(14)
+                    .padding([8, 10])
+                    .style(move |_, status| text_input::Style {
+                        background: iced::Background::Color(t.surface_2),
+                        border: iced::Border { radius: 8.0.into(), width: 1.0, color: if matches!(status, text_input::Status::Focused { .. }) { t.fg_soft } else { t.separator } },
+                        icon: t.muted,
+                        placeholder: t.muted,
+                        value: t.fg,
+                        selection: t.primary_soft,
+                    }),
+                row![
+                    Space::new().width(Length::Fill),
+                    button(text("Cancel").size(13)).on_press(Message::RememberCancel).padding([6, 12]).style(theme::ghost_button(t)),
+                    button(text("Remember").size(13)).on_press(Message::RememberOk).padding([6, 12]).style(theme::primary_button(t)),
+                ],
+            ]
+            .spacing(10),
+        )
+        .padding(16)
+        .width(460)
+        .style(theme::card(t, theme::R_LG, false));
+        container(window).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
+    }
+
+    /// The dialog that forgets everything (the Studio's askDialog for memClear).
+    fn mem_clear_window(&self, t: Tokens) -> Element<'_, Message> {
+        let window = container(
+            column![
+                text("Forget everything?").size(16).font(bold()),
+                text("All remembered facts will be deleted.").size(13).color(t.fg_soft),
+                row![
+                    Space::new().width(Length::Fill),
+                    button(text("Cancel").size(13)).on_press(Message::MemClearCancel).padding([6, 12]).style(theme::ghost_button(t)),
+                    button(text("Delete all").size(13)).on_press(Message::MemClearOk).padding([6, 12]).style(move |_, status| {
+                        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                        button::Style {
+                            background: Some(iced::Background::Color(if hovered { t.fill_hover } else { t.fill })),
+                            text_color: t.danger,
+                            border: iced::border::rounded(8),
+                            ..Default::default()
+                        }
+                    }),
+                ],
+            ]
+            .spacing(10),
+        )
+        .padding(16)
+        .width(400)
+        .style(theme::card(t, theme::R_LG, false));
+        container(window).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
     }
 
     /// The dialog that asks before a project goes away (the Studio's askDialog for `prjDelete`).
@@ -2646,7 +3164,7 @@ impl App {
                 m.content.as_str()
             };
             let text = format!("{context}{files_block}{tail}");
-            if !m.images.is_empty() {
+            let mut out = if !m.images.is_empty() {
                 let mut parts = vec![serde_json::json!({ "type": "text", "text": if text.is_empty() { "Describe the image." } else { text.as_str() } })];
                 for url in &m.images {
                     parts.push(serde_json::json!({ "type": "image_url", "image_url": { "url": url } }));
@@ -2654,7 +3172,14 @@ impl App {
                 WireMessage::with_parts(m.role.wire(), text, parts)
             } else {
                 WireMessage::new(m.role.wire(), text)
+            };
+            if matches!(m.role, Role::Tool) {
+                out.role = "tool".into();
+                out.tool_call_id = m.tool_call_id.clone();
+            } else if matches!(m.role, Role::Assistant) {
+                out.tool_calls = m.tool_calls.clone();
             }
+            out
         }));
         wire
     }
@@ -2816,6 +3341,99 @@ impl App {
         if note.is_some() {
             self.toast = note;
         }
+    }
+
+    /// The personalization as the Settings page draws it (the line under the list is the Studio's
+    /// memUsage).
+    fn personal_view(&self) -> settings::PersonalView<'_> {
+        let memories = &self.store.prefs.personal.memories;
+        let (_lines, dropped) = memory::select(memories, memory::limits::PROMPT);
+        let usage = if memories.is_empty() {
+            "Nothing remembered yet.".to_string()
+        } else {
+            format!(
+                "{} of {} entries.{}",
+                memories.len(),
+                memory::limits::MEMORIES,
+                if dropped > 0 {
+                    format!(
+                        " The {} oldest do not fit into the {} characters sent to the model and are skipped.",
+                        dropped,
+                        group(memory::limits::PROMPT as u64)
+                    )
+                } else {
+                    " All of them are sent to the model.".to_string()
+                }
+            )
+        };
+        settings::PersonalView {
+            about: &self.personal_about,
+            use_about: self.store.prefs.personal.use_about,
+            use_memory: self.store.prefs.personal.use_memory,
+            memories,
+            usage,
+            new_text: &self.mem_new,
+            edit: self.mem_edit.as_ref().map(|(id, text)| (id.as_str(), text.as_str())),
+        }
+    }
+
+    /// Puts a fact into the memory, with the line the Studio shows (memRemember).
+    fn remember(&mut self, text: String) {
+        let now = store::now_millis();
+        let (list, status, _) = memory::add(&self.store.prefs.personal.memories, &text, now, || store::uid("mem"), None);
+        match status {
+            "empty" => {}
+            "duplicate" => self.toast = Some("Already remembered.".into()),
+            "secret" => self.toast = Some("That looks like a password, key or card number. It is not saved to memory.".into()),
+            "full" => {
+                self.toast = Some(format!(
+                    "The memory is full ({} entries). Delete some in Settings > Personalization.",
+                    memory::limits::MEMORIES
+                ))
+            }
+            _ => {
+                self.store.prefs.personal.memories = list;
+                self.save();
+                self.toast = Some("Remembered. See Settings > Personalization.".into());
+            }
+        }
+    }
+
+    /// Removes one entry of the memory (the cross of a row).
+    fn mem_delete(&mut self, id: &str) {
+        self.store.prefs.personal.memories.retain(|m| m.id != id);
+        self.save();
+    }
+
+    /// Whether a "remember that …" at the start of a message saves its thing (prjCaptureMemory).
+    fn memory_capture_on(&self) -> bool {
+        if !self.store.prefs.personal.use_memory {
+            return false;
+        }
+        self.current
+            .and_then(|id| self.store.chat(id))
+            .map(|c| !(c.no_personal || c.no_memory))
+            .unwrap_or(true)
+    }
+
+    /// What goes to the server: `{version: 1, memories}` (the Studio's memDoc).
+    fn personal_body(&self) -> serde_json::Value {
+        serde_json::json!({ "version": 1, "memories": self.store.prefs.personal.memories })
+    }
+
+    /// Whether the model gets the `memory` tool (the Studio's ctOfferedFlags): switched on in the
+    /// settings, not for a chat that says no, not for a context under 2048 tokens, and not for a
+    /// model that read the prompt slower than 120 tokens a second on this computer.
+    pub fn memory_tool_offered(&self) -> bool {
+        if !self.store.prefs.personal.use_memory || self.model_info().max_context < 2048 {
+            return false;
+        }
+        let chat = self.current.and_then(|id| self.store.chat(id));
+        if chat.is_some_and(|c| c.no_personal || c.no_memory) {
+            return false;
+        }
+        let speed = self.last_prompt_speed();
+        !(speed > 0.0 && speed < 120.0)
     }
 
     /// The project of the open chat, else the one a new chat joins (the Studio's prjChrome).
@@ -3000,7 +3618,7 @@ impl App {
             local: true,
             model_name: model.detail.name.clone(),
             thinking: model.thinking.supported() && level != "off",
-            tools: prompts::Tools::default(),
+            tools: prompts::Tools { web: false, memory: self.memory_tool_offered(), chats: false },
         };
         let active = self.active_assistant();
         let mut choices: Vec<(prompts::Mode, &str)> = match active.as_ref() {
@@ -3011,6 +3629,33 @@ impl App {
             },
             None => vec![(p.system_mode(), p.system_prompt.as_str())],
         };
+        // what of yours the model is told: about me, then the memory, before the project (the
+        // Studio's composeSystem: defaults, personalization, project, assistant)
+        let chat = self.current.and_then(|id| self.store.chat(id));
+        let private = chat.is_some_and(|c| c.no_personal);
+        let memory_off = chat.is_some_and(|c| c.no_memory);
+        let mut personal_parts: Vec<String> = Vec::new();
+        if !private {
+            let personal = &p.personal;
+            if personal.use_about && !personal.about.trim().is_empty() {
+                let about: String = personal.about.trim().chars().take(memory::limits::ABOUT).collect();
+                personal_parts.push(format!("About the user and how they want answers (in their own words):\n{about}"));
+            }
+            if personal.use_memory && !memory_off {
+                let cap = if facts.size == prompts::Size::Compact { memory::limits::PROMPT_COMPACT } else { memory::limits::PROMPT };
+                let (lines, _dropped) = memory::select(&personal.memories, cap);
+                if !lines.is_empty() {
+                    let mut block = String::from("Saved memory about the user (use it when it is relevant, do not bring it up otherwise):");
+                    for line in &lines {
+                        block.push_str(&format!("\n- {line}"));
+                    }
+                    personal_parts.push(block);
+                }
+            }
+        }
+        for part in &personal_parts {
+            choices.push((prompts::Mode::Append, part));
+        }
         // the knowledge of the project sits after the default prompt and before the assistant's own text
         // (the Studio's composeSystem: defaults, personalization, project, assistant) with its own header
         let project_part = self.active_project().filter(|p| !p.instructions.trim().is_empty()).map(|p| {
@@ -3215,6 +3860,7 @@ impl App {
                 if self.live.is_none() {
                     line = line.push(button(text("Edit").size(12)).on_press(Message::EditMessage(i)).padding([3, 0]).style(theme::ghost_button(t)));
                 }
+                line = line.push(button(text("Remember").size(12)).on_press(Message::RememberOpen(i)).padding([3, 0]).style(theme::ghost_button(t)));
                 col.push(row![Space::new().width(Length::Fill), line]).into()
             }
             Role::Assistant => {
@@ -3228,12 +3874,24 @@ impl App {
                 } else if live {
                     col = col.push(text("…").size(15).color(t.muted));
                 }
+                for (ci, card) in m.tool_cards.iter().enumerate() {
+                    let mut line = row![
+                        text(card.label.clone()).size(12).color(if card.status == "error" { t.danger } else { t.muted }),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center);
+                    if card.change.is_some() && !card.undone {
+                        line = line.push(button(text("Undo").size(12)).on_press(Message::MemoryUndo(i, ci)).padding([2, 6]).style(theme::ghost_button(t)));
+                    }
+                    col = col.push(container(line).padding([4, 10]).style(theme::inset(t)));
+                }
                 if !live && !m.content.is_empty() {
                     let mut meta = row![button(text("Copy answer").size(12)).on_press(Message::Copy(i)).padding([3, 0]).style(theme::ghost_button(t))].spacing(14).align_y(Alignment::Center);
                     meta = meta.push(button(text("Retry").size(12)).on_press(Message::Regenerate(i)).padding([3, 0]).style(theme::ghost_button(t)));
                     if let Some(v) = self.version_switch(t, i) {
                         meta = meta.push(v);
                     }
+                    meta = meta.push(button(text("Remember").size(12)).on_press(Message::RememberOpen(i)).padding([3, 0]).style(theme::ghost_button(t)));
                     if let Some(s) = &m.stats {
                         if s.tokens_per_second > 0.0 {
                             meta = meta.push(
@@ -3247,6 +3905,8 @@ impl App {
                 }
                 col.into()
             }
+            // a tool answer is only sent back to the model, never drawn as a line of the chat
+            Role::Tool => Space::new().height(0).into(),
         }
     }
 
@@ -3491,6 +4151,54 @@ fn file_chip(t: Tokens, name: &str, title: Option<String>, remove: Option<Messag
     chip
 }
 
+/// The arguments of a tool call: a JSON object, also inside a code fence; `None` when unusable
+/// (the Studio's ctParseArgs).
+fn parse_tool_args(text: &str) -> Option<serde_json::Value> {
+    let raw = text.trim();
+    let fence = regex::Regex::new(r"(?s)^```(?:json)?\s*|\s*```$").expect("the pattern compiles");
+    let stripped = fence.replace_all(raw, "").to_string();
+    for candidate in [raw, stripped.as_str()] {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(candidate) {
+            if v.is_object() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// The line under the answer for a call of the memory tool (the card of ctRunTool).
+fn memory_card(args: &serde_json::Value, outcome: &memory::ToolOutcome) -> crate::memory::ToolCard {
+    let short = |s: &str, n: usize| -> String {
+        let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat.chars().count() > n {
+            format!("{}...", flat.chars().take(n.saturating_sub(1)).collect::<String>())
+        } else {
+            flat
+        }
+    };
+    if let Some(change) = &outcome.change {
+        let label = match change.kind.as_str() {
+            "add" => format!("Saved to memory: {}", change.after.as_ref().map(|m| m.text.as_str()).unwrap_or_default()),
+            "update" => format!("Updated memory: {}", change.after.as_ref().map(|m| m.text.as_str()).unwrap_or_default()),
+            _ => format!("Removed from memory: {}", change.before.as_ref().map(|m| m.text.as_str()).unwrap_or_default()),
+        };
+        return crate::memory::ToolCard { label: short(&label, 140), status: "done".into(), change: Some(change.clone()), undone: false, quiet: false };
+    }
+    let refused = outcome.text.starts_with("Not saved");
+    let action = args.get("action").and_then(serde_json::Value::as_str).unwrap_or_default();
+    let quiet = action.eq_ignore_ascii_case("list") || outcome.text == "Already remembered.";
+    let label = if refused {
+        "Memory: not saved (looks like a secret)".to_string()
+    } else if quiet {
+        "Memory checked".to_string()
+    } else {
+        format!("Memory: {}", short(&outcome.text, 80))
+    };
+    let status = if refused || outcome.text.starts_with("Error") { "error" } else { "done" };
+    crate::memory::ToolCard { label, status: status.into(), change: None, undone: false, quiet: quiet && !refused }
+}
+
 /// The names of the documents of the passages: "A and B", and with more than two "A, B and N more"
 /// (the Studio's `ragNames`).
 fn rag_names(passages: &[rag::Passage]) -> String {
@@ -3674,6 +4382,9 @@ mod tests {
             passages: None,
             images: Vec::new(),
             files: Vec::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_cards: Vec::new(),
             md: markdown::Content::new(),
         };
         assert_eq!(estimate_tokens(&[m(&"a".repeat(40))]), 14);

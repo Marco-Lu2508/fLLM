@@ -15,6 +15,9 @@ fn rec(role: Role, content: &str) -> Record {
         passages: None,
         images: Vec::new(),
         files: Vec::new(),
+        tool_calls: None,
+        tool_call_id: None,
+        tool_cards: Vec::new(),
     }
 }
 

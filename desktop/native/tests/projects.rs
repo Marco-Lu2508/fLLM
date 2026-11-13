@@ -10,7 +10,7 @@ use iced::widget::text_editor;
 use iced_test::Simulator;
 
 fn rec(role: Role, content: &str) -> Record {
-    Record { role, content: content.into(), reasoning: String::new(), stats: None, passages: None , images: Vec::new(), files: Vec::new() }
+    Record { role, content: content.into(), reasoning: String::new(), stats: None, passages: None , images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new() }
 }
 
 fn app_with(store: Store) -> (App, tempfile::TempDir) {

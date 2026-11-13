@@ -149,6 +149,39 @@ fn small_input<'a>(t: Tokens, placeholder: &'a str, value: &'a str, field: Field
         .into()
 }
 
+/// What the Settings page draws of the personalization (the state lives in the window).
+#[derive(Debug, Clone)]
+pub struct PersonalView<'a> {
+    pub about: &'a Content,
+    pub use_about: bool,
+    pub use_memory: bool,
+    pub memories: &'a [crate::memory::Memory],
+    /// The line under the list: how many entries there are, whether all of them fit into the prompt.
+    pub usage: String,
+    pub new_text: &'a str,
+    /// The memory whose text is being changed: its id and the text in the box.
+    pub edit: Option<(&'a str, &'a str)>,
+}
+
+/// A box for a text of the personalization (the input of a memory row, the field to add one).
+fn mem_input<'a>(t: Tokens, placeholder: &'a str, value: &'a str, on_input: fn(String) -> Message, on_submit: Message) -> Element<'a, Message> {
+    text_input(placeholder, value)
+        .on_input(on_input)
+        .on_submit(on_submit)
+        .size(14)
+        .padding([6, 10])
+        .width(Length::Fill)
+        .style(move |_, status| text_input::Style {
+            background: iced::Background::Color(t.surface_2),
+            border: iced::Border { radius: 8.0.into(), width: 1.0, color: if matches!(status, text_input::Status::Focused { .. }) { t.fg_soft } else { t.separator } },
+            icon: t.muted,
+            placeholder: t.muted,
+            value: t.fg,
+            selection: t.primary_soft,
+        })
+        .into()
+}
+
 /// A setting with a title and a sentence of help on the left and its control on the right.
 pub fn setting<'a>(t: Tokens, title: &'a str, help: &'a str, control: Element<'a, Message>) -> Element<'a, Message> {
     row![column![text(title).size(14), text(help).size(12).color(t.muted)].spacing(3).width(Length::Fill), container(control).width(280).align_x(iced::alignment::Horizontal::Right)]
@@ -165,7 +198,15 @@ fn value_slider<'a>(t: Tokens, range: std::ops::RangeInclusive<f32>, value: f32,
     row![s, text(format!("{value:.2}")).size(13).font(iced::Font::MONOSPACE).width(44)].spacing(10).align_y(Alignment::Center).into()
 }
 
-pub fn page<'a>(t: Tokens, prefs: &'a Prefs, system_editor: &'a Content, max_tokens_text: &'a str, sampling: &'a SamplingTexts, engine: Element<'a, Message>) -> Element<'a, Message> {
+pub fn page<'a>(
+    t: Tokens,
+    prefs: &'a Prefs,
+    system_editor: &'a Content,
+    max_tokens_text: &'a str,
+    sampling: &'a SamplingTexts,
+    engine: Element<'a, Message>,
+    personal: PersonalView<'a>,
+) -> Element<'a, Message> {
     let mut answers = column![].spacing(14);
     answers = answers.push(setting(
         t,
@@ -257,9 +298,143 @@ pub fn page<'a>(t: Tokens, prefs: &'a Prefs, system_editor: &'a Content, max_tok
         ],
     );
 
+    // ---- personalization (the Studio's Settings > Personalization: about me and memory) ----
+    let mut pers = column![].spacing(12);
+    pers = pers.push(
+        column![
+            text("Custom instructions").size(14),
+            text("Put in front of the system prompt of your chats (switch it off for one chat in the chat menu). Everything on this page stays on this computer; it is sent only to the model you are chatting with.").size(12).color(t.muted),
+        ]
+        .spacing(3),
+    );
+    pers = pers.push(
+        text_editor(personal.about)
+            .placeholder("For example: I am a nurse. Keep answers short, use metric units, and explain medical terms.")
+            .on_action(Message::AboutEdit)
+            .padding(10)
+            .size(14)
+            .height(Length::Shrink)
+            .min_height(72)
+            .max_height(180)
+            .style(move |_, status| text_editor::Style {
+                background: iced::Background::Color(t.surface_2),
+                border: iced::Border { radius: 10.0.into(), width: 1.0, color: if matches!(status, Status::Focused { .. }) { t.fg_soft } else { t.separator } },
+                placeholder: t.muted,
+                value: t.fg,
+                selection: iced::Color { a: 0.35, ..t.primary },
+            }),
+    );
+    pers = pers.push(
+        row![
+            text(format!("{} / {}", personal.about.text().chars().count(), crate::memory::limits::ABOUT))
+                .size(11)
+                .font(iced::Font::MONOSPACE)
+                .color(t.muted),
+            Space::new().width(Length::Fill),
+            text("Use these instructions").size(12).color(t.fg_soft),
+            segmented(
+                t,
+                vec![
+                    ("On", personal.use_about, Message::UseAbout(true)),
+                    ("Off", !personal.use_about, Message::UseAbout(false)),
+                ],
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    );
+    pers = pers.push(rule(t));
+    pers = pers.push(
+        column![
+            text("Remembered facts").size(14),
+            text("The assistant saves durable facts about you on its own (a card with Undo appears in the chat). You can also start a message with \"remember that ...\" or press Remember under a message. Memories are added to the system prompt of every chat (up to 3,000 characters, fewer for small models), kept on this computer with a copy on the server, and can be switched off for one chat in the chat menu.").size(12).color(t.muted),
+        ]
+        .spacing(3),
+    );
+    pers = pers.push(
+        row![
+            text("Use memory").size(13).color(t.fg_soft),
+            Space::new().width(Length::Fill),
+            segmented(
+                t,
+                vec![
+                    ("On", personal.use_memory, Message::UseMemory(true)),
+                    ("Off", !personal.use_memory, Message::UseMemory(false)),
+                ],
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    );
+    for m in personal.memories {
+        let editing = personal.edit.is_some_and(|(id, _)| id == m.id);
+        if editing {
+            let text_box = personal.edit.map(|(_, text)| text).unwrap_or("");
+            pers = pers.push(
+                row![
+                    mem_input(t, "Remember", text_box, Message::MemEditInput, Message::MemEditEnd(true)),
+                    button(text("OK").size(12)).on_press(Message::MemEditEnd(true)).padding([4, 8]).style(theme::secondary_button(t)),
+                    button(text("×").size(14)).on_press(Message::MemEditEnd(false)).padding([2, 6]).style(theme::ghost_button(t)),
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center),
+            );
+        } else {
+            let mut line = row![
+                button(text(m.text.clone()).size(13).width(Length::Fill).align_x(iced::alignment::Horizontal::Left))
+                    .on_press(Message::MemEditStart(m.id.clone()))
+                    .padding([5, 8])
+                    .style(theme::plain_button(t)),
+            ];
+            if let Some(cat) = &m.category {
+                line = line.push(
+                    container(text(cat.clone()).size(11).color(t.muted))
+                        .padding([1, 7])
+                        .style(move |_| container::Style {
+                            background: Some(iced::Background::Color(t.fill)),
+                            border: iced::border::rounded(999),
+                            ..Default::default()
+                        }),
+                );
+            }
+            line = line.push(
+                button(text("×").size(14)).on_press(Message::MemDelete(m.id.clone())).padding([2, 6]).style(theme::ghost_button(t)),
+            );
+            pers = pers.push(line.spacing(6).align_y(Alignment::Center));
+        }
+    }
+    pers = pers.push(
+        row![
+            mem_input(t, "Add something to remember", personal.new_text, Message::MemNewInput, Message::MemAddNow),
+            button(text("Add").size(13)).on_press(Message::MemAddNow).padding([5, 12]).style(theme::secondary_button(t)),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    );
+    pers = pers.push(
+        row![
+            text(personal.usage.clone()).size(12).color(t.muted).width(Length::Fill),
+            button(text("Forget everything").size(13))
+                .on_press(Message::MemClear)
+                .padding([5, 12])
+                .style(move |_, status| {
+                    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                    button::Style {
+                        background: Some(iced::Background::Color(if hovered { t.fill_hover } else { t.fill })),
+                        text_color: t.danger,
+                        border: iced::border::rounded(8),
+                        ..Default::default()
+                    }
+                }),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    );
+
     let content = column![
         container(text("Settings").size(26).font(bold())).padding(Padding { top: 14.0, right: 0.0, bottom: 4.0, left: 2.0 }),
         card(t, "Answers", answers.into()),
+        card(t, "Personalization", pers.into()),
         engine,
     ]
     .spacing(14);

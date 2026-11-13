@@ -70,6 +70,18 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   nothing but an attachment is sent and names the chat after its first attachment. Chats from before the feature load unchanged. Not
   ported: pasting an image from the clipboard (the window gets no such event) and several files in one dialog (the dialog of the server
   picks one file at a time).
+- Personalization and memory (Settings > Personalization): *Custom instructions* in a box with its counter and the switch *Use these
+  instructions*, and the remembered facts with *Use memory*, a row per entry (a click changes it, the cross deletes it), a row to add one,
+  the line *N of 100 entries …* and *Forget everything* behind its dialog. What of yours goes into the system prompt between the default
+  prompt and the project with the Studio's headers (*About the user and how they want answers …*, *Saved memory about the user …* with
+  the entries that fit — the useful ones first, newest first); a chat switches either off in the chat menu (*Personalization: on/off*,
+  *Memory: on/off* with the lines of the Studio). A question that starts with "remember that …" saves its thing, the *Remember* button
+  under a message asks first with the sentence of the Studio, secrets are refused with its line and the list holds a hundred entries. The
+  model gets the `memory` tool when the switch is on (not for a chat that says no, not for a context under 2048 tokens and not for a model
+  that reads the prompt slower than 120 tokens a second): its calls run in the window, the answer carries them and their results back, a
+  line under the answer says what changed (*Saved to memory: …*) with *Undo*, and an unknown tool or bad arguments get the Studio's error
+  lines. The copy on the server (`GET`/`PUT /api/studio/memory`) is taken over on a first run and written when it changes. Not ported: the
+  retry of a request a server refuses when it is asked with tools.
 - Code (sidebar > Code): a coding agent in a folder. Open a folder (type the path, *Choose…* for the folder dialog of the server's computer, or one of the last six), tell the agent what to do; the model
   gets the server's agent tools (read, search, edit, run commands, ...) and answers with tool calls, which the window runs through
   `/api/studio/agent/tool` and feeds back until the model answers without one (at most 30 model calls per message). Every call is a card:
@@ -101,16 +113,17 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 166 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+cargo test --locked      # 182 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
                          # window driven headless (new chat, send, stream, stop, error, delete, theme, assistants, projects,
-                         # attachments) and drawn to PNG files
+                         # attachments, personalization) and drawn to PNG files
 ```
 
 The window tests use iced's software renderer, so they need no display and no GPU. The pictures go to
 `target/tmp/ui-snapshots/` (conversation, start screen and offline screen, light and dark, the assistant menu and editor, the projects
 with their page, dialogs and passage chip, the attachment chips and the bubble with an image). A mutation of the line buffer, of the save
 in `finish`, of the guard against late events, of the project filter of the sidebar, of the passage prefix, of the project header line, of
-the files in the request, of the image parts and of the documents of the chat in the search each turn a test red.
+the files in the request, of the image parts, of the documents of the chat in the search, of the personalization in the prompt, of the
+capture of "remember that …" and of the saving of the memory tool each turn a test red.
 
 Not checked: a window on a real screen (this machine has none), scaling on a HiDPI display, input methods, the macOS and Windows builds
 (the CI workflow `native-app` builds and tests all three).
