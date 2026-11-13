@@ -4,6 +4,7 @@ use crate::api::{self, ModelInfo, StreamEvent, WireMessage};
 use crate::assistants::{self, Assistant, SysMode};
 use crate::memory;
 use crate::promptlib;
+use crate::speech;
 use crate::rag::{self, IndexedDoc};
 use crate::store::{self, Record, Role, Stats, Store};
 use crate::chatlist::{self, ChatList, ListMsg};
@@ -229,6 +230,8 @@ pub struct App {
     temp_next: bool,
     /// The dialog before a temporary chat with messages is gone for good.
     temp_close: bool,
+    /// The notice under the messages: how many messages a rewind hides, until when it stands.
+    rewind_notice: Option<(usize, u64)>,
     /// The text box of a prompt library row per id (so a half-typed row keeps its place).
     plib_texts: std::collections::HashMap<String, Content>,
     /// The copy on the server: the text that is up there, whether it is off, and one request at a time.
@@ -269,7 +272,14 @@ pub enum Message {
     Starter(usize),
     Stream(u64, StreamEvent),
     Copy(usize),
+    /// The copy as the model wrote it (the Studio's copy-md).
+    CopyMd(usize),
+    /// The answer read aloud by the computer's own voice (the Studio's speak).
+    Speak(usize),
     CopyText(String),
+    /// The conversation ends at this message; nothing is deleted, Undo brings the rest back.
+    RewindTo(usize),
+    RewindUndo,
     Hover(Option<u64>),
     ToggleTheme,
     LinkClicked(markdown::Uri),
@@ -511,6 +521,7 @@ impl App {
             new_style: "default".into(),
             temp_next: false,
             temp_close: false,
+            rewind_notice: None,
             plib_texts: std::collections::HashMap::new(),
             mem_synced_text: None,
             mem_sync_off: false,
@@ -670,6 +681,9 @@ impl App {
         if self.live.is_some() || (prompt.trim().is_empty() && self.attachments.is_empty()) {
             return Task::none();
         }
+        // what a rewind hides cannot come back into the row once a new question is asked: it is
+        // kept as a version of the chat (the conversation tree shows those later)
+        self.commit_rewinds();
         // "remember that …" at the start of a message saves the thing (the Studio's prjCaptureMemory)
         if self.memory_capture_on() {
             if let Some(fact) = memory::extract(&prompt) {
@@ -852,6 +866,8 @@ impl App {
                 if self.live.is_some() || !self.messages.get(i).is_some_and(|m| m.role == Role::Assistant) {
                     return Task::none();
                 }
+                // a new version starts from the row as it is: what a rewind hides becomes a version
+                self.commit_rewinds();
                 let (Some(id), Server::Ready(model)) = (self.current, self.server.clone()) else { return Task::none() };
                 self.sync_current();
                 if let Some(chat) = self.store.chat_mut(id) {
@@ -1716,6 +1732,10 @@ impl App {
                 Task::perform(async move { api::fetch_model(&base).await }, Message::Connected)
             }
             Message::Tick => {
+                // the notice of a rewind stands nine seconds (the Studio removes it after 9000 ms)
+                if self.rewind_notice.is_some_and(|(_, until)| chrono::Local::now().timestamp() as u64 > until) {
+                    self.rewind_notice = None;
+                }
                 // the copy of the memory on the server: asked for at the start, written when it differs
                 // (the Studio's memImportFromServer and memSyncSoon)
                 let mut sync = Task::none();
@@ -1843,9 +1863,61 @@ impl App {
                 self.on_event(ev).unwrap_or_else(Task::none)
             }
             Message::Copy(i) => match self.messages.get(i) {
+                // what you can see in the answer, without the Markdown marks (plainTextOf)
+                Some(m) => iced::clipboard::write(md::plain(&m.content)),
+                None => Task::none(),
+            },
+            Message::CopyMd(i) => match self.messages.get(i) {
                 Some(m) => iced::clipboard::write(m.content.clone()),
                 None => Task::none(),
             },
+            Message::Speak(i) => {
+                let text = self.messages.get(i).map(|m| speech::strip_for_speech(&m.content)).unwrap_or_default();
+                if text.is_empty() || speech::speak_out(&text) {
+                    Task::none()
+                } else {
+                    self.toast = Some("This computer cannot read aloud.".into());
+                    Task::none()
+                }
+            }
+            Message::RewindTo(i) => {
+                if i + 1 >= self.messages.len() {
+                    self.toast = Some("Nothing after this message to rewind.".into());
+                } else {
+                    self.messages.truncate(i + 1);
+                    let now = chrono::Local::now().timestamp();
+                    let mut hidden = 0;
+                    if let Some(chat) = self.current.and_then(|id| self.store.chat_mut(id)) {
+                        // the hidden part is kept in the chat, not thrown away (Rewind.tail)
+                        let tail = chat.messages.split_off(i + 1);
+                        hidden = tail.len();
+                        if chat.rewinds.len() >= 20 {
+                            chat.rewinds.remove(0);
+                        }
+                        chat.rewinds.push(store::Rewind { tail, at: now });
+                    }
+                    self.save();
+                    // the notice with Undo instead of a toast that vanishes (rewindNotice)
+                    self.rewind_notice = Some((hidden, now as u64 + 9));
+                }
+                Task::none()
+            }
+            Message::RewindUndo => {
+                let mut restored: Vec<Record> = Vec::new();
+                if let Some(chat) = self.current.and_then(|id| self.store.chat_mut(id)) {
+                    if let Some(r) = chat.rewinds.pop() {
+                        chat.messages.extend(r.tail.iter().cloned());
+                        restored = r.tail;
+                    }
+                }
+                if !restored.is_empty() {
+                    self.messages.extend(restored.iter().map(Msg::from_record));
+                    self.save();
+                    self.rewind_notice = None;
+                    self.toast = Some("Rewind undone".into());
+                }
+                Task::none()
+            }
             Message::CopyText(s) => iced::clipboard::write(s),
             Message::Hover(id) => {
                 self.hover = id;
@@ -2321,6 +2393,19 @@ impl App {
                         .padding([8, 14])
                         .width(Length::Fill)
                         .style(theme::secondary_button(t)),
+                )
+                .padding([6, 24]),
+            );
+        }
+        if let Some((hidden, _)) = self.rewind_notice {
+            main = main.push(
+                container(
+                    row![
+                        text(format!("Rewound: {hidden} message(s) after this one are hidden.")).size(13).color(t.fg_soft),
+                        button(text("Undo").size(12)).on_press(Message::RewindUndo).padding([2, 8]).style(theme::ghost_button(t)),
+                    ]
+                    .spacing(10)
+                    .align_y(Alignment::Center),
                 )
                 .padding([6, 24]),
             );
@@ -3651,6 +3736,25 @@ impl App {
         self.slash_index = 0;
     }
 
+    /// What the rewinds of the open chat hide becomes a version of it: a new question or a new
+    /// answer starts from the row as it is, and the hidden part is kept, not thrown away.
+    fn commit_rewinds(&mut self) {
+        let Some(id) = self.current else { return };
+        let notice_gone = self.rewind_notice.take().is_some();
+        let _ = notice_gone;
+        if let Some(chat) = self.store.chat_mut(id) {
+            let rewinds = std::mem::take(&mut chat.rewinds);
+            for r in rewinds {
+                if r.tail.is_empty() {
+                    continue;
+                }
+                let slot = chat.next_slot;
+                chat.next_slot = chat.next_slot.saturating_add(1);
+                chat.variants.push(store::Variant { slot, messages: r.tail });
+            }
+        }
+    }
+
     /// A temporary chat is gone for good: the chat leaves the list, the view is fresh (what the
     /// Studio's startNewChat does after the dialog of toggleTemporary).
     fn close_temporary(&mut self) {
@@ -4183,6 +4287,7 @@ impl App {
                     line = line.push(button(text("Edit").size(12)).on_press(Message::EditMessage(i)).padding([3, 0]).style(theme::ghost_button(t)));
                 }
                 line = line.push(button(text("Remember").size(12)).on_press(Message::RememberOpen(i)).padding([3, 0]).style(theme::ghost_button(t)));
+                line = line.push(button(text("Rewind").size(12)).on_press(Message::RewindTo(i)).padding([3, 0]).style(theme::ghost_button(t)));
                 col.push(row![Space::new().width(Length::Fill), line]).into()
             }
             Role::Assistant => {
@@ -4209,11 +4314,14 @@ impl App {
                 }
                 if !live && !m.content.is_empty() {
                     let mut meta = row![button(text("Copy answer").size(12)).on_press(Message::Copy(i)).padding([3, 0]).style(theme::ghost_button(t))].spacing(14).align_y(Alignment::Center);
+                    meta = meta.push(button(text("MD").size(12)).on_press(Message::CopyMd(i)).padding([3, 0]).style(theme::ghost_button(t)));
+                    meta = meta.push(button(text("Read aloud").size(12)).on_press(Message::Speak(i)).padding([3, 0]).style(theme::ghost_button(t)));
                     meta = meta.push(button(text("Retry").size(12)).on_press(Message::Regenerate(i)).padding([3, 0]).style(theme::ghost_button(t)));
                     if let Some(v) = self.version_switch(t, i) {
                         meta = meta.push(v);
                     }
                     meta = meta.push(button(text("Remember").size(12)).on_press(Message::RememberOpen(i)).padding([3, 0]).style(theme::ghost_button(t)));
+                    meta = meta.push(button(text("Rewind").size(12)).on_press(Message::RewindTo(i)).padding([3, 0]).style(theme::ghost_button(t)));
                     if let Some(s) = &m.stats {
                         if s.tokens_per_second > 0.0 {
                             meta = meta.push(

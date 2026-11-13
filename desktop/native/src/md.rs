@@ -73,3 +73,73 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer {
         row![bar, container(markdown::items(self, settings, contents)).padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 4.0 })].spacing(10).height(Length::Shrink).into()
     }
 }
+
+/// The visible text of an answer: what the plain copy of it carries, without the Markdown marks
+/// (the Studio's `plainTextOf` reads the rendered text; this builds the same text from the
+/// source — the code stays, because it is visible in the answer, and web addresses stay, while
+/// `stripForSpeech` takes both out).
+pub fn plain(markdown: &str) -> String {
+    // fenced code: only the fences are not visible
+    let opener = crate::speech::re(r"^[ \t]*(```|~~~)");
+    let mut kept: Vec<&str> = Vec::new();
+    let mut fence = String::new();
+    for line in markdown.split('\n') {
+        let found = opener.captures(line);
+        if !fence.is_empty() {
+            if let Some(c) = found {
+                if c[1] == fence {
+                    // the closing fence is not visible, the code above it is
+                    fence.clear();
+                    continue;
+                }
+            }
+            kept.push(line);
+            continue;
+        }
+        if let Some(c) = found {
+            fence = c[1].to_string();
+            continue;
+        }
+        kept.push(line);
+    }
+    let mut s = kept.join("\n");
+    s = crate::speech::re(r"<[^>\n]+>").replace_all(&s, " ").into_owned();
+    s = crate::speech::re(r"!\[([^\]]*)\]\([^)]*\)").replace_all(&s, "$1").into_owned();
+    s = crate::speech::re(r"\[([^\]]+)\]\([^)]*\)").replace_all(&s, "$1").into_owned();
+    s = crate::speech::re(r"`+([^`\n]*)`+").replace_all(&s, "$1").into_owned();
+    s = crate::speech::re(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+").replace_all(&s, "").into_owned();
+    s = crate::speech::re(r"(?m)^[ \t]{0,3}>[ \t]?").replace_all(&s, "").into_owned();
+    s = crate::speech::re(r"(?m)^[ \t]*([-*+]|\d+[.)])[ \t]+").replace_all(&s, "").into_owned();
+    s = crate::speech::re(r"(?m)^[ \t]*([-*_][ \t]*){3,}$").replace_all(&s, "").into_owned();
+    s = crate::speech::re(r"(?m)^\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$")
+        .replace_all(&s, "")
+        .into_owned();
+    s = crate::speech::re(r"\|").replace_all(&s, " ").into_owned();
+    s = crate::speech::re(r"\*\*(.+?)\*\*").replace_all(&s, "$1").into_owned();
+    s = crate::speech::re(r"__(.+?)__").replace_all(&s, "$1").into_owned();
+    s = crate::speech::re(r"(?m)(^|[\s(])[*_]([^*_\n]+?)[*_]([\s).,!?;:]|$)").replace_all(&s, "$1$2$3").into_owned();
+    s = s.replace("~~", "");
+    s.split('\n')
+        .map(|l| crate::speech::re(r"[ \t]+").replace_all(l, " ").trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod plain_tests {
+    use super::*;
+
+    /// What the copy of an answer carries: the text you can see, without the marks.
+    #[test]
+    fn the_plain_copy_keeps_the_visible_text_only() {
+        assert_eq!(plain("# Title\n\nSome **bold** here."), "Title\nSome bold here.");
+        assert_eq!(plain("A [link](https://example.com) and `code`."), "A link and code.");
+        assert_eq!(plain("```js\nrun();\n```\nAfter."), "run();\nAfter.", "the code is visible, the fences are not");
+        assert_eq!(plain("| a | b |\n|---|---|\n| 1 | 2 |"), "a b\n1 2");
+        assert_eq!(plain("Keep https://example.com here."), "Keep https://example.com here.", "the address is part of the text you see");
+        assert_eq!(plain("> quoted\n- item"), "quoted\nitem");
+        assert_eq!(plain("~~gone~~ *low* __und__"), "gone low und");
+        assert!(plain("").is_empty());
+    }
+}

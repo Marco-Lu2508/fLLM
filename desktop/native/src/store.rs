@@ -120,6 +120,19 @@ pub struct ChatRecord {
     /// A temporary chat: never written to the file, gone when another chat is opened.
     #[serde(default)]
     pub temporary: bool,
+    /// The rewinds that can still be taken back, newest last (the Studio's `t.rewinds`).
+    #[serde(default)]
+    pub rewinds: Vec<Rewind>,
+}
+
+/// A rewind of the chat: the messages after some message are out of the row until it is taken
+/// back (the Studio's `t.rewinds`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Rewind {
+    /// The messages that were after the message the chat was rewound to.
+    pub tail: Vec<Record>,
+    /// When it happened (seconds since 1970).
+    pub at: i64,
 }
 
 /// Which version of a message is shown out of how many.

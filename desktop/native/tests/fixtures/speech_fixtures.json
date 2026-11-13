@@ -1,0 +1,100 @@
+{
+  "strips": [
+    {
+      "input": "",
+      "out": ""
+    },
+    {
+      "input": "Just a sentence.",
+      "out": "Just a sentence."
+    },
+    {
+      "input": "# Heading\n\nSome **bold** and *italic* text with `code`.",
+      "out": "Heading\nSome bold and italic text with code."
+    },
+    {
+      "input": "```rust\nfn main() { println!(\"hi\"); }\n```\nAfter the code.",
+      "out": "After the code."
+    },
+    {
+      "input": "A [link](https://example.com/page) and an ![image alt](pic.png) here.",
+      "out": "A link and an image alt here."
+    },
+    {
+      "input": "Visit https://example.com for more. <div>markup</div> here.",
+      "out": "Visit for more. markup here."
+    },
+    {
+      "input": "> quoted line\n- item one\n1. item two",
+      "out": "quoted line\nitem one\nitem two"
+    },
+    {
+      "input": "| a | b |\n|---|---|\n| 1 | 2 |",
+      "out": "a b\n1 2"
+    },
+    {
+      "input": "think block: <think>secret reasoning</think> visible.",
+      "out": "think block: visible."
+    },
+    {
+      "input": "***\n--- rule above",
+      "out": "--- rule above"
+    },
+    {
+      "input": "A very long line with ~~struck~~ and __under__ text and ***stars***.",
+      "out": "A very long line with struck and under text and stars."
+    }
+  ],
+  "chunks": [
+    {
+      "text": "",
+      "out": []
+    },
+    {
+      "text": "One short sentence.",
+      "out": [
+        "One short sentence."
+      ]
+    },
+    {
+      "text": "First sentence. Second one! Third? Fourth.",
+      "out": [
+        "First sentence. Second one! Third? Fourth."
+      ]
+    },
+    {
+      "text": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "out": [
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ]
+    },
+    {
+      "text": "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word.",
+      "max": 100,
+      "out": [
+        "word word word word word word word word word word word word word word word word word word word word",
+        "word word word word word word word word word word word word word word word word word word word word",
+        "word word word word word word word word word word word word word word word word word word word word."
+      ]
+    },
+    {
+      "text": "Line one is here.\nLine two follows with more words.\nLine three.",
+      "max": 80,
+      "out": [
+        "Line one is here.",
+        "Line two follows with more words.",
+        "Line three."
+      ]
+    },
+    {
+      "text": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "max": 220,
+      "out": [
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAA,BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+      ]
+    }
+  ]
+}

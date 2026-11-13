@@ -14,6 +14,7 @@ pub mod models;
 pub mod prompts;
 pub mod memory;
 pub mod promptlib;
+pub mod speech;
 pub mod rag;
 pub mod settings;
 pub mod sidecar;

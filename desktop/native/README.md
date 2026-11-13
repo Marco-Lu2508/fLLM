@@ -112,6 +112,16 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   messages is gone at once, and leaving it — another chat or *New chat* — drops it for good
   without asking. The file never gets one: the save leaves it out the way the Studio's
   saveThreads does.
+- Message actions: *Copy answer* carries the visible text of the answer without the Markdown
+  marks, *MD* the text as the model wrote it, *Read aloud* strips it for speech (no code, no
+  marks, no web addresses — the rules of `stripForSpeech` of the Studio, checked against that
+  code) and hands it to the voice of the computer (`spd-say`, `espeak-ng`, `espeak`, `say`, the
+  synthesizer of Windows; a computer without one gets "This computer cannot read aloud.").
+  *Rewind* sits under a question and under an answer: the conversation ends at that message and
+  nothing is deleted — the notice under the messages says "Rewound: N message(s) after this one
+  are hidden." with *Undo* for nine seconds, at the last message it says "Nothing after this
+  message to rewind.", and the Undo says "Rewind undone". A new question or a retry keeps what
+  was hidden as a version of the chat, so the conversation tree can show it later.
 - Code (sidebar > Code): a coding agent in a folder. Open a folder (type the path, *Choose…* for the folder dialog of the server's computer, or one of the last six), tell the agent what to do; the model
   gets the server's agent tools (read, search, edit, run commands, ...) and answers with tool calls, which the window runs through
   `/api/studio/agent/tool` and feeds back until the model answers without one (at most 30 model calls per message). Every call is a card:
@@ -143,9 +153,10 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 201 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+cargo test --locked      # 208 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
                          # window driven headless (new chat, send, stream, stop, error, delete, theme, assistants, projects,
-                         # attachments, personalization, prompt library, response style, temporary chat) and drawn to PNG files
+                         # attachments, personalization, prompt library, response style, temporary chat, message actions) and drawn to
+  PNG files
 ```
 
 The window tests use iced's software renderer, so they need no display and no GPU. The pictures go to
@@ -156,8 +167,9 @@ the files in the request, of the image parts, of the documents of the chat in th
 capture of "remember that …", of the saving of the memory tool, of the sort of the library, of
 the menu on every change of the box, of the limit of a hundred prompts, of the style in the
 prompt, of the staged style for a new chat, of the web text of the Studio, of the save without
-its filter, of the staging into the chat and of the drop when a temporary chat is left each turn
-a test red.
+its filter, of the staging into the chat, of the drop when a temporary chat is left, of the
+rewind that hides, of the version it keeps for a new question and of the plain copy each turn a
+test red.
 
 Not checked: a window on a real screen (this machine has none), scaling on a HiDPI display, input methods, the macOS and Windows builds
 (the CI workflow `native-app` builds and tests all three).
