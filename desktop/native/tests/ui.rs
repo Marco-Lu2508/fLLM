@@ -54,6 +54,66 @@ fn settings() -> iced::Settings {
     iced::Settings { fonts: vec![fllm_app::app::FONT_REGULAR.into(), fllm_app::app::FONT_SEMIBOLD.into()], default_font: fllm_app::app::UI_FONT, ..Default::default() }
 }
 
+/// Esc ends a running answer and does nothing when nothing runs (the title of the Studio's send
+/// button: "Stop the answer (Esc)").
+#[test]
+fn esc_stops_a_running_answer_and_ignores_the_rest() {
+    use iced::widget::text_editor::{Action, Edit};
+    let (mut app, _dir) = app_with(vec![], "light", true);
+    let _ = app.update(Message::Esc);
+    assert!(!app.is_streaming(), "nothing runs: the key does nothing");
+    let _ = app.update(Message::Edit(Action::Edit(Edit::Paste(std::sync::Arc::new("Hi".to_string())))));
+    let _ = app.update(Message::Send);
+    assert!(app.is_streaming(), "the question started the answer");
+    let _ = app.update(Message::Esc);
+    assert!(!app.is_streaming(), "Esc ends it like the stop button");
+    assert_eq!(app.message_count(), 2, "the question and the place of the answer are kept, like with the stop button");
+}
+
+/// The reasoning of an answer is folded away, opens with a click, and is shown open while the
+/// answer has not started (the details box of the Studio).
+#[test]
+fn the_reasoning_of_an_answer_folds_and_opens() {
+    use fllm_app::api::StreamEvent;
+    use iced::widget::text_editor::{Action, Edit};
+    let mut answer = rec(Role::Assistant, "", None);
+    answer.reasoning = "Der Nutzer fragt nach Gold; ich antworte kurz.".into();
+    let chats = vec![ChatRecord { id: 1, title: "q".into(), messages: vec![rec(Role::User, "q", None), answer], ..Default::default() }];
+    let (mut app, _dir) = app_with(chats, "light", true);
+    let _ = app.update(Message::OpenChat(1));
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1000.0, 800.0), app.view());
+        ui.find("Thought process (46 characters)").expect("the summary of the box with its character count");
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1000.0, 800.0), app.view());
+        assert!(ui.find("Der Nutzer fragt nach Gold; ich antworte kurz.").is_err(), "folded away at the start");
+    }
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1000.0, 800.0), app.view());
+        ui.click("Thought process (46 characters)").expect("the summary is a button");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(m, Message::ReasoningToggle(1))), "{msgs:?}");
+        for m in msgs {
+            let _ = app.update(m);
+        }
+    }
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1000.0, 800.0), app.view());
+        ui.find("Der Nutzer fragt nach Gold; ich antworte kurz.").expect("the click opened it");
+    }
+    // while the answer has not started the box is open and says so (the Studio's "Thinking")
+    let (mut app, _dir) = app_with(vec![], "light", true);
+    let _ = app.update(Message::Edit(Action::Edit(Edit::Paste(std::sync::Arc::new("q".to_string())))));
+    let _ = app.update(Message::Send);
+    let id = app.open_chat().expect("a chat");
+    let _ = app.update(Message::Stream(id, StreamEvent::Reasoning("Schritt für Schritt.".into())));
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1000.0, 800.0), app.view());
+        ui.find("Thinking (20 characters)").expect("the summary while it thinks");
+        ui.find("Schritt für Schritt.").expect("and it is open while the answer has not started");
+    }
+    save_png(&app, "reasoning-box");
+}
+
 /// The probabilities that come with the stream land on the answer and stay with the chat.
 #[test]
 fn probabilities_of_a_streaming_answer_land_on_the_message() {

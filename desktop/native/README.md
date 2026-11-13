@@ -20,7 +20,10 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 ## What is built (stage 1: the chat, stage 2: Models and Settings)
 
 - Chat with streaming answers, Markdown (headings, lists, tables, quotes, code blocks with highlighting and a copy button, inline code),
-  stop, copy, the reasoning of thinking models kept apart, tokens per second and prompt speed under every answer.
+  stop (the button or Esc over the whole window: it ends a running answer and a research run, and does
+  nothing when nothing runs), copy, the reasoning of thinking models kept apart and foldable (the line *Thought
+  process (n characters)* of the Studio with a click; while the answer has not started it says *Thinking* and is
+  open), tokens per second and prompt speed under every answer.
 - Chats on disk (`~/.local/share/fllm-app/chats.json`, `$FLLM_APP_DATA` moves it), written after every change, a damaged file is moved aside
   instead of overwritten. Title from the first message; the sidebar opens, renames, duplicates, exports, deletes and searches them, groups
   them by the day they were last used, pins and archives them, and *Select* takes many at once.

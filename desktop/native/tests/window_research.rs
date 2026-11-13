@@ -319,6 +319,36 @@ fn the_research_chip_and_the_progress_line_are_in_the_window() {
     }
 }
 
+/// Esc stops a research run that is still going (the same as the stop button).
+#[test]
+fn esc_stops_a_running_research_run() {
+    let mut store = Store::default();
+    let mut answer = rec(Role::Assistant, "");
+    let run = fllm_app::research::ResearchUi::new(1_700_000_000_000);
+    answer.research = Some(run);
+    let mut chat = ChatRecord::new(0, "one", vec![rec(Role::User, "q"), answer]);
+    chat.updated = 1;
+    store.chats.push(chat);
+    store.next_id = 1;
+    let (mut app, _dir) = app_with(store);
+    let _ = app.update(Message::OpenChat(0));
+    {
+        let mut ui = sim(&app);
+        ui.find("Research · round 1 of 2 · step 1 of 5: planning").expect("the run is going");
+    }
+    let _ = app.update(Message::Esc);
+    {
+        let mut ui = sim(&app);
+        ui.find("Research stopped.").expect("Esc stopped it like the stop button");
+    }
+    // and nothing happens when nothing runs
+    let _ = app.update(Message::Esc);
+    {
+        let mut ui = sim(&app);
+        ui.find("Research stopped.").expect("still stopped, not undone");
+    }
+}
+
 fn super_persisted(dir: &tempfile::TempDir) -> Store {
     Store::load(&dir.path().join("chats.json"))
 }

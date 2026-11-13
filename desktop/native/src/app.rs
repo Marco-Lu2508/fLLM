@@ -81,6 +81,9 @@ pub struct Msg {
     pub research: Option<research::ResearchUi>,
     /// The words of this answer with the probability the model gave them (`node.logprobs`).
     pub logprobs: Vec<api::Logprob>,
+    /// Whether the reasoning of this message is unfolded (the `open` of the Studio's details box;
+    /// while the answer has not started it is shown open regardless).
+    pub reasoning_open: bool,
     pub md: markdown::Content,
 }
 
@@ -100,6 +103,7 @@ impl Msg {
             sources: r.sources.clone(),
             research: r.research.clone(),
             logprobs: r.logprobs.clone(),
+            reasoning_open: false,
             md: markdown::Content::parse(&r.content),
         }
     }
@@ -319,6 +323,11 @@ pub enum Message {
     ToggleWeb,
     /// One round of web tool calls came back from the server.
     ToolRound(ToolRoundResult),
+    /// The Esc key: it ends a running answer or a research run (the title of the Studio's send
+    /// button says "Stop the answer (Esc)").
+    Esc,
+    /// The reasoning of a message is shown or folded away (the `details` box of the Studio).
+    ReasoningToggle(usize),
     /// Open an address of the sources in the browser of the computer.
     OpenUrl(String),
     /// The chip in the composer: the question becomes a research project (btnToggleResearch).
@@ -853,6 +862,7 @@ impl App {
             sources: Vec::new(),
             research: None,
         logprobs: Vec::new(),
+        reasoning_open: false,
         });
         self.messages.push(Msg {
             role: Role::Assistant,
@@ -868,6 +878,7 @@ impl App {
             sources: Vec::new(),
             research: None,
             logprobs: Vec::new(),
+            reasoning_open: false,
             md: markdown::Content::new(),
         });
         // the passages of the knowledge travel with this question (the project's documents first,
@@ -1042,6 +1053,7 @@ impl App {
                     sources: Vec::new(),
                     research: None,
                     logprobs: Vec::new(),
+                    reasoning_open: false,
                     md: markdown::Content::new(),
                 });
                 self.sync_current();
@@ -1862,6 +1874,21 @@ impl App {
                         Task::none()
                     }
                 }
+            }
+            Message::Esc => {
+                // only something that runs is stopped; everything else ignores the key
+                let stopping = self.live.is_some()
+                    || self.messages.last().is_some_and(|m| m.research.as_ref().is_some_and(|r| r.running));
+                if stopping {
+                    return self.update(Message::Stop);
+                }
+                Task::none()
+            }
+            Message::ReasoningToggle(i) => {
+                if let Some(m) = self.messages.get_mut(i) {
+                    m.reasoning_open = !m.reasoning_open;
+                }
+                Task::none()
             }
             Message::ResearchToggle => {
                 self.research = !self.research;
@@ -2711,6 +2738,7 @@ impl App {
                 sources: Vec::new(),
                 research: None,
                 logprobs: Vec::new(),
+                reasoning_open: false,
                 md: markdown::Content::new(),
             });
         }
@@ -2728,6 +2756,7 @@ impl App {
             sources: Vec::new(),
             research: None,
             logprobs: Vec::new(),
+            reasoning_open: false,
             md: markdown::Content::new(),
         });
         self.tool_round += 1;
@@ -2758,9 +2787,14 @@ impl App {
         } else {
             Subscription::none()
         };
-        // files dragged onto the window are attached the way the dialog attaches them
-        let dropped =iced::event::listen_with(|event, _status, _id| match event {
+        // files dragged onto the window are attached the way the dialog attaches them; Esc ends a
+        // running answer (the title of the Studio's send button promises it)
+        let dropped = iced::event::listen_with(|event, _status, _id| match event {
             iced::Event::Window(iced::window::Event::FileDropped(path)) => Some(Message::FilesDropped(vec![path])),
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                ..
+            }) => Some(Message::Esc),
             _ => None,
         });
         Subscription::batch([retry, poll, dropped])
@@ -4722,7 +4756,27 @@ impl App {
                     }
                 }
                 if !m.reasoning.is_empty() {
-                    col = col.push(text(format!("Thought process · {} characters", m.reasoning.chars().count())).size(12).color(t.muted));
+                    // the box of the Studio: open while the answer has not started, a click folds it
+                    // (`cot-box` with its summary of the character count)
+                    let starting = live && m.content.is_empty();
+                    let label = if starting { "Thinking" } else { "Thought process" };
+                    let head = button(
+                        text(format!("{label} ({} characters)", m.reasoning.chars().count()))
+                            .size(12)
+                            .color(t.muted),
+                    )
+                    .on_press(Message::ReasoningToggle(i))
+                    .padding([2, 0])
+                    .style(theme::ghost_button(t));
+                    col = col.push(head);
+                    if m.reasoning_open || starting {
+                        col = col.push(
+                            container(text(m.reasoning.clone()).size(13).color(t.fg_soft).width(Length::Fill))
+                                .padding([10, 12])
+                                .width(Length::Fill)
+                                .style(theme::inset(t)),
+                        );
+                    }
                 }
                 if !m.content.is_empty() {
                     col = col.push(md::view(&m.md, t, &self.theme()));
@@ -5462,6 +5516,7 @@ mod tests {
             sources: Vec::new(),
             research: None,
             logprobs: Vec::new(),
+            reasoning_open: false,
             md: markdown::Content::new(),
         };
         assert_eq!(estimate_tokens(&[m(&"a".repeat(40))]), 14);
