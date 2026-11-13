@@ -19,6 +19,11 @@ pub struct Installed {
     /// What `models/load` takes: the file for a model from a folder, the name for one the server downloaded itself.
     pub reference: String,
     pub bytes: u64,
+    /// Where it came from: `downloaded`, `added`, or the source that found it (LM Studio, Ollama ...).
+    pub where_: String,
+    /// What the start plan shows for it: the file of a download, the name of a file the user
+    /// added, the name a found model has — the `name` argument of the Studio's `add`.
+    pub shown: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +44,8 @@ pub struct CatalogEntry {
     pub vision: bool,
     pub fits: bool,
     pub variants: Vec<Variant>,
+    /// What the hub has on disk for this entry (the start plan ranks the model used last).
+    pub installed_ref: Option<String>,
 }
 
 impl CatalogEntry {
@@ -136,10 +143,26 @@ pub fn parse_overview(v: &Value) -> Overview {
         .unwrap_or_default();
     let mut installed = Vec::new();
     for item in v.get("local").and_then(Value::as_array).into_iter().flatten() {
-        installed.push(Installed { name: text_of(item, "name"), reference: text_of(item, "path"), bytes: number_of(item, "size_bytes") });
+        // a file from a folder: loaded by its path, shown by its name (or the path when there is none)
+        let path = text_of(item, "path");
+        let name = { let n = text_of(item, "name"); if n.is_empty() { path.clone() } else { n } };
+        installed.push(Installed { name, reference: path.clone(), bytes: number_of(item, "size_bytes"), where_: String::from("added"), shown: { let n = text_of(item, "name"); if n.is_empty() { path.clone() } else { n } } });
     }
     for item in v.get("cached").and_then(Value::as_array).into_iter().flatten() {
-        installed.push(Installed { name: text_of(item, "name"), reference: text_of(item, "name"), bytes: number_of(item, "size_bytes") });
+        // a download the server keeps: the reference is its name (what people see), the file is
+        // beside it (the start plan takes its title from the file — startPlan of the Studio)
+        let name = text_of(item, "name");
+        let path = text_of(item, "path");
+        // the plan shows the file of a download (its name when the hub gives it none)
+        let shown = if path.is_empty() { name.clone() } else { path };
+        installed.push(Installed { name, reference: text_of(item, "name"), bytes: number_of(item, "size_bytes"), where_: String::from("downloaded"), shown });
+    }
+    for item in v.get("found").and_then(Value::as_array).into_iter().flatten() {
+        let path = text_of(item, "path");
+        installed.push(Installed { name: text_of(item, "name"), reference: path, bytes: number_of(item, "size_bytes"), where_: {
+            let source = text_of(item, "source");
+            if source.is_empty() { String::from("found") } else { source }
+        }, shown: text_of(item, "name") });
     }
     installed.retain(|i| !i.name.is_empty() && !i.reference.is_empty());
     let catalog = v
@@ -158,6 +181,7 @@ pub fn parse_overview(v: &Value) -> Overview {
             context: number_of(e, "context_length"),
             vision: e.get("vision").and_then(Value::as_bool).unwrap_or(false),
             fits: e.get("fits").and_then(Value::as_bool).unwrap_or(true),
+            installed_ref: e.pointer("/installed/ref").and_then(Value::as_str).map(str::to_string),
             variants: e
                 .get("variants")
                 .and_then(Value::as_array)
@@ -265,6 +289,44 @@ pub async fn fetch_hardware(base: String) -> Result<crate::tour::Hardware, Strin
         Ok(v) => Ok(crate::tour::Hardware::from_json(&v)),
         Err(e) => Err(e),
     }
+}
+
+/// What the start screen shows: what the engine is doing right now — the setup state of a server
+/// without a model, the model and the counters of its own clock (the hero of `panels.js` reads
+/// them from `GET /api/studio/status`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Status {
+    pub setup: bool,
+    /// The model that loads with the first message (`last_model` of the setup server).
+    pub last_model: String,
+    pub model_name: String,
+    pub parameters: u64,
+    pub parameter_size: String,
+    pub quantization: String,
+    pub max_context: u64,
+    pub uptime_secs: f64,
+    pub generated_tokens_total: u64,
+    pub slots_running: u64,
+}
+
+pub fn parse_status(v: &Value) -> Status {
+    Status {
+        setup: v.get("setup").and_then(Value::as_bool).unwrap_or(false),
+        last_model: v.get("last_model").and_then(Value::as_str).unwrap_or_default().to_string(),
+        model_name: v.pointer("/model/name").and_then(Value::as_str).unwrap_or_default().to_string(),
+        parameters: v.pointer("/model/parameters").and_then(Value::as_u64).unwrap_or(0),
+        parameter_size: v.pointer("/model/parameter_size").and_then(Value::as_str).unwrap_or_default().to_string(),
+        quantization: v.pointer("/model/quantization").and_then(Value::as_str).unwrap_or_default().to_string(),
+        max_context: v.pointer("/model/max_context").and_then(Value::as_u64).unwrap_or(0),
+        uptime_secs: v.pointer("/metrics/uptime_secs").and_then(Value::as_f64).unwrap_or(0.0),
+        generated_tokens_total: v.pointer("/metrics/generated_tokens_total").and_then(Value::as_u64).unwrap_or(0),
+        slots_running: v.pointer("/metrics/slots_running").and_then(Value::as_u64).unwrap_or(0),
+    }
+}
+
+/// The status of the engine every two seconds, the way the Studio polls it (`refreshStudioStatus`).
+pub async fn fetch_status(base: String) -> Result<Status, String> {
+    get_json(&base, "/api/studio/status").await.map(|v| parse_status(&v))
 }
 
 pub async fn fetch_downloads(base: String) -> Result<Vec<Download>, String> {
@@ -499,8 +561,12 @@ mod tests {
         assert_eq!(o.loaded.as_deref(), Some("qwen2.5-0.5b-instruct"));
         assert_eq!(o.loaded_detail, "630M · Q4_0");
         assert_eq!(o.memory, 8_309_764_096);
-        // a model from a folder is loaded by its file, a downloaded one by its name; a nameless entry is dropped
+        // a model from a folder is loaded by its file; a download is named what the hub calls it and
+        // keeps its file beside it for the start plan; an entry without a name is dropped
         assert_eq!(o.installed.iter().map(|i| (i.name.as_str(), i.reference.as_str())).collect::<Vec<_>>(), vec![("my-model.gguf", "/models/my-model.gguf"), ("qwen3.5:4b", "qwen3.5:4b")]);
+        assert_eq!(o.installed[1].shown, "/cache/qwen3.5-4b.gguf", "a download is titled by its file (startPlan)");
+        assert_eq!(o.installed[1].where_, "downloaded", "a download says where it came from");
+        assert_eq!(o.installed[0].where_, "added", "a file from a folder says so too");
         assert_eq!(o.catalog.len(), 2, "an entry without an id is dropped");
         assert_eq!(o.catalog[0].default_quant, "Q4_K_M", "the recommended quantization wins over the plain default");
         assert_eq!(o.catalog[0].bytes_of("Q8_0"), 8_908_435_456);

@@ -302,6 +302,15 @@ pub struct App {
     temp_close: bool,
     /// The welcome tour: the step that is open (None = it is closed; the Studio's `tourModal`).
     pub tour: Option<usize>,
+    /// What the engine is doing right now: the status of the hero (`updateHero` of the Studio).
+    pub hero: Option<models::Status>,
+    /// The tokens per second of the last moments: the samples of the two-minute line.
+    hero_samples: Vec<f64>,
+    /// The last counters of the server's own clock, for the rate between two moments.
+    hero_last: Option<(u64, f64)>,
+    /// The models on this computer for the start screen (asked once, like `heroHubAsked`).
+    hero_overview: Option<models::Overview>,
+    hero_hub_asked: bool,
     /// What the tour has to say (the line about this computer, a model's memory, the loaded model
     /// and the suggestions of the hub).
     pub tour_data: tour::TourData,
@@ -614,6 +623,22 @@ pub enum Message {
     TempCloseCancel,
     /// The welcome tour opens (the first start, or *Show the welcome tour* of Settings).
     TourShow,
+    /// The status of the engine came back (the hero of the start screen).
+    HeroPoll,
+    /// The status arrived; the samples of the line take it.
+    HeroStatus(Result<models::Status, String>),
+    /// The models on this computer for the start screen.
+    HeroOverview(Result<models::Overview, String>),
+    /// Load the model the start screen offers first.
+    HeroLoad(String),
+    /// Download the model the start screen offers (the recommended one when nothing is here).
+    HeroDownload { model: String, quant: String },
+    /// A model file was chosen for the start screen (file and text, like the project's dialog).
+    HeroChosen(Result<(String, Option<String>), String>),
+    /// The start screen points to the models page.
+    HeroBrowse,
+    /// The start screen asks for a model file (`Choose a model file…`).
+    HeroChoose,
     /// One step forward; the last step closes it (*Get started*).
     TourNext,
     /// One step back.
@@ -756,6 +781,11 @@ impl App {
             temp_next: false,
             temp_close: false,
             tour: None,
+            hero: None,
+            hero_samples: Vec::new(),
+            hero_last: None,
+            hero_overview: None,
+            hero_hub_asked: false,
             tour_data: tour::TourData::default(),
             shortcuts_open: false,
             sc_capture: None,
@@ -2361,6 +2391,56 @@ impl App {
                 self.temp_close = false;
                 Task::none()
             }
+            Message::HeroPoll => {
+                let base = self.base.clone();
+                Task::perform(async move { models::fetch_status(base).await }, Message::HeroStatus)
+            }
+            Message::HeroStatus(Ok(status)) => {
+                // the rate between two moments of the server's own clock (a slow poll does not
+                // skew it — the clock is the server's), and the samples of the two-minute line
+                let rate = crate::hero::trace_rate(
+                    status.generated_tokens_total,
+                    status.uptime_secs,
+                    self.hero_last.map(|(t, _)| t),
+                    self.hero_last.map(|(_, u)| u),
+                );
+                self.hero_last = Some((status.generated_tokens_total, status.uptime_secs));
+                self.hero_samples.push(rate);
+                if self.hero_samples.len() > 60 {
+                    self.hero_samples.remove(0);
+                }
+                let setup = status.setup;
+                self.hero = Some(status);
+                // the models on this computer are asked once for the start screen (heroHubAsked)
+                if setup && !self.hero_hub_asked {
+                    self.hero_hub_asked = true;
+                    let base = self.base.clone();
+                    Task::perform(async move { models::fetch_overview(base).await }, Message::HeroOverview)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::HeroStatus(Err(_)) => Task::none(),
+            Message::HeroOverview(Ok(overview)) => {
+                self.hero_overview = Some(overview);
+                Task::none()
+            }
+            Message::HeroOverview(Err(_)) => Task::none(),
+            Message::HeroLoad(reference) => {
+                Task::perform(models::load(self.base.clone(), reference), Message::ModelAction)
+            }
+            Message::HeroDownload { model, quant } => {
+                Task::perform(models::pull(self.base.clone(), model, quant), Message::ModelAction)
+            }
+            Message::HeroChosen(Ok((path, _))) => {
+                Task::perform(models::load(self.base.clone(), path), Message::ModelAction)
+            }
+            Message::HeroChosen(Err(_)) => Task::none(),
+            Message::HeroBrowse => self.update(Message::Go(View::Models)),
+            Message::HeroChoose => {
+                let base = self.base.clone();
+                Task::perform(api::pick_file_with_text(base), Message::HeroChosen)
+            }
             Message::TourShow => {
                 // the Studio's openTour: the key is written, the first step opens, and the chat is
                 // what it opens over (`switchSurface('chat')`)
@@ -3516,6 +3596,12 @@ impl App {
         // a server that was told to switch its model is back within seconds: look more often then
         let every = if self.switching { 1 } else { 4 };
         let retry = if matches!(self.server, Server::Down(_)) { time::every(Duration::from_secs(every)).map(|_| Message::Tick) } else { Subscription::none() };
+        // the start screen keeps its line of tokens per second up to date (the Studio polls every 2000 ms)
+        let hero = if !matches!(self.server, Server::Down(_)) {
+            time::every(Duration::from_secs(2)).map(|_| Message::HeroPoll)
+        } else {
+            Subscription::none()
+        };
         let poll = if (self.page == View::Models && !matches!(self.server, Server::Down(_))) || self.models.any_active() {
             time::every(Duration::from_secs(1)).map(|_| Message::Poll)
         } else {
@@ -3538,7 +3624,7 @@ impl App {
             }
             _ => None,
         });
-        Subscription::batch([retry, poll, dropped])
+        Subscription::batch([retry, poll, hero, dropped])
     }
 
     // ---- view ------------------------------------------------------------------------------------------------------------
@@ -5158,13 +5244,47 @@ impl App {
     }
 
     fn welcome(&self, t: Tokens) -> Element<'_, Message> {
-        let model = match &self.server {
-            Server::Ready(m) => format!("Running locally on this computer · {} tokens of context.", group(m.max_context)),
-            _ => "Connecting to the server…".into(),
+        // The hero of the Studio (`updateHero`): the heading of the moment and the words under
+        // it — nothing loaded with what can be done about it, the name of the model with its facts
+        let status = self.hero.as_ref();
+        let setup = status.is_some_and(|s| s.setup);
+        // the name of the model that runs is what the Studio's hero says (its `model.name`)
+        let heading = if setup {
+            String::from("No model loaded")
+        } else {
+            match status.map(|s| s.model_name.as_str()).filter(|n| !n.is_empty()) {
+                Some(name) => name.to_string(),
+                None => match &self.server {
+                    Server::Ready(m) => m.id.clone(),
+                    _ => String::from("fLLM"),
+                },
+            }
         };
-        let name = match &self.server {
-            Server::Ready(m) => m.id.clone(),
-            _ => "fLLM".into(),
+        let (sub, plan) = if setup {
+            match self.hero_overview.as_ref() {
+                None => (String::from("Looking for models on this computer …"), None),
+                Some(overview) => {
+                    let last = status.map(|s| s.last_model.as_str()).unwrap_or("");
+                    let plan = crate::hero::start_plan(overview, last);
+                    let words = if plan.mode == "load" {
+                        String::from("A model on this computer is ready. Nothing to download.")
+                    } else {
+                        String::from("Download one, or choose a model file you already have.")
+                    };
+                    (words, Some(plan))
+                }
+            }
+        } else {
+            let facts = status
+                .map(|s| crate::hero::hero_facts(s.parameters, &s.parameter_size, &s.quantization, s.max_context))
+                .unwrap_or_default();
+            let words = match &self.server {
+                Server::Ready(_) if !facts.is_empty() => format!("Running locally on this computer: {facts}."),
+                Server::Ready(_) => String::from("Running locally on this computer."),
+                _ if !facts.is_empty() => format!("Running locally on this computer: {facts}."),
+                _ => String::from("Connecting to the server…"),
+            };
+            (words, None)
         };
         let list = self.starter_list();
         let mut starters = column![].spacing(10);
@@ -5183,10 +5303,108 @@ impl App {
             }
             starters = starters.push(r);
         }
+        // The two-minute line of tokens per second: sixty bars, and the value of the last moment
+        // beside its label (the `heroTrace` and `heroTps` of the Studio)
+        let mut trace = row![].spacing(2).align_y(Alignment::End);
+        let busy = status.is_some_and(|s| s.slots_running > 0);
+        if !self.hero_samples.is_empty() {
+            let top = 10.0f64.max(self.hero_samples.iter().cloned().fold(0.0f64, f64::max));
+            for sample in self.hero_samples.iter() {
+                let h = ((sample / top).clamp(0.0, 1.0) * 58.0 + 2.0) as f32;
+                trace = trace.push(
+                    container(Space::new().width(6.0).height(h))
+                        .width(6.0)
+                        .height(60.0)
+                        .align_y(Alignment::End)
+                        .style(move |_|iced::widget::container::Style {
+                            background: Some(iced::Background::Color(if busy { t.primary } else { t.separator })),
+                            border: iced::Border { radius: theme::R_SM.into(), ..Default::default() },
+                            ..Default::default()
+                        }),
+                );
+            }
+            let (value, label) = crate::hero::trace_text(*self.hero_samples.last().unwrap(), busy);
+            trace = trace.push(
+                column![
+                    text(value).size(16).font(bold()),
+                    text(label).size(11).color(t.muted),
+                ]
+                .spacing(2)
+                .align_x(Alignment::Start)
+                .padding([0, 10]),
+            );
+        }
+        // What can be done about it: the buttons of `renderHeroStart` (load the model that is
+        // here first, or take the recommended one when nothing is)
+        let mut actions = column![].spacing(8).align_x(Alignment::Center);
+        if let Some(plan) = plan {
+            if plan.mode == "load" {
+                if let Some(first) = plan.primary.as_ref() {
+                    let meta = crate::hero::meta_line(first.size, &first.where_, first.last, first.fits);
+                    actions = actions.push(
+                        button(text(format!("Load {}", first.title)).size(14).font(bold()))
+                            .on_press(Message::HeroLoad(first.reference.clone()))
+                            .padding([10, 18])
+                            .style(primary_style(t)),
+                    ).push(text(meta).size(12).color(t.muted));
+                }
+                for other in plan.others.iter().take(4) {
+                    actions = actions.push(
+                        button(text(format!("Load {}", other.title)).size(13).color(t.fg_soft))
+                            .on_press(Message::HeroLoad(other.reference.clone()))
+                            .padding([8, 14])
+                            .style(starter_style(t)),
+                    );
+                }
+                if plan.others.len() > 4 {
+                    actions = actions.push(
+                        text(format!("and {} more on the Models page", plan.others.len() - 4))
+                            .size(12)
+                            .color(t.muted),
+                    );
+                }
+            } else if let Some(rec) = plan.download.as_ref() {
+                // name, quantization and weight in one line (the variant decides, with the
+                // warning only when it does not fit into memory — renderHeroStart of the Studio)
+                let name = if rec.display_name.is_empty() { rec.id.as_str() } else { rec.display_name.as_str() };
+                let variant = rec
+                    .variants
+                    .iter()
+                    .find(|v| v.quant == rec.default_quant)
+                    .or_else(|| rec.variants.first());
+                let bytes = variant.map_or(0, |v| v.bytes);
+                let fits = variant.map_or(rec.fits, |v| v.fits);
+                let meta = crate::hero::download_meta(name, &rec.default_quant, bytes, fits);
+                actions = actions.push(
+                    button(text("Download and start").size(14).font(bold()))
+                        .on_press(Message::HeroDownload { model: rec.id.clone(), quant: rec.default_quant.clone() })
+                        .padding([10, 18])
+                        .style(primary_style(t)),
+                ).push(
+                    text(meta).size(12).color(t.muted),
+                );
+            }
+            let mut choices = row![].spacing(8);
+            choices = choices.push(
+                button(text("Choose a model file…").size(13).color(t.fg_soft))
+                    .on_press(Message::HeroChoose)
+                    .padding([8, 14])
+                    .style(starter_style(t)),
+            ).push(
+                button(text("Browse models").size(13).color(t.fg_soft))
+                    .on_press(Message::HeroBrowse)
+                    .padding([8, 14])
+                    .style(starter_style(t)),
+            );
+            actions = actions.push(choices);
+        }
         let mut hero = column![
-            text(name).size(30).font(bold()),
-            text(model).size(14).color(t.muted),
-            Space::new().height(18),
+            text(heading).size(30).font(bold()),
+            text(sub).size(14).color(t.muted),
+            Space::new().height(10),
+            trace,
+            Space::new().height(6),
+            actions,
             starters,
         ]
         .spacing(6)
@@ -6959,6 +7177,20 @@ fn starter_style(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Style 
         })),
         text_color: t.fg_soft,
         border: iced::Border { color: t.separator, width: 0.5, radius: theme::R_LG.into() },
+        ..Default::default()
+    }
+}
+
+/// The main button of the start screen (`renderHeroStart` of the Studio): the accent, not a
+/// plain starter button.
+fn primary_style(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| button::Style {
+        background: Some(iced::Background::Color(match status {
+            button::Status::Hovered | button::Status::Pressed => t.primary_soft,
+            _ => t.primary,
+        })),
+        text_color: t.on_primary,
+        border: iced::Border { color: t.primary, width: 0.5, radius: theme::R_LG.into() },
         ..Default::default()
     }
 }

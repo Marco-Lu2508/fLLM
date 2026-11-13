@@ -53,6 +53,21 @@ behaviour between versions).
   `assistantInner`. Tests: Esc stopping and ignoring, the fold with its click, the open box while it
   thinks, and the research run stopped by the key; four mutations each turn one red; the open box is
   drawn to a PNG and read back.
+- **The start screen of the native app.** The welcome view is now the hero of the Studio (`panels.js`):
+  *No model loaded* with what can be done about it, or the name of the model with its facts. The plan is the
+  Studio's `startPlan` — every model on this computer counts (downloads, files the user added, files found in
+  Downloads, LM Studio, Ollama …), the one used last comes first, then the recommended one when it is on disk,
+  then the largest that fits into the free memory with 15 percent of room; without anything on disk the plan is
+  the recommended download. The buttons of `renderHeroStart` come with it — *Load …* with the meta line the
+  Studio builds (`sizeText`, *used last* or the source, the warning only when it may not fit), up to four other
+  models, *Download and start* with name, quantization and weight of the variant, *Choose a model file…* and
+  *Browse models*. A loaded model shows its name and the facts line (*4 billion parameters, 4B, Q4_K_M, 32768
+  tokens of context*), and the two-minute line of tokens per second is drawn as sixty bars: the rate between two
+  moments of the server's own clock polled every two seconds, the bars in the accent while a slot runs with
+  *tokens per second, the model is answering* beside the value. The status comes from `GET /api/studio/status`
+  (`setup` and `last_model` of the setup server included); the models on this computer are asked once, like
+  `heroHubAsked`. Twelve fixtures from the Studio's own pure zone, seven unit tests, four window tests with three
+  drawings of the screen, four mutations.
 - **Dictation, reading aloud and alerts in the native app.** The Studio has a *Voice and alerts* pane
   (`voice.js`); the native app has the three cards of it. Dictation tells what the Studio tells when the system
   has no speech recognition (its microphone row explains it and the button stays hidden) with the seventeen

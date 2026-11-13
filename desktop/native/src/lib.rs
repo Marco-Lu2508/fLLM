@@ -10,6 +10,7 @@ pub mod artifacts;
 pub mod chatlist;
 pub mod code;
 pub mod engine_settings;
+pub mod hero;
 pub mod md;
 pub mod models;
 pub mod palette;

@@ -1,0 +1,383 @@
+[
+  {
+    "fn": "modelFileTitle",
+    "args": [
+      "/models/qwen/Qwen3-4B-Q4_K_M.gguf"
+    ],
+    "expected": "Qwen3-4B-Q4_K_M",
+    "got": "Qwen3-4B-Q4_K_M",
+    "note": ""
+  },
+  {
+    "fn": "modelFileTitle",
+    "args": [
+      "C:\\Users\\a\\qwen.gguf"
+    ],
+    "expected": "qwen",
+    "got": "qwen",
+    "note": ""
+  },
+  {
+    "fn": "modelFileTitle",
+    "args": [
+      "qwen3.5:4b"
+    ],
+    "expected": "qwen3.5:4b",
+    "got": "qwen3.5:4b",
+    "note": ""
+  },
+  {
+    "fn": "modelFileTitle",
+    "args": [
+      "model.GGUF"
+    ],
+    "expected": "model",
+    "got": "model",
+    "note": "an upper-case extension goes too"
+  },
+  {
+    "fn": "modelFileTitle",
+    "args": [
+      ""
+    ],
+    "expected": "",
+    "got": "",
+    "note": ""
+  },
+  {
+    "fn": "modelFileTitle",
+    "args": [
+      null
+    ],
+    "expected": "",
+    "got": "",
+    "note": ""
+  },
+  {
+    "fn": "startPlan",
+    "args": [
+      {
+        "available_memory_bytes": 0,
+        "catalog": [],
+        "recommended": [],
+        "cached": [],
+        "local": [],
+        "found": []
+      },
+      ""
+    ],
+    "expected": {
+      "mode": "download",
+      "primary": null,
+      "others": [],
+      "download": null
+    },
+    "got": {
+      "mode": "download",
+      "primary": null,
+      "others": [],
+      "download": null
+    },
+    "note": "nothing anywhere: the plan is the download"
+  },
+  {
+    "fn": "startPlan",
+    "args": [
+      {
+        "available_memory_bytes": 0,
+        "catalog": [
+          {
+            "id": "qwen3-4b"
+          }
+        ],
+        "recommended": [
+          "qwen3-4b"
+        ],
+        "cached": [],
+        "local": [],
+        "found": []
+      },
+      ""
+    ],
+    "expected": {
+      "mode": "download",
+      "primary": null,
+      "others": [],
+      "download": {
+        "id": "qwen3-4b"
+      }
+    },
+    "got": {
+      "mode": "download",
+      "primary": null,
+      "others": [],
+      "download": {
+        "id": "qwen3-4b"
+      }
+    },
+    "note": "the recommended model from the catalog"
+  },
+  {
+    "fn": "startPlan",
+    "args": [
+      {
+        "available_memory_bytes": 0,
+        "catalog": [
+          {
+            "id": "used",
+            "installed": {
+              "ref": "/c/used.gguf"
+            }
+          }
+        ],
+        "recommended": [
+          "qwen"
+        ],
+        "cached": [
+          {
+            "name": "used.gguf",
+            "path": "/c/used.gguf",
+            "size_bytes": 1000000000
+          }
+        ],
+        "local": [],
+        "found": []
+      },
+      "/c/used.gguf"
+    ],
+    "expected": {
+      "mode": "load",
+      "primary": {
+        "ref": "used.gguf",
+        "title": "used",
+        "size": 1000000000,
+        "where": "downloaded",
+        "last": true,
+        "fits": true
+      },
+      "others": [],
+      "download": null
+    },
+    "got": {
+      "mode": "load",
+      "primary": {
+        "ref": "used.gguf",
+        "title": "used",
+        "size": 1000000000,
+        "where": "downloaded",
+        "last": true,
+        "fits": true
+      },
+      "others": [],
+      "download": null
+    },
+    "note": "the model used last is the first one"
+  },
+  {
+    "fn": "startPlan",
+    "args": [
+      {
+        "available_memory_bytes": 0,
+        "catalog": [
+          {
+            "id": "used",
+            "installed": {
+              "ref": "/m/used.gguf"
+            }
+          },
+          {
+            "id": "rec",
+            "installed": {
+              "ref": "/o/rec.gguf"
+            }
+          }
+        ],
+        "recommended": [
+          "rec"
+        ],
+        "cached": [],
+        "local": [
+          {
+            "name": "big.gguf",
+            "path": "/m/big.gguf",
+            "size_bytes": 4000000000
+          },
+          {
+            "name": "used.gguf",
+            "path": "/m/used.gguf",
+            "size_bytes": 1000000000
+          }
+        ],
+        "found": [
+          {
+            "name": "rec.gguf",
+            "path": "/o/rec.gguf",
+            "size_bytes": 2000000000,
+            "source": "ollama"
+          }
+        ],
+        "memory": 3000000000
+      },
+      "/m/used.gguf"
+    ],
+    "expected": {
+      "mode": "load",
+      "primary": {
+        "ref": "/m/used.gguf",
+        "title": "used",
+        "size": 1000000000,
+        "where": "added",
+        "last": true,
+        "fits": true
+      },
+      "others": [
+        {
+          "ref": "/o/rec.gguf",
+          "title": "rec",
+          "size": 2000000000,
+          "where": "ollama"
+        },
+        {
+          "ref": "/m/big.gguf",
+          "title": "big",
+          "size": 4000000000,
+          "where": "added"
+        }
+      ],
+      "download": null
+    },
+    "got": {
+      "mode": "load",
+      "primary": {
+        "ref": "/m/used.gguf",
+        "title": "used",
+        "size": 1000000000,
+        "where": "added",
+        "last": true,
+        "fits": true
+      },
+      "others": [
+        {
+          "ref": "/o/rec.gguf",
+          "title": "rec",
+          "size": 2000000000,
+          "where": "ollama"
+        },
+        {
+          "ref": "/m/big.gguf",
+          "title": "big",
+          "size": 4000000000,
+          "where": "added"
+        }
+      ],
+      "download": null
+    },
+    "note": "used first, then the recommended one, the big one that does not fit last"
+  },
+  {
+    "fn": "startPlan",
+    "args": [
+      {
+        "available_memory_bytes": 0,
+        "catalog": [],
+        "recommended": [],
+        "cached": [],
+        "local": [
+          {
+            "name": "a.gguf",
+            "path": "/M/A.GGUF",
+            "size_bytes": 1000000000
+          },
+          {
+            "name": "a.gguf",
+            "path": "/m/a.gguf",
+            "size_bytes": 999
+          }
+        ],
+        "found": []
+      },
+      ""
+    ],
+    "expected": {
+      "mode": "load",
+      "primary": {
+        "ref": "/M/A.GGUF",
+        "title": "a",
+        "size": 1000000000,
+        "where": "added",
+        "last": false,
+        "fits": true
+      },
+      "others": [],
+      "download": null
+    },
+    "got": {
+      "mode": "load",
+      "primary": {
+        "ref": "/M/A.GGUF",
+        "title": "a",
+        "size": 1000000000,
+        "where": "added",
+        "last": false,
+        "fits": true
+      },
+      "others": [],
+      "download": null
+    },
+    "note": "the same reference counts once, in lower case (the Set of the Studio)"
+  },
+  {
+    "fn": "startPlan",
+    "args": [
+      {
+        "available_memory_bytes": 0,
+        "catalog": [
+          {
+            "id": "id-elsewhere",
+            "installed": {
+              "ref": "/elsewhere"
+            }
+          }
+        ],
+        "recommended": [],
+        "cached": [
+          {
+            "name": "only-name",
+            "path": "/elsewhere",
+            "size_bytes": 10
+          }
+        ],
+        "local": [],
+        "found": []
+      },
+      "id-elsewhere"
+    ],
+    "expected": {
+      "mode": "load",
+      "primary": {
+        "ref": "only-name",
+        "title": "elsewhere",
+        "size": 10,
+        "where": "downloaded",
+        "last": false,
+        "fits": true
+      },
+      "others": [],
+      "download": null
+    },
+    "got": {
+      "mode": "load",
+      "primary": {
+        "ref": "only-name",
+        "title": "elsewhere",
+        "size": 10,
+        "where": "downloaded",
+        "last": false,
+        "fits": true
+      },
+      "others": [],
+      "download": null
+    },
+    "note": "a model only named by its hub id is not the one used last (its file name decides beside it)"
+  }
+]

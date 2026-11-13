@@ -144,6 +144,12 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   four calls); the sources are numbered `[n]` under the answer (*Sources*, a click opens the page
   in the browser). The texts, cards, budget and error lines are checked against `ctRunTool` of the
   Studio itself — the fixtures are produced by that code.
+- Start screen: the welcome view says what the engine is doing right now, like the Studio's hero: *No model
+  loaded* with the plan of what can be done about it (every model on this computer counts — the one used last first,
+  the recommended one when it is on disk, the largest that fits otherwise — or the recommended download when nothing
+  is here) and its buttons to load, download, choose a file or browse; a loaded model shows its name, its facts and
+  the two-minute line of tokens per second with the value of the last moment. Twelve fixtures of the Studio's own
+  pure functions, seven unit tests, four window tests with three drawings, four mutations.
 - Voice and alerts: Settings shows the cards *Dictation* (with what the Studio says when there is no speech
   recognition, and its seventeen languages), *Reading aloud* (voice, speed, pitch, read answers automatically,
   *Read a sample*) and *Alerts*. Every answer is read with the chosen voice through the speech programs of the
