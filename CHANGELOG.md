@@ -53,6 +53,18 @@ behaviour between versions).
   `assistantInner`. Tests: Esc stopping and ignoring, the fold with its click, the open box while it
   thinks, and the research run stopped by the key; four mutations each turn one red; the open box is
   drawn to a PNG and read back.
+- **The command palette in the native app.** The Studio opens its palette on `Ctrl+K` with the commands
+  and the chats in one list (`palette.js`, the `searchModal` of `shell.html`); the native app opens the same
+  one on its `search` shortcut. `palette.rs` is the `@pure` block of that file as Rust: the score of a text
+  for a query (exact, word start, boundary, inside, letters in order), the ranking in one block per kind
+  with the best match first and a weak row last, and the arrow steps that wrap around — checked against 37
+  cases the block produced itself, with `snippet` of `boot.js` for the text around a hit. The window draws
+  the modal: the field, the groups, the rows with the keys in force and the text under a chat title, the
+  help and the count in the foot, *Nothing found for "…".* and *No results*; the arrow keys walk it, Enter
+  runs the row, Esc closes it before anything else happens. The commands are what this app can do — the
+  pages, the theme (its title says where it would go), the tour, the shortcuts and, with a chat open, the
+  regenerate and the two exports; the chats come from the store the way the sidebar searches it. 4 window
+  tests with 3 drawings, 3 mutations.
 - **The keyboard shortcuts in the native app.** The Studio lists its shortcuts and lets people give
   them other keys (`helpModal` with the `@pure` block of `boot.js`); the native app does both now.
   `shortcuts.rs` holds the fifteen shortcuts with their descriptions, the fixed keys, the parse and the

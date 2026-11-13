@@ -1,0 +1,1183 @@
+{
+ "score": [
+  [
+   "anything",
+   "",
+   1
+  ],
+  [
+   "anything",
+   "  ",
+   1
+  ],
+  [
+   "keyboard",
+   "keyboard",
+   120
+  ],
+  [
+   "Keyboard shortcuts",
+   "keyboard",
+   100
+  ],
+  [
+   "keyboard shortcuts",
+   "board",
+   40
+  ],
+  [
+   "keyboard shortcuts",
+   "short",
+   70
+  ],
+  [
+   "the dark theme",
+   "dark",
+   70
+  ],
+  [
+   "go to chat",
+   "to",
+   70
+  ],
+  [
+   "go to chat",
+   "o t",
+   55
+  ],
+  [
+   "Go to Chat",
+   "  GO  ",
+   100
+  ],
+  [
+   "keyboard shortcuts",
+   "kbd",
+   12
+  ],
+  [
+   "keyboard shortcuts",
+   "kbs",
+   0
+  ],
+  [
+   "keyboard shortcuts",
+   "zqx",
+   0
+  ],
+  [
+   "go to chat",
+   "models",
+   0
+  ],
+  [
+   "dark mode",
+   "ark",
+   40
+  ],
+  [
+   "sand art",
+   "art",
+   70
+  ]
+ ],
+ "rank": [
+  [
+   "",
+   [
+    {
+     "id": "new",
+     "kind": "Command",
+     "title": "New chat",
+     "keywords": "start conversation"
+    },
+    {
+     "id": "chat",
+     "kind": "Command",
+     "title": "Go to Chat"
+    },
+    {
+     "id": "code",
+     "kind": "Command",
+     "title": "Go to Code",
+     "keywords": "coding agent folder"
+    },
+    {
+     "id": "models",
+     "kind": "Command",
+     "title": "Open Models",
+     "keywords": "download hugging face gguf catalog load"
+    },
+    {
+     "id": "settings",
+     "kind": "Command",
+     "title": "Open Settings"
+    },
+    {
+     "id": "theme",
+     "kind": "Command",
+     "title": "Switch to the dark theme",
+     "keywords": "appearance colors mode"
+    },
+    {
+     "id": "shortcuts",
+     "kind": "Command",
+     "title": "Keyboard shortcuts",
+     "keywords": "keys hotkeys"
+    },
+    {
+     "id": "tour",
+     "kind": "Command",
+     "title": "Show the welcome tour"
+    },
+    {
+     "id": "export-md",
+     "kind": "Command",
+     "title": "Export this chat as Markdown",
+     "keywords": "save download"
+    },
+    {
+     "id": "chat-1",
+     "kind": "Chat",
+     "title": "Gold price today"
+    },
+    {
+     "id": "chat-2",
+     "kind": "Chat",
+     "title": "Keyboard layout"
+    },
+    {
+     "id": "chat-3",
+     "kind": "Chat",
+     "title": "Docker networks"
+    },
+    {
+     "id": "pane-sampling",
+     "kind": "Setting",
+     "title": "Settings: Sampling"
+    },
+    {
+     "id": "pane-general",
+     "kind": "Setting",
+     "title": "Settings: General"
+    }
+   ],
+   40,
+   [
+    "new",
+    "chat",
+    "code",
+    "models",
+    "settings",
+    "theme",
+    "shortcuts",
+    "chat-1",
+    "chat-2",
+    "chat-3"
+   ]
+  ],
+  [
+   "",
+   [
+    {
+     "id": "new",
+     "kind": "Command",
+     "title": "New chat",
+     "keywords": "start conversation"
+    },
+    {
+     "id": "chat",
+     "kind": "Command",
+     "title": "Go to Chat"
+    },
+    {
+     "id": "code",
+     "kind": "Command",
+     "title": "Go to Code",
+     "keywords": "coding agent folder"
+    },
+    {
+     "id": "models",
+     "kind": "Command",
+     "title": "Open Models",
+     "keywords": "download hugging face gguf catalog load"
+    },
+    {
+     "id": "settings",
+     "kind": "Command",
+     "title": "Open Settings"
+    },
+    {
+     "id": "theme",
+     "kind": "Command",
+     "title": "Switch to the dark theme",
+     "keywords": "appearance colors mode"
+    },
+    {
+     "id": "shortcuts",
+     "kind": "Command",
+     "title": "Keyboard shortcuts",
+     "keywords": "keys hotkeys"
+    },
+    {
+     "id": "tour",
+     "kind": "Command",
+     "title": "Show the welcome tour"
+    },
+    {
+     "id": "export-md",
+     "kind": "Command",
+     "title": "Export this chat as Markdown",
+     "keywords": "save download"
+    },
+    {
+     "id": "chat-1",
+     "kind": "Chat",
+     "title": "Gold price today"
+    },
+    {
+     "id": "chat-2",
+     "kind": "Chat",
+     "title": "Keyboard layout"
+    },
+    {
+     "id": "chat-3",
+     "kind": "Chat",
+     "title": "Docker networks"
+    },
+    {
+     "id": "pane-sampling",
+     "kind": "Setting",
+     "title": "Settings: Sampling"
+    },
+    {
+     "id": "pane-general",
+     "kind": "Setting",
+     "title": "Settings: General"
+    }
+   ],
+   3,
+   [
+    "new",
+    "chat",
+    "code"
+   ]
+  ],
+  [
+   "chat",
+   [
+    {
+     "id": "new",
+     "kind": "Command",
+     "title": "New chat",
+     "keywords": "start conversation"
+    },
+    {
+     "id": "chat",
+     "kind": "Command",
+     "title": "Go to Chat"
+    },
+    {
+     "id": "code",
+     "kind": "Command",
+     "title": "Go to Code",
+     "keywords": "coding agent folder"
+    },
+    {
+     "id": "models",
+     "kind": "Command",
+     "title": "Open Models",
+     "keywords": "download hugging face gguf catalog load"
+    },
+    {
+     "id": "settings",
+     "kind": "Command",
+     "title": "Open Settings"
+    },
+    {
+     "id": "theme",
+     "kind": "Command",
+     "title": "Switch to the dark theme",
+     "keywords": "appearance colors mode"
+    },
+    {
+     "id": "shortcuts",
+     "kind": "Command",
+     "title": "Keyboard shortcuts",
+     "keywords": "keys hotkeys"
+    },
+    {
+     "id": "tour",
+     "kind": "Command",
+     "title": "Show the welcome tour"
+    },
+    {
+     "id": "export-md",
+     "kind": "Command",
+     "title": "Export this chat as Markdown",
+     "keywords": "save download"
+    },
+    {
+     "id": "chat-1",
+     "kind": "Chat",
+     "title": "Gold price today"
+    },
+    {
+     "id": "chat-2",
+     "kind": "Chat",
+     "title": "Keyboard layout"
+    },
+    {
+     "id": "chat-3",
+     "kind": "Chat",
+     "title": "Docker networks"
+    },
+    {
+     "id": "pane-sampling",
+     "kind": "Setting",
+     "title": "Settings: Sampling"
+    },
+    {
+     "id": "pane-general",
+     "kind": "Setting",
+     "title": "Settings: General"
+    }
+   ],
+   40,
+   [
+    "new",
+    "chat",
+    "export-md"
+   ]
+  ],
+  [
+   "keyboard",
+   [
+    {
+     "id": "new",
+     "kind": "Command",
+     "title": "New chat",
+     "keywords": "start conversation"
+    },
+    {
+     "id": "chat",
+     "kind": "Command",
+     "title": "Go to Chat"
+    },
+    {
+     "id": "code",
+     "kind": "Command",
+     "title": "Go to Code",
+     "keywords": "coding agent folder"
+    },
+    {
+     "id": "models",
+     "kind": "Command",
+     "title": "Open Models",
+     "keywords": "download hugging face gguf catalog load"
+    },
+    {
+     "id": "settings",
+     "kind": "Command",
+     "title": "Open Settings"
+    },
+    {
+     "id": "theme",
+     "kind": "Command",
+     "title": "Switch to the dark theme",
+     "keywords": "appearance colors mode"
+    },
+    {
+     "id": "shortcuts",
+     "kind": "Command",
+     "title": "Keyboard shortcuts",
+     "keywords": "keys hotkeys"
+    },
+    {
+     "id": "tour",
+     "kind": "Command",
+     "title": "Show the welcome tour"
+    },
+    {
+     "id": "export-md",
+     "kind": "Command",
+     "title": "Export this chat as Markdown",
+     "keywords": "save download"
+    },
+    {
+     "id": "chat-1",
+     "kind": "Chat",
+     "title": "Gold price today"
+    },
+    {
+     "id": "chat-2",
+     "kind": "Chat",
+     "title": "Keyboard layout"
+    },
+    {
+     "id": "chat-3",
+     "kind": "Chat",
+     "title": "Docker networks"
+    },
+    {
+     "id": "pane-sampling",
+     "kind": "Setting",
+     "title": "Settings: Sampling"
+    },
+    {
+     "id": "pane-general",
+     "kind": "Setting",
+     "title": "Settings: General"
+    }
+   ],
+   40,
+   [
+    "chat-2",
+    "shortcuts"
+   ]
+  ],
+  [
+   "folder",
+   [
+    {
+     "id": "new",
+     "kind": "Command",
+     "title": "New chat",
+     "keywords": "start conversation"
+    },
+    {
+     "id": "chat",
+     "kind": "Command",
+     "title": "Go to Chat"
+    },
+    {
+     "id": "code",
+     "kind": "Command",
+     "title": "Go to Code",
+     "keywords": "coding agent folder"
+    },
+    {
+     "id": "models",
+     "kind": "Command",
+     "title": "Open Models",
+     "keywords": "download hugging face gguf catalog load"
+    },
+    {
+     "id": "settings",
+     "kind": "Command",
+     "title": "Open Settings"
+    },
+    {
+     "id": "theme",
+     "kind": "Command",
+     "title": "Switch to the dark theme",
+     "keywords": "appearance colors mode"
+    },
+    {
+     "id": "shortcuts",
+     "kind": "Command",
+     "title": "Keyboard shortcuts",
+     "keywords": "keys hotkeys"
+    },
+    {
+     "id": "tour",
+     "kind": "Command",
+     "title": "Show the welcome tour"
+    },
+    {
+     "id": "export-md",
+     "kind": "Command",
+     "title": "Export this chat as Markdown",
+     "keywords": "save download"
+    },
+    {
+     "id": "chat-1",
+     "kind": "Chat",
+     "title": "Gold price today"
+    },
+    {
+     "id": "chat-2",
+     "kind": "Chat",
+     "title": "Keyboard layout"
+    },
+    {
+     "id": "chat-3",
+     "kind": "Chat",
+     "title": "Docker networks"
+    },
+    {
+     "id": "pane-sampling",
+     "kind": "Setting",
+     "title": "Settings: Sampling"
+    },
+    {
+     "id": "pane-general",
+     "kind": "Setting",
+     "title": "Settings: General"
+    }
+   ],
+   40,
+   [
+    "code"
+   ]
+  ],
+  [
+   "dark",
+   [
+    {
+     "id": "new",
+     "kind": "Command",
+     "title": "New chat",
+     "keywords": "start conversation"
+    },
+    {
+     "id": "chat",
+     "kind": "Command",
+     "title": "Go to Chat"
+    },
+    {
+     "id": "code",
+     "kind": "Command",
+     "title": "Go to Code",
+     "keywords": "coding agent folder"
+    },
+    {
+     "id": "models",
+     "kind": "Command",
+     "title": "Open Models",
+     "keywords": "download hugging face gguf catalog load"
+    },
+    {
+     "id": "settings",
+     "kind": "Command",
+     "title": "Open Settings"
+    },
+    {
+     "id": "theme",
+     "kind": "Command",
+     "title": "Switch to the dark theme",
+     "keywords": "appearance colors mode"
+    },
+    {
+     "id": "shortcuts",
+     "kind": "Command",
+     "title": "Keyboard shortcuts",
+     "keywords": "keys hotkeys"
+    },
+    {
+     "id": "tour",
+     "kind": "Command",
+     "title": "Show the welcome tour"
+    },
+    {
+     "id": "export-md",
+     "kind": "Command",
+     "title": "Export this chat as Markdown",
+     "keywords": "save download"
+    },
+    {
+     "id": "chat-1",
+     "kind": "Chat",
+     "title": "Gold price today"
+    },
+    {
+     "id": "chat-2",
+     "kind": "Chat",
+     "title": "Keyboard layout"
+    },
+    {
+     "id": "chat-3",
+     "kind": "Chat",
+     "title": "Docker networks"
+    },
+    {
+     "id": "pane-sampling",
+     "kind": "Setting",
+     "title": "Settings: Sampling"
+    },
+    {
+     "id": "pane-general",
+     "kind": "Setting",
+     "title": "Settings: General"
+    }
+   ],
+   40,
+   [
+    "theme"
+   ]
+  ],
+  [
+   "gguf",
+   [
+    {
+     "id": "new",
+     "kind": "Command",
+     "title": "New chat",
+     "keywords": "start conversation"
+    },
+    {
+     "id": "chat",
+     "kind": "Command",
+     "title": "Go to Chat"
+    },
+    {
+     "id": "code",
+     "kind": "Command",
+     "title": "Go to Code",
+     "keywords": "coding agent folder"
+    },
+    {
+     "id": "models",
+     "kind": "Command",
+     "title": "Open Models",
+     "keywords": "download hugging face gguf catalog load"
+    },
+    {
+     "id": "settings",
+     "kind": "Command",
+     "title": "Open Settings"
+    },
+    {
+     "id": "theme",
+     "kind": "Command",
+     "title": "Switch to the dark theme",
+     "keywords": "appearance colors mode"
+    },
+    {
+     "id": "shortcuts",
+     "kind": "Command",
+     "title": "Keyboard shortcuts",
+     "keywords": "keys hotkeys"
+    },
+    {
+     "id": "tour",
+     "kind": "Command",
+     "title": "Show the welcome tour"
+    },
+    {
+     "id": "export-md",
+     "kind": "Command",
+     "title": "Export this chat as Markdown",
+     "keywords": "save download"
+    },
+    {
+     "id": "chat-1",
+     "kind": "Chat",
+     "title": "Gold price today"
+    },
+    {
+     "id": "chat-2",
+     "kind": "Chat",
+     "title": "Keyboard layout"
+    },
+    {
+     "id": "chat-3",
+     "kind": "Chat",
+     "title": "Docker networks"
+    },
+    {
+     "id": "pane-sampling",
+     "kind": "Setting",
+     "title": "Settings: Sampling"
+    },
+    {
+     "id": "pane-general",
+     "kind": "Setting",
+     "title": "Settings: General"
+    }
+   ],
+   40,
+   [
+    "models"
+   ]
+  ],
+  [
+   "docker",
+   [
+    {
+     "id": "new",
+     "kind": "Command",
+     "title": "New chat",
+     "keywords": "start conversation"
+    },
+    {
+     "id": "chat",
+     "kind": "Command",
+     "title": "Go to Chat"
+    },
+    {
+     "id": "code",
+     "kind": "Command",
+     "title": "Go to Code",
+     "keywords": "coding agent folder"
+    },
+    {
+     "id": "models",
+     "kind": "Command",
+     "title": "Open Models",
+     "keywords": "download hugging face gguf catalog load"
+    },
+    {
+     "id": "settings",
+     "kind": "Command",
+     "title": "Open Settings"
+    },
+    {
+     "id": "theme",
+     "kind": "Command",
+     "title": "Switch to the dark theme",
+     "keywords": "appearance colors mode"
+    },
+    {
+     "id": "shortcuts",
+     "kind": "Command",
+     "title": "Keyboard shortcuts",
+     "keywords": "keys hotkeys"
+    },
+    {
+     "id": "tour",
+     "kind": "Command",
+     "title": "Show the welcome tour"
+    },
+    {
+     "id": "export-md",
+     "kind": "Command",
+     "title": "Export this chat as Markdown",
+     "keywords": "save download"
+    },
+    {
+     "id": "chat-1",
+     "kind": "Chat",
+     "title": "Gold price today"
+    },
+    {
+     "id": "chat-2",
+     "kind": "Chat",
+     "title": "Keyboard layout"
+    },
+    {
+     "id": "chat-3",
+     "kind": "Chat",
+     "title": "Docker networks"
+    },
+    {
+     "id": "pane-sampling",
+     "kind": "Setting",
+     "title": "Settings: Sampling"
+    },
+    {
+     "id": "pane-general",
+     "kind": "Setting",
+     "title": "Settings: General"
+    }
+   ],
+   40,
+   [
+    "chat-3"
+   ]
+  ],
+  [
+   "settings",
+   [
+    {
+     "id": "new",
+     "kind": "Command",
+     "title": "New chat",
+     "keywords": "start conversation"
+    },
+    {
+     "id": "chat",
+     "kind": "Command",
+     "title": "Go to Chat"
+    },
+    {
+     "id": "code",
+     "kind": "Command",
+     "title": "Go to Code",
+     "keywords": "coding agent folder"
+    },
+    {
+     "id": "models",
+     "kind": "Command",
+     "title": "Open Models",
+     "keywords": "download hugging face gguf catalog load"
+    },
+    {
+     "id": "settings",
+     "kind": "Command",
+     "title": "Open Settings"
+    },
+    {
+     "id": "theme",
+     "kind": "Command",
+     "title": "Switch to the dark theme",
+     "keywords": "appearance colors mode"
+    },
+    {
+     "id": "shortcuts",
+     "kind": "Command",
+     "title": "Keyboard shortcuts",
+     "keywords": "keys hotkeys"
+    },
+    {
+     "id": "tour",
+     "kind": "Command",
+     "title": "Show the welcome tour"
+    },
+    {
+     "id": "export-md",
+     "kind": "Command",
+     "title": "Export this chat as Markdown",
+     "keywords": "save download"
+    },
+    {
+     "id": "chat-1",
+     "kind": "Chat",
+     "title": "Gold price today"
+    },
+    {
+     "id": "chat-2",
+     "kind": "Chat",
+     "title": "Keyboard layout"
+    },
+    {
+     "id": "chat-3",
+     "kind": "Chat",
+     "title": "Docker networks"
+    },
+    {
+     "id": "pane-sampling",
+     "kind": "Setting",
+     "title": "Settings: Sampling"
+    },
+    {
+     "id": "pane-general",
+     "kind": "Setting",
+     "title": "Settings: General"
+    }
+   ],
+   40,
+   [
+    "pane-sampling",
+    "pane-general",
+    "settings"
+   ]
+  ],
+  [
+   "export",
+   [
+    {
+     "id": "new",
+     "kind": "Command",
+     "title": "New chat",
+     "keywords": "start conversation"
+    },
+    {
+     "id": "chat",
+     "kind": "Command",
+     "title": "Go to Chat"
+    },
+    {
+     "id": "code",
+     "kind": "Command",
+     "title": "Go to Code",
+     "keywords": "coding agent folder"
+    },
+    {
+     "id": "models",
+     "kind": "Command",
+     "title": "Open Models",
+     "keywords": "download hugging face gguf catalog load"
+    },
+    {
+     "id": "settings",
+     "kind": "Command",
+     "title": "Open Settings"
+    },
+    {
+     "id": "theme",
+     "kind": "Command",
+     "title": "Switch to the dark theme",
+     "keywords": "appearance colors mode"
+    },
+    {
+     "id": "shortcuts",
+     "kind": "Command",
+     "title": "Keyboard shortcuts",
+     "keywords": "keys hotkeys"
+    },
+    {
+     "id": "tour",
+     "kind": "Command",
+     "title": "Show the welcome tour"
+    },
+    {
+     "id": "export-md",
+     "kind": "Command",
+     "title": "Export this chat as Markdown",
+     "keywords": "save download"
+    },
+    {
+     "id": "chat-1",
+     "kind": "Chat",
+     "title": "Gold price today"
+    },
+    {
+     "id": "chat-2",
+     "kind": "Chat",
+     "title": "Keyboard layout"
+    },
+    {
+     "id": "chat-3",
+     "kind": "Chat",
+     "title": "Docker networks"
+    },
+    {
+     "id": "pane-sampling",
+     "kind": "Setting",
+     "title": "Settings: Sampling"
+    },
+    {
+     "id": "pane-general",
+     "kind": "Setting",
+     "title": "Settings: General"
+    }
+   ],
+   40,
+   [
+    "export-md"
+   ]
+  ],
+  [
+   "qqq",
+   [
+    {
+     "id": "new",
+     "kind": "Command",
+     "title": "New chat",
+     "keywords": "start conversation"
+    },
+    {
+     "id": "chat",
+     "kind": "Command",
+     "title": "Go to Chat"
+    },
+    {
+     "id": "code",
+     "kind": "Command",
+     "title": "Go to Code",
+     "keywords": "coding agent folder"
+    },
+    {
+     "id": "models",
+     "kind": "Command",
+     "title": "Open Models",
+     "keywords": "download hugging face gguf catalog load"
+    },
+    {
+     "id": "settings",
+     "kind": "Command",
+     "title": "Open Settings"
+    },
+    {
+     "id": "theme",
+     "kind": "Command",
+     "title": "Switch to the dark theme",
+     "keywords": "appearance colors mode"
+    },
+    {
+     "id": "shortcuts",
+     "kind": "Command",
+     "title": "Keyboard shortcuts",
+     "keywords": "keys hotkeys"
+    },
+    {
+     "id": "tour",
+     "kind": "Command",
+     "title": "Show the welcome tour"
+    },
+    {
+     "id": "export-md",
+     "kind": "Command",
+     "title": "Export this chat as Markdown",
+     "keywords": "save download"
+    },
+    {
+     "id": "chat-1",
+     "kind": "Chat",
+     "title": "Gold price today"
+    },
+    {
+     "id": "chat-2",
+     "kind": "Chat",
+     "title": "Keyboard layout"
+    },
+    {
+     "id": "chat-3",
+     "kind": "Chat",
+     "title": "Docker networks"
+    },
+    {
+     "id": "pane-sampling",
+     "kind": "Setting",
+     "title": "Settings: Sampling"
+    },
+    {
+     "id": "pane-general",
+     "kind": "Setting",
+     "title": "Settings: General"
+    }
+   ],
+   40,
+   []
+  ],
+  [
+   "docker",
+   [
+    {
+     "id": "new",
+     "kind": "Command",
+     "title": "New chat",
+     "keywords": "start conversation"
+    },
+    {
+     "id": "chat",
+     "kind": "Command",
+     "title": "Go to Chat"
+    },
+    {
+     "id": "code",
+     "kind": "Command",
+     "title": "Go to Code",
+     "keywords": "coding agent folder"
+    },
+    {
+     "id": "models",
+     "kind": "Command",
+     "title": "Open Models",
+     "keywords": "download hugging face gguf catalog load"
+    },
+    {
+     "id": "settings",
+     "kind": "Command",
+     "title": "Open Settings"
+    },
+    {
+     "id": "theme",
+     "kind": "Command",
+     "title": "Switch to the dark theme",
+     "keywords": "appearance colors mode"
+    },
+    {
+     "id": "shortcuts",
+     "kind": "Command",
+     "title": "Keyboard shortcuts",
+     "keywords": "keys hotkeys"
+    },
+    {
+     "id": "tour",
+     "kind": "Command",
+     "title": "Show the welcome tour"
+    },
+    {
+     "id": "export-md",
+     "kind": "Command",
+     "title": "Export this chat as Markdown",
+     "keywords": "save download"
+    },
+    {
+     "id": "chat-1",
+     "kind": "Chat",
+     "title": "Gold price today"
+    },
+    {
+     "id": "chat-2",
+     "kind": "Chat",
+     "title": "Keyboard layout"
+    },
+    {
+     "id": "chat-3",
+     "kind": "Chat",
+     "title": "Docker networks"
+    },
+    {
+     "id": "pane-sampling",
+     "kind": "Setting",
+     "title": "Settings: Sampling"
+    },
+    {
+     "id": "pane-general",
+     "kind": "Setting",
+     "title": "Settings: General"
+    },
+    {
+     "id": "find-setting",
+     "kind": "Setting",
+     "weak": true,
+     "title": "Search the settings for \"docker\""
+    }
+   ],
+   41,
+   [
+    "chat-3",
+    "find-setting"
+   ]
+  ]
+ ],
+ "step": [
+  [
+   -1,
+   5,
+   "ArrowDown",
+   0
+  ],
+  [
+   0,
+   5,
+   "ArrowDown",
+   1
+  ],
+  [
+   4,
+   5,
+   "ArrowDown",
+   0
+  ],
+  [
+   0,
+   5,
+   "ArrowUp",
+   4
+  ],
+  [
+   3,
+   5,
+   "ArrowUp",
+   2
+  ],
+  [
+   2,
+   5,
+   "Home",
+   0
+  ],
+  [
+   2,
+   5,
+   "End",
+   4
+  ],
+  [
+   2,
+   5,
+   "ArrowLeft",
+   2
+  ],
+  [
+   2,
+   0,
+   "ArrowDown",
+   -1
+  ]
+ ]
+}

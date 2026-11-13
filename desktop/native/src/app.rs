@@ -4,6 +4,7 @@ use crate::api::{self, ModelInfo, StreamEvent, WireMessage};
 use crate::assistants::{self, Assistant, SysMode};
 use crate::memory;
 use crate::promptlib;
+use crate::palette;
 use crate::shortcuts;
 use crate::speech;
 use crate::tour;
@@ -150,6 +151,47 @@ pub enum View {
     Project,
 }
 
+/// What a row of the command palette runs (`run` of the items of `palette.js`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaletteAction {
+    NewChat,
+    GoChat,
+    GoCode,
+    GoModels,
+    GoSettings,
+    ToggleTheme,
+    Shortcuts,
+    Tour,
+    Regenerate,
+    ExportMarkdown(u64),
+    ExportJson(u64),
+    OpenChat(u64),
+}
+
+impl PaletteAction {
+    /// The message that does the work of the row.
+    fn message(&self) -> Message {
+        match self {
+            PaletteAction::NewChat => Message::NewChat,
+            PaletteAction::GoChat => Message::Go(View::Chat),
+            PaletteAction::GoCode => Message::Go(View::Code),
+            PaletteAction::GoModels => Message::Go(View::Models),
+            PaletteAction::GoSettings => Message::Go(View::Settings),
+            PaletteAction::ToggleTheme => Message::ToggleTheme,
+            PaletteAction::Shortcuts => Message::ShortcutsOpen,
+            PaletteAction::Tour => Message::TourShow,
+            PaletteAction::Regenerate => Message::Retry,
+            PaletteAction::ExportMarkdown(id) => {
+                Message::List(ListMsg::Export(*id, chatlist::Format::Markdown))
+            }
+            PaletteAction::ExportJson(id) => {
+                Message::List(ListMsg::Export(*id, chatlist::Format::Json))
+            }
+            PaletteAction::OpenChat(id) => Message::OpenChat(*id),
+        }
+    }
+}
+
 /// What the copy of the memory on the server gave back (the Studio's memImportFromServer and memSyncSoon).
 #[derive(Debug, Clone)]
 pub enum PersonalSync {
@@ -266,6 +308,12 @@ pub struct App {
     pub sc_capture: Option<String>,
     /// The last line the panel says (*Saved.*, a refused combination, *All shortcuts ... defaults*).
     pub sc_message: String,
+    /// The command palette (`searchModal` of `shell.html`): open, what was typed, which row is
+    /// active and the rows in the order they are shown.
+    pub palette_open: bool,
+    pub palette_query: String,
+    pub palette_active: i32,
+    pub palette_rows: Vec<(palette::PaletteItem, PaletteAction)>,
     /// The notice under the messages: how many messages a rewind hides, until when it stands.
     rewind_notice: Option<(usize, u64)>,
     /// Whether the model may use the web tools of the server (the Studio's `state.useWeb`: a
@@ -579,6 +627,16 @@ pub enum Message {
     Key(iced::keyboard::Key, iced::keyboard::Modifiers),
     /// Walk the chats like `Alt+ArrowDown` and `Alt+ArrowUp` do (the `stepChat` of `boot.js`).
     ChatStep(i32),
+    /// The command palette opens (`Mod+K`, the `search` shortcut of the Studio).
+    PaletteOpen,
+    /// The command palette closes (Esc, the click beside it, or a row was run).
+    PaletteClose,
+    /// The text of the palette changed (`input` of `searchModalInput`).
+    PaletteQuery(String),
+    /// The active row moved with the arrow keys (`paletteStep` of `palette.js`).
+    PaletteActive(i32),
+    /// The row `i` runs (`run` of `palette.js`: the window closes and the row does its work).
+    PaletteRun(usize),
     Code(code::CodeMsg),
 }
 
@@ -665,6 +723,10 @@ impl App {
             shortcuts_open: false,
             sc_capture: None,
             sc_message: String::new(),
+            palette_open: false,
+            palette_query: String::new(),
+            palette_active: -1,
+            palette_rows: Vec::new(),
             rewind_notice: None,
             use_web: false,
             answer_budget: None,
@@ -782,7 +844,8 @@ impl App {
         self.messages.len()
     }
 
-    fn dark(&self) -> bool {
+    /// Whether the window is in the dark theme (the tests read it beside the theme command).
+    pub fn dark(&self) -> bool {
         match self.store.theme.as_str() {
             "dark" => true,
             "light" => false,
@@ -2115,6 +2178,17 @@ impl App {
                 Task::none()
             }
             Message::Esc => {
+                // closeOverlays of boot.js: the windows go before anything else happens
+                if self.palette_open {
+                    self.palette_open = false;
+                    return Task::none();
+                }
+                if self.shortcuts_open {
+                    return self.update(Message::ShortcutsClose);
+                }
+                if self.tour.is_some() {
+                    return self.update(Message::TourSkip);
+                }
                 // the large view of the panel goes first (the keydown of artifacts.js), then a
                 // run that goes
                 if self.art.as_ref().is_some_and(|p| p.large) {
@@ -2337,6 +2411,38 @@ impl App {
                 }
                 Task::none()
             }
+            Message::PaletteOpen => {
+                // open of palette.js: the field starts empty and the rows come at once
+                self.palette_open = true;
+                self.palette_query.clear();
+                self.palette_rows = self.palette_build();
+                self.palette_active = if self.palette_rows.is_empty() { -1 } else { 0 };
+                Task::none()
+            }
+            Message::PaletteClose => {
+                self.palette_open = false;
+                Task::none()
+            }
+            Message::PaletteQuery(q) => {
+                // refresh of palette.js: the rows are built anew, the first one is active
+                self.palette_query = q;
+                self.palette_rows = self.palette_build();
+                self.palette_active = if self.palette_rows.is_empty() { -1 } else { 0 };
+                Task::none()
+            }
+            Message::PaletteActive(index) => {
+                self.palette_active = index;
+                Task::none()
+            }
+            Message::PaletteRun(i) => {
+                // run of palette.js: the window closes first, then the row does its work
+                let action = self.palette_rows.get(i).map(|(_, a)| a.clone());
+                self.palette_open = false;
+                if let Some(action) = action {
+                    return self.update(action.message());
+                }
+                Task::none()
+            }
             Message::Key(key, modifiers) => {
                 let is_mac = cfg!(target_os = "macos");
                 let combo = shortcuts::combo_of_key(&key, modifiers, is_mac);
@@ -2362,6 +2468,22 @@ impl App {
                     }
                     return Task::none();
                 }
+                if self.palette_open {
+                    // the arrow keys of the palette (Home and End only while the field is empty,
+                    // the caret keeps them otherwise — the check of palette.js)
+                    let walk = matches!(combo.as_str(), "ArrowDown" | "ArrowUp")
+                        || matches!(combo.as_str(), "Home" | "End")
+                            && self.palette_query.is_empty();
+                    if walk {
+                        self.palette_active = palette::palette_step(
+                            self.palette_active,
+                            self.palette_rows.len(),
+                            &combo,
+                        );
+                    }
+                    // nothing else runs while the window is open
+                    return Task::none();
+                }
                 let combos = shortcuts::effective_combos(&self.store.prefs.shortcut_overrides);
                 let Some(id) = shortcuts::shortcut_for(&combos, &combo) else {
                     return Task::none();
@@ -2375,6 +2497,7 @@ impl App {
                     "openSettings" => return self.update(Message::Go(View::Settings)),
                     "regenerate" => return self.update(Message::Retry),
                     "shortcuts" => return self.update(Message::ShortcutsOpen),
+                    "search" => return self.update(Message::PaletteOpen),
                     "nextChat" => return self.update(Message::ChatStep(1)),
                     "prevChat" => return self.update(Message::ChatStep(-1)),
                     // search, focusComposer, toggleSidebar, codeAgent and codeSessions have no
@@ -3376,6 +3499,7 @@ impl App {
             && !self.temp_close
             && self.tour.is_none()
             && !self.shortcuts_open
+            && !self.palette_open
             // the large view of the artifact panel is a layer of its own
             && !self.art.as_ref().is_some_and(|p| p.large)
         {
@@ -3453,6 +3577,12 @@ impl App {
             layers = layers
                 .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::ShortcutsClose))
                 .push(self.shortcuts_window(t));
+        }
+        if self.palette_open {
+            // the backdrop of `.modal-backdrop`: a click beside the window closes the palette
+            layers = layers
+                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::PaletteClose))
+                .push(self.palette_window(t));
         }
         layers.into()
     }
@@ -4001,6 +4131,152 @@ impl App {
         let window = container(column(parts).spacing(12))
             .padding(16)
             .width(460)
+            .style(theme::card(t, theme::R_LG, false));
+        container(window)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(24)
+            .into()
+    }
+
+    /// The command palette (the `searchModal` of `shell.html`): the field, the rows in their
+    /// groups with the active one marked, and the foot with its help and count.
+    fn palette_window(&self, t: Tokens) -> Element<'_, Message> {
+        let field = text_input(
+            "Type a command, or search chats and settings",
+            &self.palette_query,
+        )
+        .on_input(Message::PaletteQuery)
+        .on_submit(Message::PaletteRun(
+            self.palette_active.max(0) as usize,
+        ))
+        .size(14)
+        .padding([10, 12])
+        .style(move |_, status| text_input::Style {
+            background: iced::Background::Color(t.surface_2),
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: 1.0,
+                color: if matches!(status, text_input::Status::Focused { .. }) {
+                    t.fg_soft
+                } else {
+                    t.separator
+                },
+            },
+            icon: t.muted,
+            placeholder: t.muted,
+            value: t.fg,
+            selection: t.primary_soft,
+        });
+
+        let mut body: Vec<Element<'_, Message>> = vec![field.into()];
+        if self.palette_rows.is_empty() {
+            // the empty line of palette.js: nothing found for what was typed
+            body.push(
+                container(
+                    text(format!(
+                        "Nothing found for \"{}\".",
+                        self.palette_query.trim()
+                    ))
+                    .size(13)
+                    .color(t.muted),
+                )
+                .padding([12, 4])
+                .into(),
+            );
+        } else {
+            let mut rows: Vec<Element<'_, Message>> = Vec::new();
+            let mut last_kind: Option<palette::Kind> = None;
+            for (i, (item, _)) in self.palette_rows.iter().enumerate() {
+                if last_kind != Some(item.kind) {
+                    last_kind = Some(item.kind);
+                    rows.push(
+                        container(text(item.kind.label()).size(11).color(t.muted))
+                            .padding(iced::Padding {
+                                top: 8.0,
+                                right: 4.0,
+                                bottom: 2.0,
+                                left: 4.0,
+                            })
+                            .into(),
+                    );
+                }
+                let active = self.palette_active == i as i32;
+                let sub: Element<'_, Message> = if item.sub.is_empty() {
+                    Space::new().width(0).into()
+                } else {
+                    text(item.sub.as_str()).size(11).color(t.muted).into()
+                };
+                let hint_chip: Element<'_, Message> = if item.hint.is_empty() {
+                    Space::new().width(0).into()
+                } else {
+                        container(text(item.hint.as_str()).size(11).color(t.fg_soft))
+                            .padding([1, 5])
+                            .style(move |_| iced::widget::container::Style {
+                                background: Some(iced::Background::Color(t.surface_2)),
+                                border: iced::Border {
+                                    radius: 5.0.into(),
+                                    width: 1.0,
+                                    color: t.separator,
+                                },
+                                ..Default::default()
+                            })
+                        .into()
+                };
+                let title = row![
+                    text(item.title.as_str()).size(13).color(t.fg).width(Length::Fill),
+                    sub,
+                    hint_chip,
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center);
+                rows.push(
+                    button(title)
+                        .on_press(Message::PaletteRun(i))
+                        .width(Length::Fill)
+                        .padding([7, 8])
+                        .style(move |style_theme, status| {
+                            let mut s = (theme::plain_button(t))(style_theme, status);
+                            if active {
+                                s.background = Some(iced::Background::Color(t.primary_soft));
+                            }
+                            s
+                        })
+                        .into(),
+                );
+            }
+            body.push(column(rows).spacing(1).into());
+        }
+        // the foot: how to move, and how many rows there are (the count of palette.js)
+        let count = self.palette_rows.len();
+        let count_text = if count == 0 {
+            String::from("No results")
+        } else {
+            format!("{count} result{}", if count == 1 { "" } else { "s" })
+        };
+        body.push(
+            row![
+                text("Up Down to move, Enter to open, Esc to close")
+                    .size(11)
+                    .color(t.muted)
+                    .width(Length::Fill),
+                text(count_text).size(11).color(t.muted),
+            ]
+            .spacing(8)
+            .padding(iced::Padding {
+                top: 6.0,
+                right: 2.0,
+                bottom: 0.0,
+                left: 2.0,
+            })
+            .into(),
+        );
+
+        let window = container(column(body).spacing(8))
+            .padding(12)
+            .width(600)
             .style(theme::card(t, theme::R_LG, false));
         container(window)
             .center_x(Length::Fill)
@@ -5362,6 +5638,145 @@ impl App {
     }
 
     /// The page on the right now.
+    /// The rows of the command palette as they are shown now: the fixed commands (with the keys in
+    /// force), the chats of the store, ranked by the query — the `build` of `palette.js`.
+    fn palette_build(&self) -> Vec<(palette::PaletteItem, PaletteAction)> {
+        use palette::{Kind, PaletteItem};
+        let combos = shortcuts::effective_combos(&self.store.prefs.shortcut_overrides);
+        let hint = |id: &str| {
+            combos
+                .get(id)
+                .map(|c| shortcuts::format(c))
+                .unwrap_or_default()
+        };
+        let chat_open = self.current.is_some() && self.page == View::Chat;
+
+        let mut items: Vec<(PaletteItem, PaletteAction)> = vec![
+            (
+                PaletteItem::new("new", Kind::Command, "New chat")
+                    .keywords("start conversation")
+                    .hint(hint("newChat")),
+                PaletteAction::NewChat,
+            ),
+        ];
+        if chat_open {
+            // the three the Studio puts behind the first one when a chat is open
+            items.push((
+                PaletteItem::new("regen", Kind::Command, "Regenerate the last answer")
+                    .keywords("again retry")
+                    .hint(hint("regenerate")),
+                PaletteAction::Regenerate,
+            ));
+            if let Some(id) = self.current {
+                items.push((
+                    PaletteItem::new("export-md", Kind::Command, "Export this chat as Markdown")
+                        .keywords("save download"),
+                    PaletteAction::ExportMarkdown(id),
+                ));
+                items.push((
+                    PaletteItem::new("export-json", Kind::Command, "Export this chat as JSON")
+                        .keywords("save download backup"),
+                    PaletteAction::ExportJson(id),
+                ));
+            }
+        }
+        items.push((
+            PaletteItem::new("chat", Kind::Command, "Go to Chat").hint(hint("surfaceChat")),
+            PaletteAction::GoChat,
+        ));
+        items.push((
+            PaletteItem::new("code", Kind::Command, "Go to Code")
+                .keywords("coding agent folder")
+                .hint(hint("surfaceCode")),
+            PaletteAction::GoCode,
+        ));
+        items.push((
+            PaletteItem::new("models", Kind::Command, "Open Models")
+                .keywords("download hugging face gguf catalog load")
+                .hint(hint("openModels")),
+            PaletteAction::GoModels,
+        ));
+        items.push((
+            PaletteItem::new("settings", Kind::Command, "Open Settings").hint(hint("openSettings")),
+            PaletteAction::GoSettings,
+        ));
+        // the title says which way it would go (the ternary of palette.js)
+        let theme_title = if self.dark() {
+            "Switch to the light theme"
+        } else {
+            "Switch to the dark theme"
+        };
+        items.push((
+            PaletteItem::new("theme", Kind::Command, theme_title)
+                .keywords("appearance colors mode"),
+            PaletteAction::ToggleTheme,
+        ));
+        items.push((
+            PaletteItem::new("shortcuts", Kind::Command, "Keyboard shortcuts")
+                .keywords("keys hotkeys")
+                .hint(hint("shortcuts")),
+            PaletteAction::Shortcuts,
+        ));
+        items.push((
+            PaletteItem::new("tour", Kind::Command, "Show the welcome tour"),
+            PaletteAction::Tour,
+        ));
+
+        // the chats of the store, newest first, with the text around a hit under the title (the
+        // sidebar searches titles and messages the same way)
+        let q = self.palette_query.trim().to_lowercase();
+        let mut chats: Vec<&store::ChatRecord> = self.store.chats.iter().collect();
+        chats.sort_by_key(|c| std::cmp::Reverse(c.updated));
+        let mut chat_rows: Vec<(PaletteItem, PaletteAction)> = Vec::new();
+        for c in chats {
+            let in_title = q.is_empty() || c.title.to_lowercase().contains(&q);
+            let text: String = c
+                .messages
+                .iter()
+                .filter(|m| !matches!(m.role, Role::Tool))
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let hit = if !in_title && !q.is_empty() {
+                palette::snippet(&text, &q)
+            } else {
+                String::new()
+            };
+            if !in_title && hit.is_empty() {
+                continue;
+            }
+            chat_rows.push((
+                PaletteItem::new(format!("chat-{}", c.id), Kind::Chat, c.title.clone()).with_sub(hit),
+                PaletteAction::OpenChat(c.id),
+            ));
+        }
+
+        // rank: the chats are scored on their titles only (the `sub` is emptied for the ranking
+        // of palette.js), a row found only in its text is appended after the ranking
+        let all: Vec<(PaletteItem, PaletteAction)> = items
+            .into_iter()
+            .chain(chat_rows.iter().map(|(item, action)| {
+                let mut item = item.clone();
+                item.sub.clear();
+                (item, action.clone())
+            }))
+            .collect();
+        let just_items: Vec<palette::PaletteItem> = all.iter().map(|(i, _)| i.clone()).collect();
+        let ranked = palette::rank_palette(&self.palette_query, &just_items, 40);
+        let mut rows: Vec<(PaletteItem, PaletteAction)> =
+            ranked.into_iter().map(|i| all[i].clone()).collect();
+
+        if !q.is_empty() {
+            let seen: Vec<String> = rows.iter().map(|(i, _)| i.id.clone()).collect();
+            for (item, action) in &chat_rows {
+                if !item.sub.is_empty() && !seen.contains(&item.id) && rows.len() < 40 {
+                    rows.push((item.clone(), action.clone()));
+                }
+            }
+        }
+        rows
+    }
+
     /// The saved state of the app (the tests read what a round wrote into it).
     pub fn store(&self) -> &Store {
         &self.store

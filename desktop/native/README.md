@@ -144,6 +144,11 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   four calls); the sources are numbered `[n]` under the answer (*Sources*, a click opens the page
   in the browser). The texts, cards, budget and error lines are checked against `ctRunTool` of the
   Studio itself — the fixtures are produced by that code.
+- The command palette (`Mod+K`): the commands of the app and the chats of the store in one list, reached
+  by typing and the arrow keys — the score, the ranking in blocks per kind and the arrow steps are the
+  `@pure` block of `palette.js` itself (37 fixture cases), the chats come with the text around a hit under
+  their title the way the sidebar searches, Enter runs a row and closes, Esc does too. 4 window tests with
+  3 drawings, 3 mutations.
 - The keyboard shortcuts: the overview (`Mod+/`, or Settings, General) lists what every one of the
   fifteen shortcuts does with the keys it has now, the fixed rows below them, and Change / Reset per row.
   Change waits for the new keys; `checkCombo` of `boot.js` refuses a bare letter, `Shift` alone, a fixed key

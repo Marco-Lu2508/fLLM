@@ -12,6 +12,7 @@ pub mod code;
 pub mod engine_settings;
 pub mod md;
 pub mod models;
+pub mod palette;
 pub mod prompts;
 pub mod memory;
 pub mod promptlib;
