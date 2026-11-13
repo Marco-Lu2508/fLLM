@@ -53,6 +53,18 @@ behaviour between versions).
   `assistantInner`. Tests: Esc stopping and ignoring, the fold with its click, the open box while it
   thinks, and the research run stopped by the key; four mutations each turn one red; the open box is
   drawn to a PNG and read back.
+- **Dictation, reading aloud and alerts in the native app.** The Studio has a *Voice and alerts* pane
+  (`voice.js`); the native app has the three cards of it. Dictation tells what the Studio tells when the system
+  has no speech recognition (its microphone row explains it and the button stays hidden) with the seventeen
+  languages of the Studio. Reading aloud keeps the voice settings of `fllm.studio.voice.v1` (language, voice,
+  rate 0.5–2, pitch 0.5–2, read answers automatically) and hands them to the speech programs of the computer on
+  each one's own scale — speech-dispatcher -100..100, espeak words per minute with pitch 0..99, `say` the same
+  with pitch 0..20, Windows -10..10 with the voice and the locale — with the voices of this machine in the
+  select and *Read a sample* beside them. The answer of a finished run is read alone when that is on, and a run
+  of twenty seconds (an agent five) says *Your answer is ready.* while the window is behind: silent when it is
+  in front (the Focused events of the window), the two-tone chime of the Studio when *Sound* is on, the system
+  notification (`notify-send`, `osascript`, the popup of Windows) when *System notification* is on. Seven tests,
+  one drawing of the settings, three mutations.
 - **The command palette in the native app.** The Studio opens its palette on `Ctrl+K` with the commands
   and the chats in one list (`palette.js`, the `searchModal` of `shell.html`); the native app opens the same
   one on its `search` shortcut. `palette.rs` is the `@pure` block of that file as Rust: the score of a text

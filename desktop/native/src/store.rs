@@ -344,6 +344,55 @@ impl Default for Personal {
     }
 }
 
+/// Voice and alerts: the language of the dictation and of the reading, the voice, how fast and
+/// how high it speaks, whether answers are read alone, and what an alert does (`settings` of
+/// `voice.js`, saved under `fllm.studio.voice.v1`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VoicePrefs {
+    /// The language tag; empty = the language of the system (`Browser language` in the Studio).
+    #[serde(default)]
+    pub lang: String,
+    /// The voice as the system knows it; empty = the default one.
+    #[serde(default)]
+    pub voice: String,
+    /// How fast it speaks (0.5 to 2, the slider of the Studio).
+    #[serde(default = "one")]
+    pub rate: f32,
+    /// How high it speaks (0.5 to 2).
+    #[serde(default = "one")]
+    pub pitch: f32,
+    /// Read every finished answer aloud without a click.
+    #[serde(default)]
+    pub auto: bool,
+    /// Say something when a long answer or an agent run finishes while the window is behind.
+    #[serde(default = "yes")]
+    pub notify: bool,
+    /// Play the short tone at that moment.
+    #[serde(default)]
+    pub sound: bool,
+    /// The permission for system notifications was already asked for (the Studio keeps the
+    /// gesture: it asks while the click that sent the message still counts).
+    #[serde(default)]
+    pub asked: bool,
+}
+
+impl Default for VoicePrefs {
+    /// The defaults of the Studio: no language, no voice, 1x, no auto reading, an alert on, no
+    /// sound, not asked yet.
+    fn default() -> Self {
+        VoicePrefs {
+            lang: String::new(),
+            voice: String::new(),
+            rate: 1.0,
+            pitch: 1.0,
+            auto: false,
+            notify: true,
+            sound: false,
+            asked: false,
+        }
+    }
+}
+
 /// What the person chose for the answers. Everything is automatic until it is switched to manual: then the value is sent with every request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Prefs {
@@ -362,6 +411,9 @@ pub struct Prefs {
     /// `fllm.studio.shortcuts.v1`; changes for unknown ids are ignored).
     #[serde(default)]
     pub shortcut_overrides: std::collections::HashMap<String, String>,
+    /// Voice and alerts (the Studio's `fllm.studio.voice.v1`).
+    #[serde(default)]
+    pub voice: VoicePrefs,
     /// The saved prompts of the library (Settings > Personalization, the "/" in the box).
     #[serde(default)]
     pub saved_prompts: Vec<crate::promptlib::SavedPrompt>,
@@ -530,7 +582,7 @@ fn default_top_p() -> f32 {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { personal: Personal::default(), personal_loaded: false, tour_seen: false, shortcut_overrides: std::collections::HashMap::new(), saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
+        Prefs { personal: Personal::default(), personal_loaded: false, tour_seen: false, shortcut_overrides: std::collections::HashMap::new(), voice: VoicePrefs::default(), saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
     }
 }
 

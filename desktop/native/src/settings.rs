@@ -239,6 +239,43 @@ fn value_slider<'a>(t: Tokens, range: std::ops::RangeInclusive<f32>, value: f32,
 }
 
 #[allow(clippy::too_many_arguments)] // a page draws from eight pieces of state
+/// What the settings show about this machine in the voice cards: its voices and whether it can
+/// notify (the `fillVoices` and `notifyNote` of `voice.js`).
+#[derive(Debug, Clone, Default)]
+pub struct VoiceView<'a> {
+    /// The voices of this computer; empty = no speech program was found.
+    pub voices: &'a [String],
+    /// Whether a program for system notifications is installed.
+    pub can_notify: bool,
+}
+
+/// One voice of the select: the empty one is the default voice (`<option value="">Default</option>).
+/// One language of the select: the tag is what is kept, the name is what is shown (`LANGUAGES` of
+/// `voice.js`, where the option value is the tag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LangChoice(&'static str, &'static str);
+
+impl std::fmt::Display for LangChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.1)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VoiceChoice(String);
+
+impl std::fmt::Display for VoiceChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            f.write_str("Default")
+        } else {
+            f.write_str(&self.0)
+        }
+    }
+}
+
+// the page of the settings carries every block of it (the Studio reads its rows from the page)
+#[allow(clippy::too_many_arguments)]
 pub fn page<'a>(
     t: Tokens,
     prefs: &'a Prefs,
@@ -248,6 +285,7 @@ pub fn page<'a>(
     sampling: &'a SamplingTexts,
     engine: Element<'a, Message>,
     personal: PersonalView<'a>,
+    voice: VoiceView<'a>,
 ) -> Element<'a, Message> {
     let mut answers = column![].spacing(14);
     answers = answers.push(setting(
@@ -611,12 +649,153 @@ pub fn page<'a>(
     ))
     .spacing(14);
 
+    // ---- the Voice and alerts pane of voice.js: dictation, reading aloud, alerts ----
+    let v = &prefs.voice;
+    let dictation_note = "Dictation is not available here: this program, or the web view of the desktop app on this system, has no speech recognition, so the microphone button is hidden. Chrome, Edge and Safari have it.";
+    let dictation = column![
+        setting(
+            t,
+            "Microphone",
+            dictation_note,
+            Space::new().width(180.0).into(),
+        ),
+        setting(
+            t,
+            "Language",
+            "Used for dictation, and for reading aloud when the voice does not set one.",
+            pick_list(
+                crate::speech::LANGUAGES
+                    .iter()
+                    .map(|(tag, name)| LangChoice(tag, name))
+                    .collect::<Vec<LangChoice>>(),
+                Some(
+                    crate::speech::LANGUAGES
+                        .iter()
+                        .find(|(tag, _)| *tag == v.lang)
+                        .map(|(tag, name)| LangChoice(tag, name))
+                        .unwrap_or(LangChoice("", "Browser language")),
+                ),
+                |c: LangChoice| Message::VoiceLang(c.0.to_string()),
+            )
+            .width(180)
+            .into(),
+        ),
+    ]
+    .spacing(14);
+
+    let voice_note = if voice.voices.is_empty() {
+        "This computer cannot read aloud."
+    } else {
+        "The voices come from your system."
+    };
+    let mut voice_items: Vec<VoiceChoice> = vec![VoiceChoice(String::new())];
+    voice_items.extend(voice.voices.iter().cloned().map(VoiceChoice));
+    let reading = column![
+        setting(
+            t,
+            "Voice",
+            voice_note,
+            pick_list(
+                voice_items,
+                Some(VoiceChoice(v.voice.clone())),
+                |c: VoiceChoice| Message::VoiceVoice(c.0),
+            )
+            .width(180)
+            .into(),
+        ),
+        setting(
+            t,
+            "Speed",
+            "How fast the answer is read.",
+            value_slider(t, 0.5..=2.0, v.rate, 0.1, Message::VoiceRate),
+        ),
+        setting(
+            t,
+            "Pitch",
+            "How high the voice speaks.",
+            value_slider(t, 0.5..=2.0, v.pitch, 0.1, Message::VoicePitch),
+        ),
+        setting(
+            t,
+            "Read answers automatically",
+            "Reads each finished answer aloud. The speaker button under an answer reads one answer.",
+            segmented(
+                t,
+                vec![
+                    ("On", v.auto, Message::VoiceAuto(true)),
+                    ("Off", !v.auto, Message::VoiceAuto(false)),
+                ],
+            ),
+        ),
+        setting(
+            t,
+            "Try it",
+            "Code and Markdown marks are left out when reading.",
+            button(text("Read a sample").size(13))
+                .on_press(Message::VoiceTest)
+                .padding([5, 12])
+                .style(theme::secondary_button(t))
+                .into(),
+        ),
+    ]
+    .spacing(14);
+
+    let notify_status = if voice.can_notify {
+        String::new()
+    } else {
+        String::from("This computer has no system notifications.")
+    };
+    let mut alerts = column![
+        setting(
+            t,
+            "System notification",
+            "When a long answer (over 20 seconds) or an agent run finishes while this window is not in front.",
+            segmented(
+                t,
+                vec![
+                    ("On", v.notify, Message::VoiceNotify(true)),
+                    ("Off", !v.notify, Message::VoiceNotify(false)),
+                ],
+            ),
+        ),
+        setting(
+            t,
+            "Sound",
+            "A short tone at the same moment.",
+            row![
+                segmented(
+                    t,
+                    vec![
+                        ("On", v.sound, Message::VoiceSound(true)),
+                        ("Off", !v.sound, Message::VoiceSound(false)),
+                    ],
+                ),
+                button(text("Play").size(13))
+                    .on_press(Message::VoiceChimeTest)
+                    .padding([5, 12])
+                    .style(theme::ghost_button(t)),
+            ]
+            .spacing(8)
+            .into(),
+        ),
+    ]
+    .spacing(14);
+    if !notify_status.is_empty() {
+        alerts = alerts.push(text(notify_status).size(12).color(t.muted));
+    }
+
     let content = column![
         container(text("Settings").size(26).font(bold())).padding(Padding { top: 14.0, right: 0.0, bottom: 4.0, left: 2.0 }),
         card(t, "General", general.into()),
         card(t, "Answers", answers.into()),
         card(t, "Personalization", pers.into()),
         engine,
+        // the Voice and alerts pane sits last so the cards before it keep their place (the pane
+        // of voice.js has its own place in the Studio's menu; the drawing of the settings takes
+        // its own height for these)
+        card(t, "Dictation", dictation.into()),
+        card(t, "Reading aloud", reading.into()),
+        card(t, "Alerts", alerts.into()),
     ]
     .spacing(14);
     let inner = container(content).max_width(780).width(Length::Fill).padding(Padding { top: 8.0, right: 24.0, bottom: 32.0, left: 24.0 });

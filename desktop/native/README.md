@@ -144,6 +144,13 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   four calls); the sources are numbered `[n]` under the answer (*Sources*, a click opens the page
   in the browser). The texts, cards, budget and error lines are checked against `ctRunTool` of the
   Studio itself — the fixtures are produced by that code.
+- Voice and alerts: Settings shows the cards *Dictation* (with what the Studio says when there is no speech
+  recognition, and its seventeen languages), *Reading aloud* (voice, speed, pitch, read answers automatically,
+  *Read a sample*) and *Alerts*. Every answer is read with the chosen voice through the speech programs of the
+  computer (`voice_args` puts rate and pitch on each program's own scale), and a run that took twenty seconds
+  (an agent five) announces itself while the window is behind — with the two-tone chime of the Studio when
+  *Sound* is on and the system notification when *System notification* is on. Seven tests, one drawing, three
+  mutations.
 - The command palette (`Mod+K`): the commands of the app and the chats of the store in one list, reached
   by typing and the arrow keys — the score, the ranking in blocks per kind and the arrow steps are the
   `@pure` block of `palette.js` itself (37 fixture cases), the chats come with the text around a hit under

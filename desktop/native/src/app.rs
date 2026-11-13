@@ -221,6 +221,9 @@ struct RagCache {
 /// The reply that is being written right now.
 struct Live {
     chat: u64,
+    /// When the run began, so a long one can be announced when it ends (the `watchRun` of
+    /// `voice.js` measures the same stretch).
+    started: std::time::Instant,
     _handle: task::Handle,
 }
 
@@ -308,6 +311,17 @@ pub struct App {
     pub sc_capture: Option<String>,
     /// The last line the panel says (*Saved.*, a refused combination, *All shortcuts ... defaults*).
     pub sc_message: String,
+    /// Whether the window is in front (the alerts of `voice.js` stay silent while it is: the
+    /// `announce` of `voice.js` returns when the document has focus and is not hidden).
+    pub window_focused: bool,
+    /// When the agent of Code mode began its run, so a long one can be announced when it ends
+    /// (the `watchRun('btnCodeSend')` of `voice.js`, five seconds there).
+    pub code_started: Option<std::time::Instant>,
+    /// The voices of this computer, for the select of the settings (empty until it was asked for
+    /// or when no speech program is installed).
+    pub voice_names: Vec<String>,
+    /// Whether this computer can show a system notification.
+    pub voice_can_notify: bool,
     /// The command palette (`searchModal` of `shell.html`): open, what was typed, which row is
     /// active and the rows in the order they are shown.
     pub palette_open: bool,
@@ -631,6 +645,29 @@ pub enum Message {
     PaletteOpen,
     /// The command palette closes (Esc, the click beside it, or a row was run).
     PaletteClose,
+    /// The window came to the front or went behind it (the alerts stay silent while it is there).
+    WindowFocus(bool),
+    /// The language of the dictation and of the reading (the `selVoiceLang` of `voice.js`).
+    VoiceLang(String),
+    /// The voice of the reading (the `selVoiceName` of `voice.js`).
+    VoiceVoice(String),
+    /// How fast the reading speaks (the `rngVoiceRate` of `voice.js`, 0.5 to 2).
+    VoiceRate(f32),
+    /// How high the reading speaks (the `rngVoicePitch` of `voice.js`, 0.5 to 2).
+    VoicePitch(f32),
+    /// Read every finished answer aloud (the `chkVoiceAuto` of `voice.js`).
+    VoiceAuto(bool),
+    /// Say something when a run ends while the window is behind (the `chkNotify` of `voice.js`).
+    VoiceNotify(bool),
+    /// Play the short tone at that moment (the `chkNotifySound` of `voice.js`).
+    VoiceSound(bool),
+    /// *Read a sample* of the settings (the `btnVoiceTest` of `voice.js`).
+    VoiceTest,
+    /// *Play* of the settings (the `btnChimeTest` of `voice.js`).
+    VoiceChimeTest,
+    /// What this computer has: its voices and whether it can notify (`fillVoices` and
+    /// `notifyNote` of `voice.js`, read from the speech programs here).
+    VoiceSystem { voices: Vec<String>, can_notify: bool },
     /// The text of the palette changed (`input` of `searchModalInput`).
     PaletteQuery(String),
     /// The active row moved with the arrow keys (`paletteStep` of `palette.js`).
@@ -723,6 +760,10 @@ impl App {
             shortcuts_open: false,
             sc_capture: None,
             sc_message: String::new(),
+            window_focused: false,
+            code_started: None,
+            voice_names: Vec::new(),
+            voice_can_notify: true,
             palette_open: false,
             palette_query: String::new(),
             palette_active: -1,
@@ -1062,7 +1103,11 @@ impl App {
             },
         )
         .abortable();
-        self.live = Some(Live { chat: id, _handle: handle.abort_on_drop() });
+        self.live = Some(Live {
+            chat: id,
+            started: std::time::Instant::now(),
+            _handle: handle.abort_on_drop(),
+        });
         Task::batch([progress, work])
     }
 
@@ -1081,7 +1126,11 @@ impl App {
         params.max_tokens = Some(max as u32);
         let events = api::chat_stream(self.base.clone(), model.id, wire, params);
         let (task, handle) = Task::stream(events).map(move |ev| Message::Stream(id, ev)).abortable();
-        self.live = Some(Live { chat: id, _handle: handle.abort_on_drop() });
+        self.live = Some(Live {
+            chat: id,
+            started: std::time::Instant::now(),
+            _handle: handle.abort_on_drop(),
+        });
         task
     }
 
@@ -1096,7 +1145,11 @@ impl App {
             None => api::chat_stream(self.base.clone(), model, wire, self.chat_params()).boxed(),
         };
         let (task, handle) = Task::stream(events).map(move |ev| Message::Stream(id, ev)).abortable();
-        self.live = Some(Live { chat: id, _handle: handle.abort_on_drop() });
+        self.live = Some(Live {
+            chat: id,
+            started: std::time::Instant::now(),
+            _handle: handle.abort_on_drop(),
+        });
         task
     }
 
@@ -1146,7 +1199,20 @@ impl App {
                 let extra = (self.store.prefs.custom_system && !self.store.prefs.system_prompt.trim().is_empty()).then(|| self.store.prefs.system_prompt.clone());
                 let base = self.base.clone();
                 let env = code::Env { base: &base, model: model.as_deref(), params: self.chat_params(), extra: extra.as_deref() };
+                let was_running_before = was_running;
                 let task = self.code.update(msg, &env);
+                if !was_running_before && self.code.running {
+                    // the run began (the `started` of watchRun in voice.js)
+                    self.code_started = Some(std::time::Instant::now());
+                } else if was_running_before && !self.code.running {
+                    // the run ended: five seconds or more say so (watchRun of voice.js)
+                    if let Some(at) = self.code_started.take() {
+                        let ms = at.elapsed().as_millis() as u64;
+                        if ms >= 5_000 {
+                            self.announce(String::from("The agent has finished."));
+                        }
+                    }
+                }
                 // the conversation of a folder is kept: it comes back when the folder is opened again
                 let file = self.data_file.with_file_name("code-sessions.json");
                 if let Some(root) = opened {
@@ -2443,6 +2509,76 @@ impl App {
                 }
                 Task::none()
             }
+            Message::WindowFocus(focused) => {
+                self.window_focused = focused;
+                Task::none()
+            }
+            Message::VoiceSystem { voices, can_notify } => {
+                // fillVoices and notifyNote of voice.js: what the settings show about this machine
+                self.voice_names = voices;
+                self.voice_can_notify = can_notify;
+                if self.voice_can_notify {
+                    let voice = &self.store.prefs.voice;
+                    if voice.notify && !voice.asked {
+                        // the Studio asks while the click that sent a message still counts as a
+                        // gesture; here there is no permission to ask for, the flag only says it
+                        self.store.prefs.voice.asked = true;
+                        self.save();
+                    }
+                }
+                Task::none()
+            }
+            Message::VoiceLang(lang) => {
+                self.store.prefs.voice.lang = lang;
+                self.save();
+                Task::none()
+            }
+            Message::VoiceVoice(voice) => {
+                self.store.prefs.voice.voice = voice;
+                self.save();
+                Task::none()
+            }
+            Message::VoiceRate(rate) => {
+                self.store.prefs.voice.rate = rate;
+                self.save();
+                Task::none()
+            }
+            Message::VoicePitch(pitch) => {
+                self.store.prefs.voice.pitch = pitch;
+                self.save();
+                Task::none()
+            }
+            Message::VoiceAuto(auto) => {
+                self.store.prefs.voice.auto = auto;
+                self.save();
+                Task::none()
+            }
+            Message::VoiceNotify(on) => {
+                self.store.prefs.voice.notify = on;
+                if on && !self.store.prefs.voice.asked {
+                    // the gesture of voice.js: the first switch that asks
+                    self.store.prefs.voice.asked = true;
+                }
+                self.save();
+                Task::none()
+            }
+            Message::VoiceSound(on) => {
+                self.store.prefs.voice.sound = on;
+                self.save();
+                Task::none()
+            }
+            Message::VoiceTest => {
+                // the sample of voice.js: the marks are left out while reading
+                speech::speak_with(
+                    "This is how **fLLM** sounds. Code blocks are skipped, and so are `marks` and [links](https://example.com).",
+                    &self.store.prefs.voice.clone(),
+                );
+                Task::none()
+            }
+            Message::VoiceChimeTest => {
+                speech::chime();
+                Task::none()
+            }
             Message::Key(key, modifiers) => {
                 let is_mac = cfg!(target_os = "macos");
                 let combo = shortcuts::combo_of_key(&key, modifiers, is_mac);
@@ -2784,8 +2920,30 @@ impl App {
                 if page == View::Models {
                     return self.refresh_models();
                 }
-                if page == View::Settings && !matches!(self.server, Server::Down(_)) {
-                    return Task::perform(engine_settings::fetch(self.base.clone()), Message::EngineLoaded);
+                if page == View::Settings {
+                    // the settings of voice.js fill their selects with what the machine has
+                    // (fillVoices and notifyNote run once when the pane opens)
+                    let voices = Task::perform(
+                        async {
+                            // the programs answer at once (`--list-voices`, a spawned notify), so
+                            // they may run where the task runs
+                            Message::VoiceSystem {
+                                voices: speech::list_voices(),
+                                can_notify: speech::can_notify(),
+                            }
+                        },
+                        |m| m,
+                    );
+                    if !matches!(self.server, Server::Down(_)) {
+                        return Task::batch(vec![
+                            voices,
+                            Task::perform(
+                                engine_settings::fetch(self.base.clone()),
+                                Message::EngineLoaded,
+                            ),
+                        ]);
+                    }
+                    return voices;
                 }
                 Task::none()
             }
@@ -3301,13 +3459,57 @@ impl App {
 
     /// The reply is over (finished, stopped or failed): save it and free the composer.
     fn finish(&mut self) {
-        if self.live.take().is_some() {
+        if let Some(live) = self.live.take() {
+            let ms = live.started.elapsed().as_millis() as u64;
             self.sync_current();
             if let Some(chat) = self.current.and_then(|id| self.store.chat_mut(id)) {
                 chat.forget_duplicates();
             }
             self.save();
+            // watchRun of voice.js: what it does when a run ends
+            self.after_run(ms);
         }
+    }
+
+    /// What happens when a run ends: the answer may be read alone, and a long run says something
+    /// when the window is behind (`watchRun` of `voice.js` — twenty seconds for an answer, five
+    /// for an agent run).
+    pub fn after_run(&mut self, ms: u64) {
+        let finished = self
+            .messages
+            .last()
+            .filter(|m| !matches!(m.role, Role::User) && !m.content.trim().is_empty())
+            .map(|m| m.content.clone());
+        let Some(content) = finished else {
+            return;
+        };
+        let voice = self.store.prefs.voice.clone();
+        if voice.auto {
+            // the studio reads the finished answer aloud (strip and chunk are speech.rs's)
+            let parts = speech::chunk_for_speech(&speech::strip_for_speech(&content), 0);
+            for part in parts {
+                speech::speak_with(&part, &voice);
+            }
+        }
+        if ms >= 20_000 {
+            self.announce(String::from("Your answer is ready."));
+        }
+    }
+
+    /// The alert of `voice.js`: silent while the window is in front, the short tone when that is
+    /// on, the system notification when that is on and allowed.
+    pub fn announce(&mut self, body: String) {
+        if self.window_focused {
+            return;
+        }
+        let voice = self.store.prefs.voice.clone();
+        if voice.sound {
+            speech::chime();
+        }
+        if voice.notify {
+            speech::notify(&body);
+        }
+        self.toast = Some(format!("Alert: {body}"));
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -3329,6 +3531,10 @@ impl App {
             }) => Some(Message::Esc),
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 Some(Message::Key(key, modifiers))
+            }
+            iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowFocus(true)),
+            iced::Event::Window(iced::window::Event::Unfocused) => {
+                Some(Message::WindowFocus(false))
             }
             _ => None,
         });
@@ -3464,6 +3670,10 @@ impl App {
                 &self.sampling_text,
                 engine_settings::view(t, &self.engine, !matches!(self.server, Server::Down(_))),
                 self.personal_view(),
+                settings::VoiceView {
+                    voices: &self.voice_names,
+                    can_notify: self.voice_can_notify,
+                },
             )
         } else if self.page == View::Project {
             // the page of a project sits where the conversation sits, so the dialogs can open over it
