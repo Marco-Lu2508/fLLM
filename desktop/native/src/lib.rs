@@ -13,6 +13,7 @@ pub mod md;
 pub mod models;
 pub mod prompts;
 pub mod memory;
+pub mod promptlib;
 pub mod rag;
 pub mod settings;
 pub mod sidecar;

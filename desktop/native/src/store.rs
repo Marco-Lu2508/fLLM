@@ -326,6 +326,9 @@ pub struct Prefs {
     /// run without one takes the memory from the server).
     #[serde(default)]
     pub personal_loaded: bool,
+    /// The saved prompts of the library (Settings > Personalization, the "/" in the box).
+    #[serde(default)]
+    pub saved_prompts: Vec<crate::promptlib::SavedPrompt>,
     /// false: the server and the model decide (nothing is sent); true: `temperature` and `top_p` are sent.
     #[serde(default)]
     pub manual_sampling: bool,
@@ -442,7 +445,7 @@ fn default_top_p() -> f32 {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { personal: Personal::default(), personal_loaded: false, manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
+        Prefs { personal: Personal::default(), personal_loaded: false, saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
     }
 }
 

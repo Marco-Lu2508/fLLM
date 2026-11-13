@@ -161,6 +161,9 @@ pub struct PersonalView<'a> {
     pub new_text: &'a str,
     /// The memory whose text is being changed: its id and the text in the box.
     pub edit: Option<(&'a str, &'a str)>,
+    /// The saved prompts of the library, and the box being typed in per id.
+    pub prompts: &'a [crate::promptlib::SavedPrompt],
+    pub plib_texts: &'a std::collections::HashMap<String, Content>,
 }
 
 /// A box for a text of the personalization (the input of a memory row, the field to add one).
@@ -429,6 +432,79 @@ pub fn page<'a>(
         ]
         .spacing(8)
         .align_y(Alignment::Center),
+    );
+
+    // ---- the prompt library (the Studio's "Saved prompts" in the same card) ----
+    pers = pers.push(rule(t));
+    pers = pers.push(
+        column![
+            text("Saved prompts").size(14),
+            text("Type / in the message box to list them, pick one with the arrow keys and Enter, or keep typing to filter by title.").size(12).color(t.muted),
+        ]
+        .spacing(3),
+    );
+    if personal.prompts.is_empty() {
+        pers = pers.push(text("No saved prompts yet.").size(13).color(t.muted));
+    }
+    for p in personal.prompts {
+        // the box of this row lives in the window (every saved prompt gets one when the program
+        // starts and when it is added; a row whose box is somehow missing is left out)
+        let Some(held) = personal.plib_texts.get(&p.id) else { continue };
+        let title_of = p.id.clone();
+        let text_of = p.id.clone();
+        pers = pers.push(
+            container(
+                row![
+                    column![
+                        text_input("Title", &p.title)
+                            .on_input(move |v| Message::PromptTitle(title_of.clone(), v))
+                            .size(13)
+                            .padding([6, 8])
+                            .width(Length::Fill)
+                            .style(move |_, status| text_input::Style {
+                                background: iced::Background::Color(t.surface_2),
+                                border: iced::Border { radius: 8.0.into(), width: 1.0, color: if matches!(status, text_input::Status::Focused { .. }) { t.fg_soft } else { t.separator } },
+                                icon: t.muted,
+                                placeholder: t.muted,
+                                value: t.fg,
+                                selection: t.primary_soft,
+                            }),
+                        text_editor(held)
+                            .placeholder("Prompt")
+                            .on_action(move |a| Message::PromptText(text_of.clone(), a))
+                            .size(13)
+                            .padding([6, 8])
+                            .height(Length::Shrink)
+                            .min_height(56)
+                            .max_height(160)
+                            .style(move |_, status| text_editor::Style {
+                                background: iced::Background::Color(t.surface_2),
+                                border: iced::Border { radius: 8.0.into(), width: 1.0, color: if matches!(status, Status::Focused { .. }) { t.fg_soft } else { t.separator } },
+                                placeholder: t.muted,
+                                value: t.fg,
+                                selection: iced::Color { a: 0.35, ..t.primary },
+                            }),
+                    ]
+                    .spacing(6)
+                    .width(Length::Fill),
+                    button(text("×").size(14)).on_press(Message::PromptDel(p.id.clone())).padding([2, 6]).style(theme::ghost_button(t)),
+                ]
+                .spacing(4)
+                .align_y(Alignment::Start),
+            )
+            .width(Length::Fill)
+            .padding(8)
+            .style(move |_| container::Style {
+                border: iced::border::rounded(8).width(1.0).color(t.separator),
+                ..Default::default()
+            }),
+        );
+    }
+    pers = pers.push(
+        button(text("Add a prompt").size(13))
+            .on_press(Message::PromptAdd)
+            .padding([5, 12])
+            .style(theme::secondary_button(t)),
     );
 
     let content = column![

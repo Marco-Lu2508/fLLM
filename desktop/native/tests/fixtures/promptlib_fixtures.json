@@ -1,0 +1,275 @@
+{
+  "prompts": [
+    {
+      "id": "pr1",
+      "title": "Email draft",
+      "text": "Write a short email about: "
+    },
+    {
+      "id": "pr2",
+      "title": "email me a plan",
+      "text": "Plan my week around: "
+    },
+    {
+      "id": "pr3",
+      "title": "Email reply to a customer",
+      "text": "Write a polite answer: "
+    },
+    {
+      "id": "pr4",
+      "title": "Summarize this text",
+      "text": "Summarize in three sentences: "
+    },
+    {
+      "id": "pr5",
+      "title": "summary for my boss",
+      "text": "One paragraph for a manager: "
+    },
+    {
+      "id": "pr6",
+      "title": "Translate to German",
+      "text": "Translate to German: "
+    },
+    {
+      "id": "pr7",
+      "title": "Explain like I am five",
+      "text": "Explain it simply: "
+    },
+    {
+      "id": "pr8",
+      "title": "Code review",
+      "text": "Review this code: "
+    },
+    {
+      "id": "pr9",
+      "title": "code cleanup",
+      "text": "Clean up this code: "
+    },
+    {
+      "id": "pr10",
+      "title": "Daily note",
+      "text": "A note for today: "
+    },
+    {
+      "id": "pr11",
+      "title": "Clear my inbox",
+      "text": "Sort these messages: "
+    }
+  ],
+  "cases": [
+    {
+      "text": "/email",
+      "indices": [
+        {
+          "id": "pr1",
+          "title": "Email draft",
+          "text": "Write a short email about: "
+        },
+        {
+          "id": "pr2",
+          "title": "email me a plan",
+          "text": "Plan my week around: "
+        },
+        {
+          "id": "pr3",
+          "title": "Email reply to a customer",
+          "text": "Write a polite answer: "
+        }
+      ]
+    },
+    {
+      "text": "/EMAIL",
+      "indices": [
+        {
+          "id": "pr1",
+          "title": "Email draft",
+          "text": "Write a short email about: "
+        },
+        {
+          "id": "pr2",
+          "title": "email me a plan",
+          "text": "Plan my week around: "
+        },
+        {
+          "id": "pr3",
+          "title": "Email reply to a customer",
+          "text": "Write a polite answer: "
+        }
+      ]
+    },
+    {
+      "text": "/email ",
+      "indices": [
+        {
+          "id": "pr1",
+          "title": "Email draft",
+          "text": "Write a short email about: "
+        },
+        {
+          "id": "pr2",
+          "title": "email me a plan",
+          "text": "Plan my week around: "
+        },
+        {
+          "id": "pr3",
+          "title": "Email reply to a customer",
+          "text": "Write a polite answer: "
+        }
+      ]
+    },
+    {
+      "text": "/",
+      "indices": [
+        {
+          "id": "pr1",
+          "title": "Email draft",
+          "text": "Write a short email about: "
+        },
+        {
+          "id": "pr2",
+          "title": "email me a plan",
+          "text": "Plan my week around: "
+        },
+        {
+          "id": "pr3",
+          "title": "Email reply to a customer",
+          "text": "Write a polite answer: "
+        },
+        {
+          "id": "pr4",
+          "title": "Summarize this text",
+          "text": "Summarize in three sentences: "
+        },
+        {
+          "id": "pr5",
+          "title": "summary for my boss",
+          "text": "One paragraph for a manager: "
+        },
+        {
+          "id": "pr6",
+          "title": "Translate to German",
+          "text": "Translate to German: "
+        },
+        {
+          "id": "pr7",
+          "title": "Explain like I am five",
+          "text": "Explain it simply: "
+        },
+        {
+          "id": "pr8",
+          "title": "Code review",
+          "text": "Review this code: "
+        }
+      ]
+    },
+    {
+      "text": "/sum",
+      "indices": [
+        {
+          "id": "pr4",
+          "title": "Summarize this text",
+          "text": "Summarize in three sentences: "
+        },
+        {
+          "id": "pr5",
+          "title": "summary for my boss",
+          "text": "One paragraph for a manager: "
+        }
+      ]
+    },
+    {
+      "text": "/summarize",
+      "indices": [
+        {
+          "id": "pr4",
+          "title": "Summarize this text",
+          "text": "Summarize in three sentences: "
+        }
+      ]
+    },
+    {
+      "text": "/plan",
+      "indices": [
+        {
+          "id": "pr2",
+          "title": "email me a plan",
+          "text": "Plan my week around: "
+        }
+      ]
+    },
+    {
+      "text": "/c",
+      "indices": [
+        {
+          "id": "pr8",
+          "title": "Code review",
+          "text": "Review this code: "
+        },
+        {
+          "id": "pr9",
+          "title": "code cleanup",
+          "text": "Clean up this code: "
+        },
+        {
+          "id": "pr11",
+          "title": "Clear my inbox",
+          "text": "Sort these messages: "
+        },
+        {
+          "id": "pr3",
+          "title": "Email reply to a customer",
+          "text": "Write a polite answer: "
+        }
+      ]
+    },
+    {
+      "text": "/clear",
+      "indices": []
+    },
+    {
+      "text": "/clear now",
+      "indices": []
+    },
+    {
+      "text": "/cle",
+      "indices": [
+        {
+          "id": "pr11",
+          "title": "Clear my inbox",
+          "text": "Sort these messages: "
+        },
+        {
+          "id": "pr9",
+          "title": "code cleanup",
+          "text": "Clean up this code: "
+        }
+      ]
+    },
+    {
+      "text": "/NEW",
+      "indices": []
+    },
+    {
+      "text": "/  summarize  ",
+      "indices": [
+        {
+          "id": "pr4",
+          "title": "Summarize this text",
+          "text": "Summarize in three sentences: "
+        }
+      ]
+    },
+    {
+      "text": "email",
+      "indices": []
+    },
+    {
+      "text": "no slash at all",
+      "indices": []
+    },
+    {
+      "text": "/xyz",
+      "indices": []
+    }
+  ]
+}

@@ -3,6 +3,7 @@
 use crate::api::{self, ModelInfo, StreamEvent, WireMessage};
 use crate::assistants::{self, Assistant, SysMode};
 use crate::memory;
+use crate::promptlib;
 use crate::rag::{self, IndexedDoc};
 use crate::store::{self, Record, Role, Stats, Store};
 use crate::chatlist::{self, ChatList, ListMsg};
@@ -13,7 +14,7 @@ use crate::engine_settings::{self, EngineState};
 use crate::models::{self, ModelsState};
 use crate::settings;
 use crate::theme::{self, Tokens};
-use iced::widget::text_editor::{Action, Binding, Content, KeyPress, Status};
+use iced::widget::text_editor::{Action, Binding, Content, KeyPress, Motion, Status};
 use iced::widget::{button, column, container, markdown, mouse_area, row, scrollable, stack, svg, text, text_editor, text_input, Space};
 use iced::{keyboard, task, time, Alignment, Element, Font, Length, Padding, Subscription, Task, Theme};
 use chrono::TimeZone;
@@ -215,6 +216,11 @@ pub struct App {
     mem_clear: bool,
     remember: Option<usize>,
     remember_text: String,
+    /// The menu under a "/" in the box: which saved prompts are listed and which one is highlighted.
+    slash: Vec<usize>,
+    slash_index: usize,
+    /// The text box of a prompt library row per id (so a half-typed row keeps its place).
+    plib_texts: std::collections::HashMap<String, Content>,
     /// The copy on the server: the text that is up there, whether it is off, and one request at a time.
     mem_synced_text: Option<String>,
     mem_sync_off: bool,
@@ -405,6 +411,19 @@ pub enum Message {
     PersonalSynced(api::SyncAnswer<PersonalSync>),
     /// Takes the change of a memory tool card back (the Undo under an answer).
     MemoryUndo(usize, usize),
+    /// The library of the settings.
+    PromptAdd,
+    PromptDel(String),
+    /// A saved prompt's title as it is typed (clamped to the limit).
+    PromptTitle(String, String),
+    /// A saved prompt's text: its box and the action of the box.
+    PromptText(String, Action),
+    /// The menu under a "/" in the box.
+    SlashPick(usize),
+    SlashUp,
+    SlashDown,
+    SlashEnter,
+    SlashClose,
     Code(code::CodeMsg),
 }
 
@@ -469,6 +488,9 @@ impl App {
             mem_clear: false,
             remember: None,
             remember_text: String::new(),
+            slash: Vec::new(),
+            slash_index: 0,
+            plib_texts: std::collections::HashMap::new(),
             mem_synced_text: None,
             mem_sync_off: false,
             mem_syncing: false,
@@ -491,6 +513,10 @@ impl App {
         if let Some(first) = app.store.chats.first().map(|c| c.id) {
             app.open(first);
         }
+        // every saved prompt gets its box here: the settings page draws them from this map
+        for p in &app.store.prefs.saved_prompts {
+            app.plib_texts.insert(p.id.clone(), Content::with_text(&p.text));
+        }
         (app, Task::perform(async move { api::fetch_model(&base).await }, Message::Connected))
     }
 
@@ -502,6 +528,16 @@ impl App {
     /// The id of the open chat, `None` for a chat that has not started.
     pub fn open_chat(&self) -> Option<u64> {
         self.current
+    }
+
+    /// What is in the message box (the tests read it after a pick of the library).
+    pub fn composer_text(&self) -> String {
+        self.editor.text()
+    }
+
+    /// Whether the menu of the prompt library under a "/" is open.
+    pub fn slash_open(&self) -> bool {
+        !self.slash.is_empty()
     }
 
     /// The text of the last message of the open chat.
@@ -1474,6 +1510,81 @@ impl App {
                 }
                 Task::none()
             }
+            // the prompt library of the settings
+            Message::PromptAdd => {
+                if self.store.prefs.saved_prompts.len() >= promptlib::limits::PROMPTS {
+                    self.toast = Some(format!("The library holds at most {} prompts.", promptlib::limits::PROMPTS));
+                } else {
+                    let title = format!("Prompt {}", self.store.prefs.saved_prompts.len() + 1);
+                    let id = store::uid("pr");
+                    self.store.prefs.saved_prompts.push(promptlib::SavedPrompt {
+                        id: id.clone(),
+                        title,
+                        text: String::new(),
+                    });
+                    self.plib_texts.insert(id, Content::new());
+                    self.save();
+                    return iced::widget::operation::focus_next();
+                }
+                Task::none()
+            }
+            Message::PromptDel(id) => {
+                self.store.prefs.saved_prompts.retain(|p| p.id != id);
+                self.plib_texts.remove(&id);
+                self.save();
+                Task::none()
+            }
+            Message::PromptTitle(id, value) => {
+                if let Some(p) = self.store.prefs.saved_prompts.iter_mut().find(|p| p.id == id) {
+                    // the Studio trims the title when you leave the field; here it is clamped as you type
+                    p.title = value.chars().take(promptlib::limits::TITLE).collect();
+                    self.save();
+                }
+                Task::none()
+            }
+            Message::PromptText(id, action) => {
+                let known = self
+                    .store
+                    .prefs
+                    .saved_prompts
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.text.clone())
+                    .unwrap_or_default();
+                let content = self.plib_texts.entry(id.clone()).or_insert_with(|| Content::with_text(&known));
+                content.perform(action);
+                let text: String = content.text().chars().take(promptlib::limits::TEXT).collect();
+                if let Some(p) = self.store.prefs.saved_prompts.iter_mut().find(|p| p.id == id) {
+                    p.text = text;
+                    self.save();
+                }
+                Task::none()
+            }
+            Message::SlashPick(i) => {
+                self.slash_pick(i);
+                Task::none()
+            }
+            Message::SlashUp => {
+                if !self.slash.is_empty() {
+                    self.slash_index = (self.slash_index + self.slash.len() - 1) % self.slash.len();
+                }
+                Task::none()
+            }
+            Message::SlashDown => {
+                if !self.slash.is_empty() {
+                    self.slash_index = (self.slash_index + 1) % self.slash.len();
+                }
+                Task::none()
+            }
+            Message::SlashEnter => {
+                self.slash_pick(self.slash_index);
+                Task::none()
+            }
+            Message::SlashClose => {
+                self.slash.clear();
+                self.slash_index = 0;
+                Task::none()
+            }
             Message::MemoryUndo(mi, ci) => {
                 let change = self.messages.get(mi).and_then(|m| m.tool_cards.get(ci)).and_then(|c| c.change.clone());
                 match change.and_then(|c| memory::undo(&self.store.prefs.personal.memories, &c).map(|list| (c, list))) {
@@ -1617,6 +1728,8 @@ impl App {
             }
             Message::Edit(action) => {
                 self.editor.perform(action);
+                // what a "/" in the box offers is asked again on every change (plibUpdateSlash)
+                self.slash_recompute();
                 Task::none()
             }
             Message::Send => {
@@ -3374,7 +3487,38 @@ impl App {
             usage,
             new_text: &self.mem_new,
             edit: self.mem_edit.as_ref().map(|(id, text)| (id.as_str(), text.as_str())),
+            prompts: &self.store.prefs.saved_prompts,
+            plib_texts: &self.plib_texts,
         }
+    }
+
+    /// What the menu under a "/" in the box offers: the saved prompts that match what is typed,
+    /// the built-in commands left alone — and only while the text is a single line
+    /// (the Studio's `plibUpdateSlash`).
+    fn slash_recompute(&mut self) {
+        let text = self.editor.text();
+        self.slash = if text.starts_with('/') && !text.contains('\n') {
+            promptlib::match_prompts(&self.store.prefs.saved_prompts, &text)
+        } else {
+            Vec::new()
+        };
+        // what the Studio does with its index when the list shrinks
+        self.slash_index = self.slash_index.min(self.slash.len().saturating_sub(1));
+    }
+
+    /// The picked prompt becomes the text of the box, the menu closes (plibPick).
+    fn slash_pick(&mut self, i: usize) {
+        if let Some(&idx) = self.slash.get(i) {
+            if let Some(p) = self.store.prefs.saved_prompts.get(idx) {
+                let text = p.text.clone();
+                self.editor = Content::with_text(&text);
+                // the cursor stands behind the text: what you type next continues it (the browser
+                // puts the cursor at the end when the value was set and the box focused)
+                self.editor.perform(Action::Move(Motion::DocumentEnd));
+            }
+        }
+        self.slash.clear();
+        self.slash_index = 0;
     }
 
     /// Puts a fact into the memory, with the line the Studio shows (memRemember).
@@ -3973,9 +4117,23 @@ impl App {
         let editor = text_editor(&self.editor)
             .placeholder("Ask anything or give an instruction")
             .on_action(Message::Edit)
-            .key_binding(|kp: KeyPress| match kp.key.as_ref() {
-                keyboard::Key::Named(keyboard::key::Named::Enter) if !kp.modifiers.shift() && matches!(kp.status, Status::Focused { .. }) => Some(Binding::Custom(Message::Send)),
-                _ => Binding::from_key_press(kp),
+            .key_binding(|kp: KeyPress| {
+                // while the menu under a "/" is open its keys belong to it (the Studio's keydown
+                // handler on the box: arrows move, Enter or Tab pick, Escape closes)
+                if !self.slash.is_empty() {
+                    match kp.key.as_ref() {
+                        keyboard::Key::Named(keyboard::key::Named::ArrowUp) => return Some(Binding::Custom(Message::SlashUp)),
+                        keyboard::Key::Named(keyboard::key::Named::ArrowDown) => return Some(Binding::Custom(Message::SlashDown)),
+                        keyboard::Key::Named(keyboard::key::Named::Escape) => return Some(Binding::Custom(Message::SlashClose)),
+                        keyboard::Key::Named(keyboard::key::Named::Enter) if !kp.modifiers.shift() => return Some(Binding::Custom(Message::SlashEnter)),
+                        keyboard::Key::Named(keyboard::key::Named::Tab) => return Some(Binding::Custom(Message::SlashEnter)),
+                        _ => {}
+                    }
+                }
+                match kp.key.as_ref() {
+                    keyboard::Key::Named(keyboard::key::Named::Enter) if !kp.modifiers.shift() && matches!(kp.status, Status::Focused { .. }) => Some(Binding::Custom(Message::Send)),
+                    _ => Binding::from_key_press(kp),
+                }
             })
             .padding(Padding { top: 14.0, right: 16.0, bottom: 6.0, left: 16.0 })
             .size(15)
@@ -4015,7 +4173,42 @@ impl App {
             Space::new().height(0).into()
         };
         let attachments = self.attachments_row(t);
-        let card = container(column![banner, attachments, editor, row![attach, hint, Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 16.0 })])
+        // the menu of the library over the box (the Studio's #slashMenu): a column of the matches,
+        // the highlighted one with the tint of the CSS .active
+        let slash_menu: Element<'_, Message> = if self.slash.is_empty() {
+            Space::new().height(0).into()
+        } else {
+            let mut items = column![].spacing(2);
+            for (i, &idx) in self.slash.iter().enumerate() {
+                if let Some(p) = self.store.prefs.saved_prompts.get(idx) {
+                    let active = i == self.slash_index;
+                    items = items.push(
+                        button(
+                            column![
+                                text(format!("/{}", p.title)).size(13).font(bold()),
+                                text(promptlib::preview(&p.text)).size(11.5).color(t.muted),
+                            ]
+                            .spacing(2)
+                            .align_x(Alignment::Start),
+                        )
+                        .on_press(Message::SlashPick(i))
+                        .padding([6, 10])
+                        .width(Length::Fill)
+                        .style(slash_button(t, active)),
+                    );
+                }
+            }
+            container(items)
+                .width(Length::Fill)
+                .padding(Padding { top: 4.0, right: 6.0, bottom: 4.0, left: 6.0 })
+                .style(move |_| container::Style {
+                    background: Some(iced::Background::Color(t.surface_2)),
+                    border: iced::border::rounded(10).width(1.0).color(t.separator),
+                    ..Default::default()
+                })
+                .into()
+        };
+        let card = container(column![banner, attachments, slash_menu, editor, row![attach, hint, Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 16.0 })])
             .style(theme::card(t, theme::R_XL, false))
             .max_width(780);
         container(card).width(Length::Fill).center_x(Length::Fill).padding(Padding { top: 8.0, right: 24.0, bottom: 20.0, left: 24.0 }).into()
@@ -4055,6 +4248,24 @@ pub fn ellipsize(text: &str, max: usize) -> String {
 pub const UI_FONT: Font = Font::with_name("Inter");
 pub const FONT_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.otf");
 pub const FONT_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.otf");
+
+/// One entry of the menu under a "/": the tint of the CSS `.slash-item.active, .slash-item:hover`
+/// (the primary colour at 14 percent) over the rounded background.
+fn slash_button(t: Tokens, active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: if active || hovered {
+                Some(iced::Background::Color(iced::Color { a: 0.14, ..t.primary }))
+            } else {
+                None
+            },
+            text_color: t.fg,
+            border: iced::border::rounded(6),
+            ..Default::default()
+        }
+    }
+}
 
 fn bold() -> Font {
     Font { weight: iced::font::Weight::Semibold, ..UI_FONT }
