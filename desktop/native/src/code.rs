@@ -1165,7 +1165,7 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
     container(body).padding(12).width(Length::Fill).style(theme::card(t, theme::R_MD, c.state == CallState::Pending)).into()
 }
 
-fn timeline<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme) -> Element<'a, Message> {
+fn timeline<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, tint: bool) -> Element<'a, Message> {
     let mut col = column![].spacing(12).width(Length::Fill);
     if s.items.is_empty() {
         let mut intro = column![text("Tell the agent what to do in this folder: explain the code, find a bug, add a test, rename something.").size(14).color(t.muted)].spacing(6);
@@ -1180,7 +1180,7 @@ fn timeline<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme) -> Element<'a,
     }
     for (i, item) in s.items.iter().enumerate() {
         let element: Element<'a, Message> = match item {
-            Item::User(text_) => row![Space::new().width(Length::Fill), container(text(text_.as_str()).size(15)).padding([9, 15]).max_width(560).style(theme::bubble(t))].into(),
+            Item::User(text_) => row![Space::new().width(Length::Fill), container(text(text_.as_str()).size(15)).padding([9, 15]).max_width(560).style(theme::bubble(t, tint))].into(),
             Item::Assistant { text: body, md: content } => {
                 if body.is_empty() {
                     if s.running && i + 1 == s.items.len() { text("…").size(15).color(t.muted).into() } else { Space::new().height(0).into() }
@@ -1198,7 +1198,14 @@ fn timeline<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme) -> Element<'a,
     scrollable(container(column_).center_x(Length::Fill).width(Length::Fill)).anchor_bottom().height(Length::Fill).into()
 }
 
-pub fn page<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, can_send: bool, recent: &'a [String]) -> Element<'a, Message> {
+pub fn page<'a>(
+    s: &'a CodeState,
+    t: Tokens,
+    theme: &iced::Theme,
+    can_send: bool,
+    recent: &'a [String],
+    tint: bool,
+) -> Element<'a, Message> {
     let Some(w) = &s.workspace else {
         let input = text_input("/path/to/your/project", &s.path_input)
             .on_input(|v| Message::Code(CodeMsg::PathInput(v)))
@@ -1325,7 +1332,7 @@ pub fn page<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, can_send: bool
     let composer = container(composer).width(Length::Fill).center_x(Length::Fill).padding(Padding { top: 8.0, right: 24.0, bottom: 20.0, left: 24.0 });
     let bar = container(container(bar).max_width(820).width(Length::Fill)).center_x(Length::Fill).padding(Padding { top: 0.0, right: 24.0, bottom: 0.0, left: 24.0 });
 
-    column![header, rule(t), timeline(s, t, theme), bar, composer].width(Length::Fill).height(Length::Fill).into()
+    column![header, rule(t), timeline(s, t, theme, tint), bar, composer].width(Length::Fill).height(Length::Fill).into()
 }
 
 #[cfg(test)]

@@ -663,6 +663,16 @@ pub enum Message {
     UsageStatus(String),
     /// The price rows are written back (`Save prices` of the Studio).
     UsageSave,
+    /// The theme of the appearance card (`selThemeMode` of the Studio).
+    LookTheme(String),
+    /// The accent colour (`accentPickerRow` of the Studio).
+    LookAccent(String),
+    /// The base size of the text (`selFontSize` of the Studio).
+    LookFontSize(u16),
+    /// Whether the user's messages are tinted (`chkColoredBubble` of the Studio).
+    LookTint(bool),
+    /// Whether the speed under every answer shows (`chkShowSpeed` of the Studio).
+    LookSpeed(bool),
     /// Ask the server for the notes of this chat (`refresh` of `inbox.js`).
     InboxRefresh,
     /// The notes of this chat came back (`refresh` of `inbox.js`).
@@ -965,7 +975,7 @@ impl App {
     }
 
     pub fn tokens(&self) -> Tokens {
-        Tokens::new(self.dark())
+        Tokens::new(self.dark(), self.store.accent.as_str())
     }
 
     pub fn theme(&self) -> Theme {
@@ -2539,6 +2549,31 @@ impl App {
                 self.usage_status = Some(text);
                 Task::none()
             }
+            Message::LookTheme(mode) => {
+                self.store.theme = mode;
+                self.save();
+                Task::none()
+            }
+            Message::LookAccent(value) => {
+                self.store.accent = value;
+                self.save();
+                Task::none()
+            }
+            Message::LookFontSize(size) => {
+                self.store.font_size = size;
+                self.save();
+                Task::none()
+            }
+            Message::LookTint(on) => {
+                self.store.colored_bubble = on;
+                self.save();
+                Task::none()
+            }
+            Message::LookSpeed(on) => {
+                self.store.show_speed = on;
+                self.save();
+                Task::none()
+            }
             Message::InboxRefresh => {
                 // no chat is open yet, or no folder is chosen for the coding agent: the notes
                 // live in that folder, there is nothing to ask (refresh of inbox.js)
@@ -3932,7 +3967,14 @@ impl App {
             return models::page(&self.models, t, matches!(self.server, Server::NoModel));
         }
         if self.page == View::Code && !matches!(self.server, Server::Down(_)) {
-            return code::page(&self.code, t, &self.theme(), matches!(self.server, Server::Ready(_)), &self.store.prefs.recent_folders);
+            return code::page(
+            &self.code,
+            t,
+            &self.theme(),
+            matches!(self.server, Server::Ready(_)),
+            &self.store.prefs.recent_folders,
+            self.store.colored_bubble,
+        );
         }
         let page: Element<'_, Message> = if self.page == View::Settings {
             // the dialogs of this page (forget everything) open over it: it joins the stack below
@@ -3953,6 +3995,13 @@ impl App {
                     data: &self.store.usage,
                     prices: &self.prices,
                     status: self.usage_status.as_deref(),
+                },
+                settings::LookView {
+                    theme: &self.store.theme,
+                    accent: &self.store.accent,
+                    font_size: self.store.font_size,
+                    tint: self.store.colored_bubble,
+                    speed: self.store.show_speed,
                 },
             )
         } else if self.page == View::Project {
@@ -6726,7 +6775,7 @@ impl App {
                 if !m.content.is_empty() {
                     bubble_col = bubble_col.push(text(&m.content).size(15));
                 }
-                let bubble = container(bubble_col).padding([9, 15]).max_width(560).style(theme::bubble(t));
+                let bubble = container(bubble_col).padding([9, 15]).max_width(560).style(theme::bubble(t, self.store.colored_bubble));
                 let mut col = column![row![Space::new().width(Length::Fill), bubble]].spacing(4);
                 if let Some(passages) = m.passages.as_ref().filter(|p| !p.is_empty()) {
                     col = col.push(row![Space::new().width(Length::Fill), self.passage_chip(t, i, passages)]);
@@ -6889,7 +6938,7 @@ impl App {
                     meta = meta.push(button(text("Remember").size(12)).on_press(Message::RememberOpen(i)).padding([3, 0]).style(theme::ghost_button(t)));
                     meta = meta.push(button(text("Rewind").size(12)).on_press(Message::RewindTo(i)).padding([3, 0]).style(theme::ghost_button(t)));
                     if let Some(s) = &m.stats {
-                        if s.tokens_per_second > 0.0 {
+                        if s.tokens_per_second > 0.0 && self.store.show_speed {
                             meta = meta.push(
                                 text(format!("{:.1} tokens/s · {} tokens{}", s.tokens_per_second, s.completion_tokens, if s.prompt_per_second > 0.0 { format!(" · prompt {:.0} tokens/s", s.prompt_per_second) } else { String::new() }))
                                     .size(12)
@@ -7489,7 +7538,15 @@ fn open_link(uri: &str) {
 }
 
 pub fn run() -> iced::Result {
+    // the base size of the text is what the appearance card set (the `selFontSize` of the Studio)
+    let look = Store::load(&store::data_file());
     iced::application(App::new, App::update, App::view)
+        .settings(iced::Settings {
+            fonts: vec![FONT_REGULAR.into(), FONT_SEMIBOLD.into()],
+            default_font: UI_FONT,
+            default_text_size: iced::Pixels(look.font_size as f32),
+            ..Default::default()
+        })
         .title("fLLM")
         .font(FONT_REGULAR)
         .font(FONT_SEMIBOLD)

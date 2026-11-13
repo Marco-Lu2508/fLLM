@@ -611,7 +611,7 @@ impl Prefs {
 
 pub const BUILT_IN_SYSTEM_PROMPT: &str = "You are a helpful assistant running locally on the user's computer. Answer in the language of the user. Be concise. Use Markdown only where it helps. If you are not sure, say so. Never invent facts, quotes, links or sources.";
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Store {
     #[serde(default)]
     pub prefs: Prefs,
@@ -627,10 +627,54 @@ pub struct Store {
     /// "light", "dark" or "" (follow the system).
     #[serde(default)]
     pub theme: String,
+    /// The accent people chose (`fllm.studio.accent.v2`): the value of one of `theme::ACCENTS`.
+    #[serde(default = "default_accent")]
+    pub accent: String,
+    /// The base size of the text in points (14, 15, 16 or 18 — the Studio's `selFontSize`).
+    #[serde(default = "default_font_size")]
+    pub font_size: u16,
+    /// Whether the user's messages are tinted with the accent (`coloredBubble` of the Studio).
+    #[serde(default = "default_true")]
+    pub colored_bubble: bool,
+    /// Whether the speed under every answer shows (`showSpeed` of the Studio).
+    #[serde(default = "default_true")]
+    pub show_speed: bool,
     /// The tokens counted per model and their prices (the `fllm.studio.usage` of the Studio's
     /// localStorage, saved with everything else here).
     #[serde(default)]
     pub usage: crate::usage::UsageData,
+}
+
+impl Default for Store {
+    /// What a fresh store holds: the look of the Studio — Copper, medium text, tinted messages and
+    /// the speed showing. (The serde defaults above do the same when an older file is read.)
+    fn default() -> Self {
+        Self {
+            prefs: Prefs::default(),
+            assistants: Vec::new(),
+            projects: Vec::new(),
+            chats: Vec::new(),
+            next_id: 0,
+            theme: String::new(),
+            accent: default_accent(),
+            font_size: default_font_size(),
+            colored_bubble: default_true(),
+            show_speed: default_true(),
+            usage: crate::usage::UsageData::default(),
+        }
+    }
+}
+
+fn default_accent() -> String {
+    String::from("patina")
+}
+
+fn default_font_size() -> u16 {
+    15
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Where the chats live: `$FLLM_APP_DATA` (tests, portable use), else the user's data folder.

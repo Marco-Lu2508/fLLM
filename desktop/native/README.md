@@ -144,6 +144,12 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   four calls); the sources are numbered `[n]` under the answer (*Sources*, a click opens the page
   in the browser). The texts, cards, budget and error lines are checked against `ctRunTool` of the
   Studio itself — the fixtures are produced by that code.
+- Appearance: the settings card of the Studio — theme (system/dark/light), the eight accent
+  colors with the chosen one ringed, the base size of the text (14–18px), *Tint your messages* and
+  *Show generation speed*. The accent colours the whole page exactly as the Studio computes it
+  (dark theme takes the accent, light theme its lighter twin, the text on it chosen by luminance),
+  without the tint the messages fall back to the Studio's secondary. Three unit tests over every
+  accent, three window tests with one drawing, four mutations.
 - Session mailbox: notes one session leaves for another wait in the workspace and show up as a badge
   *Inbox (n)* on the top bar. The panel lists them with what they say about themselves; one click puts
   a note into the message (a blank line between what was written and what comes from another session),

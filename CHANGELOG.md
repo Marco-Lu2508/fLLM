@@ -53,6 +53,19 @@ behaviour between versions).
   `assistantInner`. Tests: Esc stopping and ignoring, the fold with its click, the open box while it
   thinks, and the research run stopped by the key; four mutations each turn one red; the open box is
   drawn to a PNG and read back.
+- **The look of the native app: accent, size, tint and speed.** The Studio's *Appearance* card is
+  complete in the settings of the native app. *Theme* chooses system, dark or light; *Accent color*
+  offers the eight accents of the Studio (Copper first, the colour of the material) with the chosen
+  one ringed the way `.accent-swatch.active` is, and the whole page draws with it: the dark theme
+  takes the accent's own colour, the light theme its lighter twin, and the text on the accent is
+  dark or light by the luminance rule of `core.js` — every accent keeps its contrast in both
+  themes, which the tests check. *Font size* sets the base size the window draws with (14, 15, 16
+  or 18 as the Studio's `selFontSize`), *Tint your messages* tints the user's bubble with the accent
+  and falls back to the `--secondary` of the Studio when it is off (in Chat and in Code mode), and
+  *Show generation speed* decides whether the tokens-per-second line under an answer shows. The
+  look lives beside the theme in the store, with the defaults the Studio starts with. Three unit
+  tests over every accent and both themes, three window tests with one drawing of the card, four
+  mutations.
 - **The session mailbox in the native app.** The Studio lets one session leave a note for another
   (`inbox.js`); the native app has the badge and the panel. The notes wait in `.fllm/messages.json`
   of the workspace of the coding agent and are asked for every four seconds for the chat that is

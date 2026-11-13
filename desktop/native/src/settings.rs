@@ -238,6 +238,16 @@ fn value_slider<'a>(t: Tokens, range: std::ops::RangeInclusive<f32>, value: f32,
     row![s, text(format!("{value:.2}")).size(13).font(iced::Font::MONOSPACE).width(44)].spacing(10).align_y(Alignment::Center).into()
 }
 
+/// What the appearance card shows: the four choices of the Studio's `selThemeMode`,
+/// `accentPickerRow`, `selFontSize` and the two switches.
+pub struct LookView<'a> {
+    pub theme: &'a str,
+    pub accent: &'a str,
+    pub font_size: u16,
+    pub tint: bool,
+    pub speed: bool,
+}
+
 /// What the usage card shows: the counters, the price rows and the line under its buttons.
 pub struct UsageView<'a> {
     pub data: &'a crate::usage::UsageData,
@@ -282,6 +292,117 @@ impl std::fmt::Display for VoiceChoice {
 
 // the page of the settings carries every block of it (the Studio reads its rows from the page)
 #[allow(clippy::too_many_arguments)]
+/// The appearance card of the Studio (the `Appearance` card of `shell.html`): the theme, the accent
+/// people pick, the base size of the text and the two switches under it.
+fn appearance_card<'a>(t: Tokens, look: LookView<'a>) -> Element<'a, Message> {
+    /// The style every select of the page wears.
+    fn select_style<'a>(t: Tokens) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list::Style + 'a {
+        move |_, status| pick_list::Style {
+            background: iced::Background::Color(t.surface_2),
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: 1.0,
+                color: if matches!(status, pick_list::Status::Hovered) { t.fg_soft } else { t.separator },
+            },
+            text_color: t.fg,
+            placeholder_color: t.muted,
+            handle_color: t.muted,
+        }
+    }
+
+    let mut body = column![].spacing(16);
+
+    // Theme: what the page follows when it does not decide itself
+    const THEME_LABELS: [&str; 3] = ["Same as the system", "Dark", "Light"];
+    let theme_now = match look.theme {
+        "dark" => "Dark",
+        "light" => "Light",
+        _ => "Same as the system",
+    };
+    let theme_control = pick_list(THEME_LABELS, Some(theme_now), |label: &'static str| {
+        Message::LookTheme(match label {
+            "Dark" => String::from("dark"),
+            "Light" => String::from("light"),
+            _ => String::new(),
+        })
+    })
+    .padding([6, 10])
+    .style(select_style(t));
+    body = body.push(setting(t, "Theme", "By default the page follows the light or dark setting of your system.", theme_control.into()));
+
+    // Accent color: the eight of the Studio, the chosen one ringed like `.accent-swatch.active`
+    let mut swatches = row![].spacing(8).align_y(Alignment::Center);
+    for accent in theme::ACCENTS {
+        let chosen = accent.value == look.accent;
+        let colour = accent.thumb;
+        let label = accent.name;
+        let text_colour = theme::on_accent(colour);
+        swatches = swatches.push(
+            button(text(label).size(11).color(text_colour))
+                .on_press(Message::LookAccent(accent.value.to_string()))
+                .padding([7, 10])
+                .style(move |_, status| button::Style {
+                    background: Some(iced::Background::Color(match status {
+                        button::Status::Hovered | button::Status::Pressed => iced::Color { a: 0.85, ..colour },
+                        _ => colour,
+                    })),
+                    text_color: text_colour,
+                    border: iced::Border {
+                        radius: 999.0.into(),
+                        width: if chosen { 2.0 } else { 1.0 },
+                        color: if chosen { t.primary } else { secondary_ring(t) },
+                    },
+                    ..Default::default()
+                }),
+        );
+    }
+    body = body.push(setting(t, "Accent color", "Colors the sidebar and the controls.", swatches.into()));
+
+    // Font size: the base the whole interface draws with
+    let size_now = look.font_size;
+    const SIZE_LABELS: [&str; 4] = ["Small (14px)", "Medium (15px)", "Large (16px)", "Extra Large (18px)"];
+    let size_label = match size_now {
+        14 => SIZE_LABELS[0],
+        16 => SIZE_LABELS[2],
+        18 => SIZE_LABELS[3],
+        _ => SIZE_LABELS[1],
+    };
+    let size_control = pick_list(SIZE_LABELS, Some(size_label), |label: &'static str| {
+        Message::LookFontSize(match label {
+            "Small (14px)" => 14,
+            "Large (16px)" => 16,
+            "Extra Large (18px)" => 18,
+            _ => 15,
+        })
+    })
+    .padding([6, 10])
+    .style(select_style(t));
+    body = body.push(setting(t, "Font size", "Base size of the text in the whole interface.", size_control.into()));
+
+    // Tint your messages: the bubble of the accent, or the Studio's secondary
+    body = body.push(setting(
+        t,
+        "Tint your messages",
+        "Tints your messages in the accent color.",
+        segmented(t, vec![("On", look.tint, Message::LookTint(true)), ("Off", !look.tint, Message::LookTint(false))]),
+    ));
+
+    // Show generation speed: the line under every answer
+    body = body.push(setting(
+        t,
+        "Show generation speed",
+        "Shows tokens per second and the time to the first token below every answer.",
+        segmented(t, vec![("On", look.speed, Message::LookSpeed(true)), ("Off", !look.speed, Message::LookSpeed(false))]),
+    ));
+
+    body.into()
+}
+
+/// The ring around the swatch that is not chosen (`--secondary` of the Studio).
+fn secondary_ring(t: Tokens) -> iced::Color {
+    theme::secondary(t.dark)
+}
+
 /// The usage card of the Studio (`usage.js`): what has been counted, what it costs with the
 /// prices entered, and the rows themselves.
 fn usage_card<'a>(t: Tokens, view: UsageView<'a>) -> Element<'a, Message> {
@@ -431,6 +552,7 @@ pub fn page<'a>(
     personal: PersonalView<'a>,
     voice: VoiceView<'a>,
     usage: UsageView<'a>,
+    look: LookView<'a>,
 ) -> Element<'a, Message> {
     let mut answers = column![].spacing(14);
     answers = answers.push(setting(
@@ -938,6 +1060,7 @@ pub fn page<'a>(
         // the Voice and alerts pane sits last so the cards before it keep their place (the pane
         // of voice.js has its own place in the Studio's menu; the drawing of the settings takes
         // its own height for these)
+        card(t, "Appearance", appearance_card(t, look)),
         card(t, "Usage and cost", usage_card(t, usage)),
         card(t, "Dictation", dictation.into()),
         card(t, "Reading aloud", reading.into()),
