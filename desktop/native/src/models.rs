@@ -397,6 +397,11 @@ pub async fn gpu_check(base: String, device: String) -> Result<Vec<crate::gpuche
         .map(|v| crate::gpucheck::GpuResult::from_json(&v))
 }
 
+/// The state of the NPU for the card (`GET /api/npu`); the card decides what of it shows.
+pub async fn fetch_npu(base: String) -> Result<Value, String> {
+    get_json(&base, "/api/npu").await
+}
+
 /// The prices per million tokens the user entered (`GET /api/studio/prices`).
 pub async fn fetch_prices(base: String) -> Result<Vec<crate::usage::Price>, String> {
     get_json(&base, "/api/studio/prices").await.map(|v| parse_prices(&v))

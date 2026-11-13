@@ -53,6 +53,21 @@ behaviour between versions).
   `assistantInner`. Tests: Esc stopping and ignoring, the fold with its click, the open box while it
   thinks, and the research run stopped by the key; four mutations each turn one red; the open box is
   drawn to a PNG and read back.
+- **The NPU card and the device logic of the native app.** The Studio's `npu.js` keeps what it
+  shows for an NPU and everything it decides about the devices; the native app has both. The *NPU
+  (neural processing unit)* card under the devices of `Settings > Hardware` is `npuCardModel`: the
+  state with its summary (every one of the seven with the Studio's own words, *Ready* carrying its
+  OpenVINO version and device, *runtime missing* the download it would take), the progress line of
+  a setup run, the errors in the three steps the Studio takes, the hardware rows with their badges
+  (Intel NPU, the AMD pointer, *detected, not supported yet*), the four formats when the API names
+  them, the offload line, and the four paragraphs of `NPU_EXPLANATION` under it. The pure zone of
+  the file is ported whole with fifty-six fixtures against the Studio's own code: `deviceKey` and
+  `deviceRank` for comparing driver interfaces, `mergeDevices` (one entry per physical card — the
+  same chip through CUDA, Vulkan and the generic interface is one entry with its members, the
+  processor and NPUs never merge, two identical cards stay two), `deviceBackendLabel`, "
+  "`deviceChoices` for the load options, `runningDevice` for the sentence where the model runs,
+  `deviceMemory` with the free memory of the device itself and `deviceRole` for what a card does
+  right now. Ten unit tests, three window tests with two drawings, four mutations.
 - **The hardware card of the native app (first half).** The Studio tells in one place whether the
   GPU does the work (`gpucheck.js`); the native app has the part of it that answers that question.
   The amber notice follows `device_fallbacks` of the status exactly as `fallbackNotice` computes it:

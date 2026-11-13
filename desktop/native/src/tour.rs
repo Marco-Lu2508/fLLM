@@ -123,6 +123,10 @@ impl Hardware {
                             .get("total_memory_bytes")
                             .and_then(serde_json::Value::as_u64)
                             .unwrap_or_default(),
+                        free_memory_bytes: d
+                            .get("free_memory_bytes")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or_default(),
                         available: d
                             .get("available")
                             .and_then(serde_json::Value::as_bool)
@@ -217,6 +221,8 @@ pub struct Device {
     pub api: String,
     pub dev_type: String,
     pub total_memory_bytes: u64,
+    /// How much of it is free right now (the bar on the device card).
+    pub free_memory_bytes: u64,
     pub available: bool,
     pub has_id: bool,
 }

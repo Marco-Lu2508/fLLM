@@ -13,6 +13,7 @@ use serde_json::json;
 fn dev(name: &str, backend: &str, api: &str, dev_type: &str, total: u64) -> Device {
     Device {
         id: name.into(),
+        free_memory_bytes: 0,
         name: name.into(),
         backend: backend.into(),
         api: api.into(),

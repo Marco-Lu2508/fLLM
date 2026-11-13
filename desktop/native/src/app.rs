@@ -327,6 +327,10 @@ pub struct App {
     pub gpu_results: Vec<(String, Vec<crate::gpucheck::GpuResult>)>,
     /// What runs on the CPU although a GPU was chosen (the amber notice of the hardware card).
     pub gpu_fallback: Option<crate::gpucheck::FallbackNotice>,
+    /// The state of the NPU as the API answers it (`npuCardModel` reads it).
+    pub npu_state: Option<serde_json::Value>,
+    /// What the prompt offload of the NPU is doing (the status line of the card).
+    pub npu_runtime: bool,
     /// What the tour has to say (the line about this computer, a model's memory, the loaded model
     /// and the suggestions of the hub).
     pub tour_data: tour::TourData,
@@ -673,6 +677,8 @@ pub enum Message {
     UsageSave,
     /// The theme of the appearance card (`selThemeMode` of the Studio).
     /// The devices of this machine came back (the card of `Settings > Hardware`).
+    /// The state of the NPU came back (`npu.js` card).
+    NpuState(Result<serde_json::Value, String>),
     HardwareLoaded(Result<tour::Hardware, String>),
     /// The check of one card was started (`gpuCheckHtml` of `gpucheck.js`).
     GpuCheck(String),
@@ -854,6 +860,8 @@ impl App {
             gpu_busy: Vec::new(),
             gpu_results: Vec::new(),
             gpu_fallback: None,
+            npu_state: None,
+            npu_runtime: false,
             tour_data: tour::TourData::default(),
             shortcuts_open: false,
             sc_capture: None,
@@ -2572,6 +2580,15 @@ impl App {
                 self.usage_status = Some(text);
                 Task::none()
             }
+            Message::NpuState(Ok(state)) => {
+                self.npu_state = Some(state);
+                Task::none()
+            }
+            Message::NpuState(Err(_)) => {
+                // without the route there is no NPU to speak of: the card says it is checking
+                self.npu_state = None;
+                Task::none()
+            }
             Message::HardwareLoaded(Ok(hardware)) => {
                 self.hardware_devices = hardware.devices;
                 Task::none()
@@ -3291,18 +3308,20 @@ impl App {
                         models::fetch_hardware(self.base.clone()),
                         Message::HardwareLoaded,
                     );
+                    let npu = Task::perform(models::fetch_npu(self.base.clone()), Message::NpuState);
                     if !matches!(self.server, Server::Down(_)) {
                         return Task::batch(vec![
                             voices,
                             prices,
                             devices,
+                            npu,
                             Task::perform(
                                 engine_settings::fetch(self.base.clone()),
                                 Message::EngineLoaded,
                             ),
                         ]);
                     }
-                    return Task::batch(vec![voices, prices, devices]);
+                    return Task::batch(vec![voices, prices, devices, npu]);
                 }
                 Task::none()
             }
@@ -4077,6 +4096,7 @@ impl App {
                     notice: self.gpu_fallback.as_ref(),
                     busy: &self.gpu_busy,
                     results: &self.gpu_results,
+                    npu: self.npu_state.as_ref(),
                 },
             )
         } else if self.page == View::Project {

@@ -1,0 +1,1693 @@
+[
+  {
+    "fn": "npuMegabytes",
+    "args": [
+      0
+    ],
+    "got": "0.0",
+    "note": "zero"
+  },
+  {
+    "fn": "npuMegabytes",
+    "args": [
+      1500000000
+    ],
+    "got": "1500.0",
+    "note": "a billion and a half"
+  },
+  {
+    "fn": "npuMegabytes",
+    "args": [
+      null
+    ],
+    "got": "0.0",
+    "note": "nothing"
+  },
+  {
+    "fn": "npuProgressModel",
+    "args": [
+      null
+    ],
+    "got": {
+      "visible": false,
+      "percent": 0,
+      "text": ""
+    },
+    "note": "no progress at all"
+  },
+  {
+    "fn": "npuProgressModel",
+    "args": [
+      {
+        "busy": false
+      }
+    ],
+    "got": {
+      "visible": false,
+      "percent": 0,
+      "text": ""
+    },
+    "note": "not busy: no bar"
+  },
+  {
+    "fn": "npuProgressModel",
+    "args": [
+      {
+        "busy": true,
+        "phase": "downloading",
+        "done_bytes": 500000000,
+        "total_bytes": 2000000000
+      }
+    ],
+    "got": {
+      "visible": true,
+      "percent": 25,
+      "text": "Downloading (500.0 of 2000.0 MB)"
+    },
+    "note": "a quarter downloaded"
+  },
+  {
+    "fn": "npuProgressModel",
+    "args": [
+      {
+        "busy": true,
+        "phase": "verifying"
+      }
+    ],
+    "got": {
+      "visible": true,
+      "percent": 0,
+      "text": "Checking the download"
+    },
+    "note": "no totals: no detail"
+  },
+  {
+    "fn": "npuProgressModel",
+    "args": [
+      {
+        "busy": true,
+        "phase": "elsewhere"
+      }
+    ],
+    "got": {
+      "visible": true,
+      "percent": 0,
+      "text": "Working"
+    },
+    "note": "an unknown phase says Working"
+  },
+  {
+    "fn": "npuProgressModel",
+    "args": [
+      {
+        "busy": true,
+        "phase": "unpacking",
+        "done_bytes": 9,
+        "total_bytes": 5
+      }
+    ],
+    "got": {
+      "visible": true,
+      "percent": 100,
+      "text": "Unpacking (0.0 of 0.0 MB)"
+    },
+    "note": "more done than total: a hundred"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      null
+    ],
+    "got": {
+      "summary": "Checking for an NPU ...",
+      "offload": "",
+      "tone": "muted",
+      "hardware": [],
+      "button": null,
+      "cancel": false,
+      "remove": false,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": null,
+      "formats": [],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "checking"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      {
+        "state": "not_in_build"
+      }
+    ],
+    "got": {
+      "summary": "This build of fLLM has no NPU support.",
+      "offload": "",
+      "tone": "muted",
+      "hardware": [],
+      "button": null,
+      "cancel": false,
+      "remove": false,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": null,
+      "formats": [],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "no support in this build"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      {
+        "state": "no_npu"
+      }
+    ],
+    "got": {
+      "summary": "No NPU was found on this computer.",
+      "offload": "",
+      "tone": "muted",
+      "hardware": [],
+      "button": null,
+      "cancel": false,
+      "remove": false,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": null,
+      "formats": [],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "no NPU was found"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      {
+        "state": "unsupported_hardware"
+      }
+    ],
+    "got": {
+      "summary": "An NPU was detected, but this kind of NPU is not supported yet.",
+      "offload": "",
+      "tone": "muted",
+      "hardware": [],
+      "button": null,
+      "cancel": false,
+      "remove": false,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": null,
+      "formats": [],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "detected but unsupported"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      {
+        "state": "setup_unavailable"
+      }
+    ],
+    "got": {
+      "summary": "An Intel NPU was found, but fLLM has no automatic setup for this system. Install the OpenVINO runtime yourself and fLLM will find it.",
+      "offload": "",
+      "tone": "muted",
+      "hardware": [],
+      "button": null,
+      "cancel": false,
+      "remove": false,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": null,
+      "formats": [],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "no automatic setup"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      {
+        "state": "no_device"
+      }
+    ],
+    "got": {
+      "summary": "The OpenVINO runtime is installed but does not list an NPU. The NPU driver may be missing, or this user may not be allowed to open the device.",
+      "offload": "",
+      "tone": "warn",
+      "hardware": [],
+      "button": null,
+      "cancel": false,
+      "remove": false,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": null,
+      "formats": [],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "runtime without a device"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      {
+        "state": "ready"
+      }
+    ],
+    "got": {
+      "summary": "Ready (experimental). Choose NPU under Advanced when you load a model; long prompts then run on it.",
+      "offload": "",
+      "tone": "good",
+      "hardware": [],
+      "button": null,
+      "cancel": false,
+      "remove": false,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": null,
+      "formats": [],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "ready without a version"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      {
+        "state": "installing"
+      }
+    ],
+    "got": {
+      "summary": "Installing the runtime ...",
+      "offload": "",
+      "tone": "muted",
+      "hardware": [],
+      "button": null,
+      "cancel": false,
+      "remove": false,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": null,
+      "formats": [],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "installing"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      {
+        "state": "other_state",
+        "state_text": "Some text."
+      }
+    ],
+    "got": {
+      "summary": "Some text.",
+      "offload": "",
+      "tone": "muted",
+      "hardware": [],
+      "button": null,
+      "cancel": false,
+      "remove": false,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": null,
+      "formats": [],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "an unknown state uses state_text"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      {
+        "state": "runtime_missing",
+        "setup": {
+          "download_bytes": 140000000,
+          "pinned_version": "2025.0.1"
+        }
+      }
+    ],
+    "got": {
+      "summary": "An Intel NPU was found. The runtime that drives it (OpenVINO 2025.0.1 (a download of about 140 MB)) is not installed yet.",
+      "offload": "",
+      "tone": "muted",
+      "hardware": [],
+      "button": {
+        "action": "install",
+        "label": "Install the runtime (about 140 MB)"
+      },
+      "cancel": false,
+      "remove": false,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": null,
+      "formats": [],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "the runtime to install"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      {
+        "state": "runtime_missing",
+        "setup": {
+          "download_bytes": 140000000
+        },
+        "progress": {
+          "busy": true,
+          "phase": "failed"
+        }
+      }
+    ],
+    "got": {
+      "summary": "An Intel NPU was found. The runtime that drives it (OpenVINO  (a download of about 140 MB)) is not installed yet.",
+      "offload": "",
+      "tone": "muted",
+      "hardware": [],
+      "button": {
+        "action": "install",
+        "label": "Install the runtime (about 140 MB)"
+      },
+      "cancel": false,
+      "remove": false,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": null,
+      "formats": [],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "failed: Try again"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      {
+        "state": "ready",
+        "runtime": {
+          "version": "2025.1.0",
+          "managed": true
+        },
+        "devices": [
+          {
+            "full_name": "Intel AI Boost",
+            "architecture": "Arrow Lake"
+          }
+        ],
+        "offload_line": "reading on the NPU",
+        "quantizations": {
+          "eight_bit": [
+            "q8_0"
+          ],
+          "float16": [
+            "f16"
+          ],
+          "exact": [],
+          "converted_int4": [
+            "int4"
+          ]
+        }
+      }
+    ],
+    "got": {
+      "summary": "Ready (experimental), OpenVINO 2025.1.0. Choose NPU under Advanced when you load a model; long prompts then run on it. Intel AI Boost (platform Arrow Lake).",
+      "offload": "reading on the NPU",
+      "tone": "good",
+      "hardware": [],
+      "button": null,
+      "cancel": false,
+      "remove": true,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": null,
+      "formats": [
+        {
+          "title": "Computed as 8 bit with one scale per output row (the default)",
+          "items": [
+            "q8_0"
+          ]
+        },
+        {
+          "title": "Half precision",
+          "items": [
+            "f16"
+          ]
+        },
+        {
+          "title": "Kept at 4 bit with FLLM_NPU_WEIGHTS=int4",
+          "items": [
+            "int4"
+          ]
+        }
+      ],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "ready with version, device, offload and formats"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      {
+        "state": "unsupported_hardware",
+        "hardware": [
+          {
+            "name": "XDNA",
+            "vendor": "amd"
+          }
+        ]
+      }
+    ],
+    "got": {
+      "summary": "An AMD NPU was found. fLLM drives it with its own kernels (long prompts) or through FastFlowLM: see the AMD NPU card below.",
+      "offload": "",
+      "tone": "muted",
+      "hardware": [
+        {
+          "label": "XDNA (AMD)",
+          "badge": "AMD NPU: native kernels or FastFlowLM, see below",
+          "supported": false,
+          "problem": null
+        }
+      ],
+      "button": null,
+      "cancel": false,
+      "remove": false,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": null,
+      "formats": [],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "an AMD machine points at its card"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      {
+        "state": "no_npu",
+        "hardware": [
+          {
+            "name": "Intel AI Boost",
+            "vendor": "intel",
+            "supported": true
+          },
+          {
+            "name": "Ryzen AI",
+            "vendor": "amd",
+            "supported": false,
+            "problem": "needs FastFlowLM"
+          },
+          {
+            "name": "Something",
+            "vendor": "qualcomm",
+            "supported": false
+          }
+        ],
+        "last_error": "the driver said no"
+      }
+    ],
+    "got": {
+      "summary": "No NPU was found on this computer.",
+      "offload": "",
+      "tone": "warn",
+      "hardware": [
+        {
+          "label": "Intel AI Boost (Intel)",
+          "badge": "Intel NPU",
+          "supported": true,
+          "problem": null
+        },
+        {
+          "label": "Ryzen AI (AMD)",
+          "badge": "AMD NPU: native kernels or FastFlowLM, see below",
+          "supported": false,
+          "problem": "needs FastFlowLM"
+        },
+        {
+          "label": "Something (Qualcomm)",
+          "badge": "detected, not supported yet",
+          "supported": false,
+          "problem": null
+        }
+      ],
+      "button": null,
+      "cancel": false,
+      "remove": false,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": "the driver said no",
+      "formats": [],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "three hardware rows and an error"
+  },
+  {
+    "fn": "npuCardModel",
+    "args": [
+      {
+        "state": "no_device",
+        "runtime": {
+          "error": "cannot open the device"
+        },
+        "progress": {
+          "busy": true,
+          "phase": "downloading",
+          "done_bytes": 1,
+          "total_bytes": 4,
+          "error": "lost the network"
+        }
+      }
+    ],
+    "got": {
+      "summary": "The OpenVINO runtime is installed but does not list an NPU. The NPU driver may be missing, or this user may not be allowed to open the device.",
+      "offload": "",
+      "tone": "warn",
+      "hardware": [],
+      "button": null,
+      "cancel": false,
+      "remove": false,
+      "progress": {
+        "visible": false,
+        "percent": 0,
+        "text": ""
+      },
+      "error": "cannot open the device",
+      "formats": [],
+      "explanation": [
+        "fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.",
+        "On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as \"still compiling\"; the processor serves those meanwhile); later starts take them from a cache.",
+        "The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.",
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here."
+      ]
+    },
+    "note": "the failed phase has the first word on the error"
+  },
+  {
+    "fn": "deviceKey",
+    "args": [
+      {
+        "name": "GeForce RTX™ 4060(R)"
+      }
+    ],
+    "got": "geforce rtx™ 4060",
+    "note": "marks in parentheses go"
+  },
+  {
+    "fn": "deviceKey",
+    "args": [
+      {
+        "name": "  spaced   name "
+      }
+    ],
+    "got": "spaced name",
+    "note": "spacing folds"
+  },
+  {
+    "fn": "deviceKey",
+    "args": [
+      {
+        "name": "Radeon (TM) RX 7800"
+      }
+    ],
+    "got": "radeon rx 7800",
+    "note": "the TM mark goes"
+  },
+  {
+    "fn": "deviceKey",
+    "args": [
+      null
+    ],
+    "got": "",
+    "note": "nothing"
+  },
+  {
+    "fn": "deviceRank",
+    "args": [
+      {
+        "id": "cuda:0",
+        "name": "GeForce RTX 4060(R)",
+        "backend": "cuda",
+        "api": "cuda",
+        "dev_type": "",
+        "total_memory_bytes": 8000000000,
+        "available": true,
+        "has_id": true
+      }
+    ],
+    "got": 0,
+    "note": "the vendor's own interface first"
+  },
+  {
+    "fn": "deviceRank",
+    "args": [
+      {
+        "id": "vulkan:1",
+        "name": "GeForce RTX 4060",
+        "backend": "vulkan",
+        "api": "vulkan",
+        "dev_type": "",
+        "total_memory_bytes": 8100000000,
+        "available": true,
+        "has_id": true
+      }
+    ],
+    "got": 1,
+    "note": "the native API second"
+  },
+  {
+    "fn": "deviceRank",
+    "args": [
+      {
+        "id": "vulkan:2",
+        "name": "GeForce RTX 4060",
+        "backend": "vulkan",
+        "api": "wgpu",
+        "dev_type": "",
+        "total_memory_bytes": 8100000000,
+        "available": true,
+        "has_id": true
+      }
+    ],
+    "got": 3,
+    "note": "the generic last"
+  },
+  {
+    "fn": "mergeDevices",
+    "args": [
+      [
+        {
+          "id": "cpu0",
+          "name": "Intel Core i5",
+          "backend": "cpu",
+          "api": "cpu",
+          "dev_type": "",
+          "total_memory_bytes": 0,
+          "available": true,
+          "has_id": true
+        },
+        {
+          "id": "cuda:0",
+          "name": "GeForce RTX 4060(R)",
+          "backend": "cuda",
+          "api": "cuda",
+          "dev_type": "",
+          "total_memory_bytes": 8000000000,
+          "available": true,
+          "has_id": true
+        },
+        {
+          "id": "vulkan:1",
+          "name": "GeForce RTX 4060",
+          "backend": "vulkan",
+          "api": "vulkan",
+          "dev_type": "",
+          "total_memory_bytes": 8100000000,
+          "available": true,
+          "has_id": true
+        },
+        {
+          "id": "vulkan:2",
+          "name": "GeForce RTX 4060",
+          "backend": "vulkan",
+          "api": "wgpu",
+          "dev_type": "",
+          "total_memory_bytes": 8100000000,
+          "available": true,
+          "has_id": true
+        },
+        {
+          "id": "npu0",
+          "name": "Intel AI Boost",
+          "backend": "npu",
+          "api": "npu",
+          "dev_type": "",
+          "total_memory_bytes": 0,
+          "available": true,
+          "has_id": true
+        }
+      ],
+      ""
+    ],
+    "got": [
+      {
+        "id": "cpu0",
+        "name": "Intel Core i5",
+        "backend": "cpu",
+        "api": "cpu",
+        "dev_type": "",
+        "total_memory_bytes": 0,
+        "available": true,
+        "has_id": true,
+        "members": [
+          {
+            "id": "cpu0",
+            "backend": "cpu",
+            "api": "cpu"
+          }
+        ],
+        "others": []
+      },
+      {
+        "id": "cuda:0",
+        "name": "GeForce RTX 4060(R)",
+        "backend": "cuda",
+        "api": "cuda",
+        "dev_type": "",
+        "total_memory_bytes": 8000000000,
+        "available": true,
+        "has_id": true,
+        "members": [
+          {
+            "id": "cuda:0",
+            "backend": "cuda",
+            "api": "cuda"
+          },
+          {
+            "id": "vulkan:1",
+            "backend": "vulkan",
+            "api": "vulkan"
+          },
+          {
+            "id": "vulkan:2",
+            "backend": "vulkan",
+            "api": "wgpu"
+          }
+        ],
+        "others": [
+          {
+            "id": "vulkan:1",
+            "backend": "vulkan",
+            "api": "vulkan",
+            "label": "Vulkan"
+          },
+          {
+            "id": "vulkan:2",
+            "backend": "vulkan",
+            "api": "wgpu",
+            "label": "Vulkan (generic)"
+          }
+        ]
+      },
+      {
+        "id": "npu0",
+        "name": "Intel AI Boost",
+        "backend": "npu",
+        "api": "npu",
+        "dev_type": "",
+        "total_memory_bytes": 0,
+        "available": true,
+        "has_id": true,
+        "members": [
+          {
+            "id": "npu0",
+            "backend": "npu",
+            "api": "npu"
+          }
+        ],
+        "others": []
+      }
+    ],
+    "note": "five entries become three"
+  },
+  {
+    "fn": "mergeDevices",
+    "args": [
+      [
+        {
+          "id": "cuda:0",
+          "name": "RTX 4090",
+          "backend": "cuda",
+          "api": "cuda",
+          "dev_type": "",
+          "total_memory_bytes": 24000000000,
+          "available": true,
+          "has_id": true
+        },
+        {
+          "id": "cuda:1",
+          "name": "RTX 4090",
+          "backend": "cuda",
+          "api": "cuda",
+          "dev_type": "",
+          "total_memory_bytes": 24000000000,
+          "available": true,
+          "has_id": true
+        }
+      ],
+      ""
+    ],
+    "got": [
+      {
+        "id": "cuda:0",
+        "name": "RTX 4090",
+        "backend": "cuda",
+        "api": "cuda",
+        "dev_type": "",
+        "total_memory_bytes": 24000000000,
+        "available": true,
+        "has_id": true,
+        "members": [
+          {
+            "id": "cuda:0",
+            "backend": "cuda",
+            "api": "cuda"
+          }
+        ],
+        "others": []
+      },
+      {
+        "id": "cuda:1",
+        "name": "RTX 4090",
+        "backend": "cuda",
+        "api": "cuda",
+        "dev_type": "",
+        "total_memory_bytes": 24000000000,
+        "available": true,
+        "has_id": true,
+        "members": [
+          {
+            "id": "cuda:1",
+            "backend": "cuda",
+            "api": "cuda"
+          }
+        ],
+        "others": []
+      }
+    ],
+    "note": "two identical cards stay two"
+  },
+  {
+    "fn": "mergeDevices",
+    "args": [
+      [
+        {
+          "id": "a",
+          "name": "Same Card",
+          "backend": "cuda",
+          "api": "cuda",
+          "dev_type": "",
+          "total_memory_bytes": 10000000000,
+          "available": true,
+          "has_id": true
+        },
+        {
+          "id": "b",
+          "name": "Same Card",
+          "backend": "vulkan",
+          "api": "vulkan",
+          "dev_type": "",
+          "total_memory_bytes": 2000000000,
+          "available": true,
+          "has_id": true
+        }
+      ],
+      ""
+    ],
+    "got": [
+      {
+        "id": "a",
+        "name": "Same Card",
+        "backend": "cuda",
+        "api": "cuda",
+        "dev_type": "",
+        "total_memory_bytes": 10000000000,
+        "available": true,
+        "has_id": true,
+        "members": [
+          {
+            "id": "a",
+            "backend": "cuda",
+            "api": "cuda"
+          }
+        ],
+        "others": []
+      },
+      {
+        "id": "b",
+        "name": "Same Card",
+        "backend": "vulkan",
+        "api": "vulkan",
+        "dev_type": "",
+        "total_memory_bytes": 2000000000,
+        "available": true,
+        "has_id": true,
+        "members": [
+          {
+            "id": "b",
+            "backend": "vulkan",
+            "api": "vulkan"
+          }
+        ],
+        "others": []
+      }
+    ],
+    "note": "under half the size: another device"
+  },
+  {
+    "fn": "mergeDevices",
+    "args": [
+      [],
+      ""
+    ],
+    "got": [],
+    "note": "nothing"
+  },
+  {
+    "fn": "mergeDevices",
+    "args": [
+      [
+        {
+          "id": "cuda:0",
+          "name": "GeForce RTX 4060(R)",
+          "backend": "cuda",
+          "api": "cuda",
+          "dev_type": "",
+          "total_memory_bytes": 8000000000,
+          "available": true,
+          "has_id": true
+        },
+        {
+          "id": "vulkan:1",
+          "name": "GeForce RTX 4060",
+          "backend": "vulkan",
+          "api": "vulkan",
+          "dev_type": "",
+          "total_memory_bytes": 8100000000,
+          "available": true,
+          "has_id": true
+        }
+      ],
+      "vulkan:1"
+    ],
+    "got": [
+      {
+        "id": "vulkan:1",
+        "name": "GeForce RTX 4060",
+        "backend": "vulkan",
+        "api": "vulkan",
+        "dev_type": "",
+        "total_memory_bytes": 8100000000,
+        "available": true,
+        "has_id": true,
+        "members": [
+          {
+            "id": "cuda:0",
+            "backend": "cuda",
+            "api": "cuda"
+          },
+          {
+            "id": "vulkan:1",
+            "backend": "vulkan",
+            "api": "vulkan"
+          }
+        ],
+        "others": [
+          {
+            "id": "cuda:0",
+            "backend": "cuda",
+            "api": "cuda",
+            "label": "NVIDIA CUDA"
+          }
+        ]
+      }
+    ],
+    "note": "the wanted one stands for its group"
+  },
+  {
+    "fn": "deviceBackendLabel",
+    "args": [
+      {
+        "id": "cpu0",
+        "name": "Intel Core i5",
+        "backend": "cpu",
+        "api": "cpu",
+        "dev_type": "",
+        "total_memory_bytes": 0,
+        "available": true,
+        "has_id": true
+      }
+    ],
+    "got": "Processor",
+    "note": "the processor"
+  },
+  {
+    "fn": "deviceBackendLabel",
+    "args": [
+      {
+        "id": "cuda:0",
+        "name": "GeForce RTX 4060(R)",
+        "backend": "cuda",
+        "api": "cuda",
+        "dev_type": "",
+        "total_memory_bytes": 8000000000,
+        "available": true,
+        "has_id": true
+      }
+    ],
+    "got": "NVIDIA CUDA",
+    "note": "NVIDIA CUDA"
+  },
+  {
+    "fn": "deviceBackendLabel",
+    "args": [
+      {
+        "id": "vulkan:2",
+        "name": "GeForce RTX 4060",
+        "backend": "vulkan",
+        "api": "wgpu",
+        "dev_type": "",
+        "total_memory_bytes": 8100000000,
+        "available": true,
+        "has_id": true
+      }
+    ],
+    "got": "Vulkan (generic)",
+    "note": "the generic gets its word"
+  },
+  {
+    "fn": "deviceBackendLabel",
+    "args": [
+      {
+        "id": "x",
+        "name": "y",
+        "backend": "weird",
+        "api": "weird",
+        "dev_type": "",
+        "total_memory_bytes": 0,
+        "available": true,
+        "has_id": true
+      }
+    ],
+    "got": "weird",
+    "note": "an unknown backend is itself"
+  },
+  {
+    "fn": "deviceChoices",
+    "args": [
+      {
+        "devices": [
+          {
+            "id": "cuda:0",
+            "name": "GeForce RTX 4060(R)",
+            "backend": "cuda",
+            "api": "cuda",
+            "dev_type": "",
+            "total_memory_bytes": 8000000000,
+            "available": true,
+            "has_id": true
+          },
+          {
+            "id": "vulkan:1",
+            "name": "GeForce RTX 4060",
+            "backend": "vulkan",
+            "api": "vulkan",
+            "dev_type": "",
+            "total_memory_bytes": 8100000000,
+            "available": true,
+            "has_id": true
+          },
+          {
+            "id": "cpu0",
+            "name": "Intel Core i5",
+            "backend": "cpu",
+            "api": "cpu",
+            "dev_type": "",
+            "total_memory_bytes": 0,
+            "available": true,
+            "has_id": true
+          },
+          {
+            "id": "ghost",
+            "name": "No Memory GPU",
+            "backend": "vulkan",
+            "api": "vulkan",
+            "dev_type": "",
+            "total_memory_bytes": 0,
+            "available": true,
+            "has_id": true
+          }
+        ]
+      },
+      null,
+      ""
+    ],
+    "got": [
+      {
+        "value": "auto",
+        "label": "Automatic (recommended)",
+        "warning": null
+      },
+      {
+        "value": "cpu",
+        "label": "Processor only",
+        "warning": null
+      },
+      {
+        "value": "cuda:0",
+        "label": "GeForce RTX 4060(R) (NVIDIA CUDA)",
+        "warning": null
+      },
+      {
+        "value": "vulkan:1",
+        "label": "GeForce RTX 4060(R) (Vulkan, other backend)",
+        "warning": null,
+        "alternative": true
+      }
+    ],
+    "note": "the list of the load options"
+  },
+  {
+    "fn": "deviceChoices",
+    "args": [
+      {
+        "devices": [
+          {
+            "id": "cuda:0",
+            "name": "GeForce RTX 4060(R)",
+            "backend": "cuda",
+            "api": "cuda",
+            "dev_type": "",
+            "total_memory_bytes": 8000000000,
+            "available": true,
+            "has_id": true
+          }
+        ]
+      },
+      {
+        "state": "ready"
+      },
+      ""
+    ],
+    "got": [
+      {
+        "value": "auto",
+        "label": "Automatic (recommended)",
+        "warning": null
+      },
+      {
+        "value": "cpu",
+        "label": "Processor only",
+        "warning": null
+      },
+      {
+        "value": "cuda:0",
+        "label": "GeForce RTX 4060(R) (NVIDIA CUDA)",
+        "warning": null
+      },
+      {
+        "value": "npu",
+        "label": "NPU (experimental)",
+        "warning": "Experimental: the NPU only speeds up reading long prompts (the processor writes the answer). The integrated graphics are usually faster. A converted copy of the weights is kept in memory."
+      }
+    ],
+    "note": "the NPU when it is ready"
+  },
+  {
+    "fn": "deviceChoices",
+    "args": [
+      {
+        "devices": [
+          {
+            "id": "cuda:0",
+            "name": "GeForce RTX 4060(R)",
+            "backend": "cuda",
+            "api": "cuda",
+            "dev_type": "",
+            "total_memory_bytes": 8000000000,
+            "available": true,
+            "has_id": true
+          }
+        ]
+      },
+      null,
+      "not-here"
+    ],
+    "got": [
+      {
+        "value": "auto",
+        "label": "Automatic (recommended)",
+        "warning": null
+      },
+      {
+        "value": "cpu",
+        "label": "Processor only",
+        "warning": null
+      },
+      {
+        "value": "cuda:0",
+        "label": "GeForce RTX 4060(R) (NVIDIA CUDA)",
+        "warning": null
+      },
+      {
+        "value": "not-here",
+        "label": "not-here (current)",
+        "warning": null
+      }
+    ],
+    "note": "the current one is kept"
+  },
+  {
+    "fn": "deviceChoices",
+    "args": [
+      {
+        "devices": [
+          {
+            "id": "cuda:0",
+            "name": "GeForce RTX 4060(R)",
+            "backend": "cuda",
+            "api": "cuda",
+            "dev_type": "",
+            "total_memory_bytes": 8000000000,
+            "available": true,
+            "has_id": true
+          }
+        ]
+      },
+      null,
+      "npu1"
+    ],
+    "got": [
+      {
+        "value": "auto",
+        "label": "Automatic (recommended)",
+        "warning": null
+      },
+      {
+        "value": "cpu",
+        "label": "Processor only",
+        "warning": null
+      },
+      {
+        "value": "cuda:0",
+        "label": "GeForce RTX 4060(R) (NVIDIA CUDA)",
+        "warning": null
+      },
+      {
+        "value": "npu1",
+        "label": "npu1 (current)",
+        "warning": "Experimental: the NPU only speeds up reading long prompts (the processor writes the answer). The integrated graphics are usually faster. A converted copy of the weights is kept in memory."
+      }
+    ],
+    "note": "an unknown current with an npu name warns"
+  },
+  {
+    "fn": "runningDevice",
+    "args": [
+      "cpu",
+      {
+        "devices": [
+          {
+            "id": "cuda:0",
+            "name": "GeForce RTX 4060(R)",
+            "backend": "cuda",
+            "api": "cuda",
+            "dev_type": "",
+            "total_memory_bytes": 8000000000,
+            "available": true,
+            "has_id": true
+          }
+        ],
+        "auto_choice": "cuda:0"
+      },
+      "avx2-fma"
+    ],
+    "got": {
+      "label": "CPU · avx2-fma",
+      "title": "The model runs on the processor.",
+      "auto": false
+    },
+    "note": "the processor with its tier"
+  },
+  {
+    "fn": "runningDevice",
+    "args": [
+      "auto",
+      {
+        "devices": [
+          {
+            "id": "cuda:0",
+            "name": "GeForce RTX 4060(R)",
+            "backend": "cuda",
+            "api": "cuda",
+            "dev_type": "",
+            "total_memory_bytes": 8000000000,
+            "available": true,
+            "has_id": true
+          }
+        ],
+        "auto_choice": "cuda:0"
+      },
+      ""
+    ],
+    "got": {
+      "label": "GeForce RTX 4060 · CUDA",
+      "title": "GeForce RTX 4060(R): the automatic choice (cuda:0); layers that do not fit run on the processor.",
+      "auto": true
+    },
+    "note": "the automatic choice"
+  },
+  {
+    "fn": "runningDevice",
+    "args": [
+      "cuda:0",
+      {
+        "devices": [
+          {
+            "id": "cuda:0",
+            "name": "GeForce RTX 4060(R)",
+            "backend": "cuda",
+            "api": "cuda",
+            "dev_type": "",
+            "total_memory_bytes": 8000000000,
+            "available": true,
+            "has_id": true
+          }
+        ],
+        "auto_choice": ""
+      },
+      ""
+    ],
+    "got": {
+      "label": "GeForce RTX 4060 · CUDA",
+      "title": "GeForce RTX 4060(R): chosen in the load options (cuda:0).",
+      "auto": false
+    },
+    "note": "chosen in the load options"
+  },
+  {
+    "fn": "runningDevice",
+    "args": [
+      "auto",
+      {},
+      ""
+    ],
+    "got": {
+      "label": "CPU · simd",
+      "title": "The model runs on the processor.",
+      "auto": true
+    },
+    "note": "without a report only the processor part"
+  },
+  {
+    "fn": "deviceMemory",
+    "args": [
+      {
+        "id": "cuda:0",
+        "name": "GeForce RTX 4060(R)",
+        "backend": "cuda",
+        "api": "cuda",
+        "dev_type": "",
+        "total_memory_bytes": 8000000000,
+        "available": true,
+        "has_id": true,
+        "free_memory_bytes": 9000000000
+      }
+    ],
+    "got": {
+      "known": true,
+      "pct": 0,
+      "level": "ok"
+    },
+    "note": "total under free: nothing used"
+  },
+  {
+    "fn": "deviceMemory",
+    "args": [
+      {
+        "id": "cuda:0",
+        "name": "GeForce RTX 4060(R)",
+        "backend": "cuda",
+        "api": "cuda",
+        "dev_type": "",
+        "total_memory_bytes": 8000000000,
+        "available": true,
+        "has_id": true,
+        "free_memory_bytes": 2000000000
+      }
+    ],
+    "got": {
+      "known": true,
+      "pct": 75,
+      "level": "warn"
+    },
+    "note": "three quarters full: a warning"
+  },
+  {
+    "fn": "deviceMemory",
+    "args": [
+      {
+        "id": "cuda:0",
+        "name": "GeForce RTX 4060(R)",
+        "backend": "cuda",
+        "api": "cuda",
+        "dev_type": "",
+        "total_memory_bytes": 8000000000,
+        "available": true,
+        "has_id": true,
+        "free_memory_bytes": 500000000
+      }
+    ],
+    "got": {
+      "known": true,
+      "pct": 94,
+      "level": "high"
+    },
+    "note": "ninety-four percent: high"
+  },
+  {
+    "fn": "deviceMemory",
+    "args": [
+      {
+        "id": "cuda:0",
+        "name": "GeForce RTX 4060(R)",
+        "backend": "cuda",
+        "api": "cuda",
+        "dev_type": "",
+        "total_memory_bytes": 8000000000,
+        "available": true,
+        "has_id": true,
+        "free_memory_bytes": 8000000000
+      }
+    ],
+    "got": {
+      "known": true,
+      "pct": 0,
+      "level": "ok"
+    },
+    "note": "all free: nothing used"
+  },
+  {
+    "fn": "deviceMemory",
+    "args": [
+      {
+        "id": "cpu0",
+        "name": "Intel Core i5",
+        "backend": "cpu",
+        "api": "cpu",
+        "dev_type": "",
+        "total_memory_bytes": 0,
+        "available": true,
+        "has_id": true
+      }
+    ],
+    "got": {
+      "known": false,
+      "pct": 0,
+      "level": "ok"
+    },
+    "note": "a device without a size has no bar"
+  },
+  {
+    "fn": "deviceRole",
+    "args": [
+      {
+        "id": "cuda:0",
+        "members": [
+          {
+            "id": "cuda:0",
+            "backend": "cuda",
+            "api": "cuda"
+          },
+          {
+            "id": "vulkan:1",
+            "backend": "vulkan",
+            "api": "vulkan"
+          }
+        ]
+      },
+      "auto",
+      "cuda:0",
+      true
+    ],
+    "got": "running",
+    "note": "the running one"
+  },
+  {
+    "fn": "deviceRole",
+    "args": [
+      {
+        "id": "cuda:0",
+        "members": [
+          {
+            "id": "cuda:0",
+            "backend": "cuda",
+            "api": "cuda"
+          }
+        ]
+      },
+      "auto",
+      "cuda:0",
+      false
+    ],
+    "got": "auto",
+    "note": "the automatic choice without a model"
+  },
+  {
+    "fn": "deviceRole",
+    "args": [
+      {
+        "id": "cuda:0",
+        "members": [
+          {
+            "id": "cuda:0",
+            "backend": "cuda",
+            "api": "cuda"
+          }
+        ]
+      },
+      "vulkan:9",
+      "cuda:0",
+      true
+    ],
+    "got": "",
+    "note": "another device: nothing"
+  },
+  {
+    "fn": "deviceRole",
+    "args": [
+      {
+        "id": "cpu0"
+      },
+      "auto",
+      "cpu",
+      true
+    ],
+    "got": "",
+    "note": "the processor when the choice is the processor"
+  }
+]

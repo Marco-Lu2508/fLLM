@@ -245,6 +245,8 @@ pub struct HardwareView<'a> {
     pub notice: Option<&'a crate::gpucheck::FallbackNotice>,
     pub busy: &'a [String],
     pub results: &'a [(String, Vec<crate::gpucheck::GpuResult>)],
+    /// The answer of `GET /api/npu`; `None` while the card is still checking.
+    pub npu: Option<&'a serde_json::Value>,
 }
 
 /// What the appearance card shows: the four choices of the Studio's `selThemeMode`,
@@ -409,6 +411,69 @@ fn hardware_card<'a>(t: Tokens, view: HardwareView<'a>) -> Element<'a, Message> 
         body = body.push(text("Compute devices").size(15).font(bold()));
         body = body.push(devices);
     }
+
+    // The NPU card of `npu.js`: the summary decides what of it shows, the four paragraphs of
+    // NPU_EXPLANATION stand under it in any case.
+    let npu = crate::npu::npu_card_model(view.npu);
+    let mut npu_body = column![].spacing(8);
+    npu_body = npu_body.push(text("NPU (neural processing unit)").size(15).font(bold()));
+    let summary_colour = match npu.tone {
+        "good" => t.ok,
+        "warn" => t.primary,
+        _ => t.muted,
+    };
+    npu_body = npu_body.push(text(npu.summary.clone()).size(13).color(summary_colour));
+    if !npu.offload.is_empty() {
+        npu_body = npu_body.push(text(npu.offload.clone()).size(13).color(t.fg_soft));
+    }
+    for row in &npu.hardware {
+        let badge = if row.supported { t.ok } else if row.badge.starts_with("AMD") { t.primary } else { t.muted };
+        npu_body = npu_body.push(
+            row![text(row.label.clone()).size(13), Space::new().width(8.0), text(row.badge.clone()).size(12).color(badge)]
+                .align_y(Alignment::Center),
+        );
+        if let Some(problem) = &row.problem {
+            npu_body = npu_body.push(text(problem.clone()).size(12).color(t.muted));
+        }
+    }
+    if npu.progress.visible {
+        npu_body = npu_body.push(text(npu.progress.text.clone()).size(13).color(t.fg_soft));
+    }
+    if let Some(error) = &npu.error {
+        npu_body = npu_body.push(text(error.clone()).size(13).color(t.danger));
+    }
+    let mut npu_actions = row![].spacing(8).align_y(Alignment::Center);
+    if let Some(button_data) = &npu.button {
+        npu_actions = npu_actions.push(
+            button(text(button_data.label.clone()).size(13).color(t.fg_soft))
+                .on_press(Message::UsageStatus(format!("{}: not wired in this build", button_data.action)))
+                .padding([8, 14])
+                .style(crate::app::starter_style(t)),
+        );
+    }
+    if npu.cancel {
+        npu_actions = npu_actions.push(button(text("Cancel").size(13).color(t.fg_soft)).on_press(Message::UsageStatus(String::from("Cancelled."))).padding([8, 14]).style(crate::app::starter_style(t)));
+    }
+    if npu.remove {
+        npu_actions = npu_actions.push(button(text("Remove the runtime").size(13).color(t.fg_soft)).on_press(Message::UsageStatus(String::from("Removed."))).padding([8, 14]).style(crate::app::starter_style(t)));
+    }
+    if npu.button.is_some() || npu.cancel || npu.remove {
+        npu_body = npu_body.push(npu_actions);
+    }
+    for format in &npu.formats {
+        npu_body = npu_body.push(
+            column![text(format.title).size(12).color(t.muted), text(format.items.join(", ")).size(13)]
+                .spacing(3),
+        );
+    }
+    npu_body = npu_body.push(text("Explanation").size(12).font(bold()).color(t.muted));
+    for paragraph in npu.explanation {
+        npu_body = npu_body.push(text(paragraph).size(12).color(t.muted));
+    }
+    body = body.push(
+        container(npu_body).width(Length::Fill).padding(14).style(theme::card(t, theme::R_LG, false)),
+    );
+
     body.into()
 }
 

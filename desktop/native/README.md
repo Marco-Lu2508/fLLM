@@ -144,6 +144,14 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   four calls); the sources are numbered `[n]` under the answer (*Sources*, a click opens the page
   in the browser). The texts, cards, budget and error lines are checked against `ctRunTool` of the
   Studio itself — the fixtures are produced by that code.
+- NPU card: what the Studio's `npuCardModel` says — the state with its summary (the runtime to
+  install, *Ready* with the version and the device, the progress of a setup run), the hardware rows
+  with their badges, the errors, the formats and the four paragraphs of the explanation. Behind the
+  device grid sits the whole pure zone of `npu.js`: how the same chip through several driver
+  interfaces becomes one entry (`mergeDevices`), which interface stands first (`deviceRank`), the
+  choice list of the load options, the memory bar of a card, the sentence of where the model runs
+  and the role of every device. Fifty-six fixtures against the Studio's own file, ten unit tests,
+  one window test with a drawing, four mutations.
 - Hardware card: what this machine has (the processor and the cards with their memory; a device
   without memory stays out) with *Test this GPU* on the cards that can be tested — the CPU and the
   NPU are skipped, *Testing ...* while it runs, and the answers come back coloured ok/warn/bad. The

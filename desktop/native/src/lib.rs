@@ -13,6 +13,7 @@ pub mod engine_settings;
 pub mod gpucheck;
 pub mod hero;
 pub mod md;
+pub mod npu;
 pub mod models;
 pub mod palette;
 pub mod prompts;

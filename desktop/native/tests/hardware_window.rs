@@ -22,6 +22,7 @@ fn app() -> (App, tempfile::TempDir) {
 fn device(id: &str, name: &str, backend: &str, bytes: u64) -> Device {
     Device {
         id: id.into(),
+        free_memory_bytes: 0,
         name: name.into(),
         backend: backend.into(),
         api: String::new(),
@@ -120,6 +121,46 @@ fn the_card_lists_the_devices_and_tests_the_ones_that_can_be_tested() {
     let mut ui = sim(&app);
     ui.find("cuda:0: the card does the work").expect("the result line of gpuVerdictLine");
     save_png(&app, "settings-hardware");
+}
+
+/// The NPU card says what `npuCardModel` says: the summary of its state with the version and the
+/// device, the formats the API names, and the four paragraphs of the Studio's explanation — while
+/// nothing was asked yet it only says it is checking.
+#[test]
+fn the_npu_card_says_what_the_studio_says() {
+    let (mut app, _dir) = app();
+    let _ = app.update(Message::Go(View::Settings));
+    {
+        let mut ui = sim(&app);
+        ui.find("NPU (neural processing unit)").expect("the title of the card");
+        ui.find("Checking for an NPU ...").expect("nothing asked yet (npuCardModel with null)");
+    }
+
+    let state = json!({
+        "state": "ready",
+        "runtime": {"version": "2025.1.0", "managed": true},
+        "devices": [{"full_name": "Intel AI Boost", "architecture": "Arrow Lake"}],
+        "hardware": [{"name": "Intel AI Boost", "vendor": "intel", "supported": true}],
+        "quantizations": {"eight_bit": ["q8_0"], "float16": ["f16"]},
+    });
+    let _ = app.update(Message::NpuState(Ok(state)));
+
+    let mut ui = sim(&app);
+    ui.find("Ready (experimental), OpenVINO 2025.1.0. Choose NPU under Advanced when you load a model; \
+long prompts then run on it. Intel AI Boost (platform Arrow Lake).")
+        .expect("the summary of npuCardModel");
+    ui.find("Intel AI Boost (Intel)").expect("the hardware row");
+    ui.find("Intel NPU").expect("the badge of a supported one");
+    ui.find("Computed as 8 bit with one scale per output row (the default)").expect("the first format");
+    ui.find("Half precision").expect("the second format");
+    ui.find("Explanation").expect("the explanation of the Studio stands under it");
+    ui.find(
+        "It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM \
+with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why \
+here.",
+    )
+    .expect("the fourth paragraph as one line");
+    save_png(&app, "settings-npu");
 }
 
 /// The amber notice follows the status: without fallbacks nothing shows, with them the title, the
