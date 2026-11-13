@@ -112,6 +112,11 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   messages is gone at once, and leaving it — another chat or *New chat* — drops it for good
   without asking. The file never gets one: the save leaves it out the way the Studio's
   saveThreads does.
+- Conversation tree: a *Retry* under an answer and an *Edit* under a question keep the old
+  version — the chat holds its versions (`Variant`, the slot of the shown one) and under a
+  message with more than one the arrows `‹ 1 / 2 ›` step through them: a click switches, the
+  numbers say which one is shown, and they are away while an answer is written. What a rewind
+  hides becomes one of those versions when the row moves on.
 - Message actions: *Copy answer* carries the visible text of the answer without the Markdown
   marks, *MD* the text as the model wrote it, *Read aloud* strips it for speech (no code, no
   marks, no web addresses — the rules of `stripForSpeech` of the Studio, checked against that
