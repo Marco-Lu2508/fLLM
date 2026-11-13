@@ -329,6 +329,62 @@ pub async fn fetch_status(base: String) -> Result<Status, String> {
     get_json(&base, "/api/studio/status").await.map(|v| parse_status(&v))
 }
 
+/// One note a session left for another one (the `session_note` tool of the agent; they wait in
+/// `.fllm/messages.json` of the workspace — `inbox.js` of the Studio).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct Note {
+    pub id: u64,
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub to: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+/// The notes that wait for this chat (`GET /api/studio/agent/messages?chat=`). Without a chosen
+/// folder the server answers an empty list, not an error — the page may ask before one is chosen.
+pub async fn fetch_notes(base: String, chat: String) -> Result<Vec<Note>, String> {
+    let value = get_json(&base, &format!("/api/studio/agent/messages?chat={}", urlencode(&chat))).await?;
+    Ok(parse_notes(&value))
+}
+
+/// The `messages` list of the route's answer: missing fields are empty, not an error.
+pub fn parse_notes(value: &Value) -> Vec<Note> {
+    value
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|n| Note {
+                    id: n.get("id").and_then(Value::as_u64).unwrap_or(0),
+                    from: text_of(n, "from"),
+                    to: text_of(n, "to"),
+                    text: text_of(n, "text"),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Marks notes as read (`DELETE /api/studio/agent/messages` with `{ids: [...]}`).
+pub async fn dismiss_notes(base: String, ids: Vec<u64>) -> Result<Vec<u64>, String> {
+    post(&base, "/api/studio/agent/messages", json!({ "ids": ids })).await.map(|_| ids)
+}
+
+/// What a URL takes: the chat key as the Studio writes it (`encodeURIComponent`).
+fn urlencode(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// The prices per million tokens the user entered (`GET /api/studio/prices`).
 pub async fn fetch_prices(base: String) -> Result<Vec<crate::usage::Price>, String> {
     get_json(&base, "/api/studio/prices").await.map(|v| parse_prices(&v))

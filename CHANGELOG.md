@@ -53,6 +53,16 @@ behaviour between versions).
   `assistantInner`. Tests: Esc stopping and ignoring, the fold with its click, the open box while it
   thinks, and the research run stopped by the key; four mutations each turn one red; the open box is
   drawn to a PNG and read back.
+- **The session mailbox in the native app.** The Studio lets one session leave a note for another
+  (`inbox.js`); the native app has the badge and the panel. The notes wait in `.fllm/messages.json`
+  of the workspace of the coding agent and are asked for every four seconds for the chat that is
+  open — without a folder or without a chat there is nothing to ask, so the badge stays away, as in
+  the Studio. With notes waiting the top bar shows *Inbox (2)*; the panel over the page carries
+  *Notes from other sessions* with *Close*, every note as *#1 · session-a → session-b* (a note
+  without a sender says *a session*), its text and its two buttons: *Insert into the message* puts
+  the note into the composer with a blank line between what was written and what comes from another
+  session, *Done* marks it read with `DELETE /api/studio/agent/messages` and looks again. A click
+  beside the panel only takes the click. Four window tests with one drawing, three mutations.
 - **Usage and cost in the native app.** The Studio counts what its answers weigh and what they
   cost (`usage.js`); the native app has the card of it in Settings. Every answer's usage block lands
   in the counters of this machine — at most sixty models, the same keys, the same words: the totals

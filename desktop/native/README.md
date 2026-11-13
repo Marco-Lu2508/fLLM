@@ -144,6 +144,10 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   four calls); the sources are numbered `[n]` under the answer (*Sources*, a click opens the page
   in the browser). The texts, cards, budget and error lines are checked against `ctRunTool` of the
   Studio itself — the fixtures are produced by that code.
+- Session mailbox: notes one session leaves for another wait in the workspace and show up as a badge
+  *Inbox (n)* on the top bar. The panel lists them with what they say about themselves; one click puts
+  a note into the message (a blank line between what was written and what comes from another session),
+  another marks it read. Four window tests with one drawing, three mutations.
 - Usage and cost: the settings card counts the tokens of every answer per model and shows what
   they cost with the prices entered (dollars per million; the longest matching pattern wins, `*`
   matches any tail). The table carries every model with its answers, input, output and cost plus the

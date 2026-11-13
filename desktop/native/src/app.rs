@@ -315,6 +315,10 @@ pub struct App {
     pub prices: Vec<crate::usage::Price>,
     /// What the last press of the usage pane said ("Prices saved." ...).
     pub usage_status: Option<String>,
+    /// The notes of the session mailbox that wait for this chat (`notes` of `inbox.js`).
+    pub inbox: Vec<models::Note>,
+    /// Whether the panel of the mailbox is open over the top bar.
+    pub inbox_open: bool,
     /// What the tour has to say (the line about this computer, a model's memory, the loaded model
     /// and the suggestions of the hub).
     pub tour_data: tour::TourData,
@@ -659,6 +663,18 @@ pub enum Message {
     UsageStatus(String),
     /// The price rows are written back (`Save prices` of the Studio).
     UsageSave,
+    /// Ask the server for the notes of this chat (`refresh` of `inbox.js`).
+    InboxRefresh,
+    /// The notes of this chat came back (`refresh` of `inbox.js`).
+    InboxLoaded(Result<Vec<models::Note>, String>),
+    /// The mailbox button was pressed (open, or shut when it is open).
+    InboxToggle,
+    /// The panel of the mailbox was left (Close, or a click beside it).
+    InboxClose,
+    /// A note goes into the message under the cursor (the composer of the Studio).
+    InboxInsert(u64),
+    /// A note was read (`Done` of the Studio).
+    InboxDone(u64),
     /// One step forward; the last step closes it (*Get started*).
     TourNext,
     /// One step back.
@@ -808,6 +824,8 @@ impl App {
             hero_hub_asked: false,
             prices: Vec::new(),
             usage_status: None,
+            inbox: Vec::new(),
+            inbox_open: false,
             tour_data: tour::TourData::default(),
             shortcuts_open: false,
             sc_capture: None,
@@ -2521,6 +2539,75 @@ impl App {
                 self.usage_status = Some(text);
                 Task::none()
             }
+            Message::InboxRefresh => {
+                // no chat is open yet, or no folder is chosen for the coding agent: the notes
+                // live in that folder, there is nothing to ask (refresh of inbox.js)
+                let Some(id) = self.current else {
+                    self.inbox = Vec::new();
+                    self.inbox_open = false;
+                    return Task::none();
+                };
+                if self.code.workspace.is_none() {
+                    self.inbox = Vec::new();
+                    self.inbox_open = false;
+                    return Task::none();
+                }
+                let base = self.base.clone();
+                Task::perform(
+                    async move { models::fetch_notes(base, id.to_string()).await },
+                    Message::InboxLoaded,
+                )
+            }
+            Message::InboxLoaded(Ok(notes)) => {
+                self.inbox = notes;
+                if self.inbox.is_empty() {
+                    self.inbox_open = false;
+                }
+                Task::none()
+            }
+            Message::InboxLoaded(Err(_)) => {
+                self.inbox = Vec::new();
+                self.inbox_open = false;
+                Task::none()
+            }
+            Message::InboxToggle => {
+                self.inbox_open = !self.inbox_open;
+                Task::none()
+            }
+            Message::InboxClose => {
+                self.inbox_open = false;
+                Task::none()
+            }
+            Message::InboxInsert(id) => {
+                // the composer takes the note the way the Studio puts it in: a blank line between
+                // what was written and what comes from another session
+                if let Some(note) = self.inbox.iter().find(|n| n.id == id) {
+                    let text = note.text.clone();
+                    let joined = {
+                        let now = self.editor.text();
+                        if now.trim().is_empty() {
+                            text
+                        } else {
+                            format!("{now}\n\n{text}")
+                        }
+                    };
+                    self.editor.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+                    self.editor.perform(text_editor::Action::SelectAll);
+                    self.editor
+                        .perform(text_editor::Action::Edit(text_editor::Edit::Paste(joined.into())));
+                }
+                self.inbox_open = false;
+                Task::none()
+            }
+            Message::InboxDone(id) => {
+                let base = self.base.clone();
+                Task::perform(models::dismiss_notes(base, vec![id]), move |result| {
+                    match result {
+                        Ok(_) => Message::InboxRefresh,
+                        Err(_) => Message::InboxRefresh,
+                    }
+                })
+            }
             Message::HeroChoose => {
                 let base = self.base.clone();
                 Task::perform(api::pick_file_with_text(base), Message::HeroChosen)
@@ -3692,6 +3779,12 @@ impl App {
         // a server that was told to switch its model is back within seconds: look more often then
         let every = if self.switching { 1 } else { 4 };
         let retry = if matches!(self.server, Server::Down(_)) { time::every(Duration::from_secs(every)).map(|_| Message::Tick) } else { Subscription::none() };
+        // the mailbox follows this chat: the badge has to show what waits in the workspace
+        let inbox = if self.current.is_some() && self.code.workspace.is_some() {
+            time::every(Duration::from_secs(4)).map(|_| Message::InboxRefresh)
+        } else {
+            Subscription::none()
+        };
         // the start screen keeps its line of tokens per second up to date (the Studio polls every 2000 ms)
         let hero = if !matches!(self.server, Server::Down(_)) {
             time::every(Duration::from_secs(2)).map(|_| Message::HeroPoll)
@@ -3720,7 +3813,7 @@ impl App {
             }
             _ => None,
         });
-        Subscription::batch([retry, poll, hero, dropped])
+        Subscription::batch([retry, poll, hero, inbox, dropped])
     }
 
     // ---- view ------------------------------------------------------------------------------------------------------------
@@ -3897,6 +3990,7 @@ impl App {
             && self.tour.is_none()
             && !self.shortcuts_open
             && !self.palette_open
+            && !self.inbox_open
             // the large view of the artifact panel is a layer of its own
             && !self.art.as_ref().is_some_and(|p| p.large)
         {
@@ -3925,6 +4019,19 @@ impl App {
             layers = layers
                 .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::ClosePicker))
                 .push(self.picker(t));
+        }
+        if self.inbox_open && !self.inbox.is_empty() {
+            // a click beside the panel only takes the click (it closes, as in the Studio)
+            layers = layers
+                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::InboxClose))
+                .push(
+                    container(self.inbox_panel(t))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(Alignment::End)
+                        .align_y(Alignment::Start)
+                        .padding(iced::Padding { top: 64.0, right: 16.0, bottom: 0.0, left: 0.0 }),
+                );
         }
         if self.asst_menu {
             layers = layers
@@ -5207,6 +5314,54 @@ impl App {
             .into()
     }
 
+    /// The panel of the session mailbox over the top bar (`render` of `inbox.js`): every note with
+    /// what it says about itself, the text, and the two things that can be done with it.
+    fn inbox_panel(&self, t: Tokens) -> Element<'_, Message> {
+        let mut body = column![].spacing(0);
+        body = body.push(
+            row![
+                text("Notes from other sessions").size(13).font(bold()),
+                Space::new().width(Length::Fill),
+                button(text("Close").size(12).color(t.fg_soft))
+                    .on_press(Message::InboxClose)
+                    .padding([4, 10])
+                    .style(crate::app::starter_style(t)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+        for note in self.inbox.iter() {
+            let mut who = format!("#{} · {}", note.id, if note.from.is_empty() { "a session" } else { &note.from });
+            if !note.to.is_empty() {
+                who.push_str(&format!(" → {}", note.to));
+            }
+            body = body.push(
+                column![
+                    text(who).size(11).color(t.muted),
+                    text(note.text.clone()).size(13),
+                    row![
+                        button(text("Insert into the message").size(12))
+                            .on_press(Message::InboxInsert(note.id))
+                            .padding([5, 10])
+                            .style(crate::app::primary_style(t)),
+                        button(text("Done").size(12).color(t.fg_soft))
+                            .on_press(Message::InboxDone(note.id))
+                            .padding([5, 10])
+                            .style(crate::app::starter_style(t)),
+                    ]
+                    .spacing(8)
+                ]
+                .spacing(4)
+                .padding([8, 0]),
+            );
+        }
+        container(body)
+            .width(420.0)
+            .padding(12)
+            .style(theme::card(t, theme::R_LG, true))
+            .into()
+    }
+
     fn topbar(&self, t: Tokens) -> Element<'_, Message> {
         let (name, max) = match &self.server {
             Server::Ready(m) => (m.id.clone(), m.max_context),
@@ -5331,7 +5486,30 @@ impl App {
         .on_press(Message::TempToggle)
         .padding(6)
         .style(slash_button(t, temp_active));
-        let inner = container(row![pill, Space::new().width(10), asst_pill, Space::new().width(10), project_badge, Space::new().width(10), chip, Space::new().width(Length::Fill), meter, Space::new().width(10), temp_button].align_y(Alignment::Center)).max_width(780).width(Length::Fill);
+        // the mailbox of this session: how many notes wait in the workspace (the btnInbox of the Studio)
+        let inbox_button: Element<'_, Message> = if self.inbox.is_empty() {
+            Space::new().into()
+        } else {
+            let count = self.inbox.len();
+            button(text(format!("Inbox ({count})")).size(13).color(t.fg_soft))
+                .on_press(Message::InboxToggle)
+                .padding([5, 12])
+                .style(move |_, status| {
+                    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                    button::Style {
+                        background: Some(iced::Background::Color(if hovered || self.inbox_open {
+                            t.fill_hover
+                        } else {
+                            t.fill
+                        })),
+                        text_color: t.fg,
+                        border: iced::border::rounded(999),
+                        ..Default::default()
+                    }
+                })
+                .into()
+        };
+        let inner = container(row![pill, Space::new().width(10), asst_pill, Space::new().width(10), project_badge, Space::new().width(10), chip, Space::new().width(Length::Fill), inbox_button, Space::new().width(10), meter, Space::new().width(10), temp_button].align_y(Alignment::Center)).max_width(780).width(Length::Fill);
         container(inner)
             .center_x(Length::Fill)
             .padding([0, 24])
