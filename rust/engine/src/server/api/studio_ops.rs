@@ -881,8 +881,9 @@ fn run_picker(kind: &str) -> Result<Option<String>, PickError> {
     Err(PickError::Unavailable)
 }
 
-/// How large a file the `file` dialog may read back (an exported assistant is a few kilobytes).
-const PICKED_MAX: usize = 4 * 1024 * 1024;
+/// How large a file the `file` dialog may read back: the `MAX_TEXT_ATTACHMENT` of the web Studio
+/// (a bigger or binary file is handed over as its path only and goes through `extract`).
+const PICKED_MAX: usize = 20 * 1024 * 1024;
 
 /// The text of the file a dialog chose: read on this machine, cut at `PICKED_MAX`, must be UTF-8.
 fn read_picked(path: &str) -> Result<String, String> {
@@ -896,7 +897,8 @@ fn read_picked(path: &str) -> Result<String, String> {
 /// `POST /api/studio/pick-file` with `{kind: "model" | "gguf" | "file" | "folder"}` (`model` and `gguf` choose a model file: .gguf, .safetensors or config.json; `file` chooses any file and
 /// answers its text as well, which is how a window imports an exported assistant; `folder` a folder,
 /// for example a Hugging Face model): opens the dialog of the operating system on this machine and
-/// answers with `{path}` (`null` when the dialog was closed), plus `{text}` for `file`.
+/// answers with `{path}` (`null` when the dialog was closed), plus `{text}` for `file` when the file is
+/// UTF-8 text within the limit; a binary or bigger file comes back as its path alone.
 pub(in crate::server) async fn pick_file(Json(body): Json<Value>) -> Response {
     let kind = body.get("kind").and_then(Value::as_str).unwrap_or("gguf").to_owned();
     if !matches!(kind.as_str(), "model" | "gguf" | "file" | "folder") {
@@ -904,11 +906,11 @@ pub(in crate::server) async fn pick_file(Json(body): Json<Value>) -> Response {
     }
     let for_dialog = kind.clone();
     match tokio::task::spawn_blocking(move || run_picker(&for_dialog)).await {
-        // the import route: the file is read here, so the window gets its text in one call
-        Ok(Ok(Some(path))) if kind == "file" => match read_picked(&path) {
-            Ok(text) => Json(json!({"path": path, "text": text})).into_response(),
-            Err(e) => api_error(StatusCode::UNPROCESSABLE_ENTITY, &e),
-        },
+        // the import route: the text comes with the path when it can be read as text
+        Ok(Ok(Some(path))) if kind == "file" => {
+            let text = read_picked(&path).ok();
+            Json(json!({"path": path, "text": text})).into_response()
+        }
         Ok(Ok(path)) => Json(json!({"path": path})).into_response(),
         Ok(Err(PickError::Unavailable)) => api_error(
             StatusCode::NOT_IMPLEMENTED,

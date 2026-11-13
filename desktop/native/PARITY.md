@@ -20,11 +20,11 @@ checks at the bottom pass.
 | Thinking chip (off/low/medium/high, per model), collapsible reasoning | part (chip done, one level for all chats; reasoning shown, collapsing: todo) |
 | Default system prompt builder (date, language, model family, tools), response style | part (built from date, language, model family and size, prompt length auto/full/short, your text replaces or is added, clock held 30 min; tools and response style: todo) |
 | Assistants (name, icon, color, instructions, sampling, model, suggestions; import/export) | done (six built-ins plus your own ones; the menu under the name in the top bar; editor with icon, color, sampling, model, starters and the per-assistant default prompt; export and import as JSON) |
-| Projects (instructions + knowledge base, move chats) | todo |
+| Projects (instructions + knowledge base, move chats) | done (a *Projects* section in the sidebar with a row per project, its chats under it and rename/delete; the page with the name, the used characters, the instructions box, the knowledge with *Add files* and its documents, the chats of the project with their dates, *New chat in project* and *Delete project* behind the Studio's confirm dialog; chats move through the picker of the chat menu and of the select row, a new chat joins the open project; the instructions enter the system prompt between the default prompt and the assistant's own text with the Studio's header line, and the best passages of the knowledge travel with the newest question, shown under it; limits and messages follow PRJ_LIMITS and projects.js) |
 | Presets / prompt library (`/` in the box) | todo |
 | Personalization and memory | todo |
 | Sampling panel (temperature, top-p/k, min-p, penalties, mirostat, ...) | done (constraint/grammar and logprobs: todo) |
-| Attach images (vision), text files, documents (PDF, DOCX, ... via `/api/studio/extract`) + passage search (BM25) | todo |
+| Attach images (vision), text files and documents to a chat (PDF, DOCX, ... via `/api/studio/extract`) with the knowledge of the chat itself (the search itself is built: `rag.rs`, projects use it) | todo |
 | Use the web / Allow web access (tools) / Research mode | todo |
 | Message actions (copy, copy Markdown, read aloud, rewind) | part (copy) |
 | Temporary chat | todo |

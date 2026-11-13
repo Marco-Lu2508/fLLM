@@ -1,0 +1,428 @@
+{
+ "docs": [
+  {
+   "id": "doc-a",
+   "name": "report.pdf",
+   "text": "The quarterly report covers revenue growth of twelve percent. Costs stayed flat, and the team shipped three features on time.\n\nServers are the backbone of the platform. A server rack holds many machines, and each machine runs several services. When a server fails, the services move to another server. Our servers run in two data centers, and the operators check the servers every night. Documents about the servers live in the knowledge base.\n\nA short one."
+  },
+  {
+   "id": "doc-b",
+   "name": "notes.md",
+   "text": "Intro line about tokens and chunking.\n\nThe quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. \n\nTail paragraph with the word chunk twice: chunk one, chunk two."
+  },
+  {
+   "id": "doc-c",
+   "name": "kurz.txt",
+   "text": "Zusammenfassung: Der Bericht behandelt Umsatz, Kosten und Server. Lesen Sie die Dokumente für die Details."
+  }
+ ],
+ "cases": [
+  {
+   "kind": "tokenize",
+   "query": "How many servers are in the data center?",
+   "tokens": [
+    "many",
+    "server",
+    "data",
+    "center"
+   ]
+  },
+  {
+   "kind": "tokenize",
+   "query": "what does the quarterly report say about revenue?",
+   "tokens": [
+    "quarterly",
+    "report",
+    "say",
+    "revenue"
+   ]
+  },
+  {
+   "kind": "tokenize",
+   "query": "chunk overlap passages",
+   "tokens": [
+    "chunk",
+    "overlap",
+    "passage"
+   ]
+  },
+  {
+   "kind": "tokenize",
+   "query": "Dokumente und Server",
+   "tokens": [
+    "dokumente",
+    "server"
+   ]
+  },
+  {
+   "kind": "tokenize",
+   "query": "zzzz nothing matches this at all",
+   "tokens": [
+    "zzzz",
+    "nothing",
+    "matche",
+    "all"
+   ]
+  },
+  {
+   "kind": "tokenize",
+   "query": "the of and",
+   "tokens": []
+  },
+  {
+   "kind": "tokenize",
+   "query": "Servers servers SERVERS chunking",
+   "tokens": [
+    "server",
+    "server",
+    "server",
+    "chunking"
+   ]
+  },
+  {
+   "kind": "tokenize",
+   "query": "42",
+   "tokens": [
+    "42"
+   ]
+  },
+  {
+   "kind": "chunk",
+   "id": "doc-a",
+   "chunks": [
+    "The quarterly report covers revenue growth of twelve percent. Costs stayed flat, and the team shipped three features on time.\n\nServers are the backbone of the platform. A server rack holds many machines, and each machine runs several services. When a server fails, the services move to another server. Our servers run in two data centers, and the operators check the servers every night. Documents about the servers live in the knowledge base.\n\nA short one."
+   ]
+  },
+  {
+   "kind": "chunk",
+   "id": "doc-b",
+   "chunks": [
+    "Intro line about tokens and chunking.\n\nThe quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters.",
+    "the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters.\n\nTail paragraph with the word chunk twice: chunk one, chunk two."
+   ]
+  },
+  {
+   "kind": "chunk",
+   "id": "doc-c",
+   "chunks": [
+    "Zusammenfassung: Der Bericht behandelt Umsatz, Kosten und Server. Lesen Sie die Dokumente für die Details."
+   ]
+  },
+  {
+   "kind": "search",
+   "query": "How many servers are in the data center?",
+   "hits": [
+    {
+     "docId": "doc-a",
+     "doc": "report.pdf",
+     "n": 1,
+     "m": 1,
+     "score": 5.681930368843624,
+     "text": "The quarterly report covers revenue growth of twelve percent. Costs stayed flat, and the team shipped three features on time.\n\nServers are the backbone of the platform. A server rack holds many machines, and each machine runs several services. When a server fails, the services move to another server. Our servers run in two data centers, and the operators check the servers every night. Documents about the servers live in the knowledge base.\n\nA short one."
+    },
+    {
+     "docId": "doc-c",
+     "doc": "kurz.txt",
+     "n": 1,
+     "m": 1,
+     "score": 1.123199221451161,
+     "text": "Zusammenfassung: Der Bericht behandelt Umsatz, Kosten und Server. Lesen Sie die Dokumente für die Details."
+    }
+   ]
+  },
+  {
+   "kind": "search",
+   "query": "what does the quarterly report say about revenue?",
+   "hits": [
+    {
+     "docId": "doc-a",
+     "doc": "report.pdf",
+     "n": 1,
+     "m": 1,
+     "score": 4.194118999521565,
+     "text": "The quarterly report covers revenue growth of twelve percent. Costs stayed flat, and the team shipped three features on time.\n\nServers are the backbone of the platform. A server rack holds many machines, and each machine runs several services. When a server fails, the services move to another server. Our servers run in two data centers, and the operators check the servers every night. Documents about the servers live in the knowledge base.\n\nA short one."
+    }
+   ]
+  },
+  {
+   "kind": "search",
+   "query": "chunk overlap passages",
+   "hits": [
+    {
+     "docId": "doc-b",
+     "doc": "notes.md",
+     "n": 2,
+     "m": 2,
+     "score": 3.4771692795360982,
+     "text": "the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters.\n\nTail paragraph with the word chunk twice: chunk one, chunk two."
+    },
+    {
+     "docId": "doc-b",
+     "doc": "notes.md",
+     "n": 1,
+     "m": 2,
+     "score": 1.3895190598507046,
+     "text": "Intro line about tokens and chunking.\n\nThe quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters."
+    }
+   ]
+  },
+  {
+   "kind": "search",
+   "query": "Dokumente und Server",
+   "hits": [
+    {
+     "docId": "doc-c",
+     "doc": "kurz.txt",
+     "n": 1,
+     "m": 1,
+     "score": 3.074157624506097,
+     "text": "Zusammenfassung: Der Bericht behandelt Umsatz, Kosten und Server. Lesen Sie die Dokumente für die Details."
+    },
+    {
+     "docId": "doc-a",
+     "doc": "report.pdf",
+     "n": 1,
+     "m": 1,
+     "score": 1.4878113693220592,
+     "text": "The quarterly report covers revenue growth of twelve percent. Costs stayed flat, and the team shipped three features on time.\n\nServers are the backbone of the platform. A server rack holds many machines, and each machine runs several services. When a server fails, the services move to another server. Our servers run in two data centers, and the operators check the servers every night. Documents about the servers live in the knowledge base.\n\nA short one."
+    }
+   ]
+  },
+  {
+   "kind": "search",
+   "query": "zzzz nothing matches this at all",
+   "hits": []
+  },
+  {
+   "kind": "search",
+   "query": "the of and",
+   "hits": []
+  },
+  {
+   "kind": "search",
+   "query": "Servers servers SERVERS chunking",
+   "hits": [
+    {
+     "docId": "doc-a",
+     "doc": "report.pdf",
+     "n": 1,
+     "m": 1,
+     "score": 1.4878113693220592,
+     "text": "The quarterly report covers revenue growth of twelve percent. Costs stayed flat, and the team shipped three features on time.\n\nServers are the backbone of the platform. A server rack holds many machines, and each machine runs several services. When a server fails, the services move to another server. Our servers run in two data centers, and the operators check the servers every night. Documents about the servers live in the knowledge base.\n\nA short one."
+    },
+    {
+     "docId": "doc-c",
+     "doc": "kurz.txt",
+     "n": 1,
+     "m": 1,
+     "score": 1.123199221451161,
+     "text": "Zusammenfassung: Der Bericht behandelt Umsatz, Kosten und Server. Lesen Sie die Dokumente für die Details."
+    },
+    {
+     "docId": "doc-b",
+     "doc": "notes.md",
+     "n": 1,
+     "m": 2,
+     "score": 0.7145598577128078,
+     "text": "Intro line about tokens and chunking.\n\nThe quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters. The quick brown fox jumps over the lazy dog while the parser splits this sentence into passages of about eighteen hundred characters."
+    }
+   ]
+  },
+  {
+   "kind": "search",
+   "query": "42",
+   "hits": []
+  },
+  {
+   "kind": "opening",
+   "k": 5,
+   "hits": [
+    {
+     "docId": "doc-a",
+     "n": 1,
+     "m": 1
+    },
+    {
+     "docId": "doc-b",
+     "n": 1,
+     "m": 2
+    },
+    {
+     "docId": "doc-b",
+     "n": 2,
+     "m": 2
+    },
+    {
+     "docId": "doc-c",
+     "n": 1,
+     "m": 1
+    }
+   ]
+  },
+  {
+   "kind": "opening",
+   "k": 2,
+   "hits": [
+    {
+     "docId": "doc-a",
+     "n": 1,
+     "m": 1
+    },
+    {
+     "docId": "doc-b",
+     "n": 1,
+     "m": 2
+    }
+   ]
+  },
+  {
+   "kind": "cosine",
+   "a": [
+    1,
+    2,
+    3
+   ],
+   "b": [
+    1,
+    2,
+    3
+   ],
+   "v": 1
+  },
+  {
+   "kind": "cosine",
+   "a": [
+    1,
+    0
+   ],
+   "b": [
+    0,
+    1
+   ],
+   "v": 0
+  },
+  {
+   "kind": "cosine",
+   "a": [
+    0,
+    0
+   ],
+   "b": [
+    1,
+    1
+   ],
+   "v": 0
+  },
+  {
+   "kind": "cosine",
+   "a": [
+    1,
+    2
+   ],
+   "b": [
+    2,
+    4
+   ],
+   "v": 1
+  },
+  {
+   "kind": "prefix",
+   "passages": [
+    {
+     "doc": "report.pdf",
+     "n": 1,
+     "m": 1,
+     "text": "The quarterly report covers revenue growth of twelve percent. Costs stayed flat, and the team shipped three features on time.\n\nServers are the backbone of the platform. A server rack holds many machines, and each machine runs several services. When a server fails, the services move to another server. Our servers run in two data centers, and the operators check the servers every night. Documents about the servers live in the knowledge base.\n\nA short one."
+    },
+    {
+     "doc": "kurz.txt",
+     "n": 1,
+     "m": 1,
+     "text": "Zusammenfassung: Der Bericht behandelt Umsatz, Kosten und Server. Lesen Sie die Dokumente für die Details."
+    }
+   ],
+   "prefix": "Passages from the attached documents. Use them to answer, and name the source in brackets, for example [report.pdf, chunk 3/42], when you rely on one.\n\n[report.pdf, chunk 1/1]\nThe quarterly report covers revenue growth of twelve percent. Costs stayed flat, and the team shipped three features on time.\n\nServers are the backbone of the platform. A server rack holds many machines, and each machine runs several services. When a server fails, the services move to another server. Our servers run in two data centers, and the operators check the servers every night. Documents about the servers live in the knowledge base.\n\nA short one.\n\n[kurz.txt, chunk 1/1]\nZusammenfassung: Der Bericht behandelt Umsatz, Kosten und Server. Lesen Sie die Dokumente für die Details.\n\n---\n"
+  }
+ ],
+ "index": {
+  "n": 4,
+  "avg": 73.75,
+  "df": {
+   "another": 1,
+   "backbone": 1,
+   "base": 1,
+   "behandelt": 1,
+   "bericht": 1,
+   "brown": 2,
+   "center": 1,
+   "character": 2,
+   "check": 1,
+   "chunk": 1,
+   "chunking": 1,
+   "cost": 1,
+   "cover": 1,
+   "data": 1,
+   "detail": 1,
+   "document": 1,
+   "dog": 2,
+   "dokumente": 1,
+   "each": 1,
+   "eighteen": 2,
+   "every": 1,
+   "fail": 1,
+   "feature": 1,
+   "flat": 1,
+   "fox": 2,
+   "für": 1,
+   "growth": 1,
+   "hold": 1,
+   "hundred": 2,
+   "intro": 1,
+   "jump": 2,
+   "knowledge": 1,
+   "kosten": 1,
+   "lazy": 2,
+   "lesen": 1,
+   "line": 1,
+   "live": 1,
+   "machine": 1,
+   "many": 1,
+   "move": 1,
+   "night": 1,
+   "one": 2,
+   "operator": 1,
+   "paragraph": 1,
+   "parser": 2,
+   "passage": 2,
+   "percent": 1,
+   "platform": 1,
+   "quarterly": 1,
+   "quick": 2,
+   "rack": 1,
+   "report": 1,
+   "revenue": 1,
+   "run": 1,
+   "sentence": 2,
+   "server": 2,
+   "service": 1,
+   "several": 1,
+   "shipped": 1,
+   "short": 1,
+   "sie": 1,
+   "split": 2,
+   "stayed": 1,
+   "tail": 1,
+   "team": 1,
+   "three": 1,
+   "time": 1,
+   "token": 1,
+   "twelve": 1,
+   "twice": 1,
+   "two": 2,
+   "umsatz": 1,
+   "while": 2,
+   "word": 1,
+   "zusammenfassung": 1
+  }
+ }
+}

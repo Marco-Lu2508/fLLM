@@ -312,10 +312,11 @@ pub async fn fetch_model(base: &str) -> Result<ModelInfo, String> {
     Ok(info)
 }
 
-/// Lets the server open a file dialog (`POST /api/studio/pick-file` with `kind: "file"`) and reads the
-/// chosen file there, so an exported assistant can be imported. The answer is the text of the file, or
-/// why it could not be read; no timeout, because a dialog waits for the person at the computer.
-pub async fn pick_assistant_file(base: String) -> Result<String, String> {
+/// Lets the server open a file dialog (`POST /api/studio/pick-file` with `kind: "file"`). The answer is
+/// the path of the chosen file with its text when it is UTF-8 and not too large (a binary document goes
+/// through `extract_file` instead), or an empty error when the dialog was closed; no timeout, because a
+/// dialog waits for the person at the computer.
+pub async fn pick_file_with_text(base: String) -> Result<(String, Option<String>), String> {
     let http = reqwest::Client::new();
     let resp = http
         .post(format!("{base}/api/studio/pick-file"))
@@ -334,12 +335,42 @@ pub async fn pick_assistant_file(base: String) -> Result<String, String> {
             .unwrap_or_else(|| format!("the server answered {status}"));
         return Err(message);
     }
-    match data.get("text").and_then(serde_json::Value::as_str) {
-        Some(text) => Ok(text.to_string()),
+    let Some(path) = data.get("path").and_then(serde_json::Value::as_str).map(str::to_string) else {
         // the dialog was closed: no file, and no line about it (the Studio is silent then too)
-        None if data.get("path").is_some_and(serde_json::Value::is_null) => Err(String::new()),
-        None => Err("The server did not send the file.".into()),
+        return Err(String::new());
+    };
+    let text = data.get("text").and_then(serde_json::Value::as_str).map(str::to_string);
+    Ok((path, text))
+}
+
+/// Reads a document the window could not read itself (PDF, DOCX, XLSX, EPUB, HTML) through the
+/// server's extract route (`POST /api/studio/extract?name=…`, the body is the file). The answer is the
+/// text, the pages it had and whether only its beginning was read.
+pub async fn extract_file(base: String, name: String, bytes: Vec<u8>) -> Result<(String, Option<u64>, bool), String> {
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!("{base}/api/studio/extract"))
+        .query(&[("name", name.as_str())])
+        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|e| format!("no server at {base}: {e}"))?;
+    let status = resp.status();
+    let data: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if !status.is_success() {
+        let message = data
+            .pointer("/error/message")
+            .or_else(|| data.get("error"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("The server could not read {name} (error {status})."));
+        return Err(message);
     }
+    let text = data.get("text").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+    let pages = data.get("pages").and_then(serde_json::Value::as_u64);
+    let truncated = data.get("truncated").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    Ok((text, pages, truncated))
 }
 
 type ByteStream = Pin<Box<dyn Stream<Item = reqwest::Result<Vec<u8>>> + Send>>;

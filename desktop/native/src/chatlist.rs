@@ -33,6 +33,9 @@ pub enum ListMsg {
     SelectAll,
     DeleteSelected,
     ArchiveSelected,
+    /// Asks which project these chats go to (the menu asks for one chat, the select row for all).
+    MoveAsk,
+    MoveSelected,
     ShowArchived(bool),
 }
 
@@ -46,6 +49,8 @@ pub enum Effect {
     Deleted(Vec<u64>),
     /// A line for the user ("Saved to ...").
     Toast(String),
+    /// These chats should be moved to a project: the window opens the picker.
+    AskProject(Vec<u64>),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -121,7 +126,17 @@ impl ChatList {
             if !q.is_empty() && !matches(c, q) {
                 continue;
             }
-            if c.archived { archived.push(c) } else { live.push(c) }
+            if c.archived {
+                // an archived chat stays reachable under Archived, project chats included (the Studio's toast says so)
+                archived.push(c);
+                continue;
+            }
+            // the chats of a project are shown under their project, not here (the Studio's prjSidebarView);
+            // a search looks through every chat, project chats included
+            if q.is_empty() && c.project.is_some() {
+                continue;
+            }
+            live.push(c)
         }
         let by_use = |v: &mut Vec<&ChatRecord>| v.sort_by_key(|c| std::cmp::Reverse(c.updated));
         by_use(&mut live);
@@ -264,6 +279,17 @@ impl ChatList {
                 self.select = false;
                 Effect::Save
             }
+            ListMsg::MoveAsk => {
+                let ids = self.menu.map(|id| vec![id]).unwrap_or_default();
+                self.menu = None;
+                if ids.is_empty() { Effect::Nothing } else { Effect::AskProject(ids) }
+            }
+            ListMsg::MoveSelected => {
+                let ids: Vec<u64> = self.selected.iter().copied().collect();
+                self.selected.clear();
+                self.select = false;
+                if ids.is_empty() { Effect::Nothing } else { Effect::AskProject(ids) }
+            }
             ListMsg::ShowArchived(on) => {
                 self.show_archived = on;
                 Effect::Nothing
@@ -296,6 +322,7 @@ impl ChatList {
             col = col.push(
                 row![
                     button(text("All").size(12)).on_press(Message::List(ListMsg::SelectAll)).padding([3, 8]).style(theme::secondary_button(t)),
+                    button(text(format!("Move {n}")).size(12)).on_press_maybe((n > 0).then_some(Message::List(ListMsg::MoveSelected))).padding([3, 8]).style(theme::secondary_button(t)),
                     button(text(format!("Archive {n}")).size(12)).on_press_maybe((n > 0).then_some(Message::List(ListMsg::ArchiveSelected))).padding([3, 8]).style(theme::secondary_button(t)),
                     button(text(format!("Delete {n}")).size(12)).on_press_maybe((n > 0 && can_act).then_some(Message::List(ListMsg::DeleteSelected))).padding([3, 8]).style(theme::secondary_button(t)),
                 ]
@@ -399,6 +426,7 @@ impl ChatList {
                             item(if c.pinned { "Unpin" } else { "Pin" }, ListMsg::Pin(c.id), true),
                             item("Rename", ListMsg::RenameStart(c.id), true),
                             item(if c.archived { "Unarchive" } else { "Archive" }, ListMsg::Archive(c.id), true),
+                            item("Move", ListMsg::MoveAsk, true),
                         ]
                         .spacing(4),
                         row![

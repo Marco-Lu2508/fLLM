@@ -12,6 +12,7 @@ pub mod engine_settings;
 pub mod md;
 pub mod models;
 pub mod prompts;
+pub mod rag;
 pub mod settings;
 pub mod sidecar;
 pub mod store;

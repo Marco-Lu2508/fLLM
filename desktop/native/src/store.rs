@@ -1,8 +1,10 @@
 //! The chats on disk: one JSON file in the app's data folder, written after every change.
 
 use crate::assistants::Assistant;
+use crate::rag::Passage;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -36,6 +38,9 @@ pub struct Record {
     pub reasoning: String,
     #[serde(default)]
     pub stats: Option<Stats>,
+    /// The passages of the documents that travelled with this question (the Studio's node.passages).
+    #[serde(default)]
+    pub passages: Option<Vec<Passage>>,
 }
 
 /// Another way the conversation went: editing a message or asking for a new answer keeps the old version.
@@ -70,6 +75,9 @@ pub struct ChatRecord {
     /// The assistant of this chat (None: what the settings say, shown as Standard).
     #[serde(default)]
     pub assistant: Option<String>,
+    /// The project this chat belongs to (None: it is a chat of its own).
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// Which version of a message is shown out of how many.
@@ -152,6 +160,95 @@ impl ChatRecord {
         let shown = self.messages.clone();
         self.variants.retain(|v| !(v.messages.len() == shown.len() && v.messages.iter().zip(&shown).all(|(a, b)| same(a, b))));
     }
+}
+
+/// One extracted document of a project knowledge (the Studio's project doc).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectDoc {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub text: String,
+    /// How many pages the source had, when the server said so.
+    #[serde(default)]
+    pub pages: Option<u64>,
+    /// The characters of `text` when the document was added.
+    #[serde(default)]
+    pub chars: usize,
+    /// When it was added (seconds since 1970).
+    #[serde(default)]
+    pub added: i64,
+}
+
+/// A project: chats with shared instructions and a knowledge that is searched for every question.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Project {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default)]
+    pub docs: Vec<ProjectDoc>,
+    #[serde(default)]
+    pub created: i64,
+    #[serde(default)]
+    pub updated: i64,
+}
+
+impl Project {
+    /// The characters of the knowledge (what `prjUsed` counts in the Studio).
+    pub fn used(&self) -> usize {
+        self.docs.iter().map(|d| d.text.chars().count()).sum()
+    }
+
+    /// The project as it comes from disk: a usable id, a name, the texts cut to the limits
+    /// (the cleanup `prjLoad` runs on every load).
+    pub fn cleaned(self) -> Option<Project> {
+        if self.id.is_empty() {
+            return None;
+        }
+        let mut name = if self.name.is_empty() { "Project".to_string() } else { self.name };
+        name = name.chars().take(crate::rag::limits::NAME).collect();
+        Some(Project {
+            id: self.id,
+            name,
+            instructions: self.instructions.chars().take(crate::rag::limits::INSTRUCTIONS).collect(),
+            docs: self
+                .docs
+                .into_iter()
+                .filter(|d| !d.id.is_empty())
+                .map(|d| ProjectDoc {
+                    id: d.id,
+                    name: if d.name.is_empty() { "document".to_string() } else { d.name },
+                    text: d.text.chars().take(crate::rag::MAX_DOC_CHARS).collect(),
+                    pages: d.pages,
+                    chars: d.chars.min(crate::rag::MAX_DOC_CHARS),
+                    added: d.added,
+                })
+                .collect(),
+            created: if self.created > 0 { self.created } else { now_secs() },
+            updated: if self.updated > 0 { self.updated } else { now_secs() },
+        })
+    }
+}
+
+/// Seconds since 1970 (the `Date.now()` of the Studio, in seconds like the chats keep it).
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// An id for a new entry: `prj-…`, `pdoc-…`, `doc-…` (the `uid()` of the Studio).
+pub fn uid(prefix: &str) -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    format!("{prefix}-{:x}-{:x}", nanos, COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
 /// What the person chose for the answers. Everything is automatic until it is switched to manual: then the value is sent with every request.
@@ -309,6 +406,9 @@ pub struct Store {
     /// The saved assistants; the six built-ins are rebuilt on every start and never stored.
     #[serde(default)]
     pub assistants: Vec<Assistant>,
+    /// The projects with their knowledge (the Studio keeps them in the browser storage).
+    #[serde(default)]
+    pub projects: Vec<Project>,
     pub chats: Vec<ChatRecord>,
     #[serde(default)]
     pub next_id: u64,
@@ -332,6 +432,7 @@ impl Store {
                 s.next_id = s.next_id.max(s.chats.iter().map(|c| c.id + 1).max().unwrap_or(0));
                 // the same cleanup the Studio runs on every load: a broken entry is dropped, the rest is clamped
                 s.assistants = s.assistants.drain(..).filter_map(Assistant::cleaned).collect();
+                s.projects = s.projects.drain(..).filter_map(Project::cleaned).collect();
                 s
             }
             Err(_) => {
@@ -390,7 +491,7 @@ mod tests {
         let a = s.new_chat();
         let b = s.new_chat();
         assert_ne!(a, b);
-        s.chat_mut(a).unwrap().messages.push(Record { role: Role::User, content: "Hi".into(), reasoning: String::new(), stats: None });
+        s.chat_mut(a).unwrap().messages.push(Record { role: Role::User, content: "Hi".into(), reasoning: String::new(), stats: None, passages: None });
         s.save(&path).unwrap();
         let back = Store::load(&path);
         assert_eq!(back, s);
@@ -400,7 +501,7 @@ mod tests {
     }
 
     fn rec(role: Role, text: &str) -> Record {
-        Record { role, content: text.into(), reasoning: String::new(), stats: None }
+        Record { role, content: text.into(), reasoning: String::new(), stats: None, passages: None }
     }
 
     fn chat(lines: &[(Role, &str)]) -> ChatRecord {

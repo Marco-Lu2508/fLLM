@@ -47,6 +47,18 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   `{{date}}` / `{{time}}` / `{{language}}` filled in). *Export* writes `<name>.assistant.json` to the Downloads folder, *Import* reads one
   back through `POST /api/studio/pick-file` with `kind: "file"`, which opens the dialog of this machine and answers the text of the file it
   chose. A built-in is edited as a copy; deleting clears the choice; chats from before the feature load unchanged.
+- Projects: a *Projects* section in the sidebar between the navigation and the chats — a row per project with its folder, its count of
+  chats, rename and delete, its chats below it when the chevron is open, and *New project* as an input row at the top. The page of a
+  project (the row or the badge in the top bar) has the name, how many of the 2,000,000 characters of knowledge are used, the
+  *Instructions for every chat of this project* box, the *Knowledge* with *Add files* (the dialog of this machine; text files are read
+  here, PDF, DOCX, XLSX, EPUB and HTML through `POST /api/studio/extract`, images are refused with the line of the Studio) and every
+  document with its size, pages and a cross, the chats of the project with their dates, *New chat in project*, *Rename* and
+  *Delete project* — the last one asks first, with the sentence of the Studio's dialog. Chats move with *Move* in the chat menu or in
+  the select row: the picker lists *No project* and every project. A new chat joins the project of the page it was started from, the
+  badge in the top bar opens the page, the sidebar only lists chats without a project (a search finds them all, archived ones stay
+  under *Archived*). Every question in a chat of a project searches its knowledge (BM25, `src/rag.rs`); the passages travel with the
+  newest question and the window shows them under it, and the instructions sit in the system prompt between the default prompt and the
+  assistant's own text with the Studio's header line. Limits, clamps and messages follow `PRJ_LIMITS` and `projects.js`.
 - Code (sidebar > Code): a coding agent in a folder. Open a folder (type the path, *Choose…* for the folder dialog of the server's computer, or one of the last six), tell the agent what to do; the model
   gets the server's agent tools (read, search, edit, run commands, ...) and answers with tool calls, which the window runs through
   `/api/studio/agent/tool` and feeds back until the model answers without one (at most 30 model calls per message). Every call is a card:
@@ -67,7 +79,7 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 
 | Stage | Content |
 |---|---|
-| 2c | Load options (context, device), the measured prompt speed with the compact prompt, projects and memory, web tools |
+| 2c | Load options (context, device), the measured prompt speed with the compact prompt, memory, web tools |
 | 3b | Code mode: sub-agents, a terminal view |
 | 4a | One download per system with the app and the engine side by side: the `native-bundle` workflow (started by hand with a release tag; it takes the engine of that release, checks its checksum, adds the app and, with `upload`, signs and attaches the archives) |
 | 4 | The engine inside the process (no second program; for now the app starts the server next to it, see above), installers per system that put both side by side, the tray, autostart, updates; then the Tauri app and the web Studio files can go |
@@ -78,13 +90,15 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 101 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
-                         # window driven headless (new chat, send, stream, stop, error, delete, theme) and drawn to PNG files
+cargo test --locked      # 160 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+                         # window driven headless (new chat, send, stream, stop, error, delete, theme, assistants, projects) and drawn
+                         # to PNG files
 ```
 
 The window tests use iced's software renderer, so they need no display and no GPU. The pictures go to
-`target/tmp/ui-snapshots/` (conversation, start screen and offline screen, light and dark). A mutation of the line buffer, of the save in
-`finish` and of the guard against late events each turn a test red.
+`target/tmp/ui-snapshots/` (conversation, start screen and offline screen, light and dark, the assistant menu and editor, the projects
+with their page, dialogs and passage chip). A mutation of the line buffer, of the save in `finish`, of the guard against late events, of
+the project filter of the sidebar, of the passage prefix and of the project header line each turn a test red.
 
 Not checked: a window on a real screen (this machine has none), scaling on a HiDPI display, input methods, the macOS and Windows builds
 (the CI workflow `native-app` builds and tests all three).

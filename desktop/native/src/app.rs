@@ -2,6 +2,7 @@
 
 use crate::api::{self, ModelInfo, StreamEvent, WireMessage};
 use crate::assistants::{self, Assistant, SysMode};
+use crate::rag::{self, IndexedDoc};
 use crate::store::{self, Record, Role, Stats, Store};
 use crate::chatlist::{self, ChatList, ListMsg};
 use crate::md;
@@ -14,6 +15,7 @@ use crate::theme::{self, Tokens};
 use iced::widget::text_editor::{Action, Binding, Content, KeyPress, Status};
 use iced::widget::{button, column, container, markdown, mouse_area, row, scrollable, stack, svg, text, text_editor, text_input, Space};
 use iced::{keyboard, task, time, Alignment, Element, Font, Length, Padding, Subscription, Task, Theme};
+use chrono::TimeZone;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -42,6 +44,10 @@ pub(crate) const ICON_PIN: &[u8] = include_bytes!("../icons/pin.svg");
 const ICON_CODE: &[u8] = include_bytes!("../icons/code.svg");
 const ICON_CHEVRON: &[u8] = include_bytes!("../icons/chevron-down.svg");
 const ICON_CHECK: &[u8] = include_bytes!("../icons/check.svg");
+const ICON_FOLDER: &[u8] = include_bytes!("../icons/folder.svg");
+const ICON_CHEVRON_RIGHT: &[u8] = include_bytes!("../icons/chevron-right.svg");
+const ICON_X: &[u8] = include_bytes!("../icons/x.svg");
+const ICON_FILE: &[u8] = include_bytes!("../icons/file.svg");
 
 /// A message with its rendered Markdown.
 pub struct Msg {
@@ -49,16 +55,18 @@ pub struct Msg {
     pub content: String,
     pub reasoning: String,
     pub stats: Option<Stats>,
+    /// The passages of the documents that went with this question (shown under it).
+    pub passages: Option<Vec<crate::rag::Passage>>,
     pub md: markdown::Content,
 }
 
 impl Msg {
     fn from_record(r: &Record) -> Msg {
-        Msg { role: r.role, content: r.content.clone(), reasoning: r.reasoning.clone(), stats: r.stats.clone(), md: markdown::Content::parse(&r.content) }
+        Msg { role: r.role, content: r.content.clone(), reasoning: r.reasoning.clone(), stats: r.stats.clone(), passages: r.passages.clone(), md: markdown::Content::parse(&r.content) }
     }
 
     fn record(&self) -> Record {
-        Record { role: self.role, content: self.content.clone(), reasoning: self.reasoning.clone(), stats: self.stats.clone() }
+        Record { role: self.role, content: self.content.clone(), reasoning: self.reasoning.clone(), stats: self.stats.clone(), passages: self.passages.clone() }
     }
 }
 
@@ -78,6 +86,14 @@ pub enum View {
     Models,
     Settings,
     Code,
+    /// The page of one project (the Studio's project window).
+    Project,
+}
+
+/// The search index of the project knowledge, with the signature of the documents it was built from.
+struct RagCache {
+    sig: String,
+    index: rag::Index,
 }
 
 /// The reply that is being written right now.
@@ -117,6 +133,24 @@ pub struct App {
     asst_edit: Option<assistants::Editor>,
     /// The model of a just-chosen assistant: applied when the list of models arrives (it is fetched on demand).
     asst_model_pending: Option<String>,
+    /// The project page that is open, the projects whose chats show in the sidebar and the chats to move.
+    prj_view: Option<String>,
+    prj_open: std::collections::BTreeSet<String>,
+    prj_pick: Option<Vec<u64>>,
+    /// The project whose deletion waits for the *yes* of the dialog (the Studio's askDialog).
+    prj_delete: Option<String>,
+    /// The project a new chat joins (the Studio's prj.pending) and the row for a new project.
+    prj_pending: Option<String>,
+    prj_creating: bool,
+    prj_new_name: String,
+    /// The project being renamed in the sidebar: its id and the typed name.
+    prj_renaming: Option<(String, String)>,
+    /// The instructions box of the project page.
+    prj_instr: Content,
+    /// The search index of the project knowledge, rebuilt when the documents change.
+    rag_cache: Option<RagCache>,
+    /// The questions whose passage chip is open (the Studio's <details> under the message).
+    rag_open: std::collections::BTreeSet<usize>,
     code: CodeState,
     /// How many of the newest messages the conversation draws: laying out hundreds of messages on every frame of a stream would stall the window.
     window: usize,
@@ -234,6 +268,34 @@ pub enum Message {
     AsstSysToggle,
     AsstIcon(String),
     AsstColor(String),
+    /// The projects: the rows in the sidebar, the page, its documents and the picker of a move.
+    PrjNew,
+    PrjNewInput(String),
+    /// `true` keeps the typed name.
+    PrjNewEnd(bool),
+    PrjRenameStart(String),
+    PrjRenameInput(String),
+    PrjRenameEnd(bool),
+    /// Asks whether the project really goes away (the Studio's askDialog).
+    PrjDelete(String),
+    PrjDeleteCancel,
+    PrjDeleteOk,
+    PrjToggle(String),
+    PrjOpen(String),
+    PrjClose,
+    PrjInstr(Action),
+    PrjNewChat,
+    PrjChat(u64),
+    PrjAddFiles,
+    /// The dialog of *Add files*: its path with the text when the file is text, or why it failed.
+    PrjFileChosen(Result<(String, Option<String>), String>),
+    /// The server read a binary document: its name, its text, its pages and whether it was cut short.
+    PrjExtracted(Result<(String, String, Option<u64>, bool), String>),
+    PrjDocRemove(String),
+    /// The picker of a project: `Some("")` means *No project*, `None` cancels.
+    PrjPick(Option<String>),
+    /// Shows or hides the passages under the question at `i` (the chip of the Studio's ragChipsHtml).
+    RagToggle(usize),
     Code(code::CodeMsg),
 }
 
@@ -280,6 +342,17 @@ impl App {
             asst_menu: false,
             asst_edit: None,
             asst_model_pending: None,
+            prj_view: None,
+            prj_open: Default::default(),
+            prj_pick: None,
+            prj_delete: None,
+            prj_pending: None,
+            prj_creating: false,
+            prj_new_name: String::new(),
+            prj_renaming: None,
+            prj_instr: Content::new(),
+            rag_cache: None,
+            rag_open: Default::default(),
             code: CodeState::default(),
             window: CHAT_WINDOW,
             list: ChatList::default(),
@@ -319,6 +392,11 @@ impl App {
     /// The text of the message at `i` of the open chat.
     pub fn message_text(&self, i: usize) -> Option<&str> {
         self.messages.get(i).map(|m| m.content.as_str())
+    }
+
+    /// The passages under the message at `i` (what the chip under it draws).
+    pub fn message_passages(&self, i: usize) -> Option<&[crate::rag::Passage]> {
+        self.messages.get(i).and_then(|m| m.passages.as_deref())
     }
 
     /// What is in the message box.
@@ -363,6 +441,8 @@ impl App {
             self.window = CHAT_WINDOW;
             self.editing = None;
             self.current = Some(id);
+            // a chat that is open takes the pending project of a new one away (the Studio's prjChrome)
+            self.prj_pending = None;
             self.used_tokens = estimate_tokens(&self.messages);
             self.used_exact = false;
             self.error = None;
@@ -392,11 +472,16 @@ impl App {
         let id = match self.current {
             Some(id) => id,
             None => {
-                // the chat remembers the assistant that was chosen for new chats
+                // the chat remembers the assistant that was chosen for new chats and the project it was started from
                 let wanted = self.active_assistant_id();
                 let id = self.store.new_chat();
                 if let Some(chat) = self.store.chat_mut(id) {
                     chat.assistant = wanted;
+                }
+                if let Some(pid) = self.prj_pending.take().filter(|pid| self.store.projects.iter().any(|p| p.id == *pid)) {
+                    if let Some(chat) = self.store.chat_mut(id) {
+                        chat.project = Some(pid);
+                    }
                 }
                 self.current = Some(id);
                 id
@@ -413,8 +498,13 @@ impl App {
             }
         }
         let first = self.messages.is_empty();
-        self.messages.push(Msg { role: Role::User, md: markdown::Content::parse(&prompt), content: prompt.clone(), reasoning: String::new(), stats: None });
-        self.messages.push(Msg { role: Role::Assistant, content: String::new(), reasoning: String::new(), stats: None, md: markdown::Content::new() });
+        self.messages.push(Msg { role: Role::User, md: markdown::Content::parse(&prompt), content: prompt.clone(), reasoning: String::new(), stats: None, passages: None });
+        self.messages.push(Msg { role: Role::Assistant, content: String::new(), reasoning: String::new(), stats: None, passages: None, md: markdown::Content::new() });
+        // the passages of the project knowledge travel with this question
+        let passages = self.passages_for(&prompt);
+        if let Some(user) = self.messages.iter_mut().filter(|m| m.role == Role::User).last() {
+            user.passages = passages;
+        }
         if first {
             if let Some(chat) = self.store.chat_mut(id) {
                 chat.title = store::title_from(&prompt);
@@ -504,7 +594,7 @@ impl App {
                     chat.branch_at(i);
                 }
                 self.messages.truncate(i);
-                self.messages.push(Msg { role: Role::Assistant, content: String::new(), reasoning: String::new(), stats: None, md: markdown::Content::new() });
+                self.messages.push(Msg { role: Role::Assistant, content: String::new(), reasoning: String::new(), stats: None, passages: None, md: markdown::Content::new() });
                 self.sync_current();
                 self.save();
                 self.error = None;
@@ -669,7 +759,20 @@ impl App {
             Message::AsstImport => {
                 self.asst_menu = false;
                 let base = self.base.clone();
-                Task::perform(api::pick_assistant_file(base), Message::AsstImported)
+                Task::perform(
+                    async move {
+                        match api::pick_file_with_text(base).await {
+                            Ok((_, Some(text))) => Ok(text),
+                            // a file that is not UTF-8 text cannot be an exported assistant
+                            Ok((path, None)) => {
+                                let name = path.rsplit(['/', '\\']).next().unwrap_or(path.as_str()).to_string();
+                                Err(format!("{name} is not a text file."))
+                            }
+                            Err(e) => Err(e),
+                        }
+                    },
+                    Message::AsstImported,
+                )
             }
             Message::AsstImported(result) => {
                 let parsed = result.and_then(|text| assistants::parse_import(&text, assistants::new_id));
@@ -767,6 +870,231 @@ impl App {
                 }
                 Task::none()
             }
+            Message::PrjNew => {
+                self.prj_creating = true;
+                self.prj_new_name.clear();
+                Task::none()
+            }
+            Message::PrjNewInput(v) => {
+                self.prj_new_name = v.chars().take(120).collect();
+                Task::none()
+            }
+            Message::PrjNewEnd(keep) => {
+                self.prj_creating = false;
+                let name: String = self.prj_new_name.trim().chars().take(rag::limits::NAME).collect();
+                self.prj_new_name.clear();
+                if !keep || name.is_empty() {
+                    return Task::none();
+                }
+                let now = store::now_secs();
+                let id = store::uid("prj");
+                self.store.projects.push(store::Project {
+                    id: id.clone(),
+                    name: name.clone(),
+                    instructions: String::new(),
+                    docs: Vec::new(),
+                    created: now,
+                    updated: now,
+                });
+                self.prj_open.insert(id.clone());
+                self.save();
+                self.open_project(&id);
+                Task::none()
+            }
+            Message::PrjRenameStart(id) => {
+                let name = self.store.projects.iter().find(|p| p.id == id).map(|p| p.name.clone());
+                if let Some(name) = name {
+                    self.prj_renaming = Some((id, name));
+                }
+                Task::none()
+            }
+            Message::PrjRenameInput(v) => {
+                if let Some((_, name)) = &mut self.prj_renaming {
+                    *name = v.chars().take(120).collect();
+                }
+                Task::none()
+            }
+            Message::PrjRenameEnd(keep) => {
+                let Some((id, typed)) = self.prj_renaming.take() else { return Task::none() };
+                let name: String = typed.trim().chars().take(rag::limits::NAME).collect();
+                if keep && !name.is_empty() {
+                    if let Some(p) = self.store.projects.iter_mut().find(|p| p.id == id) {
+                        p.name = name;
+                        p.updated = store::now_secs();
+                    }
+                    self.save();
+                }
+                Task::none()
+            }
+            Message::PrjDelete(id) => {
+                if self.store.projects.iter().any(|p| p.id == id) {
+                    self.prj_delete = Some(id);
+                }
+                Task::none()
+            }
+            Message::PrjDeleteCancel => {
+                self.prj_delete = None;
+                Task::none()
+            }
+            Message::PrjDeleteOk => {
+                let Some(id) = self.prj_delete.take() else { return Task::none() };
+                let Some(pos) = self.store.projects.iter().position(|p| p.id == id) else { return Task::none() };
+                self.store.projects.remove(pos);
+                for c in self.store.chats.iter_mut().filter(|c| c.project.as_deref() == Some(id.as_str())) {
+                    c.project = None;
+                }
+                self.prj_open.remove(&id);
+                if self.prj_view.as_deref() == Some(id.as_str()) {
+                    self.prj_view = None;
+                    self.page = View::Chat;
+                }
+                if self.prj_pending.as_deref() == Some(id.as_str()) {
+                    self.prj_pending = None;
+                }
+                self.rag_cache = None;
+                self.save();
+                // the Studio says nothing after the dialog; it only cleared the caches and re-rendered
+                Task::none()
+            }
+            Message::PrjToggle(id) => {
+                if !self.prj_open.remove(&id) {
+                    self.prj_open.insert(id);
+                }
+                Task::none()
+            }
+            Message::PrjOpen(id) => {
+                self.open_project(&id);
+                Task::none()
+            }
+            Message::PrjClose => {
+                self.page = View::Chat;
+                Task::none()
+            }
+            Message::PrjInstr(action) => {
+                let edit = action.is_edit();
+                self.prj_instr.perform(action);
+                if edit {
+                    let text: String = self.prj_instr.text().chars().take(rag::limits::INSTRUCTIONS).collect();
+                    if let Some(pid) = self.prj_view.clone() {
+                        if let Some(p) = self.store.projects.iter_mut().find(|p| p.id == pid) {
+                            p.instructions = text;
+                            p.updated = store::now_secs();
+                        }
+                        self.save();
+                    }
+                }
+                Task::none()
+            }
+            Message::PrjNewChat => {
+                let id = self.prj_view.clone();
+                let task = self.update(Message::NewChat);
+                // the new chat is what you want to see (the Studio closes the page and opens it)
+                self.page = View::Chat;
+                if let Some(pid) = id.filter(|pid| self.store.projects.iter().any(|p| p.id == *pid)) {
+                    self.prj_open.insert(pid.clone());
+                    self.prj_pending = Some(pid);
+                }
+                task
+            }
+            Message::PrjChat(id) => {
+                if self.live.is_none() {
+                    self.page = View::Chat;
+                    self.open(id);
+                }
+                Task::none()
+            }
+            Message::PrjAddFiles => {
+                let base = self.base.clone();
+                Task::perform(api::pick_file_with_text(base), Message::PrjFileChosen)
+            }
+            Message::PrjFileChosen(result) => {
+                match result {
+                    // the dialog was closed
+                    Err(e) if e.is_empty() => {}
+                    Err(e) => self.toast = Some(e),
+                    Ok((path, text)) => {
+                        let name = path.rsplit(['/', '\\']).next().unwrap_or(path.as_str()).to_string();
+                        let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+                        if ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif", "ico", "tiff"].contains(&ext.as_str()) {
+                            self.toast = Some(format!("{name}: images cannot be searched. Add text, PDF or Office files."));
+                        } else if let Some(text) = text {
+                            self.store_doc(&name, text, None);
+                        } else {
+                            // the window reads the file itself and lets the server do the rest
+                            match std::fs::read(&path) {
+                                Err(e) => self.toast = Some(format!("The file could not be read: {e}")),
+                                Ok(bytes) => {
+                                    if bytes.len() as u64 > rag::MAX_TEXT_ATTACHMENT {
+                                        self.toast = Some(format!("{name} is too large (more than 20.0 MB)."));
+                                    } else if ["pdf", "docx", "xlsx", "epub", "html", "htm", "xhtml"].contains(&ext.as_str()) {
+                                        self.toast = Some(format!("Reading {name}..."));
+                                        let base = self.base.clone();
+                                        return Task::perform(
+                                            async move {
+                                                let (text, pages, truncated) = api::extract_file(base, name.clone(), bytes).await?;
+                                                Ok::<(String, String, Option<u64>, bool), String>((name, text, pages, truncated))
+                                            },
+                                            Message::PrjExtracted,
+                                        );
+                                    } else {
+                                        self.toast = Some(format!("{name} is not a text file."));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::PrjExtracted(result) => {
+                match result {
+                    Ok((name, text, pages, _truncated)) => self.store_doc(&name, text, pages),
+                    Err(e) => self.toast = Some(e),
+                }
+                Task::none()
+            }
+            Message::PrjDocRemove(id) => {
+                if let Some(pid) = self.prj_view.clone() {
+                    if let Some(p) = self.store.projects.iter_mut().find(|p| p.id == pid) {
+                        p.docs.retain(|d| d.id != id);
+                        p.updated = store::now_secs();
+                    }
+                    self.save();
+                }
+                Task::none()
+            }
+            Message::PrjPick(choice) => {
+                let Some(ids) = self.prj_pick.take() else { return Task::none() };
+                let project = choice.filter(|s| !s.is_empty());
+                let mut n = 0;
+                for id in &ids {
+                    if let Some(c) = self.store.chat_mut(*id) {
+                        c.project = project.clone();
+                        n += 1;
+                    }
+                }
+                if n > 0 {
+                    if let Some(pid) = &project {
+                        self.prj_open.insert(pid.clone());
+                    }
+                    self.save();
+                    // the line of the Studio's prjMove
+                    self.toast = Some(match &project {
+                        Some(pid) => {
+                            let name = self.store.projects.iter().find(|p| p.id == *pid).map(|p| p.name.clone()).unwrap_or_default();
+                            format!("{} chat{} moved to \"{}\"", n, if n == 1 { "" } else { "s" }, name)
+                        }
+                        None => format!("{} chat{} taken out of the project", n, if n == 1 { "" } else { "s" }),
+                    });
+                }
+                Task::none()
+            }
+            Message::RagToggle(i) => {
+                if !self.rag_open.remove(&i) {
+                    self.rag_open.insert(i);
+                }
+                Task::none()
+            }
             Message::Connected(Err(e)) => {
                 self.server = Server::Down(e);
                 Task::none()
@@ -795,6 +1123,7 @@ impl App {
                     return Task::none();
                 }
                 self.current = None;
+                self.prj_pending = None;
                 self.messages.clear();
                 self.window = CHAT_WINDOW;
                 self.editing = None;
@@ -827,6 +1156,7 @@ impl App {
                         self.save();
                     }
                     chatlist::Effect::Toast(t) => self.toast = Some(t),
+                    chatlist::Effect::AskProject(ids) => self.prj_pick = Some(ids),
                 }
                 Task::none()
             }
@@ -1245,6 +1575,8 @@ impl App {
         )
         .padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0 });
 
+        let projects = self.prj_sidebar(t);
+
         let nav = column![
             nav_item(t, ICON_CHAT, "Chat", self.page == View::Chat, Some(Message::Go(View::Chat))),
             nav_item(t, ICON_CODE, "Code", self.page == View::Code, Some(Message::Go(View::Code))),
@@ -1258,6 +1590,7 @@ impl App {
                 container(brand).padding(Padding { top: 0.0, right: 10.0, bottom: 0.0, left: 10.0 }).height(52).align_y(Alignment::Center),
                 new_chat,
                 nav,
+                projects,
                 container(text("Chats").size(12).font(bold()).color(t.muted)).padding(Padding { top: 16.0, right: 10.0, bottom: 4.0, left: 10.0 }),
                 chats,
                 footer,
@@ -1291,15 +1624,20 @@ impl App {
         if self.page == View::Settings {
             return settings::page(t, &self.store.prefs, &self.system_editor, &self.max_tokens_text, &self.sampling_text, engine_settings::view(t, &self.engine, !matches!(self.server, Server::Down(_))));
         }
-        let content: Element<'_, Message> = match &self.server {
-            Server::Down(_) | Server::Connecting if self.switching => self.switching_card(t),
-            Server::Down(reason) => self.offline(t, reason),
-            Server::NoModel => self.no_model(t),
-            _ if self.messages.is_empty() => self.welcome(t),
-            _ => self.conversation(t),
+        let page: Element<'_, Message> = if self.page == View::Project {
+            // the page of a project sits where the conversation sits, so the dialogs can open over it
+            self.project_page(t)
+        } else {
+            let content: Element<'_, Message> = match &self.server {
+                Server::Down(_) | Server::Connecting if self.switching => self.switching_card(t),
+                Server::Down(reason) => self.offline(t, reason),
+                Server::NoModel => self.no_model(t),
+                _ if self.messages.is_empty() => self.welcome(t),
+                _ => self.conversation(t),
+            };
+            column![self.topbar(t), content, self.composer(t)].width(Length::Fill).height(Length::Fill).into()
         };
-        let page: Element<'_, Message> = column![self.topbar(t), content, self.composer(t)].width(Length::Fill).height(Length::Fill).into();
-        if !self.picker_open && !self.asst_menu && self.asst_edit.is_none() {
+        if !self.picker_open && !self.asst_menu && self.asst_edit.is_none() && self.prj_pick.is_none() && self.prj_delete.is_none() {
             return page;
         }
         let mut layers = stack![page];
@@ -1318,6 +1656,17 @@ impl App {
             layers = layers
                 .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::AsstMenuClose))
                 .push(self.asst_editor(t));
+        }
+        if self.prj_pick.is_some() {
+            layers = layers
+                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::PrjPick(None)))
+                .push(self.prj_pick_window(t));
+        }
+        if self.prj_delete.is_some() {
+            // the dialog of the Studio's askDialog: a click beside it only takes the click
+            layers = layers
+                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::PrjDeleteCancel))
+                .push(self.prj_delete_window(t));
         }
         layers.into()
     }
@@ -1361,6 +1710,299 @@ impl App {
             .style(theme::card(t, theme::R_LG, false));
         // under the model name: the top bar is 52 high and the column is centered like the chat
         container(container(panel).max_width(780).width(Length::Fill)).center_x(Length::Fill).padding(Padding { top: 46.0, right: 24.0, bottom: 0.0, left: 24.0 }).width(Length::Fill).height(Length::Fill).into()
+    }
+
+    /// The projects over the chats in the sidebar (the Studio's projectList): a row per project with
+    /// its chats when it is open, the input row for a new one and the rename row where it is asked for.
+    fn prj_sidebar(&self, t: Tokens) -> Element<'_, Message> {
+        let head = container(
+            row![
+                text("Projects").size(12).font(bold()).color(t.muted),
+                Space::new().width(Length::Fill),
+                button(svg(icon(ICON_PLUS)).width(14).height(14).style(muted_svg(t)))
+                    .on_press(Message::PrjNew)
+                    .padding(3)
+                    .style(theme::ghost_button(t)),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
+        )
+        .padding(Padding { top: 16.0, right: 10.0, bottom: 4.0, left: 10.0 });
+        let mut col = column![head].spacing(2);
+        if self.prj_creating {
+            col = col.push(
+                row![
+                    asst_text_input(t, "New project", &self.prj_new_name, Message::PrjNewInput, Length::Fill),
+                    button(text("OK").size(12)).on_press(Message::PrjNewEnd(true)).padding([4, 8]).style(theme::secondary_button(t)),
+                    button(text("×").size(14)).on_press(Message::PrjNewEnd(false)).padding([2, 6]).style(theme::ghost_button(t)),
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center),
+            );
+        } else if self.store.projects.is_empty() {
+            col = col.push(container(text("No projects yet").size(13).color(t.muted)).padding([6, 10]));
+        }
+        for p in &self.store.projects {
+            let open = self.prj_open.contains(&p.id);
+            if self.prj_renaming.as_ref().is_some_and(|(id, _)| *id == p.id) {
+                let typed = self.prj_renaming.as_ref().map(|(_, n)| n.as_str()).unwrap_or("");
+                col = col.push(
+                    row![
+                        asst_text_input(t, "Project name", typed, Message::PrjRenameInput, Length::Fill),
+                        button(text("OK").size(12)).on_press(Message::PrjRenameEnd(true)).padding([4, 8]).style(theme::secondary_button(t)),
+                        button(text("×").size(14)).on_press(Message::PrjRenameEnd(false)).padding([2, 6]).style(theme::ghost_button(t)),
+                    ]
+                    .spacing(4)
+                    .align_y(Alignment::Center),
+                );
+                continue;
+            }
+            let mut chats: Vec<&store::ChatRecord> = self
+                .store
+                .chats
+                .iter()
+                .filter(|c| c.project.as_deref() == Some(p.id.as_str()) && !c.archived)
+                .collect();
+            chats.sort_by_key(|c| std::cmp::Reverse(c.updated));
+            let line = row![
+                button(svg(icon(if open { ICON_CHEVRON } else { ICON_CHEVRON_RIGHT })).width(13).height(13).style(muted_svg(t)))
+                    .on_press(Message::PrjToggle(p.id.clone()))
+                    .padding(4)
+                    .style(theme::ghost_button(t)),
+                button(
+                    row![
+                        svg(icon(ICON_FOLDER)).width(14).height(14).style(accent_svg(t)),
+                        text(ellipsize(&p.name, 16)).size(13),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                )
+                .on_press(Message::PrjOpen(p.id.clone()))
+                .padding([4, 2])
+                .width(Length::Fill)
+                .style(theme::plain_button(t)),
+                text(chats.len().to_string()).size(11).color(t.muted),
+                button(svg(icon(assistants::icon_bytes("pen"))).width(12).height(12).style(muted_svg(t)))
+                    .on_press(Message::PrjRenameStart(p.id.clone()))
+                    .padding(4)
+                    .style(theme::ghost_button(t)),
+                button(svg(icon(ICON_X)).width(12).height(12).style(muted_svg(t)))
+                    .on_press(Message::PrjDelete(p.id.clone()))
+                    .padding(4)
+                    .style(theme::ghost_button(t)),
+            ]
+            .spacing(2)
+            .align_y(Alignment::Center);
+            col = col.push(container(line).padding(Padding { top: 2.0, right: 4.0, bottom: 2.0, left: 4.0 }));
+            if open {
+                if chats.is_empty() {
+                    col = col
+                        .push(container(text("No chats yet").size(12).color(t.muted)).padding(Padding { top: 2.0, right: 10.0, bottom: 4.0, left: 28.0 }));
+                }
+                for c in chats {
+                    let active = self.current == Some(c.id);
+                    let row_i = button(text(ellipsize(&c.title, 24)).size(13).wrapping(text::Wrapping::None))
+                        .on_press_maybe(self.live.is_none().then_some(Message::PrjChat(c.id)))
+                        .padding([6, 10])
+                        .width(Length::Fill)
+                        .style(theme::row_button(t, active));
+                    col = col.push(container(row_i).padding(Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 22.0 }));
+                }
+            }
+        }
+        col.into()
+    }
+
+    /// The page of one project: its name, instructions, knowledge and chats (the Studio's project window).
+    fn project_page(&self, t: Tokens) -> Element<'_, Message> {
+        let empty = container(Space::new().width(Length::Fill).height(Length::Fill));
+        let Some(id) = self.prj_view.clone() else { return empty.into() };
+        let Some(p) = self.store.projects.iter().find(|p| p.id == id) else { return empty.into() };
+        let head = row![
+            text(p.name.clone()).size(26).font(bold()),
+            Space::new().width(Length::Fill),
+            button(text("New chat in project").size(13)).on_press(Message::PrjNewChat).padding([6, 12]).style(theme::primary_button(t)),
+            button(text("Rename").size(13)).on_press(Message::PrjRenameStart(p.id.clone())).padding([6, 12]).style(theme::secondary_button(t)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let usage = text(format!(
+            "{} of {} characters used. Only the extracted text is stored, on this computer.",
+            group(p.used() as u64),
+            group(rag::limits::PROJECT_USAGES as u64)
+        ))
+        .size(12)
+        .color(t.muted);
+        let instructions = column![
+            text("Instructions for every chat of this project").size(13).color(t.fg_soft),
+            asst_area(t, &self.prj_instr, Message::PrjInstr, "For example: Answer as a support engineer for your product.", 90.0),
+        ]
+        .spacing(4);
+        let knowledge = column![
+            row![
+                text("Knowledge").size(13).color(t.fg_soft),
+                Space::new().width(Length::Fill),
+                button(text("Add files").size(12)).on_press(Message::PrjAddFiles).padding([4, 10]).style(theme::secondary_button(t)),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(4);
+        let mut docs = column![].spacing(4);
+        if p.docs.is_empty() {
+            docs = docs.push(text("No documents yet. Add files that every chat of this project should be able to search.").size(13).color(t.muted));
+        } else {
+            for d in &p.docs {
+                let size = format!("{}{}", format_bytes(d.chars as u64), d.pages.map(|n| format!(", {n} pages")).unwrap_or_default());
+                docs = docs.push(
+                    row![
+                        svg(icon(ICON_FILE)).width(14).height(14).style(muted_svg(t)),
+                        text(ellipsize(&d.name, 30)).size(13).width(Length::Fill),
+                        text(size).size(12).color(t.muted),
+                        button(svg(icon(ICON_X)).width(12).height(12).style(muted_svg(t)))
+                            .on_press(Message::PrjDocRemove(d.id.clone()))
+                            .padding(4)
+                            .style(theme::ghost_button(t)),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+            }
+        }
+        let note = text("Every question in a chat of this project searches these documents; the best passages are shown under your message.")
+            .size(12)
+            .color(t.muted);
+        let mut chats: Vec<&store::ChatRecord> = self.store.chats.iter().filter(|c| c.project.as_deref() == Some(p.id.as_str())).collect();
+        chats.sort_by_key(|c| std::cmp::Reverse(c.updated));
+        let mut chat_rows = column![].spacing(2);
+        if chats.is_empty() {
+            chat_rows = chat_rows.push(text("No chats in this project yet.").size(13).color(t.muted));
+        } else {
+            for c in chats {
+                let date = chrono::Local
+                    .timestamp_opt(c.updated, 0)
+                    .single()
+                    .map(|d| d.format("%m/%d/%Y").to_string())
+                    .unwrap_or_default();
+                let label = format!("{}{date}", if c.archived { "archived · " } else { "" });
+                chat_rows = chat_rows.push(
+                    button(
+                        row![
+                            text(ellipsize(&c.title, 34)).size(13).width(Length::Fill),
+                            text(label).size(11).color(t.muted),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    )
+                    .on_press_maybe(self.live.is_none().then_some(Message::PrjChat(c.id)))
+                    .padding([7, 10])
+                    .width(Length::Fill)
+                    .style(theme::row_button(t, self.current == Some(c.id))),
+                );
+            }
+        }
+        let footer = row![
+            button(text("Delete project").size(13))
+                .on_press(Message::PrjDelete(p.id.clone()))
+                .padding([6, 12])
+                .style(move |_, status| {
+                    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                    button::Style {
+                        background: Some(iced::Background::Color(if hovered { t.fill_hover } else { t.fill })),
+                        text_color: t.danger,
+                        border: iced::border::rounded(8),
+                        ..Default::default()
+                    }
+                }),
+            Space::new().width(Length::Fill),
+            button(text("Close").size(13)).on_press(Message::PrjClose).padding([6, 12]).style(theme::ghost_button(t)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let content = column![head, usage, instructions, knowledge, docs, note, text("Chats").size(13).color(t.fg_soft), chat_rows, footer].spacing(12);
+        let inner = container(content).max_width(780).width(Length::Fill).padding(Padding { top: 14.0, right: 24.0, bottom: 32.0, left: 24.0 });
+        scrollable(container(inner).center_x(Length::Fill).width(Length::Fill)).height(Length::Fill).into()
+    }
+
+    /// The dialog that asks before a project goes away (the Studio's askDialog for `prjDelete`).
+    fn prj_delete_window(&self, t: Tokens) -> Element<'_, Message> {
+        let Some(id) = self.prj_delete.clone() else { return Space::new().into() };
+        let Some(p) = self.store.projects.iter().find(|p| p.id == id) else { return Space::new().into() };
+        let n = self.store.chats.iter().filter(|c| c.project.as_deref() == Some(id.as_str())).count();
+        let text_line = format!(
+            "\"{}\" and its {} document{} will be deleted. Its {} chat{} stay in your list.",
+            p.name,
+            p.docs.len(),
+            if p.docs.len() == 1 { "" } else { "s" },
+            n,
+            if n == 1 { "" } else { "s" }
+        );
+        let window = container(
+            column![
+                text("Delete project?").size(16).font(bold()),
+                text(text_line).size(13).color(t.fg_soft),
+                row![
+                    Space::new().width(Length::Fill),
+                    button(text("Cancel").size(13)).on_press(Message::PrjDeleteCancel).padding([6, 12]).style(theme::ghost_button(t)),
+                    button(text("Delete").size(13)).on_press(Message::PrjDeleteOk).padding([6, 12]).style(move |_, status| {
+                        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                        button::Style {
+                            background: Some(iced::Background::Color(if hovered { t.fill_hover } else { t.fill })),
+                            text_color: t.danger,
+                            border: iced::border::rounded(8),
+                            ..Default::default()
+                        }
+                    }),
+                ],
+            ]
+            .spacing(10),
+        )
+        .padding(16)
+        .width(420)
+        .style(theme::card(t, theme::R_LG, false));
+        container(window).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
+    }
+
+    /// The small window to choose the project of a move (the Studio's pickModal).
+    fn prj_pick_window(&self, t: Tokens) -> Element<'_, Message> {
+        let many = self.prj_pick.as_ref().is_some_and(|ids| ids.len() > 1);
+        let title = if many { "Move the chats to a project" } else { "Move the chat to a project" };
+        let mut list = column![button(
+            text("No project").size(13)
+        )
+        .on_press(Message::PrjPick(Some(String::new())))
+        .padding([8, 10])
+        .width(Length::Fill)
+        .style(theme::row_button(t, false))]
+        .spacing(2);
+        for p in &self.store.projects {
+            list = list.push(
+                button(
+                    row![svg(icon(ICON_FOLDER)).width(14).height(14).style(accent_svg(t)), text(ellipsize(&p.name, 28)).size(13)]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                )
+                .on_press(Message::PrjPick(Some(p.id.clone())))
+                .padding([8, 10])
+                .width(Length::Fill)
+                .style(theme::row_button(t, false)),
+            );
+        }
+        let window = container(
+            column![
+                text(title).size(16).font(bold()),
+                list,
+                row![
+                    Space::new().width(Length::Fill),
+                    button(text("Cancel").size(13)).on_press(Message::PrjPick(None)).padding([6, 12]).style(theme::ghost_button(t)),
+                ],
+            ]
+            .spacing(8),
+        )
+        .padding(16)
+        .width(380)
+        .style(theme::card(t, theme::R_LG, false));
+        container(window).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
     }
 
     /// The assistant menu under the name in the top bar (the Studio's presetMenu): every assistant with
@@ -1661,6 +2303,30 @@ impl App {
                 ..Default::default()
             }
         });
+        // the project of this chat beside the assistant (the Studio's prjBadge): a click opens its page
+        let project_badge: Element<'_, Message> = match self.active_project() {
+            Some(p) => button(
+                row![
+                    svg(icon(ICON_FOLDER)).width(13).height(13).style(accent_svg(t)),
+                    text(ellipsize(&p.name, 16)).size(13),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .on_press(Message::PrjOpen(p.id.clone()))
+            .padding([5, 12])
+            .style(move |_, status| {
+                let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    background: Some(iced::Background::Color(if hovered { t.fill_hover } else { t.fill })),
+                    text_color: t.fg_soft,
+                    border: iced::border::rounded(999),
+                    ..Default::default()
+                }
+            })
+            .into(),
+            None => Space::new().into(),
+        };
         let meter: Element<'_, Message> = if max > 0 {
             let ratio = (self.used_tokens as f32 / max as f32).clamp(0.0, 1.0);
             let used_part = ((ratio * 1000.0).round() as u16).max(if self.used_tokens > 0 { 8 } else { 0 });
@@ -1709,7 +2375,7 @@ impl App {
         } else {
             Space::new().into()
         };
-        let inner = container(row![pill, Space::new().width(10), asst_pill, Space::new().width(10), chip, Space::new().width(Length::Fill), meter].align_y(Alignment::Center)).max_width(780).width(Length::Fill);
+        let inner = container(row![pill, Space::new().width(10), asst_pill, Space::new().width(10), project_badge, Space::new().width(10), chip, Space::new().width(Length::Fill), meter].align_y(Alignment::Center)).max_width(780).width(Length::Fill);
         container(inner)
             .center_x(Length::Fill)
             .padding([0, 24])
@@ -1796,13 +2462,23 @@ impl App {
     }
 
     /// The messages of the next request: the system prompt, then the chat without the empty answer that is about to be written.
+    /// Only the newest question carries its passages (the Studio sends them with the last user message only).
     pub fn wire_messages(&self) -> Vec<WireMessage> {
         let mut wire = vec![WireMessage::new("system", self.system_prompt())];
         let upto = match self.messages.last() {
             Some(last) if last.role == Role::Assistant && last.content.is_empty() => self.messages.len() - 1,
             _ => self.messages.len(),
         };
-        wire.extend(self.messages[..upto].iter().map(|m| WireMessage::new(m.role.wire(), m.content.clone())));
+        let last_user = self.messages[..upto].iter().rposition(|m| m.role == Role::User);
+        wire.extend(self.messages[..upto].iter().enumerate().map(|(i, m)| {
+            let mut content = m.content.clone();
+            if Some(i) == last_user {
+                if let Some(passages) = &m.passages {
+                    content = format!("{}{}", rag::prefix(passages), content);
+                }
+            }
+            WireMessage::new(m.role.wire(), content)
+        }));
         wire
     }
 
@@ -1851,6 +2527,81 @@ impl App {
     /// How fast the model read its last prompt (tokens per second; 0 when unknown).
     fn last_prompt_speed(&self) -> f64 {
         self.messages.iter().rev().find_map(|m| m.stats.as_ref().map(|s| s.prompt_per_second).filter(|v| *v > 0.0)).unwrap_or(0.0)
+    }
+
+    /// The project of the open chat, else the one a new chat joins (the Studio's prjChrome).
+    fn active_project(&self) -> Option<&store::Project> {
+        let id = match self.current {
+            Some(cid) => self.store.chat(cid).and_then(|c| c.project.clone()),
+            None => self.prj_pending.clone(),
+        }?;
+        self.store.projects.iter().find(|p| p.id == id)
+    }
+
+    /// Shows the page of a project (its instructions go into the box).
+    fn open_project(&mut self, id: &str) {
+        let text = match self.store.projects.iter().find(|p| p.id == id) {
+            Some(p) => p.instructions.clone(),
+            None => return,
+        };
+        self.prj_view = Some(id.to_string());
+        self.page = View::Project;
+        self.prj_instr = Content::with_text(&text);
+    }
+
+    /// The documents searched for a question: the knowledge of the project of this chat.
+    fn knowledge(&self) -> Vec<(String, String, String)> {
+        match self.active_project() {
+            Some(p) => p.docs.iter().map(|d| (d.id.clone(), d.name.clone(), d.text.clone())).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The passages for a question, best first; `None` when there is nothing to search. The index is
+    /// kept until the documents change (the Studio's ragThreadIndex cache).
+    fn passages_for(&mut self, question: &str) -> Option<Vec<rag::Passage>> {
+        let docs = self.knowledge();
+        if docs.is_empty() {
+            self.rag_cache = None;
+            return None;
+        }
+        let sig = docs.iter().map(|(id, _, text)| format!("{id}:{}", text.len())).collect::<Vec<_>>().join("|");
+        let stale = self.rag_cache.as_ref().is_none_or(|c| c.sig != sig);
+        if stale {
+            let refs: Vec<IndexedDoc<'_>> = docs.iter().map(|(id, name, text)| IndexedDoc { id, name, text }).collect();
+            self.rag_cache = Some(RagCache { sig, index: rag::build_index(&refs) });
+        }
+        let k = rag::passage_count(self.model_info().max_context);
+        let index = &self.rag_cache.as_ref().expect("the index was just built").index;
+        let found = rag::search(index, question, k, None);
+        (!found.is_empty()).then(|| rag::arrange(found))
+    }
+
+    /// Puts an extracted text into the knowledge of the open project, within the limits (prjAddFiles).
+    fn store_doc(&mut self, name: &str, text: String, pages: Option<u64>) {
+        let Some(pid) = self.prj_view.clone() else { return };
+        let Some(pos) = self.store.projects.iter().position(|p| p.id == pid) else { return };
+        let used_project = self.store.projects[pos].used();
+        let used_total: usize = self.store.projects.iter().map(|p| p.used()).sum();
+        let project_name = self.store.projects[pos].name.clone();
+        match rag::fit_doc(used_project, used_total, name, &text) {
+            rag::Fit::Message(m) => self.toast = Some(m),
+            fit => {
+                let (text, note) = fit.stored().expect("only a refused fit has no text");
+                let chars = text.chars().count();
+                self.store.projects[pos].docs.push(store::ProjectDoc {
+                    id: store::uid("pdoc"),
+                    name: name.to_string(),
+                    text,
+                    pages,
+                    chars,
+                    added: store::now_secs(),
+                });
+                self.store.projects[pos].updated = store::now_secs();
+                self.save();
+                self.toast = Some(note.unwrap_or_else(|| format!("{name} added to \"{project_name}\"")));
+            }
+        }
     }
 
     /// The assistant of the open chat; without an open chat the one chosen for new chats. An id that no
@@ -1964,6 +2715,15 @@ impl App {
             },
             None => vec![(p.system_mode(), p.system_prompt.as_str())],
         };
+        // the knowledge of the project sits after the default prompt and before the assistant's own text
+        // (the Studio's composeSystem: defaults, personalization, project, assistant) with its own header
+        let project_part = self.active_project().filter(|p| !p.instructions.trim().is_empty()).map(|p| {
+            let text: String = p.instructions.trim().chars().take(rag::limits::INSTRUCTIONS).collect();
+            format!("Instructions for the project \"{}\":\n{}", p.name, text)
+        });
+        if let Some(project_part) = project_part.as_deref() {
+            choices.push((prompts::Mode::Append, project_part));
+        }
         if let Some(a) = active.as_ref().filter(|a| !a.system.trim().is_empty()) {
             choices.push((prompts::Mode::Append, a.system.as_str()));
         }
@@ -2048,6 +2808,50 @@ impl App {
             .into()
     }
 
+    /// The chip under a question that was answered with passages (the Studio's `ragChipsHtml`): a line
+    /// with the count and the names of the documents, the passages behind a click.
+    fn passage_chip<'a>(&'a self, t: Tokens, i: usize, passages: &'a [rag::Passage]) -> Element<'a, Message> {
+        let open = self.rag_open.contains(&i);
+        let names = rag_names(passages);
+        let head = button(
+            row![
+                svg(icon(if open { ICON_CHEVRON } else { ICON_CHEVRON_RIGHT })).width(12).height(12).style(muted_svg(t)),
+                text(format!(
+                    "Using {} passage{} from {names}",
+                    passages.len(),
+                    if passages.len() == 1 { "" } else { "s" }
+                ))
+                .size(12)
+                .color(t.muted),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::RagToggle(i))
+        .padding([4, 8])
+        .style(theme::ghost_button(t));
+        let mut col = column![head].spacing(4);
+        if open {
+            for p in passages {
+                // the box is as wide as the bubble above, so the text wraps inside it instead of running off
+                col = col.push(
+                    container(
+                        column![
+                            text(format!("{}, chunk {}/{}", p.doc, p.n, p.m)).size(12).font(bold()).color(t.fg_soft),
+                            text(rag_snippet(&p.text)).size(12).color(t.muted).width(Length::Fill).wrapping(text::Wrapping::Word),
+                        ]
+                        .spacing(2)
+                        .width(Length::Fill),
+                    )
+                    .padding([6, 10])
+                    .width(Length::Fixed(560.0))
+                    .style(theme::inset(t)),
+                );
+            }
+        }
+        col.into()
+    }
+
     /// The arrows under a message that has more than one version: "‹ 2 / 3 ›".
     fn version_switch(&self, t: Tokens, i: usize) -> Option<Element<'_, Message>> {
         let v = self.current.and_then(|id| self.store.chat(id))?.versions_at(i);
@@ -2067,6 +2871,10 @@ impl App {
         match m.role {
             Role::User => {
                 let bubble = container(text(&m.content).size(15)).padding([9, 15]).max_width(560).style(theme::bubble(t));
+                let mut col = column![row![Space::new().width(Length::Fill), bubble]].spacing(4);
+                if let Some(passages) = m.passages.as_ref().filter(|p| !p.is_empty()) {
+                    col = col.push(row![Space::new().width(Length::Fill), self.passage_chip(t, i, passages)]);
+                }
                 let mut line = row![].spacing(14).align_y(Alignment::Center);
                 if let Some(v) = self.version_switch(t, i) {
                     line = line.push(v);
@@ -2074,7 +2882,7 @@ impl App {
                 if self.live.is_none() {
                     line = line.push(button(text("Edit").size(12)).on_press(Message::EditMessage(i)).padding([3, 0]).style(theme::ghost_button(t)));
                 }
-                column![row![Space::new().width(Length::Fill), bubble], row![Space::new().width(Length::Fill), line]].spacing(4).into()
+                col.push(row![Space::new().width(Length::Fill), line]).into()
             }
             Role::Assistant => {
                 let live = self.live.is_some() && i + 1 == self.messages.len();
@@ -2158,8 +2966,15 @@ impl App {
 }
 
 /// A rough count of the tokens of a chat (four characters to a token) until the server has counted the real ones. The meter says so with a tilde.
+/// The passages that travel with the newest question count too (the Studio's `ragTokens`).
 fn estimate_tokens(messages: &[Msg]) -> u64 {
-    messages.iter().map(|m| m.content.chars().count() as u64 / 4 + 4).sum()
+    let mut total: u64 = messages.iter().map(|m| m.content.chars().count() as u64 / 4 + 4).sum();
+    if let Some(i) = messages.iter().rposition(|m| m.role == Role::User) {
+        if let Some(passages) = &messages[i].passages {
+            total += rag::prefix(passages).chars().count() as u64 / 4;
+        }
+    }
+    total
 }
 
 /// `text` cut to `max` characters with an ellipsis (iced has no text overflow of its own).
@@ -2186,6 +3001,51 @@ pub fn group(n: u64) -> String {
     let mut parts: Vec<&str> = digits.as_bytes().rchunks(3).map(|c| std::str::from_utf8(c).unwrap_or("")).collect();
     parts.reverse();
     parts.join(",")
+}
+
+/// The names of the documents of the passages: "A and B", and with more than two "A, B and N more"
+/// (the Studio's `ragNames`).
+fn rag_names(passages: &[rag::Passage]) -> String {
+    let mut unique: Vec<&str> = Vec::new();
+    for p in passages {
+        if !unique.contains(&p.doc.as_str()) {
+            unique.push(&p.doc);
+        }
+    }
+    if unique.len() > 2 {
+        format!("{}, {} and {} more", unique[0], unique[1], unique.len() - 2)
+    } else {
+        unique.join(" and ")
+    }
+}
+
+/// What a passage shows under its source: the whitespace collapsed, cut to 700 characters (ragSnippet).
+fn rag_snippet(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > 700 {
+        format!("{}...", flat.chars().take(700).collect::<String>())
+    } else {
+        flat
+    }
+}
+
+/// Bytes as the Studio shows them (`formatBytes`): "0 B", "457 B", "4.2 KB", "20.0 MB".
+pub fn format_bytes(b: u64) -> String {
+    if b == 0 {
+        return "0 B".to_string();
+    }
+    let units = ["B", "KB", "MB", "GB", "TB"];
+    let mut i = 0usize;
+    let mut v = b as f64;
+    while v >= 1024.0 && i < units.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {}", units[i])
+    }
 }
 
 pub(crate) fn muted_svg(t: Tokens) -> impl Fn(&Theme, svg::Status) -> svg::Style {
@@ -2318,7 +3178,7 @@ mod tests {
 
     #[test]
     fn the_estimate_is_four_characters_to_a_token_plus_a_little_for_the_frame() {
-        let m = |c: &str| Msg { role: Role::User, content: c.into(), reasoning: String::new(), stats: None, md: markdown::Content::new() };
+        let m = |c: &str| Msg { role: Role::User, content: c.into(), reasoning: String::new(), stats: None, passages: None, md: markdown::Content::new() };
         assert_eq!(estimate_tokens(&[m(&"a".repeat(40))]), 14);
         assert_eq!(estimate_tokens(&[]), 0);
     }
