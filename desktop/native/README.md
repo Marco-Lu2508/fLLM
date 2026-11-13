@@ -144,6 +144,14 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   four calls); the sources are numbered `[n]` under the answer (*Sources*, a click opens the page
   in the browser). The texts, cards, budget and error lines are checked against `ctRunTool` of the
   Studio itself — the fixtures are produced by that code.
+- The math of an answer, typeset: `$x$`, `$$x$$`, `\(x\)` and `\[x\]` in the Markdown of the chat are found
+  by the recognizers of `markdown.js` (with their lookbehind and lookahead as character checks, which a Rust regex
+  cannot express) and given to the typesetter of the Studio (`tex.rs`, the `typeset` and `toHTML` of `markdown.js`
+  as fixtures): groups, scripts, fractions, roots, symbols, Greek letters, accents, big operators with their power
+  above and their subscript below in a display answer, `\text`, thin spaces of the units. A display piece gets its
+  own line, an inline piece keeps its place between the words with the typeset source instead of the dollars, and a
+  piece that will not typeset is shown as its source — checked in the window and drawn to PNG, with the fixtures
+  produced by `markdown.js` itself (45 typeset cases, 7 span places, 15 inline patterns).
 - Research mode: the chip *Research* in the composer (between web and style; one press and the
   line of the Studio says what it means) turns a question without attachments into a research run:
   the plan asks the model for 3–6 search queries (with the JSON schema, read plain when the server

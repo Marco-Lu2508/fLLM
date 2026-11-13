@@ -1,0 +1,403 @@
+{
+ "tex": [
+  [
+   "x + y",
+   "<i>x</i>+<i>y</i>",
+   "<i>x</i>+<i>y</i>"
+  ],
+  [
+   "\\frac{1}{2}",
+   "<span class=\"tx-frac\"><span class=\"tx-num\">1</span><span class=\"tx-den\">2</span></span>",
+   "<span class=\"tx-frac\"><span class=\"tx-num\">1</span><span class=\"tx-den\">2</span></span>"
+  ],
+  [
+   "\\sqrt{4}",
+   "<span class=\"tx-sqrt\"><span class=\"tx-rad\">√</span><span class=\"tx-rcnt\">4</span></span>",
+   "<span class=\"tx-sqrt\"><span class=\"tx-rad\">√</span><span class=\"tx-rcnt\">4</span></span>"
+  ],
+  [
+   "\\sqrt[3]{x}",
+   "<sup class=\"tx-rootn\">3</sup><span class=\"tx-sqrt\"><span class=\"tx-rad\">√</span><span class=\"tx-rcnt\"><i>x</i></span></span>",
+   "<sup class=\"tx-rootn\">3</sup><span class=\"tx-sqrt\"><span class=\"tx-rad\">√</span><span class=\"tx-rcnt\"><i>x</i></span></span>"
+  ],
+  [
+   "x^2 + y_{1}",
+   "<i>x</i><sup>2</sup>+<i>y</i><sub>1</sub>",
+   "<i>x</i><sup>2</sup>+<i>y</i><sub>1</sub>"
+  ],
+  [
+   "\\sum_{i=1}^{n} i",
+   "<span class=\"tx-op\">∑</span><span class=\"tx-ss\"><sup><i>n</i></sup><sub><i>i</i>=1</sub></span><i>i</i>",
+   "<span class=\"tx-lim\"><span class=\"tx-top\"><i>n</i></span><span class=\"tx-big\"><span class=\"tx-op\">∑</span></span><span class=\"tx-bot\"><i>i</i>=1</span></span><i>i</i>"
+  ],
+  [
+   "\\alpha + \\beta",
+   "<i>α</i>+<i>β</i>",
+   "<i>α</i>+<i>β</i>"
+  ],
+  [
+   "\\Gamma \\Delta",
+   "ΓΔ",
+   "ΓΔ"
+  ],
+  [
+   "\\infty \\partial \\nabla",
+   "∞∂∇",
+   "∞∂∇"
+  ],
+  [
+   "\\leq \\geq \\neq \\approx",
+   "≤≥≠≈",
+   "≤≥≠≈"
+  ],
+  [
+   "\\int_0^1 x\\,dx",
+   "<span class=\"tx-op\">∫</span><span class=\"tx-ss\"><sup>1</sup><sub>0</sub></span><i>x</i> <i>d</i><i>x</i>",
+   "<span class=\"tx-op\">∫</span><span class=\"tx-ss\"><sup>1</sup><sub>0</sub></span><i>x</i> <i>d</i><i>x</i>"
+  ],
+  [
+   "\\text{hello}",
+   "<span class=\"tx-rm\">hello</span>",
+   "<span class=\"tx-rm\">hello</span>"
+  ],
+  [
+   "\\mathrm{d}",
+   "<span class=\"tx-rm\">d</span>",
+   "<span class=\"tx-rm\">d</span>"
+  ],
+  [
+   "\\textbf{bold}",
+   "<b>bold</b>",
+   "<b>bold</b>"
+  ],
+  [
+   "\\mathbf{x}",
+   "<b><i>x</i></b>",
+   "<b><i>x</i></b>"
+  ],
+  [
+   "\\mathbb{R}",
+   "ℝ",
+   "ℝ"
+  ],
+  [
+   "\\hat{x} + \\vec{v}",
+   "<i>x</i>̂+<i>v</i>⃗",
+   "<i>x</i>̂+<i>v</i>⃗"
+  ],
+  [
+   "\\lim_{x \\to 0}",
+   "<span class=\"tx-fn\">lim</span><sub><i>x</i>→0</sub>",
+   "<span class=\"tx-lim\"><span class=\"tx-top\"></span><span class=\"tx-big\"><span class=\"tx-fn\">lim</span></span><span class=\"tx-bot\"><i>x</i>→0</span></span>"
+  ],
+  [
+   "a \\to b",
+   "<i>a</i>→<i>b</i>",
+   "<i>a</i>→<i>b</i>"
+  ],
+  [
+   "\\left( x \\right)",
+   "(<i>x</i>)",
+   "(<i>x</i>)"
+  ],
+  [
+   "\\overline{AB}",
+   "<span class=\"tx-over\"><i>A</i><i>B</i></span>",
+   "<span class=\"tx-over\"><i>A</i><i>B</i></span>"
+  ],
+  [
+   "100\\%",
+   "100%",
+   "100%"
+  ],
+  [
+   "x \\cdot y",
+   "<i>x</i>·<i>y</i>",
+   "<i>x</i>·<i>y</i>"
+  ],
+  [
+   "\\emptyset",
+   "∅",
+   "∅"
+  ],
+  [
+   "f(x) = \\frac{x+1}{x-1}",
+   "<i>f</i>(<i>x</i>)=<span class=\"tx-frac\"><span class=\"tx-num\"><i>x</i>+1</span><span class=\"tx-den\"><i>x</i>−1</span></span>",
+   "<i>f</i>(<i>x</i>)=<span class=\"tx-frac\"><span class=\"tx-num\"><i>x</i>+1</span><span class=\"tx-den\"><i>x</i>−1</span></span>"
+  ],
+  [
+   "\\alpha\\beta\\gamma",
+   "<i>α</i><i>β</i><i>γ</i>",
+   "<i>α</i><i>β</i><i>γ</i>"
+  ],
+  [
+   "\\pi r^2",
+   "<i>π</i><i>r</i><sup>2</sup>",
+   "<i>π</i><i>r</i><sup>2</sup>"
+  ],
+  [
+   "n! = \\prod_{k=1}^{n} k",
+   "<i>n</i>!=<span class=\"tx-op\">∏</span><span class=\"tx-ss\"><sup><i>n</i></sup><sub><i>k</i>=1</sub></span><i>k</i>",
+   "<i>n</i>!=<span class=\"tx-lim\"><span class=\"tx-top\"><i>n</i></span><span class=\"tx-big\"><span class=\"tx-op\">∏</span></span><span class=\"tx-bot\"><i>k</i>=1</span></span><i>k</i>"
+  ],
+  [
+   "\\varphi(x)",
+   "<i>φ</i>(<i>x</i>)",
+   "<i>φ</i>(<i>x</i>)"
+  ],
+  [
+   "\\Omega",
+   "Ω",
+   "Ω"
+  ],
+  [
+   "e^{i\\pi} + 1 = 0",
+   "<i>e</i><sup><i>i</i><i>π</i></sup>+1=0",
+   "<i>e</i><sup><i>i</i><i>π</i></sup>+1=0"
+  ],
+  [
+   "\\text{if } x > 0",
+   "<span class=\"tx-rm\">if </span><i>x</i>&gt;0",
+   "<span class=\"tx-rm\">if </span><i>x</i>&gt;0"
+  ],
+  [
+   "\\sqrt{a^2 + b^2}",
+   "<span class=\"tx-sqrt\"><span class=\"tx-rad\">√</span><span class=\"tx-rcnt\"><i>a</i><sup>2</sup>+<i>b</i><sup>2</sup></span></span>",
+   "<span class=\"tx-sqrt\"><span class=\"tx-rad\">√</span><span class=\"tx-rcnt\"><i>a</i><sup>2</sup>+<i>b</i><sup>2</sup></span></span>"
+  ],
+  [
+   "\\xrightarrow{f}",
+   null,
+   null
+  ],
+  [
+   "a_b^c",
+   "<i>a</i><span class=\"tx-ss\"><sup><i>c</i></sup><sub><i>b</i></sub></span>",
+   "<i>a</i><span class=\"tx-ss\"><sup><i>c</i></sup><sub><i>b</i></sub></span>"
+  ],
+  [
+   "\\cos(\\theta)",
+   "<span class=\"tx-fn\">cos</span>(<i>θ</i>)",
+   "<span class=\"tx-fn\">cos</span>(<i>θ</i>)"
+  ],
+  [
+   "x \\in A \\cup B",
+   "<i>x</i>∈<i>A</i>∪<i>B</i>",
+   "<i>x</i>∈<i>A</i>∪<i>B</i>"
+  ],
+  [
+   "\\forall x \\exists y",
+   "∀<i>x</i>∃<i>y</i>",
+   "∀<i>x</i>∃<i>y</i>"
+  ],
+  [
+   "\\neg P \\land Q",
+   "¬<i>P</i>∧<i>Q</i>",
+   "¬<i>P</i>∧<i>Q</i>"
+  ],
+  [
+   "\\begin{nothing}",
+   null,
+   null
+  ],
+  [
+   "\\frac{1}{",
+   null,
+   null
+  ],
+  [
+   "^{}",
+   null,
+   null
+  ],
+  [
+   "\\unknowncommand",
+   null,
+   null
+  ],
+  [
+   "2 +",
+   "2+",
+   "2+"
+  ],
+  [
+   "a}b",
+   null,
+   null
+  ]
+ ],
+ "span": [
+  [
+   "x",
+   false,
+   "<span class=\"tex\"><i>x</i></span>"
+  ],
+  [
+   "\\frac{1}{2}",
+   false,
+   "<span class=\"tex\"><span class=\"tx-frac\"><span class=\"tx-num\">1</span><span class=\"tx-den\">2</span></span></span>"
+  ],
+  [
+   "\\frac{1}{2}",
+   true,
+   "<span class=\"tex tex-display\"><span class=\"tx-frac\"><span class=\"tx-num\">1</span><span class=\"tx-den\">2</span></span></span>"
+  ],
+  [
+   "not latex",
+   false,
+   "<span class=\"tex\"><i>n</i><i>o</i><i>t</i><i>l</i><i>a</i><i>t</i><i>e</i><i>x</i></span>"
+  ],
+  [
+   "",
+   false,
+   "<span class=\"math-inline\" title=\"Shown as source: not a supported LaTeX expression\"></span>"
+  ],
+  [
+   "   ",
+   false,
+   "<span class=\"math-inline\" title=\"Shown as source: not a supported LaTeX expression\">   </span>"
+  ],
+  [
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   false,
+   "<span class=\"math-inline\" title=\"Shown as source: not a supported LaTeX expression\">xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</span>"
+  ]
+ ],
+ "patterns": [
+  [
+   "$x$",
+   [
+    {
+     "start": 0,
+     "end": 3,
+     "display": false,
+     "body": "x"
+    }
+   ]
+  ],
+  [
+   "$ x$",
+   []
+  ],
+  [
+   "$x $",
+   []
+  ],
+  [
+   "a $x$ b",
+   [
+    {
+     "start": 2,
+     "end": 5,
+     "display": false,
+     "body": "x"
+    }
+   ]
+  ],
+  [
+   "$$x$$",
+   [
+    {
+     "start": 0,
+     "end": 5,
+     "display": true,
+     "body": "x"
+    }
+   ]
+  ],
+  [
+   "\\[x\\]",
+   [
+    {
+     "start": 0,
+     "end": 5,
+     "display": true,
+     "body": "x"
+    }
+   ]
+  ],
+  [
+   "\\(x\\)",
+   [
+    {
+     "start": 0,
+     "end": 5,
+     "display": false,
+     "body": "x"
+    }
+   ]
+  ],
+  [
+   "price $5 and $10$",
+   [
+    {
+     "start": 13,
+     "end": 17,
+     "display": false,
+     "body": "10"
+    }
+   ]
+  ],
+  [
+   "100$ note",
+   []
+  ],
+  [
+   "$x$5",
+   []
+  ],
+  [
+   "x$y$z",
+   []
+  ],
+  [
+   "not $math$ here",
+   [
+    {
+     "start": 4,
+     "end": 10,
+     "display": false,
+     "body": "math"
+    }
+   ]
+  ],
+  [
+   "two $a$ and $b$ cases",
+   [
+    {
+     "start": 4,
+     "end": 7,
+     "display": false,
+     "body": "a"
+    },
+    {
+     "start": 12,
+     "end": 15,
+     "display": false,
+     "body": "b"
+    }
+   ]
+  ],
+  [
+   "display $$\\frac{1}{2}$$ inline $x$",
+   [
+    {
+     "start": 8,
+     "end": 23,
+     "display": true,
+     "body": "\\frac{1}{2}"
+    },
+    {
+     "start": 31,
+     "end": 34,
+     "display": false,
+     "body": "x"
+    }
+   ]
+  ],
+  [
+   "escaped \\$5 stays",
+   []
+  ]
+ ]
+}

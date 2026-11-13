@@ -53,6 +53,14 @@ behaviour between versions).
   `assistantInner`. Tests: Esc stopping and ignoring, the fold with its click, the open box while it
   thinks, and the research run stopped by the key; four mutations each turn one red; the open box is
   drawn to a PNG and read back.
+- **The math of an answer in the native app.** The Studio typesets the math of an answer with `markdown.js`
+  (`typeset` and `toHTML`); the native chat now does it too. The recognizers of `markdown.js` for `$$..$$`, `\[..\]`,
+  `\(..\)` and `$..$` are character checks in Rust (a Rust regex has no lookbehind or lookahead), the typesetter is
+  the Studio's own as fixtures that `markdown.js` produced (45 pieces: groups, scripts, fractions, roots, symbols,
+  Greek, accents, big operators with their powers in a display answer, `\text`, units), and the paragraph of the
+  viewer draws a display piece on its own line and an inline piece between the words with the typeset source, the
+  dollars gone. A piece that will not typeset is its source, like the Studio's fallback. The window with an answer
+  is drawn to PNG, three mutations each turn a test red.
 - **The output format and the token probabilities of the native app.** The sampling panel of the Settings
   page grew the two pieces it still lacked: *Output format* (the picker of the Studio: free text, JSON object,
   JSON schema, GBNF grammar, regular expression) with the box for the schema, grammar or pattern under it when

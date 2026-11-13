@@ -51,7 +51,103 @@ pub fn view_runs<'a>(
     markdown::view_with(content.items(), settings(t, theme), &Viewer { t, runs: Some(runs) })
 }
 
+/// The Studio typesets the math of an answer: a display paragraph (`$$x$$`, `\[..\]`) gets its
+/// own line with the typeset source, an inline piece (`$x$`) is typeset between the words.
+/// Everything else is drawn exactly as the paragraph is today.
 impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
+    fn paragraph(
+        &self,
+        settings: markdown::Settings,
+        text: &markdown::Text,
+    ) -> Element<'a, Message> {
+        let spans = text.spans(settings.style);
+        // the character stream with the boundaries of the spans, so a piece of math is found
+        // even when it begins in one span and ends in the next
+        let mut stream = String::new();
+        let mut bounds: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+        for s in spans.iter() {
+            let start = stream.chars().count();
+            stream.push_str(&s.text);
+            bounds.push((start, stream.chars().count()));
+        }
+        let hits = crate::tex::math_hits(&stream);
+        if hits.is_empty() {
+            return markdown::paragraph(settings, text, Self::on_link_click);
+        }
+        let last = stream.chars().count();
+        // a piece of the paragraph between two character positions, with the styles it had, and
+        // optionally one text in the style the piece began with (a piece of math is typeset,
+        // the Studio swaps `$x$` for the typeset source between the words)
+        let slice = |from: usize, to: usize, replace_by: Option<&str>| -> Option<Element<'a, Message>> {
+            let mut out: Vec<iced::widget::text::Span<'static, markdown::Uri>> = Vec::new();
+            for (span, (start, end)) in spans.iter().zip(bounds.iter()) {
+                let s = (*start).max(from);
+                let e = (*end).min(to);
+                if s >= e {
+                    continue;
+                }
+                let cut: String = span.text.chars().skip(s - start).take(e - s).collect();
+                if cut.is_empty() {
+                    continue;
+                }
+                let mut piece = span.clone();
+                piece.text = cut.into();
+                out.push(piece);
+            }
+            if let Some(replacement) = replace_by {
+                if let Some(first) = out.first_mut() {
+                    first.text = replacement.to_string().into();
+                    out.truncate(1);
+                }
+            }
+            if out.is_empty() {
+                return None;
+            }
+            Some(rich_text(out).on_link_click(Self::on_link_click).into())
+        };
+
+        let mut pieces: Vec<Element<'a, Message>> = Vec::new();
+        let mut cursor = 0usize;
+        for hit in hits {
+            if hit.start > cursor {
+                if let Some(el) = slice(cursor, hit.start, None) {
+                    pieces.push(el);
+                }
+            }
+            let source = match crate::tex::typeset(&hit.body, hit.display) {
+                Some(node) => crate::tex::html_plain(&crate::tex::to_html(&node, hit.display)),
+                None if hit.display => hit.body.clone(),
+                None => format!("${}$", hit.body),
+            };
+            if hit.display {
+                // a display paragraph is a line of its own
+                pieces.push(
+                    container(iced::widget::text(source))
+                        .width(Length::Fill)
+                        .padding([6, 8])
+                        .into(),
+                );
+            } else if let Some(el) = slice(hit.start, hit.end, Some(&source)) {
+                // an inline piece keeps its place between the words: the typeset source of the
+                // Studio, in the style of the paragraph around it
+                pieces.push(el);
+            }
+            cursor = hit.end;
+        }
+        if cursor < last {
+            if let Some(el) = slice(cursor, last, None) {
+                pieces.push(el);
+            }
+        }
+        if pieces.is_empty() {
+            return markdown::paragraph(settings, text, Self::on_link_click);
+        }
+        if pieces.len() == 1 {
+            return pieces.remove(0);
+        }
+        column(pieces).spacing(4).into()
+    }
+
     fn on_link_click(url: markdown::Uri) -> Message {
         Message::LinkClicked(url)
     }
