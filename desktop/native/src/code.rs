@@ -997,7 +997,7 @@ impl CodeState {
                         self.handle = None;
                         Task::none()
                     }
-                    StreamEvent::Reasoning(_) | StreamEvent::Usage { .. } | StreamEvent::Timings { .. } => Task::none(),
+                    StreamEvent::Reasoning(_) | StreamEvent::Logprobs(_) | StreamEvent::Usage { .. } | StreamEvent::Timings { .. } => Task::none(),
                 }
             }
             CodeMsg::Approve(id) => {

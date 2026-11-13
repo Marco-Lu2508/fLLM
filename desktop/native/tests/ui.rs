@@ -18,7 +18,7 @@ fn model() -> ModelInfo {
 }
 
 fn rec(role: Role, content: &str, stats: Option<Stats>) -> Record {
-    Record { role, content: content.into(), reasoning: String::new(), stats, passages: None , images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new(), sources: Vec::new(), research: None }
+    Record { role, content: content.into(), reasoning: String::new(), stats, passages: None , images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new(), sources: Vec::new(), research: None, logprobs: Vec::new() }
 }
 
 /// An app on a temporary data folder, with the given chats and theme, connected to a model.
@@ -52,6 +52,60 @@ fn sample_chats() -> Vec<ChatRecord> {
 
 fn settings() -> iced::Settings {
     iced::Settings { fonts: vec![fllm_app::app::FONT_REGULAR.into(), fllm_app::app::FONT_SEMIBOLD.into()], default_font: fllm_app::app::UI_FONT, ..Default::default() }
+}
+
+/// The probabilities that come with the stream land on the answer and stay with the chat.
+#[test]
+fn probabilities_of_a_streaming_answer_land_on_the_message() {
+    use fllm_app::api::{Logprob, StreamEvent};
+    let chats = vec![ChatRecord { id: 1, title: "q".into(), messages: vec![rec(Role::User, "q", None), rec(Role::Assistant, "", None)], ..Default::default() }];
+    let (mut app, dir) = app_with(chats, "light", true);
+    use iced::widget::text_editor::{Action, Edit};
+    let _ = app.update(Message::Edit(Action::Edit(Edit::Paste(std::sync::Arc::new("q".to_string())))));
+    let _ = app.update(Message::Send);
+    assert!(app.is_streaming(), "the question started the answer");
+    // the events of that answer belong to it
+    let id = app.open_chat().expect("a chat is open");
+    let _ = app.update(Message::Stream(
+        id,
+        StreamEvent::Logprobs(vec![Logprob { token: "Sure,".into(), logprob: -0.01 }, Logprob { token: " here".into(), logprob: -3.2 }]),
+    ));
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1000.0, 800.0), app.view());
+        ui.find("Sure,").expect("the probabilities landed on the answer and are drawn");
+    }
+    let _ = app.update(Message::Stream(id, StreamEvent::Delta("The answer.".into())));
+    let _ = app.update(Message::Stream(id, StreamEvent::Done));
+    // kept with the chat: exactly the answer that got them
+    let saved = Store::load(&dir.path().join("chats.json"));
+    let with_probs = saved.chat(id).unwrap().messages.iter().filter(|m| m.logprobs.len() == 2).count();
+    assert_eq!(with_probs, 1, "kept with the message");
+}
+
+/// The words of an answer with the probability the model gave them, as chips under the text
+/// (the Studio's `logprobsHtml`: the warmer the color, the more certain the model was).
+#[test]
+fn the_probabilities_of_an_answer_are_shown_as_chips() {
+    use fllm_app::api::Logprob;
+    let mut answer = rec(Role::Assistant, "practice answer", None);
+    answer.logprobs = vec![
+        Logprob { token: "Sure,".into(), logprob: -0.01 },
+        Logprob { token: " here".into(), logprob: -3.2 },
+        Logprob { token: " it".into(), logprob: -1.1 },
+    ];
+    let chats = vec![ChatRecord { id: 1, title: "q".into(), messages: vec![rec(Role::User, "q", None), answer], ..Default::default() }];
+    let (mut app, dir) = app_with(chats, "light", true);
+    let _ = app.update(Message::OpenChat(1));
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1000.0, 800.0), app.view());
+        ui.find("Sure,").expect("the first word of the answer with its probability");
+        ui.find(" here").expect("the second word");
+    }
+    save_png(&app, "logprob-chips");
+    // the probabilities come back with the chat
+    let saved = Store::load(&dir.path().join("chats.json"));
+    assert_eq!(saved.chats[0].messages[1].logprobs.len(), 3, "kept with the message");
+    assert_eq!(saved.chats[0].messages[1].logprobs[2].token, " it");
 }
 
 fn save_png(app: &App, name: &str) -> PathBuf {

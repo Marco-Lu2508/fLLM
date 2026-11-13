@@ -74,6 +74,9 @@ pub struct Record {
     /// The research run of this message, with its log (the Studio's `node.research`).
     #[serde(default)]
     pub research: Option<crate::research::ResearchUi>,
+    /// The words of this answer with the probability the model gave them (`node.logprobs`).
+    #[serde(default)]
+    pub logprobs: Vec<crate::api::Logprob>,
 }
 
 /// Another way the conversation went: editing a message or asking for a new answer keeps the old version.
@@ -411,6 +414,16 @@ pub struct Sampling {
     /// Words that end the answer, separated by commas.
     #[serde(default)]
     pub stop: String,
+    /// The shape the answer must hold to: "", json_object, json_schema, gbnf or regex (the
+    /// Studio's `p.constraint`).
+    #[serde(default)]
+    pub constraint: String,
+    /// The JSON schema, GBNF grammar or regular expression of the format above.
+    #[serde(default)]
+    pub constraint_spec: String,
+    /// Whether every answer shows its token probabilities (the Studio's `p.logprobs`).
+    #[serde(default)]
+    pub logprobs: bool,
 }
 
 fn one() -> f32 {
@@ -419,7 +432,20 @@ fn one() -> f32 {
 
 impl Default for Sampling {
     fn default() -> Self {
-        Sampling { top_k: 0, min_p: 0.0, repetition_penalty: 1.0, presence_penalty: 0.0, frequency_penalty: 0.0, dry_multiplier: 0.0, mirostat: 0, seed: None, stop: String::new() }
+        Sampling {
+            top_k: 0,
+            min_p: 0.0,
+            repetition_penalty: 1.0,
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
+            dry_multiplier: 0.0,
+            mirostat: 0,
+            seed: None,
+            stop: String::new(),
+            constraint: String::new(),
+            constraint_spec: String::new(),
+            logprobs: false,
+        }
     }
 }
 
@@ -428,6 +454,32 @@ impl Sampling {
     pub fn fields(&self) -> serde_json::Map<String, serde_json::Value> {
         use serde_json::json;
         let mut m = serde_json::Map::new();
+        if self.logprobs {
+            m.insert("logprobs".into(), json!(true));
+            m.insert("top_logprobs".into(), json!(5));
+        }
+        match self.constraint.as_str() {
+            "json_object" => {
+                m.insert("response_format".into(), json!({ "type": "json_object" }));
+            }
+            "json_schema" if !self.constraint_spec.trim().is_empty() => {
+                // an invalid schema box is ignored, the answer stays free (chat.js)
+                if let Ok(schema) = serde_json::from_str::<serde_json::Value>(self.constraint_spec.trim()) {
+                    m.insert(
+                        "response_format".into(),
+                        json!({ "type": "json_schema", "json_schema": { "name": "schema", "strict": true, "schema": schema } }),
+                    );
+                }
+            }
+            "gbnf" if !self.constraint_spec.trim().is_empty() => {
+                m.insert("grammar".into(), json!(self.constraint_spec));
+                m.insert("grammar_type".into(), json!("gbnf"));
+            }
+            "regex" if !self.constraint_spec.trim().is_empty() => {
+                m.insert("regex".into(), json!(self.constraint_spec));
+            }
+            _ => {}
+        }
         if self.top_k > 0 {
             m.insert("top_k".into(), json!(self.top_k));
         }
@@ -620,7 +672,7 @@ mod tests {
         let a = s.new_chat();
         let b = s.new_chat();
         assert_ne!(a, b);
-        s.chat_mut(a).unwrap().messages.push(Record { role: Role::User, content: "Hi".into(), reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new(), sources: Vec::new(), research: None });
+        s.chat_mut(a).unwrap().messages.push(Record { role: Role::User, content: "Hi".into(), reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new(), sources: Vec::new(), research: None, logprobs: Vec::new() });
         s.save(&path).unwrap();
         let back = Store::load(&path);
         assert_eq!(back, s);
@@ -630,7 +682,7 @@ mod tests {
     }
 
     fn rec(role: Role, text: &str) -> Record {
-        Record { role, content: text.into(), reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new(), sources: Vec::new(), research: None }
+        Record { role, content: text.into(), reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new(), sources: Vec::new(), research: None, logprobs: Vec::new() }
     }
 
     fn chat(lines: &[(Role, &str)]) -> ChatRecord {

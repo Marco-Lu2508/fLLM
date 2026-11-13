@@ -1,7 +1,7 @@
 //! The server side: what the window asks an fLLM server over HTTP (`/v1/models`, `/v1/chat/completions` with a stream).
 
 use futures::stream::{self, Stream, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::pin::Pin;
 
@@ -176,6 +176,13 @@ pub fn chat_body_with_tools(model: &str, messages: &[WireMessage], params: ChatP
     body
 }
 
+/// One word of an answer with the probability the model gave it (the Studio's logprob rows).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Logprob {
+    pub token: String,
+    pub logprob: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct WireMessage {
     pub role: String,
@@ -282,6 +289,9 @@ pub enum StreamEvent {
     Delta(String),
     /// Text of the reasoning (`reasoning_content`), shown apart from the answer.
     Reasoning(String),
+    /// The probabilities of the words of this piece (`choice.logprobs.content`, when the request
+    /// asked for them).
+    Logprobs(Vec<Logprob>),
     /// A piece of a tool call: the calls arrive in parts, `index` says which call a part belongs to (the id and the name come with the first).
     ToolCall { index: usize, id: Option<String>, name: Option<String>, arguments: String },
     /// Token counts at the end (`stream_options.include_usage`).
@@ -313,6 +323,21 @@ pub fn parse_sse_line(line: &str) -> Option<Vec<StreamEvent>> {
         }
         if let Some(c) = delta.get("content").and_then(|c| c.as_str()).filter(|s| !s.is_empty()) {
             out.push(StreamEvent::Delta(c.to_string()));
+        }
+        if let Some(lps) = v
+            .pointer("/choices/0/logprobs/content")
+            .and_then(|c| c.as_array())
+            .filter(|a| !a.is_empty())
+        {
+            let parsed: Vec<Logprob> = lps
+                .iter()
+                .filter_map(|e| {
+                    Some(Logprob { token: e.get("token")?.as_str()?.to_string(), logprob: e.get("logprob")?.as_f64()? as f32 })
+                })
+                .collect();
+            if !parsed.is_empty() {
+                out.push(StreamEvent::Logprobs(parsed));
+            }
         }
         for (i, call) in delta.get("tool_calls").and_then(|c| c.as_array()).into_iter().flatten().enumerate() {
             out.push(StreamEvent::ToolCall {
@@ -596,6 +621,26 @@ mod tests {
     fn a_content_delta_is_text() {
         let ev = parse_sse_line(r#"data: {"choices":[{"index":0,"delta":{"content":"Hallo"}}]}"#).unwrap();
         assert_eq!(ev, vec![StreamEvent::Delta("Hallo".into())]);
+    }
+
+    #[test]
+    fn the_probabilities_of_the_words_come_with_the_stream() {
+        let ev = parse_sse_line(
+            r#"data: {"choices":[{"index":0,"delta":{},"logprobs":{"content":[{"token":"Gold","logprob":-0.123,"bytes":[71,111]},{"token":" rose","logprob":-2.5}]}}]}"#,
+        )
+        .unwrap();
+        let StreamEvent::Logprobs(v) = &ev[0] else { panic!("the probabilities of this piece: {ev:?}") };
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert_eq!(v[0].token, "Gold");
+        assert!((v[0].logprob + 0.123).abs() < 1e-6, "{}", v[0].logprob);
+        assert_eq!(v[1].token, " rose");
+        assert!(v[1].logprob < -2.0);
+        // nothing of it arrives without a request for it
+        let plain = parse_sse_line(r#"data: {"choices":[{"index":0,"delta":{"content":"x"}}]}"#).unwrap();
+        assert!(!plain.iter().any(|e| matches!(e, StreamEvent::Logprobs(_))), "{plain:?}");
+        // an empty list is no event
+        let empty = parse_sse_line(r#"data: {"choices":[{"index":0,"delta":{},"logprobs":{"content":[]}}]}"#).unwrap();
+        assert!(empty.is_empty(), "{empty:?}");
     }
 
     #[test]

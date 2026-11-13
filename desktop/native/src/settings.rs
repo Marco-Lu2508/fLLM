@@ -8,7 +8,7 @@ use crate::models::{bold, card, rule};
 use crate::store::{Prefs, Sampling, BUILT_IN_SYSTEM_PROMPT};
 use crate::theme::{self, Tokens};
 use iced::widget::text_editor::{Content, Status};
-use iced::widget::{button, column, container, row, scrollable, slider, text, text_editor, text_input, Space};
+use iced::widget::{button, column, container, pick_list, row, scrollable, slider, text, text_editor, text_input, Space};
 use iced::{Alignment, Element, Length, Padding};
 
 /// Two or three choices side by side; the selected one is filled.
@@ -149,6 +149,43 @@ fn small_input<'a>(t: Tokens, placeholder: &'a str, value: &'a str, field: Field
         .into()
 }
 
+/// The picker of the output format (the Studio's selConstraint with its five options).
+fn constraint_picker<'a>(t: Tokens, constraint: &'a str) -> Element<'a, Message> {
+    const OPTIONS: [&str; 5] = ["Free text", "JSON object", "JSON schema", "GBNF grammar", "Regular expression"];
+    let current = match constraint {
+        "json_object" => "JSON object",
+        "json_schema" => "JSON schema",
+        "gbnf" => "GBNF grammar",
+        "regex" => "Regular expression",
+        _ => "Free text",
+    };
+    pick_list(OPTIONS, Some(current), |label: &'static str| {
+        Message::SamplingConstraint(
+            match label {
+                "JSON object" => "json_object",
+                "JSON schema" => "json_schema",
+                "GBNF grammar" => "gbnf",
+                "Regular expression" => "regex",
+                _ => "none",
+            }
+            .to_string(),
+        )
+    })
+    .padding([6, 10])
+    .style(move |_, status| pick_list::Style {
+        background: iced::Background::Color(t.surface_2),
+        border: iced::Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: if matches!(status, pick_list::Status::Hovered) { t.fg_soft } else { t.separator },
+        },
+        text_color: t.fg,
+        placeholder_color: t.muted,
+        handle_color: t.muted,
+    })
+    .into()
+}
+
 /// What the Settings page draws of the personalization (the state lives in the window).
 #[derive(Debug, Clone)]
 pub struct PersonalView<'a> {
@@ -201,10 +238,12 @@ fn value_slider<'a>(t: Tokens, range: std::ops::RangeInclusive<f32>, value: f32,
     row![s, text(format!("{value:.2}")).size(13).font(iced::Font::MONOSPACE).width(44)].spacing(10).align_y(Alignment::Center).into()
 }
 
+#[allow(clippy::too_many_arguments)] // a page draws from eight pieces of state
 pub fn page<'a>(
     t: Tokens,
     prefs: &'a Prefs,
     system_editor: &'a Content,
+    spec_editor: &'a Content,
     max_tokens_text: &'a str,
     sampling: &'a SamplingTexts,
     engine: Element<'a, Message>,
@@ -229,7 +268,49 @@ pub fn page<'a>(
             .push(setting(t, "DRY multiplier", "Penalizes repeated phrases, not only words. Empty: off.", small_input(t, "off", &sampling.dry_multiplier, Field::DryMultiplier, 110.0)))
             .push(setting(t, "Mirostat", "0 off, 1 or 2: the model aims at a steady level of surprise. Empty: off.", small_input(t, "off", &sampling.mirostat, Field::Mirostat, 110.0)))
             .push(setting(t, "Seed", "The same seed and settings give the same answer. Empty: random.", small_input(t, "random", &sampling.seed, Field::Seed, 140.0)))
-            .push(setting(t, "Stop words", "The answer ends when one of these appears; separate them with commas.", small_input(t, "none", &sampling.stop, Field::Stop, 240.0)));
+            .push(setting(t, "Stop words", "The answer ends when one of these appears; separate them with commas.", small_input(t, "none", &sampling.stop, Field::Stop, 240.0)))
+            .push(setting(
+                t,
+                "Output format",
+                "The answer is generated under this shape. A schema, grammar or pattern is written below when one needs it.",
+                constraint_picker(t, &prefs.sampling.constraint),
+            ))
+            .push(setting(
+                t,
+                "Show token probabilities",
+                "Every answer shows its words with how likely the model thought them: the warmer the color, the more certain.",
+                segmented(t, vec![
+                    ("On", prefs.sampling.logprobs, Message::SamplingLogprobs(true)),
+                    ("Off", !prefs.sampling.logprobs, Message::SamplingLogprobs(false)),
+                ]),
+            ));
+        if matches!(prefs.sampling.constraint.as_str(), "json_schema" | "gbnf" | "regex") {
+            answers = answers.push(setting(
+                t,
+                "Format specification",
+                "The JSON schema, GBNF grammar or regular expression the answer is generated under.",
+                text_editor(spec_editor)
+                    .placeholder("JSON schema, GBNF grammar or regular expression")
+                    .on_action(Message::SamplingSpecEdit)
+                    .padding(12)
+                    .size(13)
+                    .height(Length::Shrink)
+                    .min_height(74)
+                    .max_height(180)
+                    .style(move |_, status| text_editor::Style {
+                        background: iced::Background::Color(t.surface_2),
+                        border: iced::Border {
+                            radius: 10.0.into(),
+                            width: 1.0,
+                            color: if matches!(status, Status::Focused { .. }) { t.fg_soft } else { t.separator }
+                        },
+                        placeholder: t.muted,
+                        value: t.fg,
+                        selection: iced::Color { a: 0.35, ..t.primary },
+                    })
+                    .into(),
+            ));
+        }
     }
     answers = answers.push(rule(t));
     answers = answers.push(setting(

@@ -79,6 +79,8 @@ pub struct Msg {
     pub sources: Vec<tools::Source>,
     /// The research run of this message, with its log (the Studio's `node.research`).
     pub research: Option<research::ResearchUi>,
+    /// The words of this answer with the probability the model gave them (`node.logprobs`).
+    pub logprobs: Vec<api::Logprob>,
     pub md: markdown::Content,
 }
 
@@ -97,6 +99,7 @@ impl Msg {
             tool_cards: r.tool_cards.clone(),
             sources: r.sources.clone(),
             research: r.research.clone(),
+            logprobs: r.logprobs.clone(),
             md: markdown::Content::parse(&r.content),
         }
     }
@@ -115,6 +118,7 @@ impl Msg {
             tool_cards: self.tool_cards.clone(),
             sources: self.sources.clone(),
             research: self.research.clone(),
+            logprobs: self.logprobs.clone(),
         }
     }
 }
@@ -193,6 +197,8 @@ pub struct App {
     models: ModelsState,
     /// The text box of the custom system prompt, and the text of the "longest answer" box.
     system_editor: Content,
+    /// The schema, grammar or pattern of the output format of the sampling panel.
+    spec_editor: Content,
     max_tokens_text: String,
     engine: EngineState,
     /// The list of models under the model name in the top bar.
@@ -340,6 +346,14 @@ pub enum Message {
     /// A load, unload, download or download action is done (or failed with this message).
     ModelAction(Result<String, String>),
     SamplingManual(bool),
+    /// The shape the answer must hold to (the Studio's selConstraint).
+    SamplingConstraint(String),
+    /// The schema, grammar or pattern of the shape above (the Studio's txtConstraintSpec).
+    SamplingSpec(String),
+    /// The editor of that specification was written in.
+    SamplingSpecEdit(Action),
+    /// Whether every answer shows its token probabilities (the Studio's chkLogprobs).
+    SamplingLogprobs(bool),
     Temperature(f32),
     TopP(f32),
     SystemCustom(bool),
@@ -544,6 +558,7 @@ impl App {
             page: View::Chat,
             models: ModelsState::default(),
             system_editor: Content::new(),
+            spec_editor: Content::new(),
             max_tokens_text: String::new(),
             engine: EngineState::default(),
             picker_open: false,
@@ -600,6 +615,7 @@ impl App {
             sidecar_note: None,
         };
         app.system_editor = Content::with_text(&app.store.prefs.system_prompt);
+        app.spec_editor = Content::with_text(&app.store.prefs.sampling.constraint_spec);
         app.personal_about = Content::with_text(&app.store.prefs.personal.about);
         app.sampling_text = settings::SamplingTexts::from(&app.store.prefs.sampling);
         app.max_tokens_text = if app.store.prefs.max_tokens > 0 { app.store.prefs.max_tokens.to_string() } else { String::new() };
@@ -836,6 +852,7 @@ impl App {
             tool_cards: Vec::new(),
             sources: Vec::new(),
             research: None,
+        logprobs: Vec::new(),
         });
         self.messages.push(Msg {
             role: Role::Assistant,
@@ -850,6 +867,7 @@ impl App {
             tool_cards: Vec::new(),
             sources: Vec::new(),
             research: None,
+            logprobs: Vec::new(),
             md: markdown::Content::new(),
         });
         // the passages of the knowledge travel with this question (the project's documents first,
@@ -1023,6 +1041,7 @@ impl App {
                     tool_cards: Vec::new(),
                     sources: Vec::new(),
                     research: None,
+                    logprobs: Vec::new(),
                     md: markdown::Content::new(),
                 });
                 self.sync_current();
@@ -1077,6 +1096,31 @@ impl App {
             }
             Message::SamplingField(field, typed) => {
                 self.sampling_text.apply(field, typed, &mut self.store.prefs.sampling);
+                Task::none()
+            }
+            Message::SamplingConstraint(v) => {
+                self.store.prefs.sampling.constraint = v;
+                self.save();
+                Task::none()
+            }
+            Message::SamplingSpec(v) => {
+                self.store.prefs.sampling.constraint_spec = v.clone();
+                self.spec_editor = Content::with_text(&v);
+                self.save();
+                Task::none()
+            }
+            Message::SamplingSpecEdit(action) => {
+                let edit = action.is_edit();
+                self.spec_editor.perform(action);
+                if edit {
+                    self.store.prefs.sampling.constraint_spec = self.spec_editor.text().trim_end_matches('\n').to_string();
+                    self.save();
+                }
+                Task::none()
+            }
+            Message::SamplingLogprobs(v) => {
+                self.store.prefs.sampling.logprobs = v;
+                self.save();
                 Task::none()
             }
             Message::ShowEarlier => {
@@ -2441,6 +2485,11 @@ impl App {
                     last.md.push_str(&s);
                 }
             }
+            StreamEvent::Logprobs(v) => {
+                if let Some(last) = self.messages.last_mut() {
+                    last.logprobs.extend(v);
+                }
+            }
             StreamEvent::Reasoning(s) => {
                 if let Some(last) = self.messages.last_mut() {
                     last.reasoning.push_str(&s);
@@ -2661,6 +2710,7 @@ impl App {
                 tool_cards: Vec::new(),
                 sources: Vec::new(),
                 research: None,
+                logprobs: Vec::new(),
                 md: markdown::Content::new(),
             });
         }
@@ -2677,6 +2727,7 @@ impl App {
             tool_cards: Vec::new(),
             sources: Vec::new(),
             research: None,
+            logprobs: Vec::new(),
             md: markdown::Content::new(),
         });
         self.tool_round += 1;
@@ -2839,6 +2890,7 @@ impl App {
                 t,
                 &self.store.prefs,
                 &self.system_editor,
+                &self.spec_editor,
                 &self.max_tokens_text,
                 &self.sampling_text,
                 engine_settings::view(t, &self.engine, !matches!(self.server, Server::Down(_))),
@@ -4439,6 +4491,25 @@ impl App {
         &self.list
     }
 
+    /// The background of a word of the answer: `hsl(hue, 70%, 42%, 0.22)` of the Studio's
+    /// `.lp-tok` — the warmer, the more certain the model was.
+    fn logprob_color(hue: f32) -> iced::Color {
+        let h = hue.rem_euclid(360.0) / 60.0;
+        let (s, l, a) = (0.70f32, 0.42f32, 0.22f32);
+        let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+        let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+        let m = l - c / 2.0;
+        let (r, g, b) = match h as i32 {
+            0 => (c, x, 0.0),
+            1 => (x, c, 0.0),
+            2 => (0.0, c, x),
+            3 => (0.0, x, c),
+            4 => (x, 0.0, c),
+            _ => (c, 0.0, x),
+        };
+        iced::Color::from_rgba(r + m, g + m, b + m, a)
+    }
+
     /// The chip of the research mode (tests read it).
     pub fn research_state(&self) -> bool {
         self.research
@@ -4668,6 +4739,24 @@ impl App {
                         line = line.push(button(text("Undo").size(12)).on_press(Message::MemoryUndo(i, ci)).padding([2, 6]).style(theme::ghost_button(t)));
                     }
                     col = col.push(container(line).padding([4, 10]).style(theme::inset(t)));
+                }
+                // the words of the answer with their probability as chips (logprobsHtml)
+                if !m.logprobs.is_empty() {
+                    let mut chips = row![].spacing(4);
+                    for lp in &m.logprobs {
+                        let p = lp.logprob.exp().clamp(0.0, 1.0);
+                        let hue = (p * 130.0).round();
+                        chips = chips.push(
+                            container(text(lp.token.clone()).size(12).font(iced::Font::MONOSPACE))
+                                .padding([2, 5])
+                                .style(move |_| container::Style {
+                                    background: Some(iced::Background::Color(Self::logprob_color(hue))),
+                                    border: iced::border::rounded(4),
+                                    ..Default::default()
+                                }),
+                        );
+                    }
+                    col = col.push(container(chips).padding([4, 0]));
                 }
                 if let Some(ui) = &m.research {
                     if ui.log_open {
@@ -5372,6 +5461,7 @@ mod tests {
             tool_cards: Vec::new(),
             sources: Vec::new(),
             research: None,
+            logprobs: Vec::new(),
             md: markdown::Content::new(),
         };
         assert_eq!(estimate_tokens(&[m(&"a".repeat(40))]), 14);

@@ -25,6 +25,7 @@ fn rec(role: Role, content: &str) -> Record {
         tool_cards: Vec::new(),
     sources: Vec::new(),
     research: None,
+    logprobs: Vec::new(),
     }
 }
 

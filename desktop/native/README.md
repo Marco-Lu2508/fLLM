@@ -28,8 +28,12 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   hairlines), Inter shipped inside the program, a context meter with a track, 780-pixel reading column shared by messages and composer.
 - No server: a clear screen with the address and a retry every four seconds. A server without a model has its own screen that leads to Models.
 - Settings (sidebar > Settings). Everything is *Automatic* until you switch it to *Manual*; a manual value is sent with every message, an
-  automatic one is left to the server and the model. Answers: sampling (temperature, top-p), the system prompt (the short built-in one or your own
-  text), the longest answer; kept in the chat file, "Reset all answer settings" puts them back. The engine of the server (the Studio's own
+  automatic one is left to the server and the model. Answers: sampling (temperature, top-p), the advanced values (top-k, min-p, penalties, DRY,
+  mirostat, seed, stop words), the output format (free text, a JSON object, a JSON schema, a GBNF grammar or a regular expression, with the box for
+  the schema, grammar or pattern below when one needs it — a box that does not parse is ignored, like in the Studio), the token probabilities of an
+  answer (every word of the answer comes back with the chance the model gave it and is drawn as a chip under the text, the warmer the color the more
+  certain), the system prompt (the short built-in one or your own text), the longest answer; kept in the chat file, "Reset all answer settings" puts
+  them back. The engine of the server (the Studio's own
   routes `/api/studio/engine` and `/api/studio/settings`): sharing the start of prompts, the state checkpoints of Qwen3.5 / Mamba / RWKV and their
   memory, prompt blocks in RAM or on disk, what happens when memory runs out, saved answers and who shares them, loading the last model at start,
   unloading when idle. A switch or choice is written at once, a number or text when you press Enter (checked first); the server says which

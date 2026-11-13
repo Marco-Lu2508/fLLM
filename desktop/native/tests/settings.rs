@@ -55,6 +55,96 @@ fn manual_sampling_is_sent_remembered_and_switched_off_again() {
     assert!((reload(&dir).prefs.temperature - 0.3).abs() < 1e-6);
 }
 
+/// The output format and the token probabilities of the manual sampling (the Studio's
+/// selConstraint, txtConstraintSpec and chkLogprobs): what they send and what is remembered.
+#[test]
+fn the_output_format_and_the_probabilities_are_sent_as_the_studio_sends_them() {
+    let (mut app, dir) = app("light");
+    let _ = app.update(Message::SamplingManual(true));
+    let _ = app.update(Message::SamplingConstraint("json_schema".into()));
+    let _ = app.update(Message::SamplingSpec("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\"],\"additionalProperties\":false}".into()));
+    let _ = app.update(Message::SamplingLogprobs(true));
+    let body = chat_body("tiny", &app.wire_messages(), app.chat_params());
+    assert_eq!(body["response_format"]["type"], "json_schema", "{body}");
+    assert_eq!(body["response_format"]["json_schema"]["name"], "schema");
+    assert!(body["response_format"]["json_schema"]["schema"]["properties"]["a"].is_object(), "{body}");
+    assert_eq!(body["logprobs"], serde_json::json!(true), "the switch of the Studio");
+    assert_eq!(body["top_logprobs"], serde_json::json!(5), "five alternatives, like the Studio");
+    let saved = reload(&dir).prefs;
+    assert_eq!(saved.sampling.constraint, "json_schema", "kept with the chat file");
+    assert!(saved.sampling.logprobs);
+
+    // an invalid schema box is ignored, the answer stays free (chat.js)
+    let _ = app.update(Message::SamplingSpec("{not json".into()));
+    let body = chat_body("tiny", &app.wire_messages(), app.chat_params());
+    assert!(body.get("response_format").is_none(), "a broken schema is not sent: {body}");
+
+    // a GBNF grammar and a regular expression ride as their own fields
+    let _ = app.update(Message::SamplingConstraint("gbnf".into()));
+    let _ = app.update(Message::SamplingSpec("root ::= \"hi\"".into()));
+    let body = chat_body("tiny", &app.wire_messages(), app.chat_params());
+    assert_eq!(body["grammar"], "root ::= \"hi\"", "{body}");
+    assert_eq!(body["grammar_type"], "gbnf", "{body}");
+    let _ = app.update(Message::SamplingConstraint("regex".into()));
+    let _ = app.update(Message::SamplingSpec("^hi".into()));
+    let body = chat_body("tiny", &app.wire_messages(), app.chat_params());
+    assert_eq!(body["regex"], "^hi", "{body}");
+    assert!(body.get("grammar").is_none(), "{body}");
+
+    // a JSON object needs no specification
+    let _ = app.update(Message::SamplingConstraint("json_object".into()));
+    let body = chat_body("tiny", &app.wire_messages(), app.chat_params());
+    assert_eq!(body["response_format"]["type"], "json_object", "{body}");
+    assert!(body.get("regex").is_none(), "{body}");
+
+    // automatic sends none of it
+    let _ = app.update(Message::SamplingManual(false));
+    let body = chat_body("tiny", &app.wire_messages(), app.chat_params());
+    assert!(body.get("logprobs").is_none() && body.get("response_format").is_none() && body.get("grammar").is_none(), "{body}");
+}
+
+/// The panel draws the picker, the switch, and the box for the specification when one is needed.
+#[test]
+fn the_sampling_panel_draws_the_format_box_and_the_switch() {
+    let (mut app, _dir) = app("light");
+    let _ = app.update(Message::SamplingManual(true));
+    let _ = app.update(Message::Go(fllm_app::app::View::Settings));
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        ui.find("Output format").expect("the picker of the five formats");
+        ui.find("Show token probabilities").expect("the switch");
+        let mut ui2 = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        assert!(ui2.find("Format specification").is_err(), "no box without a format that needs one");
+    }
+    let _ = app.update(Message::SamplingConstraint("gbnf".into()));
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        ui.find("Format specification").expect("the box for the grammar");
+    }
+    let _ = app.update(Message::SamplingConstraint("none".into()));
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        assert!(ui.find("Format specification").is_err(), "the box is gone with free text");
+    }
+    let _ = app.update(Message::SamplingConstraint("regex".into()));
+    let _ = app.update(Message::SamplingLogprobs(true));
+    save_png(&app, "sampling-format");
+}
+
+/// Writes one PNG of the given view into the snapshot dir of the run (the pattern of `tests/ui.rs`).
+fn save_png(app: &App, name: &str) {
+    let theme = app.theme();
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+    let shot = ui.snapshot(&theme).expect("the software renderer draws the view");
+    let dir = std::path::PathBuf::from(std::env::var("FLLM_SNAPSHOT_DIR").unwrap_or_else(|_| "/opt/data/cache/scratch/fLLM/desktop/native/ui-snapshots".into()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let prefix = format!("{name}-");
+    for old in std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&prefix)) {
+        let _ = std::fs::remove_file(old.path());
+    }
+    shot.matches_image(dir.join(format!("{name}.png"))).expect("the picture is written");
+}
+
 #[test]
 fn a_custom_system_prompt_replaces_the_built_in_one_and_an_empty_one_falls_back() {
     let (mut app, dir) = app("light");
