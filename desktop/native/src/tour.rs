@@ -154,18 +154,38 @@ pub fn shortcut_label(id: &str) -> String {
 /// and Escape, `Mod` read as `Cmd` on macOS and `Ctrl` elsewhere, the parts joined by a space on
 /// macOS and by a `+` everywhere else).
 pub fn format_combo(combo: &str, is_mac: bool) -> String {
+    // the parse of boot.js: leading words that are modifiers are modifiers, everything after the
+    // first word that is not one is the key (`Option+X` stays `Option+X`)
     let mut mods: Vec<&str> = Vec::new();
-    let mut key = "";
-    for part in combo.split('+') {
-        match part {
-            "Mod" | "Alt" | "Shift" | "Ctrl" | "Meta" => mods.push(part),
-            _ => key = part,
+    let mut rest = combo.trim();
+    let mut key;
+    loop {
+        match rest.find('+') {
+            Some(i) if i > 0 => {
+                let head = &rest[..i];
+                if matches!(head, "Mod" | "Ctrl" | "Alt" | "Shift" | "Meta") {
+                    if !mods.contains(&head) {
+                        mods.push(head);
+                    }
+                    rest = &rest[i + 1..];
+                } else {
+                    key = rest.to_string();
+                    break;
+                }
+            }
+            _ => {
+                key = rest.to_string();
+                break;
+            }
         }
+    }
+    if key.chars().count() == 1 {
+        key = key.to_uppercase();
     }
     if key.is_empty() {
         return String::new();
     }
-    let named = match key {
+    let named = match key.as_str() {
         "ArrowUp" => "Up",
         "ArrowDown" => "Down",
         "ArrowLeft" => "Left",

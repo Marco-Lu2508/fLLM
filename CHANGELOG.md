@@ -53,6 +53,18 @@ behaviour between versions).
   `assistantInner`. Tests: Esc stopping and ignoring, the fold with its click, the open box while it
   thinks, and the research run stopped by the key; four mutations each turn one red; the open box is
   drawn to a PNG and read back.
+- **The keyboard shortcuts in the native app.** The Studio lists its shortcuts and lets people give
+  them other keys (`helpModal` with the `@pure` block of `boot.js`); the native app does both now.
+  `shortcuts.rs` holds the fifteen shortcuts with their descriptions, the fixed keys, the parse and the
+  normal form, the keys in force (defaults with the saved changes on top), `checkCombo` (a bare letter,
+  `Shift` alone, a fixed key and a key another shortcut has are refused with the Studio's words) and
+  `shortcutFor`. The window draws the overview: what each shortcut does, its keys in a chip, Change that
+  waits for the new keys, Reset per changed row, the fixed rows without `?`, and *Reset all*. The window
+  keydown builds the combination the way `comboFromEvent` does — `Mod` is the command key on macOS and
+  Ctrl elsewhere, a modifier alone is no combination — and runs the shortcut: the surfaces, Models,
+  Settings, the stop, the new chat, the chat walk, the regenerate and the overview itself; the saved
+  changes live in the prefs beside the tour's flag. 74 fixture cases the `@pure` block produced, five
+  window tests with three drawings, three mutations.
 - **The welcome tour in the native app.** The Studio shows a tour on the first start (`voice.js`, four
   steps in the `tourModal` of `shell.html`); the native app shows the same one. `tour.rs` holds what each
   step says — the two paragraphs of the welcome, the line about this computer from `describeComputer` of

@@ -358,6 +358,10 @@ pub struct Prefs {
     /// once, Settings > General shows it again on demand.
     #[serde(default)]
     pub tour_seen: bool,
+    /// The shortcuts that were changed from their defaults, by id (the Studio's
+    /// `fllm.studio.shortcuts.v1`; changes for unknown ids are ignored).
+    #[serde(default)]
+    pub shortcut_overrides: std::collections::HashMap<String, String>,
     /// The saved prompts of the library (Settings > Personalization, the "/" in the box).
     #[serde(default)]
     pub saved_prompts: Vec<crate::promptlib::SavedPrompt>,
@@ -526,7 +530,7 @@ fn default_top_p() -> f32 {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { personal: Personal::default(), personal_loaded: false, tour_seen: false, saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
+        Prefs { personal: Personal::default(), personal_loaded: false, tour_seen: false, shortcut_overrides: std::collections::HashMap::new(), saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
     }
 }
 

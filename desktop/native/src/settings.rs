@@ -599,6 +599,16 @@ pub fn page<'a>(
             .style(theme::secondary_button(t))
             .into(),
     )]
+    .push(setting(
+        t,
+        "Keyboard shortcuts",
+        "See and change the keys.",
+        button(text("Keyboard shortcuts").size(13))
+            .on_press(Message::ShortcutsOpen)
+            .padding([5, 12])
+            .style(theme::secondary_button(t))
+            .into(),
+    ))
     .spacing(14);
 
     let content = column![

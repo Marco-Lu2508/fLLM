@@ -144,6 +144,13 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   four calls); the sources are numbered `[n]` under the answer (*Sources*, a click opens the page
   in the browser). The texts, cards, budget and error lines are checked against `ctRunTool` of the
   Studio itself — the fixtures are produced by that code.
+- The keyboard shortcuts: the overview (`Mod+/`, or Settings, General) lists what every one of the
+  fifteen shortcuts does with the keys it has now, the fixed rows below them, and Change / Reset per row.
+  Change waits for the new keys; `checkCombo` of `boot.js` refuses a bare letter, `Shift` alone, a fixed key
+  and a combination another shortcut has, with the Studio's own words; the changes are saved (`fllm.studio
+  .shortcuts.v1`) and the window reads them (`comboFromEvent`: `Mod` is the command key on macOS and Ctrl
+  elsewhere, a modifier alone is nothing, a plain letter is for the text field). 74 fixture cases produced
+  by the `@pure` block of `boot.js` itself, five window tests, three mutations.
 - The welcome tour: the first start shows it once (`TOUR_KEY` of the Studio: no key and no chats), four
   steps in the modal of `shell.html` — *Welcome to fLLM*, *Your computer* with the line of `describeComputer`
   (`models.js`, one entry per physical device through the merging of `npu.js`, the processor first), *Pick a

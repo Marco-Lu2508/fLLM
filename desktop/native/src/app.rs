@@ -4,6 +4,7 @@ use crate::api::{self, ModelInfo, StreamEvent, WireMessage};
 use crate::assistants::{self, Assistant, SysMode};
 use crate::memory;
 use crate::promptlib;
+use crate::shortcuts;
 use crate::speech;
 use crate::tour;
 use crate::artifacts;
@@ -259,6 +260,12 @@ pub struct App {
     /// What the tour has to say (the line about this computer, a model's memory, the loaded model
     /// and the suggestions of the hub).
     pub tour_data: tour::TourData,
+    /// The overview of the keyboard shortcuts (the `helpModal` of the Studio).
+    pub shortcuts_open: bool,
+    /// The shortcut that waits for its new keys (the *Change* button; a second press cancels).
+    pub sc_capture: Option<String>,
+    /// The last line the panel says (*Saved.*, a refused combination, *All shortcuts ... defaults*).
+    pub sc_message: String,
     /// The notice under the messages: how many messages a rewind hides, until when it stands.
     rewind_notice: Option<(usize, u64)>,
     /// Whether the model may use the web tools of the server (the Studio's `state.useWeb`: a
@@ -558,6 +565,20 @@ pub enum Message {
         overview: Result<models::Overview, String>,
         hardware: Result<tour::Hardware, String>,
     },
+    /// The overview of the keyboard shortcuts opens (`Mod+/`, `?`, or Settings, General).
+    ShortcutsOpen,
+    /// The overview closes (*Close*, or the click beside it).
+    ShortcutsClose,
+    /// A shortcut waits for its new keys (the *Change* button; a second press cancels).
+    ScChange(String),
+    /// One changed shortcut goes back to its default keys (the *Reset* button).
+    ScReset(String),
+    /// Every change is undone (*Reset all*).
+    ScResetAll,
+    /// A key of the window was pressed and no text field took it (the keydown of `boot.js`).
+    Key(iced::keyboard::Key, iced::keyboard::Modifiers),
+    /// Walk the chats like `Alt+ArrowDown` and `Alt+ArrowUp` do (the `stepChat` of `boot.js`).
+    ChatStep(i32),
     Code(code::CodeMsg),
 }
 
@@ -641,6 +662,9 @@ impl App {
             temp_close: false,
             tour: None,
             tour_data: tour::TourData::default(),
+            shortcuts_open: false,
+            sc_capture: None,
+            sc_message: String::new(),
             rewind_notice: None,
             use_web: false,
             answer_budget: None,
@@ -2256,6 +2280,109 @@ impl App {
                 }
                 Task::none()
             }
+            Message::ShortcutsOpen => {
+                // openShortcuts of boot.js: the capture is empty and so is the message
+                self.shortcuts_open = true;
+                self.sc_capture = None;
+                self.sc_message.clear();
+                Task::none()
+            }
+            Message::ShortcutsClose => {
+                self.shortcuts_open = false;
+                self.sc_capture = None;
+                Task::none()
+            }
+            Message::ScChange(id) => {
+                // a second press on Change is a cancel (the click handler of boot.js)
+                self.sc_capture = if self.sc_capture.as_deref() == Some(id.as_str()) {
+                    None
+                } else {
+                    Some(id)
+                };
+                self.sc_message.clear();
+                Task::none()
+            }
+            Message::ScReset(id) => {
+                self.store.prefs.shortcut_overrides.remove(&id);
+                self.sc_message.clear();
+                self.save();
+                Task::none()
+            }
+            Message::ScResetAll => {
+                self.store.prefs.shortcut_overrides.clear();
+                self.sc_message =
+                    String::from("All shortcuts are back to their defaults.");
+                self.save();
+                Task::none()
+            }
+            Message::ChatStep(delta) => {
+                // stepChat of boot.js: the chats of the Studio are walked by their time, the
+                // newest first, from the one that is open
+                let mut ids: Vec<(i64, u64)> = self
+                    .store
+                    .chats
+                    .iter()
+                    .map(|c| (c.updated, c.id))
+                    .collect();
+                ids.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+                if !ids.is_empty() {
+                    let current = self.current;
+                    let i = ids
+                        .iter()
+                        .position(|(_, id)| Some(*id) == current)
+                        .unwrap_or(0);
+                    let next = (i as i32 + delta).clamp(0, ids.len() as i32 - 1) as usize;
+                    let id = ids[next].1;
+                    return self.update(Message::OpenChat(id));
+                }
+                Task::none()
+            }
+            Message::Key(key, modifiers) => {
+                let is_mac = cfg!(target_os = "macos");
+                let combo = shortcuts::combo_of_key(&key, modifiers, is_mac);
+                if combo.is_empty() {
+                    return Task::none();
+                }
+                // rebinding: the next combination is the new one (the keydown of boot.js)
+                if let Some(id) = self.sc_capture.clone() {
+                    if combo == "Escape" {
+                        self.sc_capture = None;
+                        self.sc_message.clear();
+                        return Task::none();
+                    }
+                    let combos = shortcuts::effective_combos(&self.store.prefs.shortcut_overrides);
+                    match shortcuts::check_combo(&combos, &id, &combo) {
+                        Ok(new) => {
+                            self.store.prefs.shortcut_overrides.insert(id, new);
+                            self.sc_capture = None;
+                            self.sc_message = String::from("Saved.");
+                            self.save();
+                        }
+                        Err(error) => self.sc_message = error,
+                    }
+                    return Task::none();
+                }
+                let combos = shortcuts::effective_combos(&self.store.prefs.shortcut_overrides);
+                let Some(id) = shortcuts::shortcut_for(&combos, &combo) else {
+                    return Task::none();
+                };
+                match id {
+                    "newChat" => return self.update(Message::NewChat),
+                    "stop" => return self.update(Message::Stop),
+                    "surfaceChat" => return self.update(Message::Go(View::Chat)),
+                    "surfaceCode" => return self.update(Message::Go(View::Code)),
+                    "openModels" => return self.update(Message::Go(View::Models)),
+                    "openSettings" => return self.update(Message::Go(View::Settings)),
+                    "regenerate" => return self.update(Message::Retry),
+                    "shortcuts" => return self.update(Message::ShortcutsOpen),
+                    "nextChat" => return self.update(Message::ChatStep(1)),
+                    "prevChat" => return self.update(Message::ChatStep(-1)),
+                    // search, focusComposer, toggleSidebar, codeAgent and codeSessions have no
+                    // surface of their own here yet; the list shows them like the Studio does
+                    _ => {}
+                }
+                Task::none()
+            }
             Message::StylePick(style) => {
                 self.style_menu = false;
                 // the Studio writes the choice into the chat, or into state.newStyle without one
@@ -3077,6 +3204,9 @@ impl App {
                 key: keyboard::Key::Named(keyboard::key::Named::Escape),
                 ..
             }) => Some(Message::Esc),
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                Some(Message::Key(key, modifiers))
+            }
             _ => None,
         });
         Subscription::batch([retry, poll, dropped])
@@ -3245,6 +3375,7 @@ impl App {
             && !self.mem_clear
             && !self.temp_close
             && self.tour.is_none()
+            && !self.shortcuts_open
             // the large view of the artifact panel is a layer of its own
             && !self.art.as_ref().is_some_and(|p| p.large)
         {
@@ -3316,6 +3447,12 @@ impl App {
             layers = layers
                 .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::TourSkip))
                 .push(self.tour_window(t));
+        }
+        if self.shortcuts_open {
+            // the backdrop of `.modal-backdrop`: a click beside the window closes the overview
+            layers = layers
+                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::ShortcutsClose))
+                .push(self.shortcuts_window(t));
         }
         layers.into()
     }
@@ -3864,6 +4001,134 @@ impl App {
         let window = container(column(parts).spacing(12))
             .padding(16)
             .width(460)
+            .style(theme::card(t, theme::R_LG, false));
+        container(window)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(24)
+            .into()
+    }
+
+    /// The overview of the keyboard shortcuts (the `helpModal` of `shell.html` with
+    /// `renderShortcutsPanel` of `boot.js`): what every key does, the keys it has now, Change /
+    /// Cancel and Reset per row, the fixed rows, and the message of the panel.
+    fn shortcuts_window(&self, t: Tokens) -> Element<'_, Message> {
+        let combos = shortcuts::effective_combos(&self.store.prefs.shortcut_overrides);
+        let mut rows: Vec<Element<'_, Message>> = Vec::new();
+
+        // the rows of the list: what it does, the keys, and what may be done about them
+        for s in shortcuts::SHORTCUTS.iter() {
+            let keys = combos.get(s.id).cloned().unwrap_or_default();
+            let changed = self.store.prefs.shortcut_overrides.contains_key(s.id);
+            let capturing = self.sc_capture.as_deref() == Some(s.id);
+            let chip: Element<'_, Message> = if capturing {
+                text("Press the new keys (Esc cancels)").size(12).color(t.primary).into()
+            } else {
+                container(text(shortcuts::format(&keys)).size(12).color(t.fg_soft))
+                    .padding([2, 6])
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(iced::Background::Color(t.surface_2)),
+                        border: iced::Border {
+                            radius: 6.0.into(),
+                            width: 1.0,
+                            color: t.separator,
+                        },
+                        ..Default::default()
+                    })
+                    .into()
+            };
+            let mut actions: Vec<Element<'_, Message>> = vec![
+                button(text(if capturing { "Cancel" } else { "Change" }).size(12))
+                    .on_press(Message::ScChange(s.id.to_string()))
+                    .padding([3, 8])
+                    .style(theme::ghost_button(t))
+                    .into(),
+            ];
+            if changed {
+                actions.push(
+                    button(text("Reset").size(12))
+                        .on_press(Message::ScReset(s.id.to_string()))
+                        .padding([3, 8])
+                        .style(theme::ghost_button(t))
+                        .into(),
+                );
+            }
+            rows.push(
+                row![
+                    text(s.desc).size(13).color(t.fg).width(Length::Fill),
+                    chip,
+                    row(actions).spacing(4),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .padding([4, 0])
+                .into(),
+            );
+        }
+        // the fixed rows of FIXED_KEYS, without the row of `?` (the filter of the Studio)
+        for (keys, desc) in shortcuts::FIXED_KEYS {
+            if keys == "?" {
+                continue;
+            }
+            rows.push(
+                row![
+                    text(desc).size(13).color(t.fg_soft).width(Length::Fill),
+                    container(text(shortcuts::format(&shortcuts::norm_combo(keys))).size(12).color(t.fg_soft))
+                        .padding([2, 6])
+                        .style(move |_| iced::widget::container::Style {
+                            background: Some(iced::Background::Color(t.surface_2)),
+                            border: iced::Border {
+                                radius: 6.0.into(),
+                                width: 1.0,
+                                color: t.separator,
+                            },
+                            ..Default::default()
+                        }),
+                    Space::new().width(110.0),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .padding([4, 0])
+                .into(),
+            );
+        }
+
+        let mut body: Vec<Element<'_, Message>> = vec![
+            text("Keyboard shortcuts").size(16).font(bold()).into(),
+            text("Choose Change, then press the new keys. A combination that is already in use is refused.")
+                .size(13)
+                .color(t.fg_soft)
+                .into(),
+            column(rows).spacing(2).into(),
+        ];
+        if !self.sc_message.is_empty() {
+            body.push(text(self.sc_message.as_str()).size(13).color(t.fg_soft).into());
+        }
+        // Reset all: there only when there is something to undo (the display of boot.js)
+        let mut actions: Vec<Element<'_, Message>> = Vec::new();
+        if !self.store.prefs.shortcut_overrides.is_empty() {
+            actions.push(
+                button(text("Reset all").size(13))
+                    .on_press(Message::ScResetAll)
+                    .padding([6, 12])
+                    .style(theme::ghost_button(t))
+                    .into(),
+            );
+        }
+        actions.push(
+            button(text("Close").size(13))
+                .on_press(Message::ShortcutsClose)
+                .padding([6, 12])
+                .style(theme::primary_button(t))
+                .into(),
+        );
+        body.push(row(actions).spacing(8).into());
+
+        let window = container(column(body).spacing(12))
+            .padding(16)
+            .width(520)
             .style(theme::card(t, theme::R_LG, false));
         container(window)
             .center_x(Length::Fill)
@@ -5097,6 +5362,21 @@ impl App {
     }
 
     /// The page on the right now.
+    /// The saved state of the app (the tests read what a round wrote into it).
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// The saved state of the app, for the tests that put chats into it.
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
+    /// The keys a shortcut was changed to, if it was changed (the *Reset* button of the Studio).
+    pub fn shortcut_override(&self, id: &str) -> Option<&String> {
+        self.store.prefs.shortcut_overrides.get(id)
+    }
+
     pub fn page(&self) -> View {
         self.page
     }

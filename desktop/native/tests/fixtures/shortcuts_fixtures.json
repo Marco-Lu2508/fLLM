@@ -1,0 +1,1020 @@
+{
+ "parse": [
+  [
+   "Mod+N",
+   {
+    "mods": [
+     "Mod"
+    ],
+    "key": "N"
+   }
+  ],
+  [
+   "mod+n",
+   {
+    "mods": [
+     "Mod"
+    ],
+    "key": "N"
+   }
+  ],
+  [
+   "Escape",
+   {
+    "mods": [],
+    "key": "Escape"
+   }
+  ],
+  [
+   "",
+   null
+  ],
+  [
+   "   ",
+   null
+  ],
+  [
+   "x+y",
+   {
+    "mods": [],
+    "key": "x+y"
+   }
+  ],
+  [
+   "Ctrl+Shift+P",
+   {
+    "mods": [
+     "Ctrl",
+     "Shift"
+    ],
+    "key": "P"
+   }
+  ],
+  [
+   "Shift+Mod+P",
+   {
+    "mods": [
+     "Mod",
+     "Shift"
+    ],
+    "key": "P"
+   }
+  ],
+  [
+   "Mod+Mod+N",
+   {
+    "mods": [
+     "Mod"
+    ],
+    "key": "N"
+   }
+  ],
+  [
+   "Mod+/",
+   {
+    "mods": [
+     "Mod"
+    ],
+    "key": "/"
+   }
+  ],
+  [
+   "Mod+,",
+   {
+    "mods": [
+     "Mod"
+    ],
+    "key": ","
+   }
+  ],
+  [
+   "Alt+ArrowDown",
+   {
+    "mods": [
+     "Alt"
+    ],
+    "key": "ArrowDown"
+   }
+  ]
+ ],
+ "norm": [
+  [
+   "Mod+N",
+   "Mod+N"
+  ],
+  [
+   "mod+n",
+   "Mod+N"
+  ],
+  [
+   "Shift+Mod+P",
+   "Mod+Shift+P"
+  ],
+  [
+   "n",
+   "N"
+  ],
+  [
+   "Escape",
+   "Escape"
+  ],
+  [
+   "",
+   ""
+  ],
+  [
+   "x+y",
+   "x+y"
+  ]
+ ],
+ "format": [
+  [
+   "Mod+N",
+   "Ctrl+N",
+   "Cmd N"
+  ],
+  [
+   "Mod+/",
+   "Ctrl+/",
+   "Cmd /"
+  ],
+  [
+   "Mod+Shift+P",
+   "Ctrl+Shift+P",
+   "Cmd Shift P"
+  ],
+  [
+   "Escape",
+   "Esc",
+   "Esc"
+  ],
+  [
+   "ArrowUp",
+   "Up",
+   "Up"
+  ],
+  [
+   "Alt+ArrowDown",
+   "Alt+Down",
+   "Option Down"
+  ],
+  [
+   "Alt+Option+X",
+   "Alt+Option+X",
+   "Option Option+X"
+  ],
+  [
+   "",
+   "",
+   ""
+  ],
+  [
+   "not a combo",
+   "not a combo",
+   "not a combo"
+  ]
+ ],
+ "effective": [
+  [
+   {},
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+J"
+   },
+   {
+    "newChat": "Mod+J",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   }
+  ],
+  [
+   {
+    "newChat": "mod+j"
+   },
+   {
+    "newChat": "Mod+J",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   }
+  ],
+  [
+   {
+    "unknown": "Mod+Q"
+   },
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+J",
+    "stop": "no"
+   },
+   {
+    "newChat": "Mod+J",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "no",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   }
+  ]
+ ],
+ "check": [
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "newChat",
+   "Mod+N",
+   {
+    "ok": true,
+    "combo": "Mod+N"
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "newChat",
+   "Mod+J",
+   {
+    "ok": true,
+    "combo": "Mod+J"
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "newChat",
+   "Q",
+   {
+    "ok": false,
+    "error": "Use at least one of Ctrl, Alt or Cmd with the key, so typing is not disturbed."
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "newChat",
+   "Shift+Q",
+   {
+    "ok": false,
+    "error": "Shift alone is used for typing capital letters."
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "newChat",
+   "Enter",
+   {
+    "ok": false,
+    "error": "Use at least one of Ctrl, Alt or Cmd with the key, so typing is not disturbed."
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "newChat",
+   "Mod+Enter",
+   {
+    "ok": true,
+    "combo": "Mod+Enter"
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "newChat",
+   "Escape",
+   {
+    "ok": false,
+    "error": "Esc is already used for: Stop the answer or the agent, close a window."
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "newChat",
+   "Shift+Escape",
+   {
+    "ok": false,
+    "error": "Shift+Esc is already used for: Put the cursor in the message field."
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "newChat",
+   "ArrowUp",
+   {
+    "ok": false,
+    "error": "Up is fixed: Edit your last message (empty field)."
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "newChat",
+   "Mod+ArrowUp",
+   {
+    "ok": true,
+    "combo": "Mod+ArrowUp"
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "newChat",
+   "Mod+N",
+   {
+    "ok": true,
+    "combo": "Mod+N"
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "stop",
+   "Mod+N",
+   {
+    "ok": false,
+    "error": "Ctrl+N is already used for: New chat (new session in Code)."
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "stop",
+   "Alt+1",
+   {
+    "ok": false,
+    "error": "Alt+1 is already used for: Go to Chat."
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "shortcuts",
+   "Mod+/",
+   {
+    "ok": true,
+    "combo": "Mod+/"
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "shortcuts",
+   "?",
+   {
+    "ok": false,
+    "error": "Use at least one of Ctrl, Alt or Cmd with the key, so typing is not disturbed."
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "search",
+   "",
+   {
+    "ok": false,
+    "error": "Press a key combination."
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+J",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "newChat",
+   "Mod+N",
+   {
+    "ok": true,
+    "combo": "Mod+N"
+   }
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "toggleSidebar",
+   "mod+b",
+   {
+    "ok": true,
+    "combo": "Mod+B"
+   }
+  ]
+ ],
+ "for": [
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "Mod+N",
+   "newChat"
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "mod+n",
+   ""
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "Escape",
+   "stop"
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "Alt+ArrowDown",
+   "nextChat"
+  ],
+  [
+   {
+    "newChat": "Mod+N",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "Alt+9",
+   ""
+  ],
+  [
+   {
+    "newChat": "Mod+J",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "Mod+J",
+   "newChat"
+  ],
+  [
+   {
+    "newChat": "Mod+J",
+    "search": "Mod+K",
+    "focusComposer": "Shift+Escape",
+    "toggleSidebar": "Mod+B",
+    "stop": "Escape",
+    "surfaceChat": "Alt+1",
+    "surfaceCode": "Alt+2",
+    "openModels": "Alt+3",
+    "openSettings": "Mod+,",
+    "nextChat": "Alt+ArrowDown",
+    "prevChat": "Alt+ArrowUp",
+    "regenerate": "Alt+R",
+    "shortcuts": "Mod+/",
+    "codeAgent": "Alt+B",
+    "codeSessions": "Alt+L"
+   },
+   "Mod+N",
+   ""
+  ]
+ ],
+ "fromevent": [
+  [
+   {
+    "key": "n",
+    "ctrlKey": true
+   },
+   false,
+   "Mod+N"
+  ],
+  [
+   {
+    "key": "n",
+    "ctrlKey": true
+   },
+   true,
+   "Ctrl+N"
+  ],
+  [
+   {
+    "key": "n",
+    "metaKey": true
+   },
+   true,
+   "Mod+N"
+  ],
+  [
+   {
+    "key": "Escape"
+   },
+   false,
+   "Escape"
+  ],
+  [
+   {
+    "key": "Shift"
+   },
+   false,
+   ""
+  ],
+  [
+   {
+    "key": "Control"
+   },
+   false,
+   ""
+  ],
+  [
+   {
+    "key": " ",
+    "ctrlKey": true
+   },
+   false,
+   "Mod+Space"
+  ],
+  [
+   {
+    "key": "k",
+    "altKey": true,
+    "code": "KeyK"
+   },
+   false,
+   "Alt+K"
+  ],
+  [
+   {
+    "key": "5",
+    "altKey": true,
+    "code": "Digit5"
+   },
+   false,
+   "Alt+5"
+  ],
+  [
+   {
+    "key": "ArrowDown",
+    "altKey": true
+   },
+   false,
+   "Alt+ArrowDown"
+  ],
+  [
+   {
+    "key": "?",
+    "shiftKey": true,
+    "ctrlKey": true
+   },
+   false,
+   "Mod+?"
+  ],
+  [
+   {
+    "key": "a",
+    "shiftKey": true
+   },
+   false,
+   "Shift+A"
+  ],
+  [
+   {
+    "key": "A",
+    "shiftKey": true
+   },
+   false,
+   "Shift+A"
+  ],
+  [
+   {
+    "key": "b",
+    "altKey": true,
+    "shiftKey": true
+   },
+   false,
+   "Alt+Shift+B"
+  ],
+  [
+   {
+    "key": "",
+    "ctrlKey": true
+   },
+   false,
+   ""
+  ],
+  [
+   {
+    "key": "Escape",
+    "shiftKey": true
+   },
+   false,
+   "Shift+Escape"
+  ]
+ ]
+}
