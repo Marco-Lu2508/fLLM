@@ -518,6 +518,24 @@ pub fn chat_stream_with_tools(base: String, model: String, messages: Vec<WireMes
     })
 }
 
+/// How a chat asks the server for its web tools: the routes of the Studio
+/// (`/api/studio/web/search` and `/api/studio/web/fetch`).
+pub struct EngineFetcher {
+    pub base: String,
+}
+
+impl crate::tools::Fetcher for EngineFetcher {
+    fn post(&self, route: String, body: serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::tools::Resp, String>> + Send>> {
+        let url = format!("{}{}", self.base, route);
+        Box::pin(async move {
+            let resp = reqwest::Client::new().post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+            let status = resp.status().as_u16();
+            let value = resp.json::<serde_json::Value>().await.unwrap_or(serde_json::Value::Null);
+            Ok(crate::tools::Resp { status, body: value })
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

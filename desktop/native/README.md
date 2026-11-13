@@ -127,6 +127,16 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   are hidden." with *Undo* for nine seconds, at the last message it says "Nothing after this
   message to rewind.", and the Undo says "Rewind undone". A new question or a retry keeps what
   was hidden as a version of the chat, so the conversation tree can show it later.
+- Use the web: the chip *Allow web access* in the composer switches the web tools of the server on
+  for the window (one press; the line of the Studio says what that means, and the chip is tinted
+  while it is on). The request then carries `web_search` and `web_fetch` beside the memory with
+  the descriptions of the Studio, the prompt gets the web line (the compact one for a small
+  model), a context under 2,048 tokens gets no tools at all and a temporary or private chat gets
+  no memory. The calls run against `POST /api/studio/web/search` and `/api/studio/web/fetch`, one
+  after the other, with the room for results the Studio budgets for one answer (five rounds of
+  four calls); the sources are numbered `[n]` under the answer (*Sources*, a click opens the page
+  in the browser). The texts, cards, budget and error lines are checked against `ctRunTool` of the
+  Studio itself — the fixtures are produced by that code.
 - Code (sidebar > Code): a coding agent in a folder. Open a folder (type the path, *Choose…* for the folder dialog of the server's computer, or one of the last six), tell the agent what to do; the model
   gets the server's agent tools (read, search, edit, run commands, ...) and answers with tool calls, which the window runs through
   `/api/studio/agent/tool` and feeds back until the model answers without one (at most 30 model calls per message). Every call is a card:
@@ -158,10 +168,10 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 208 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+cargo test --locked      # 213 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
                          # window driven headless (new chat, send, stream, stop, error, delete, theme, assistants, projects,
-                         # attachments, personalization, prompt library, response style, temporary chat, message actions) and drawn to
-  PNG files
+                         # attachments, personalization, prompt library, response style, temporary chat, message actions, web tools) and
+  drawn to PNG files
 ```
 
 The window tests use iced's software renderer, so they need no display and no GPU. The pictures go to
@@ -173,7 +183,8 @@ capture of "remember that …", of the saving of the memory tool, of the sort of
 the menu on every change of the box, of the limit of a hundred prompts, of the style in the
 prompt, of the staged style for a new chat, of the web text of the Studio, of the save without
 its filter, of the staging into the chat, of the drop when a temporary chat is left, of the
-rewind that hides, of the version it keeps for a new question and of the plain copy each turn a
+rewind that hides, of the version it keeps for a new question, of the plain copy, of the web
+tools in the request, of their line in the prompt and of the sources under an answer each turn a
 test red.
 
 Not checked: a window on a real screen (this machine has none), scaling on a HiDPI display, input methods, the macOS and Windows builds

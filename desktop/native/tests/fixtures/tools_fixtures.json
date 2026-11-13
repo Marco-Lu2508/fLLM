@@ -1,0 +1,655 @@
+[
+  {
+    "kind": "budget",
+    "outputs": [
+      {
+        "per": 2088,
+        "total": 5570
+      },
+      {
+        "per": 8355,
+        "total": 22282
+      },
+      {
+        "per": 1200,
+        "total": 272
+      },
+      {
+        "per": 2088,
+        "total": 5570
+      },
+      {
+        "per": 12000,
+        "total": 1359998
+      }
+    ]
+  },
+  {
+    "kind": "clip",
+    "outputs": [
+      "short",
+      "a much longer text t\n... [31 characters cut]",
+      ""
+    ]
+  },
+  {
+    "kind": "short",
+    "outputs": [
+      "spaced out",
+      "xxxxxxxxx...",
+      ""
+    ]
+  },
+  {
+    "kind": "host",
+    "outputs": [
+      "example.com:8443",
+      "not a url",
+      "x.test"
+    ]
+  },
+  {
+    "kind": "http",
+    "outputs": [
+      "Web access is not available: this server has no web tools.",
+      "Web access is blocked: because.",
+      "The web request failed (error 500).",
+      "The web request failed (error 401)."
+    ]
+  },
+  {
+    "kind": "limits",
+    "rounds": 5,
+    "calls": 4,
+    "example": {
+      "web_search": "{\"query\": \"latest stable version of Rust\"}",
+      "web_fetch": "{\"url\": \"https://example.com/page\"}",
+      "memory": "{\"action\": \"add\", \"text\": \"Prefers metric units\"}",
+      "search_chats": "{\"query\": \"trip to Lisbon\"}",
+      "skill": "{\"action\": \"read\", \"name\": \"release-checklist\"}",
+      "schedule": "{\"name\": \"Morning news\", \"prompt\": \"Summarise the top technology news\", \"when\": \"daily at 08:00\"}"
+    }
+  },
+  {
+    "kind": "defs",
+    "outputs": [
+      [
+        {
+          "type": "function",
+          "function": {
+            "name": "web_search",
+            "description": "Search the web. Use only for current, specific or unknown facts. Returns titles, links and snippets.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "query": {
+                  "type": "string",
+                  "description": "What to search for, as short search keywords"
+                }
+              },
+              "required": [
+                "query"
+              ]
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "web_fetch",
+            "description": "Open a web page and read it as text. Use it on a result of web_search, or on a link the user gave.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "description": "The full http or https address"
+                }
+              },
+              "required": [
+                "url"
+              ]
+            }
+          }
+        }
+      ],
+      [
+        {
+          "type": "function",
+          "function": {
+            "name": "memory",
+            "description": "Save, change or delete a short fact about the user that stays useful in later chats (name, preferences, projects, constraints). Never trivia or secrets.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "add",
+                    "update",
+                    "remove",
+                    "list"
+                  ]
+                },
+                "text": {
+                  "type": "string",
+                  "description": "The fact, one short sentence (add, update)"
+                },
+                "category": {
+                  "type": "string",
+                  "description": "profile, preference, project, constraint or other"
+                },
+                "match": {
+                  "type": "string",
+                  "description": "Part of the existing entry to update or remove"
+                },
+                "id": {
+                  "type": "string",
+                  "description": "Id of the entry, from list (instead of match)"
+                }
+              },
+              "required": [
+                "action"
+              ]
+            }
+          }
+        }
+      ],
+      [
+        {
+          "type": "function",
+          "function": {
+            "name": "web_search",
+            "description": "Search the web for current or unknown facts.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "query": {
+                  "type": "string",
+                  "description": "What to search for, as short search keywords"
+                }
+              },
+              "required": [
+                "query"
+              ]
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "web_fetch",
+            "description": "Read a web page as text.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "description": "The full http or https address"
+                }
+              },
+              "required": [
+                "url"
+              ]
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "memory",
+            "description": "Save durable facts about the user.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "add",
+                    "update",
+                    "remove",
+                    "list"
+                  ]
+                },
+                "text": {
+                  "type": "string",
+                  "description": "The fact, one short sentence (add, update)"
+                },
+                "category": {
+                  "type": "string",
+                  "description": "profile, preference, project, constraint or other"
+                },
+                "match": {
+                  "type": "string",
+                  "description": "Part of the existing entry to update or remove"
+                },
+                "id": {
+                  "type": "string",
+                  "description": "Id of the entry, from list (instead of match)"
+                }
+              },
+              "required": [
+                "action"
+              ]
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "search_chats",
+            "description": "Search the user's earlier chats.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "query": {
+                  "type": "string",
+                  "description": "Keywords to look for"
+                }
+              },
+              "required": [
+                "query"
+              ]
+            }
+          }
+        }
+      ],
+      []
+    ]
+  },
+  {
+    "kind": "parse",
+    "outputs": [
+      {
+        "a": 1
+      },
+      {
+        "a": 1
+      },
+      null,
+      {},
+      {
+        "query": "x"
+      }
+    ]
+  },
+  {
+    "kind": "label",
+    "outputs": [
+      "Searching: rust version",
+      "Searched: rust version",
+      "Reading: example.com/page",
+      "Read: example.com/page"
+    ]
+  },
+  {
+    "kind": "sources",
+    "numbers": [
+      1,
+      2,
+      1,
+      3
+    ],
+    "list": [
+      {
+        "n": 1,
+        "title": "One",
+        "url": "https://a.test/one",
+        "fetched": false
+      },
+      {
+        "n": 2,
+        "title": "Two",
+        "url": "https://a.test/two",
+        "fetched": false
+      },
+      {
+        "n": 3,
+        "title": "a.test",
+        "url": "https://a.test/page",
+        "fetched": true
+      }
+    ]
+  },
+  {
+    "name": "web_search",
+    "args": {
+      "query": "fLLM release"
+    },
+    "spec": {
+      "search": {
+        "ok": true,
+        "results": [
+          {
+            "url": "https://example.com/blog",
+            "title": "The fLLM blog",
+            "snippet": "Version 2.0 was released today."
+          },
+          {
+            "url": "not-a-url",
+            "title": "Ignored",
+            "snippet": "no protocol"
+          },
+          {
+            "url": "https://other.test/post",
+            "title": "Another take",
+            "snippet": "It is fast."
+          }
+        ]
+      }
+    },
+    "out": {
+      "text": "Search results for \"fLLM release\". Cite sources as [n].\n\n[1] The fLLM blog (https://example.com/blog)\nVersion 2.0 was released today.\n\n[2] Another take (https://other.test/post)\nIt is fast.",
+      "card": {
+        "label": "Searched: fLLM release",
+        "status": "done",
+        "detail": "2 results"
+      }
+    },
+    "after": {
+      "left": 4811,
+      "sources": [
+        {
+          "n": 1,
+          "title": "The fLLM blog",
+          "url": "https://example.com/blog",
+          "fetched": false
+        },
+        {
+          "n": 2,
+          "title": "Another take",
+          "url": "https://other.test/post",
+          "fetched": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "web_search",
+    "args": {
+      "query": "nothing here"
+    },
+    "spec": {
+      "search": {
+        "ok": true,
+        "results": []
+      }
+    },
+    "out": {
+      "text": "No results for \"nothing here\". Try other keywords or answer without the web.",
+      "card": {
+        "label": "Searched: nothing here",
+        "status": "done",
+        "detail": "no results"
+      }
+    },
+    "after": {
+      "left": 5000,
+      "sources": []
+    }
+  },
+  {
+    "name": "web_search",
+    "args": {
+      "query": "blocked"
+    },
+    "spec": {
+      "search": {
+        "ok": false,
+        "status": 404,
+        "error": "gone"
+      }
+    },
+    "out": {
+      "text": "Error: Web access is not available: this server has no web tools.",
+      "card": {
+        "label": "Searched: blocked",
+        "status": "error",
+        "detail": "Error: Web access is not available: this server has no web tools."
+      }
+    },
+    "after": {
+      "left": 5000,
+      "sources": []
+    }
+  },
+  {
+    "name": "web_search",
+    "args": {},
+    "spec": {
+      "search": {
+        "ok": true,
+        "results": []
+      }
+    },
+    "out": {
+      "text": "Error: \"query\" is required.",
+      "card": {
+        "label": "Searched: ",
+        "status": "error",
+        "detail": "Error: \"query\" is required."
+      }
+    },
+    "after": {
+      "left": 5000,
+      "sources": []
+    }
+  },
+  {
+    "name": "web_search",
+    "args": {
+      "query": "no room"
+    },
+    "spec": {
+      "left": 300,
+      "search": {
+        "ok": true,
+        "results": []
+      }
+    },
+    "out": {
+      "text": "Skipped: the room for web results in this answer is used up. Answer with what you have.",
+      "card": {
+        "label": "Searched: no room",
+        "status": "error",
+        "detail": "Skipped: the room for web results in this answer is used up. Answer with what you have."
+      }
+    },
+    "after": {
+      "left": 300,
+      "sources": []
+    }
+  },
+  {
+    "name": "web_fetch",
+    "args": {
+      "url": "https://example.com/doc"
+    },
+    "spec": {
+      "pages": {
+        "https://example.com/doc": {
+          "ok": true,
+          "url": "https://example.com/doc",
+          "text": "The page says hello."
+        }
+      }
+    },
+    "out": {
+      "text": "[1] https://example.com/doc\nThe page says hello.",
+      "card": {
+        "label": "Read: example.com/doc",
+        "status": "done",
+        "detail": "20 characters"
+      }
+    },
+    "after": {
+      "left": 4952,
+      "sources": [
+        {
+          "n": 1,
+          "title": "example.com",
+          "url": "https://example.com/doc",
+          "fetched": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "web_fetch",
+    "args": {
+      "url": "ftp://nope"
+    },
+    "spec": {},
+    "out": {
+      "text": "Error: \"url\" must be a full http or https address.",
+      "card": {
+        "label": "Read: ftp://nope",
+        "status": "error",
+        "detail": "Error: \"url\" must be a full http or https address."
+      }
+    },
+    "after": {
+      "left": 5000,
+      "sources": []
+    }
+  },
+  {
+    "name": "web_fetch",
+    "args": {
+      "url": "https://empty.test/"
+    },
+    "spec": {
+      "pages": {
+        "https://empty.test/": {
+          "ok": true,
+          "url": "https://empty.test/",
+          "text": "   "
+        }
+      }
+    },
+    "out": {
+      "text": "Error: the page has no readable text.",
+      "card": {
+        "label": "Read: empty.test/",
+        "status": "error",
+        "detail": "Error: the page has no readable text."
+      }
+    },
+    "after": {
+      "left": 5000,
+      "sources": []
+    }
+  },
+  {
+    "name": "web_fetch",
+    "args": {
+      "url": "https://missing.test/"
+    },
+    "spec": {
+      "pages": {
+        "https://missing.test/": {
+          "ok": false,
+          "status": 500,
+          "error": "boom"
+        }
+      }
+    },
+    "out": {
+      "text": "Error: The web request failed (error 500).",
+      "card": {
+        "label": "Read: missing.test/",
+        "status": "error",
+        "detail": "Error: The web request failed (error 500)."
+      }
+    },
+    "after": {
+      "left": 5000,
+      "sources": []
+    }
+  },
+  {
+    "name": "nope",
+    "args": {
+      "x": 1
+    },
+    "spec": {},
+    "out": {
+      "text": "Error: unknown tool 'nope'.",
+      "card": {
+        "label": "nope",
+        "status": "error",
+        "detail": "unknown tool"
+      }
+    },
+    "after": {
+      "left": 5000,
+      "sources": []
+    }
+  },
+  {
+    "name": "memory",
+    "args": "not json at all",
+    "spec": {},
+    "out": {
+      "text": "Error: the arguments of memory are not valid JSON. Call it again with a JSON object such as {\"action\": \"add\", \"text\": \"Prefers metric units\"}.",
+      "card": {
+        "label": "Memory",
+        "status": "error",
+        "detail": "Error: the arguments of memory are not valid JSON. Call it again with a JSON object such as {\"action\": \"add\", \"text\": \"Prefers metric units\"}."
+      }
+    },
+    "after": {
+      "left": 5000,
+      "sources": []
+    }
+  },
+  {
+    "name": "memory",
+    "args": {
+      "action": "add",
+      "text": "Flies the DA40"
+    },
+    "spec": {
+      "memory": {
+        "text": "Remembered.",
+        "change": {
+          "kind": "add",
+          "id": "m1",
+          "before": null,
+          "after": {
+            "id": "m1",
+            "text": "Flies the DA40",
+            "created_at": 1,
+            "updated_at": 1,
+            "uses": 0,
+            "category": null
+          }
+        }
+      }
+    },
+    "out": {
+      "text": "Remembered.",
+      "card": {
+        "label": "Saved to memory: Flies the DA40",
+        "status": "done",
+        "change": {
+          "kind": "add",
+          "id": "m1",
+          "before": null,
+          "after": {
+            "id": "m1",
+            "text": "Flies the DA40",
+            "created_at": 1,
+            "updated_at": 1,
+            "uses": 0,
+            "category": null
+          }
+        }
+      }
+    },
+    "after": {
+      "left": 5000,
+      "sources": []
+    }
+  }
+]

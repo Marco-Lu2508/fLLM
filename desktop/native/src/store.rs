@@ -68,6 +68,9 @@ pub struct Record {
     /// What the tools did under the answer (the Studio's `node.tools`).
     #[serde(default)]
     pub tool_cards: Vec<crate::memory::ToolCard>,
+    /// The sources of an answer that used the web tools (the Studio's `node.sources`).
+    #[serde(default)]
+    pub sources: Vec<crate::tools::Source>,
 }
 
 /// Another way the conversation went: editing a message or asking for a new answer keeps the old version.
@@ -614,7 +617,7 @@ mod tests {
         let a = s.new_chat();
         let b = s.new_chat();
         assert_ne!(a, b);
-        s.chat_mut(a).unwrap().messages.push(Record { role: Role::User, content: "Hi".into(), reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new() });
+        s.chat_mut(a).unwrap().messages.push(Record { role: Role::User, content: "Hi".into(), reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new(), sources: Vec::new() });
         s.save(&path).unwrap();
         let back = Store::load(&path);
         assert_eq!(back, s);
@@ -624,7 +627,7 @@ mod tests {
     }
 
     fn rec(role: Role, text: &str) -> Record {
-        Record { role, content: text.into(), reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new() }
+        Record { role, content: text.into(), reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new(), sources: Vec::new() }
     }
 
     fn chat(lines: &[(Role, &str)]) -> ChatRecord {

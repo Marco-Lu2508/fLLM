@@ -18,7 +18,7 @@ fn model() -> ModelInfo {
 }
 
 fn rec(role: Role, content: &str, stats: Option<Stats>) -> Record {
-    Record { role, content: content.into(), reasoning: String::new(), stats, passages: None , images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new() }
+    Record { role, content: content.into(), reasoning: String::new(), stats, passages: None , images: Vec::new(), files: Vec::new(), tool_calls: None, tool_call_id: None, tool_cards: Vec::new(), sources: Vec::new() }
 }
 
 /// An app on a temporary data folder, with the given chats and theme, connected to a model.

@@ -5,6 +5,7 @@ use crate::assistants::{self, Assistant, SysMode};
 use crate::memory;
 use crate::promptlib;
 use crate::speech;
+use crate::tools;
 use crate::rag::{self, IndexedDoc};
 use crate::store::{self, Record, Role, Stats, Store};
 use crate::chatlist::{self, ChatList, ListMsg};
@@ -48,6 +49,7 @@ const ICON_CODE: &[u8] = include_bytes!("../icons/code.svg");
 const ICON_CHEVRON: &[u8] = include_bytes!("../icons/chevron-down.svg");
 const ICON_LINES: &[u8] = include_bytes!("../icons/lines.svg");
 const ICON_GHOST: &[u8] = include_bytes!("../icons/ghost.svg");
+const ICON_GLOBE: &[u8] = include_bytes!("../icons/globe.svg");
 const ICON_CHECK: &[u8] = include_bytes!("../icons/check.svg");
 const ICON_FOLDER: &[u8] = include_bytes!("../icons/folder.svg");
 const ICON_CHEVRON_RIGHT: &[u8] = include_bytes!("../icons/chevron-right.svg");
@@ -71,6 +73,8 @@ pub struct Msg {
     pub tool_call_id: Option<String>,
     /// What the tools did under the answer (the Studio's node.tools).
     pub tool_cards: Vec<crate::memory::ToolCard>,
+    /// The sources of an answer that used the web tools (`ctSourcesHtml` under it).
+    pub sources: Vec<tools::Source>,
     pub md: markdown::Content,
 }
 
@@ -87,6 +91,7 @@ impl Msg {
             tool_calls: r.tool_calls.clone(),
             tool_call_id: r.tool_call_id.clone(),
             tool_cards: r.tool_cards.clone(),
+            sources: r.sources.clone(),
             md: markdown::Content::parse(&r.content),
         }
     }
@@ -103,6 +108,7 @@ impl Msg {
             tool_calls: self.tool_calls.clone(),
             tool_call_id: self.tool_call_id.clone(),
             tool_cards: self.tool_cards.clone(),
+            sources: self.sources.clone(),
         }
     }
 }
@@ -232,6 +238,17 @@ pub struct App {
     temp_close: bool,
     /// The notice under the messages: how many messages a rewind hides, until when it stands.
     rewind_notice: Option<(usize, u64)>,
+    /// Whether the model may use the web tools of the server (the Studio's `state.useWeb`: a
+    /// choice of the window, not kept between starts).
+    use_web: bool,
+    /// The room for web results of the answer that is being written (`ctBudget`, one per answer).
+    answer_budget: Option<tools::Budget>,
+    /// The sources of the answer that is being written, so the model can cite them as `[n]`.
+    answer_sources: Vec<tools::Source>,
+    /// The round of tool calls that is running: every call in its order with the result (None
+    /// until it came), and which of them the server still has to answer.
+    tool_hold: Vec<Option<(String, String, crate::memory::ToolCard)>>,
+    tool_web_jobs: Vec<(usize, String, String, String)>,
     /// The text box of a prompt library row per id (so a half-typed row keeps its place).
     plib_texts: std::collections::HashMap<String, Content>,
     /// The copy on the server: the text that is up there, whether it is off, and one request at a time.
@@ -280,6 +297,12 @@ pub enum Message {
     /// The conversation ends at this message; nothing is deleted, Undo brings the rest back.
     RewindTo(usize),
     RewindUndo,
+    /// The chip in the composer: the model may search the web and read pages (btnToggleWeb).
+    ToggleWeb,
+    /// One round of web tool calls came back from the server.
+    ToolRound(ToolRoundResult),
+    /// Open an address of the sources in the browser of the computer.
+    OpenUrl(String),
     Hover(Option<u64>),
     ToggleTheme,
     LinkClicked(markdown::Uri),
@@ -454,6 +477,16 @@ pub enum Message {
     Code(code::CodeMsg),
 }
 
+/// What the web tools of one round gave back, in the order of the calls (the memory calls of the
+/// same round are already in the window when this arrives).
+#[derive(Debug, Clone)]
+pub struct ToolRoundResult {
+    /// Index of the call in the round, its id, the text for the model and the card under the answer.
+    pub results: Vec<(usize, String, String, crate::memory::ToolCard)>,
+    pub budget_left: usize,
+    pub sources: Vec<tools::Source>,
+}
+
 impl App {
     pub fn new() -> (App, Task<Message>) {
         let data = store::data_file();
@@ -522,6 +555,11 @@ impl App {
             temp_next: false,
             temp_close: false,
             rewind_notice: None,
+            use_web: false,
+            answer_budget: None,
+            answer_sources: Vec::new(),
+            tool_hold: Vec::new(),
+            tool_web_jobs: Vec::new(),
             plib_texts: std::collections::HashMap::new(),
             mem_synced_text: None,
             mem_sync_off: false,
@@ -570,6 +608,11 @@ impl App {
     /// Whether the menu of the prompt library under a "/" is open.
     pub fn slash_open(&self) -> bool {
         !self.slash.is_empty()
+    }
+
+    /// The tools the next request would offer (the tests read them).
+    pub fn offered_tools(&self) -> Option<serde_json::Value> {
+        self.tool_defs()
     }
 
     /// Whether a temporary chat is staged for the next new chat (the tests read it).
@@ -684,6 +727,9 @@ impl App {
         // what a rewind hides cannot come back into the row once a new question is asked: it is
         // kept as a version of the chat (the conversation tree shows those later)
         self.commit_rewinds();
+        // one answer has its own room for web results and its own sources (ctGenerate)
+        self.answer_budget = Some(tools::budget(model.max_context));
+        self.answer_sources.clear();
         // "remember that …" at the start of a message saves the thing (the Studio's prjCaptureMemory)
         if self.memory_capture_on() {
             if let Some(fact) = memory::extract(&prompt) {
@@ -761,6 +807,7 @@ impl App {
             tool_calls: None,
             tool_call_id: None,
             tool_cards: Vec::new(),
+        sources: Vec::new(),
         });
         self.messages.push(Msg {
             role: Role::Assistant,
@@ -773,6 +820,7 @@ impl App {
             tool_calls: None,
             tool_call_id: None,
             tool_cards: Vec::new(),
+            sources: Vec::new(),
             md: markdown::Content::new(),
         });
         // the passages of the knowledge travel with this question (the project's documents first,
@@ -800,7 +848,12 @@ impl App {
     fn stream(&mut self, id: u64, model: String) -> Task<Message> {
         self.hold_clock(id);
         let wire = self.wire_messages();
-        let events = api::chat_stream(self.base.clone(), model, wire, self.chat_params());
+        let defs = self.tool_defs();
+        use futures::StreamExt;
+        let events: futures::stream::BoxStream<'static, StreamEvent> = match defs {
+            Some(tools_json) => api::chat_stream_with_tools(self.base.clone(), model, wire, self.chat_params(), Some(tools_json)).boxed(),
+            None => api::chat_stream(self.base.clone(), model, wire, self.chat_params()).boxed(),
+        };
         let (task, handle) = Task::stream(events).map(move |ev| Message::Stream(id, ev)).abortable();
         self.live = Some(Live { chat: id, _handle: handle.abort_on_drop() });
         task
@@ -869,6 +922,9 @@ impl App {
                 // a new version starts from the row as it is: what a rewind hides becomes a version
                 self.commit_rewinds();
                 let (Some(id), Server::Ready(model)) = (self.current, self.server.clone()) else { return Task::none() };
+                // a new answer has its own room for web results and its own sources
+                self.answer_budget = Some(tools::budget(model.max_context));
+                self.answer_sources.clear();
                 self.sync_current();
                 if let Some(chat) = self.store.chat_mut(id) {
                     chat.branch_at(i);
@@ -885,6 +941,7 @@ impl App {
                     tool_calls: None,
                     tool_call_id: None,
                     tool_cards: Vec::new(),
+                    sources: Vec::new(),
                     md: markdown::Content::new(),
                 });
                 self.sync_current();
@@ -1639,6 +1696,48 @@ impl App {
                 self.slash_index = 0;
                 Task::none()
             }
+            Message::ToggleWeb => {
+                self.use_web = !self.use_web;
+                if self.use_web {
+                    self.toast = Some(
+                        "The model may now search the web and read pages when it needs to. Questions it can answer itself are not searched."
+                            .into(),
+                    );
+                }
+                Task::none()
+            }
+            Message::OpenUrl(url) => {
+                open_page(&url);
+                Task::none()
+            }
+            Message::ToolRound(result) => {
+                if let Some(budget) = self.answer_budget.as_mut() {
+                    budget.left = result.budget_left;
+                }
+                self.answer_sources = result.sources;
+                for (index, id, text, card) in result.results {
+                    if let Some(slot) = self.tool_hold.get_mut(index) {
+                        *slot = Some((id, text, card));
+                    }
+                }
+                // a call the server never answered gets an error line, so the round can close
+                for slot in self.tool_hold.iter_mut() {
+                    if slot.is_none() {
+                        *slot = Some((
+                            String::new(),
+                            "Error: the web request failed.".to_string(),
+                            crate::memory::ToolCard { label: "Web".into(), status: "error".into(), change: None, undone: false, quiet: false },
+                        ));
+                    }
+                }
+                match self.live.as_ref().map(|l| l.chat) {
+                    Some(chat) => self.tool_round_finalize(chat).unwrap_or_else(Task::none),
+                    None => {
+                        self.finish();
+                        Task::none()
+                    }
+                }
+            }
             Message::StyleMenu => {
                 self.style_menu = !self.style_menu;
                 Task::none()
@@ -2266,50 +2365,124 @@ impl App {
     /// what happened and the answer continues (the Studio's ctGenerate with `env.memory`).
     fn run_tool_round(&mut self) -> Option<Task<Message>> {
         let chat = self.live.as_ref().map(|l| l.chat)?;
-        if !self.memory_tool_offered() {
-            // the switch went off while the answer ran: the calls are dropped, so no later question
-            // ever carries them without their answers
+        let flags = self.tool_flags();
+        if !flags.web && !flags.memory {
+            // the switches went off while the answer ran: the calls are dropped, so no later
+            // question ever carries them without their answers
             if let Some(last) = self.messages.last_mut() {
                 last.tool_calls = None;
             }
             self.finish();
             return None;
         }
-        if self.tool_round >= 8 {
+        if self.tool_round as usize >= tools::MAX_ROUNDS {
             self.finish();
             return None;
         }
         let calls = self.messages.last().and_then(|m| m.tool_calls.clone()).unwrap_or_else(|| serde_json::json!([]));
+        let jobs: Vec<(String, String, String)> = calls
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .take(tools::MAX_CALLS)
+            .map(|call| {
+                let id = call.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+                let name = call.pointer("/function/name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+                let raw_args = call.pointer("/function/arguments").and_then(serde_json::Value::as_str).unwrap_or("{}").to_string();
+                (id, name, raw_args)
+            })
+            .collect();
+        if jobs.is_empty() {
+            self.finish();
+            return None;
+        }
+        // what one answer may still take from the server for web results (ctBudget, one per answer)
+        let budget = self.answer_budget.unwrap_or_else(|| tools::budget(self.model_info().max_context));
+        let sources = std::mem::take(&mut self.answer_sources);
         let now = store::now_millis();
-        let mut results: Vec<(String, String)> = Vec::new();
-        let mut cards: Vec<crate::memory::ToolCard> = Vec::new();
-        for call in calls.as_array().cloned().unwrap_or_default() {
-            let id = call.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
-            let name = call.pointer("/function/name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
-            let raw_args = call.pointer("/function/arguments").and_then(serde_json::Value::as_str).unwrap_or("{}").to_string();
-            let (text, card) = if name != "memory" {
-                (
-                    format!("Error: unknown tool '{name}'."),
-                    crate::memory::ToolCard { label: name.clone(), status: "error".into(), change: None, undone: false, quiet: false },
-                )
-            } else {
-                match parse_tool_args(&raw_args) {
-                    None => (
-                        "Error: the arguments of memory are not valid JSON. Call it again with a JSON object such as {\"action\": \"add\", \"text\": \"Prefers metric units\"}."
-                            .to_string(),
-                        crate::memory::ToolCard { label: "Memory".into(), status: "error".into(), change: None, undone: false, quiet: false },
-                    ),
-                    Some(args) => {
-                        let outcome = memory::tool_apply(&self.store.prefs.personal.memories, &args, now, || store::uid("mem"));
-                        if outcome.list != self.store.prefs.personal.memories {
-                            self.store.prefs.personal.memories = outcome.list.clone();
-                            self.save();
-                        }
-                        let card = memory_card(&args, &outcome);
-                        (outcome.text, card)
+        self.tool_hold = Vec::new();
+        self.tool_web_jobs = Vec::new();
+        let fetcher = api::EngineFetcher { base: self.base.clone() };
+        for (index, (id, name, raw_args)) in jobs.into_iter().enumerate() {
+            let memory_here = name == "memory" && flags.memory;
+            let web_here = name == "web_search" || name == "web_fetch";
+            if !web_here {
+                // the memory calls are answered in this window (they need no server); a call of a
+                // tool this chat does not have gets the Studio's line about it
+                let mem_list = std::sync::Arc::new(std::sync::Mutex::new(self.store.prefs.personal.memories.clone()));
+                let mem_for_closure = std::sync::Arc::clone(&mem_list);
+                let mut env = tools::Env {
+                    budget,
+                    sources: Vec::new(),
+                    memory: memory_here.then(|| {
+                        Box::new(move |args: &serde_json::Value| {
+                            let mut guard = mem_for_closure.lock().expect("the memory of the round");
+                            let outcome = memory::tool_apply(&guard, args, now, || store::uid("mem"));
+                            *guard = outcome.list.clone();
+                            tools::MemoryRun { text: outcome.text, change: outcome.change, list: outcome.list }
+                        })
+                            as Box<dyn FnMut(&serde_json::Value) -> tools::MemoryRun + Send>
+                    }),
+                };
+                let outcome = futures::executor::block_on(tools::run(&name, &raw_args, &mut env, &fetcher));
+                if memory_here {
+                    let final_list = mem_list.lock().expect("the memory of the round").clone();
+                    if final_list != self.store.prefs.personal.memories {
+                        self.store.prefs.personal.memories = final_list;
+                        self.save();
                     }
                 }
-            };
+                let card = crate::memory::ToolCard {
+                    label: outcome.card.label,
+                    status: outcome.card.status.to_string(),
+                    change: outcome.card.change,
+                    undone: false,
+                    quiet: outcome.card.quiet,
+                };
+                self.tool_hold.push(Some((id, outcome.text, card)));
+            } else {
+                self.tool_hold.push(None);
+                self.tool_web_jobs.push((index, id, name, raw_args));
+            }
+        }
+        if self.tool_web_jobs.is_empty() {
+            // everything of the round is answered here: the next round starts at once
+            return self.tool_round_finalize(chat);
+        }
+        // the web calls go to the server, one after the other (the Studio awaits them in order)
+        let jobs = std::mem::take(&mut self.tool_web_jobs);
+        let base = self.base.clone();
+        let task = Task::perform(
+            async move {
+                let fetcher = api::EngineFetcher { base };
+                let mut env = tools::Env { budget, sources, memory: None };
+                let mut results = Vec::new();
+                for (index, id, name, raw_args) in jobs {
+                    let outcome = tools::run(&name, &raw_args, &mut env, &fetcher).await;
+                    let card = crate::memory::ToolCard {
+                        label: outcome.card.label,
+                        status: outcome.card.status.to_string(),
+                        change: outcome.card.change,
+                        undone: false,
+                        quiet: outcome.card.quiet,
+                    };
+                    results.push((index, id, outcome.text, card));
+                }
+                ToolRoundResult { results, budget_left: env.budget.left, sources: env.sources }
+            },
+            Message::ToolRound,
+        );
+        Some(task)
+    }
+
+    /// Everything of the round has its answer: the results in the order of the calls go back to
+    /// the model, the cards stand under it, and the next round starts (the Studio's loop).
+    fn tool_round_finalize(&mut self, chat: u64) -> Option<Task<Message>> {
+        let mut cards = Vec::new();
+        let mut results: Vec<(String, String)> = Vec::new();
+        for slot in std::mem::take(&mut self.tool_hold) {
+            let Some((id, text, card)) = slot else { continue };
             results.push((id, text));
             cards.push(card);
         }
@@ -2328,6 +2501,7 @@ impl App {
                 tool_calls: None,
                 tool_call_id: Some(id),
                 tool_cards: Vec::new(),
+                sources: Vec::new(),
                 md: markdown::Content::new(),
             });
         }
@@ -2342,6 +2516,7 @@ impl App {
             tool_calls: None,
             tool_call_id: None,
             tool_cards: Vec::new(),
+            sources: Vec::new(),
             md: markdown::Content::new(),
         });
         self.tool_round += 1;
@@ -4014,7 +4189,10 @@ impl App {
             local: true,
             model_name: model.detail.name.clone(),
             thinking: model.thinking.supported() && level != "off",
-            tools: prompts::Tools { web: false, memory: self.memory_tool_offered(), chats: false },
+            tools: {
+                let flags = self.tool_flags();
+                prompts::Tools { web: flags.web, memory: flags.memory, chats: false }
+            },
         };
         let active = self.active_assistant();
         let mut choices: Vec<(prompts::Mode, &str)> = match active.as_ref() {
@@ -4312,6 +4490,17 @@ impl App {
                     }
                     col = col.push(container(line).padding([4, 10]).style(theme::inset(t)));
                 }
+                if !live && !m.sources.is_empty() {
+                    // the sources of the answer, numbered like the model cites them (ctSourcesHtml)
+                    let mut sources_line = row![text("Sources").size(12).color(t.muted)].spacing(10).align_y(Alignment::Center);
+                    for s in &m.sources {
+                        let title = format!("[{}] {}", s.n, ellipsize(&s.title, 70));
+                        sources_line = sources_line.push(
+                            button(text(title).size(12).color(t.primary)).on_press(Message::OpenUrl(s.url.clone())).padding([0, 2]).style(theme::ghost_button(t)),
+                        );
+                    }
+                    col = col.push(sources_line);
+                }
                 if !live && !m.content.is_empty() {
                     let mut meta = row![button(text("Copy answer").size(12)).on_press(Message::Copy(i)).padding([3, 0]).style(theme::ghost_button(t))].spacing(14).align_y(Alignment::Center);
                     meta = meta.push(button(text("MD").size(12)).on_press(Message::CopyMd(i)).padding([3, 0]).style(theme::ghost_button(t)));
@@ -4399,6 +4588,36 @@ impl App {
             .into()
     }
 
+    /// Which tools this chat is offered (the Studio's ctOfferedFlags): a context of a few
+    /// hundred tokens has no room for schemas, and a temporary or private chat has no memory.
+    fn tool_flags(&self) -> tools::Flags {
+        let model = self.model_info();
+        let size = prompts::size(model.max_context, model.detail.parameters, self.store.prefs.prompt_length, self.last_prompt_speed());
+        if size == prompts::Size::Tiny {
+            return tools::Flags::default();
+        }
+        let chat = self.current.and_then(|id| self.store.chat(id));
+        let private = chat.is_some_and(|c| c.temporary || c.no_personal);
+        tools::Flags {
+            web: self.use_web,
+            memory: self.memory_tool_offered() && !private,
+            chats: false,
+        }
+    }
+
+    /// The definitions of the offered tools in the OpenAI format (None: no tools at all), for the
+    /// request of the round (the Studio's ctOffered → the `tools` of ctGenerate).
+    fn tool_defs(&self) -> Option<serde_json::Value> {
+        let model = self.model_info();
+        let size = prompts::size(model.max_context, model.detail.parameters, self.store.prefs.prompt_length, self.last_prompt_speed());
+        let defs = tools::defs(self.tool_flags(), size == prompts::Size::Compact);
+        if defs.as_array().is_some_and(|a| a.is_empty()) {
+            None
+        } else {
+            Some(defs)
+        }
+    }
+
     fn composer(&self, t: Tokens) -> Element<'_, Message> {
         let editor = text_editor(&self.editor)
             .placeholder("Ask anything or give an instruction")
@@ -4449,6 +4668,20 @@ impl App {
             .on_press_maybe((!busy).then_some(Message::Attach))
             .padding(6)
             .style(theme::ghost_button(t));
+        // the chip to allow the web tools of the server (the Studio's btnToggleWeb)
+        let web_chip = button(
+            row![
+                svg(icon(ICON_GLOBE)).width(14).height(14).style(move |theme, status| {
+                    if self.use_web { accent_svg(t)(theme, status) } else { muted_svg(t)(theme, status) }
+                }),
+                text("Allow web access").size(13),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::ToggleWeb)
+        .padding([5, 10])
+        .style(slash_button(t, self.use_web));
         // the chip of the response style with its menu (the Studio's #btnStyle and #styleMenu in the
         // composer toolbar: "Style", or "Style: Concise" for a chat that has one)
         let staged = self
@@ -4540,7 +4773,7 @@ impl App {
                 })
                 .into()
         };
-        let card = container(column![banner, attachments, slash_menu, editor, style_menu, row![attach, style_chip, hint, Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 16.0 })])
+        let card = container(column![banner, attachments, slash_menu, editor, style_menu, row![attach, web_chip, style_chip, hint, Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 16.0 })])
             .style(theme::card(t, theme::R_XL, false))
             .max_width(780);
         container(card).width(Length::Fill).center_x(Length::Fill).padding(Padding { top: 8.0, right: 24.0, bottom: 20.0, left: 24.0 }).into()
@@ -4580,6 +4813,17 @@ pub fn ellipsize(text: &str, max: usize) -> String {
 pub const UI_FONT: Font = Font::with_name("Inter");
 pub const FONT_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.otf");
 pub const FONT_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.otf");
+
+/// Opens an address in the browser of the computer (the sources under an answer are links in
+/// the Studio). Best effort: nothing happens when the computer has no browser command.
+fn open_page(url: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd").args(["/C", "start", url]).spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
 
 /// One entry of the menu under a "/": the tint of the CSS `.slash-item.active, .slash-item:hover`
 /// (the primary colour at 14 percent) over the rounded background.
@@ -4694,53 +4938,7 @@ fn file_chip(t: Tokens, name: &str, title: Option<String>, remove: Option<Messag
     chip
 }
 
-/// The arguments of a tool call: a JSON object, also inside a code fence; `None` when unusable
-/// (the Studio's ctParseArgs).
-fn parse_tool_args(text: &str) -> Option<serde_json::Value> {
-    let raw = text.trim();
-    let fence = regex::Regex::new(r"(?s)^```(?:json)?\s*|\s*```$").expect("the pattern compiles");
-    let stripped = fence.replace_all(raw, "").to_string();
-    for candidate in [raw, stripped.as_str()] {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(candidate) {
-            if v.is_object() {
-                return Some(v);
-            }
-        }
-    }
-    None
-}
 
-/// The line under the answer for a call of the memory tool (the card of ctRunTool).
-fn memory_card(args: &serde_json::Value, outcome: &memory::ToolOutcome) -> crate::memory::ToolCard {
-    let short = |s: &str, n: usize| -> String {
-        let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
-        if flat.chars().count() > n {
-            format!("{}...", flat.chars().take(n.saturating_sub(1)).collect::<String>())
-        } else {
-            flat
-        }
-    };
-    if let Some(change) = &outcome.change {
-        let label = match change.kind.as_str() {
-            "add" => format!("Saved to memory: {}", change.after.as_ref().map(|m| m.text.as_str()).unwrap_or_default()),
-            "update" => format!("Updated memory: {}", change.after.as_ref().map(|m| m.text.as_str()).unwrap_or_default()),
-            _ => format!("Removed from memory: {}", change.before.as_ref().map(|m| m.text.as_str()).unwrap_or_default()),
-        };
-        return crate::memory::ToolCard { label: short(&label, 140), status: "done".into(), change: Some(change.clone()), undone: false, quiet: false };
-    }
-    let refused = outcome.text.starts_with("Not saved");
-    let action = args.get("action").and_then(serde_json::Value::as_str).unwrap_or_default();
-    let quiet = action.eq_ignore_ascii_case("list") || outcome.text == "Already remembered.";
-    let label = if refused {
-        "Memory: not saved (looks like a secret)".to_string()
-    } else if quiet {
-        "Memory checked".to_string()
-    } else {
-        format!("Memory: {}", short(&outcome.text, 80))
-    };
-    let status = if refused || outcome.text.starts_with("Error") { "error" } else { "done" };
-    crate::memory::ToolCard { label, status: status.into(), change: None, undone: false, quiet: quiet && !refused }
-}
 
 /// The names of the documents of the passages: "A and B", and with more than two "A, B and N more"
 /// (the Studio's `ragNames`).
@@ -4928,6 +5126,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             tool_cards: Vec::new(),
+            sources: Vec::new(),
             md: markdown::Content::new(),
         };
         assert_eq!(estimate_tokens(&[m(&"a".repeat(40))]), 14);
