@@ -6,8 +6,10 @@ use crate::theme::{self, Tokens};
 use iced::widget::{column, container, markdown, row, rich_text, scrollable, text, Space};
 use iced::{font, Element, Font, Length, Padding, Pixels};
 
-pub struct Viewer {
+pub struct Viewer<'a> {
     pub t: Tokens,
+    /// The runs that stand under a code block of this answer, keyed by the code that runs.
+    pub runs: Option<&'a std::collections::HashMap<String, crate::artifacts::CodeRun>>,
 }
 
 /// The settings for an answer: sizes in proportion (the default makes a heading twice the body), spacing between the blocks.
@@ -35,22 +37,56 @@ pub fn settings(t: Tokens, theme: &iced::Theme) -> markdown::Settings {
 }
 
 pub fn view<'a>(content: &'a markdown::Content, t: Tokens, theme: &iced::Theme) -> Element<'a, Message> {
-    markdown::view_with(content.items(), settings(t, theme), &Viewer { t })
+    markdown::view_with(content.items(), settings(t, theme), &Viewer { t, runs: None })
 }
 
-impl<'a> markdown::Viewer<'a, Message> for Viewer {
+/// The same, with the runs of the chat: every code block draws the output of its own run under
+/// itself (the `.run-out` of a code card in the Studio).
+pub fn view_runs<'a>(
+    content: &'a markdown::Content,
+    t: Tokens,
+    theme: &iced::Theme,
+    runs: &'a std::collections::HashMap<String, crate::artifacts::CodeRun>,
+) -> Element<'a, Message> {
+    markdown::view_with(content.items(), settings(t, theme), &Viewer { t, runs: Some(runs) })
+}
+
+impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
     fn on_link_click(url: markdown::Uri) -> Message {
         Message::LinkClicked(url)
     }
 
     fn code_block(&self, settings: markdown::Settings, language: Option<&'a str>, code: &'a str, lines: &'a [markdown::Text]) -> Element<'a, Message> {
         let t = self.t;
-        let label = language.filter(|l| !l.is_empty()).unwrap_or("text");
+        let info = language.unwrap_or("");
+        let lang = info.split_whitespace().next().unwrap_or("");
+        let label = if lang.is_empty() { "text" } else { lang };
+        let kind = crate::artifacts::artifact_kind(lang);
+        let title = crate::artifacts::parse_info(info);
+        // the buttons of the Studio: Open/Preview for a block that is one, Run for JavaScript
+        let mut actions = row![].spacing(4);
+        if kind.is_previewable() || !title.is_empty() {
+            let word = if kind.is_previewable() { "Preview" } else { "Open" };
+            actions = actions.push(
+                iced::widget::button(text(word).size(12))
+                    .on_press(Message::ArtOpen(code.to_string(), info.to_string()))
+                    .padding([2, 8])
+                    .style(theme::ghost_button(t)),
+            );
+        }
+        let run = self.runs.and_then(|runs| runs.get(code));
+        if crate::artifacts::is_js_lang(lang) {
+            let word = if run.is_some_and(|r| matches!(r.status, crate::artifacts::RunStatus::Running)) { "Stop" } else { "Run" };
+            let msg = if word == "Stop" { Message::RunStop(code.to_string()) } else { Message::RunCode(code.to_string()) };
+            actions = actions.push(iced::widget::button(text(word).size(12)).on_press(msg).padding([2, 8]).style(theme::ghost_button(t)));
+        }
         let header = row![
             text(label).size(12).color(t.muted).font(Font { weight: font::Weight::Medium, ..crate::app::UI_FONT }),
             Space::new().width(Length::Fill),
+            actions,
             iced::widget::button(text("Copy code").size(12)).on_press(Message::CopyText(code.to_string())).padding([2, 8]).style(theme::ghost_button(t)),
         ]
+        .spacing(6)
         .align_y(iced::Alignment::Center)
         .padding(Padding { top: 4.0, right: 6.0, bottom: 0.0, left: 14.0 });
         let body = scrollable(
@@ -60,7 +96,30 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer {
             .padding(Padding { top: 6.0, right: 14.0, bottom: 14.0, left: 14.0 }),
         )
         .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::default().width(6).scroller_width(6)));
-        container(column![header, body]).width(Length::Fill).style(theme::inset(t)).into()
+        let mut col = column![header, body];
+        if let Some(run) = run {
+            let status = match &run.status {
+                crate::artifacts::RunStatus::Running => text("Running...").size(12).color(if run.warn { t.danger } else { t.muted }),
+                crate::artifacts::RunStatus::Finished { line, .. } => text(line.clone()).size(12).color(if run.warn { t.danger } else { t.muted }),
+                crate::artifacts::RunStatus::Stopped(why) => text(why.clone()).size(12).color(if run.warn { t.danger } else { t.muted }),
+            };
+            let mut out = column![status].spacing(3);
+            if !run.lines.is_empty() {
+                let mut body = column![].spacing(1);
+                for line in &run.lines {
+                    let color = match line.level.as_str() {
+                        "error" => t.danger,
+                        "warn" | "info" => t.primary,
+                        "value" => t.primary,
+                        _ => t.fg_soft,
+                    };
+                    body = body.push(text(line.text.clone()).size(12).color(color).font(Font { weight: font::Weight::Normal, ..crate::app::UI_FONT }));
+                }
+                out = out.push(body);
+            }
+            col = col.push(container(out).padding([6, 10]).style(theme::inset(t)));
+        }
+        container(col).width(Length::Fill).style(theme::inset(t)).into()
     }
 
     fn quote(&self, settings: markdown::Settings, contents: &'a [markdown::Item]) -> Element<'a, Message> {

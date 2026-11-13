@@ -1,0 +1,620 @@
+{
+ "limits": {
+  "kind_by_lang": {
+   "html": "html",
+   "htm": "html",
+   "xhtml": "html",
+   "svg": "svg",
+   "md": "markdown",
+   "markdown": "markdown",
+   "csv": "csv",
+   "tsv": "csv"
+  },
+  "ext_by_lang": {
+   "python": "py",
+   "py": "py",
+   "javascript": "js",
+   "js": "js",
+   "typescript": "ts",
+   "ts": "ts",
+   "rust": "rs",
+   "rs": "rs",
+   "go": "go",
+   "java": "java",
+   "c": "c",
+   "cpp": "cpp",
+   "sh": "sh",
+   "bash": "sh",
+   "sql": "sql",
+   "json": "json",
+   "css": "css",
+   "yaml": "yaml",
+   "yml": "yaml",
+   "toml": "toml"
+  },
+  "kind_ext": {
+   "html": "html",
+   "svg": "svg",
+   "markdown": "md",
+   "csv": "csv"
+  },
+  "kind_mime": {
+   "html": "text/html",
+   "svg": "image/svg+xml",
+   "markdown": "text/markdown",
+   "csv": "text/csv",
+   "code": "text/plain"
+  }
+ },
+ "kind": [
+  [
+   "html",
+   "html"
+  ],
+  [
+   "HTM",
+   "html"
+  ],
+  [
+   "xhtml",
+   "html"
+  ],
+  [
+   "svg",
+   "svg"
+  ],
+  [
+   "md",
+   "markdown"
+  ],
+  [
+   "markdown",
+   "markdown"
+  ],
+  [
+   "csv",
+   "csv"
+  ],
+  [
+   "TSV",
+   "csv"
+  ],
+  [
+   "js",
+   "code"
+  ],
+  [
+   "py",
+   "code"
+  ],
+  [
+   "",
+   "code"
+  ],
+  [
+   "undefined",
+   "code"
+  ]
+ ],
+ "parse_info": [
+  [
+   "title=\"My page\"",
+   "My page"
+  ],
+  [
+   "title='Single' rest",
+   "Single"
+  ],
+  [
+   "artifact=bare.html extra",
+   "bare.html"
+  ],
+  [
+   "name=\"Named\"",
+   "Named"
+  ],
+  [
+   "tab=4 title=\"Tabs too\"",
+   "Tabs too"
+  ],
+  [
+   "no title here",
+   ""
+  ],
+  [
+   "",
+   ""
+  ],
+  [
+   "title = \"Spaced\"",
+   "Spaced"
+  ]
+ ],
+ "extract": [
+  [
+   "a plain fence",
+   []
+  ],
+  [
+   "an html page",
+   [
+    {
+     "lang": "html",
+     "kind": "html",
+     "title": "",
+     "code": "<h1>Hi</h1>"
+    }
+   ]
+  ],
+  [
+   "with a title on a code block",
+   [
+    {
+     "lang": "python",
+     "kind": "code",
+     "title": "calc.py",
+     "code": "print(1)"
+    }
+   ]
+  ],
+  [
+   "tilde fence with info",
+   [
+    {
+     "lang": "svg",
+     "kind": "svg",
+     "title": "logo",
+     "code": "<circle/>"
+    }
+   ]
+  ],
+  [
+   "unclosed fence is skipped",
+   []
+  ],
+  [
+   "closing fence needs only backticks",
+   [
+    {
+     "lang": "md",
+     "kind": "markdown",
+     "title": "",
+     "code": "# Hi\n``` trailing junk not allowed"
+    }
+   ]
+  ],
+  [
+   "markdown variant",
+   [
+    {
+     "lang": "markdown",
+     "kind": "markdown",
+     "title": "",
+     "code": "# Doc"
+    }
+   ]
+  ],
+  [
+   "tsv is a table",
+   [
+    {
+     "lang": "tsv",
+     "kind": "csv",
+     "title": "",
+     "code": "1\t2"
+    }
+   ]
+  ],
+  [
+   "the info string may be long",
+   [
+    {
+     "lang": "js",
+     "kind": "code",
+     "title": "Run me",
+     "code": "x"
+    }
+   ]
+  ],
+  [
+   "cr lf line endings",
+   [
+    {
+     "lang": "html",
+     "kind": "html",
+     "title": "",
+     "code": "<p>ok</p>"
+    }
+   ]
+  ],
+  [
+   "body keeps blank lines",
+   [
+    {
+     "lang": "csv",
+     "kind": "csv",
+     "title": "",
+     "code": "a,b\n\n1,2"
+    }
+   ]
+  ],
+  [
+   "four backticks",
+   [
+    {
+     "lang": "html",
+     "kind": "html",
+     "title": "",
+     "code": "<p>deep</p>"
+    }
+   ]
+  ],
+  [
+   "kind code without a title is not an artifact",
+   []
+  ],
+  [
+   "indented fence",
+   [
+    {
+     "lang": "html",
+     "kind": "html",
+     "title": "",
+     "code": "  <p>x</p>"
+    }
+   ]
+  ]
+ ],
+ "families": [
+  [
+   "two messages with the same title",
+   [
+    {
+     "id": "m1#0",
+     "kind": "html",
+     "title": "a",
+     "lang": "html",
+     "touched": 2,
+     "versions": [
+      {
+       "n": 1,
+       "msgId": "m1",
+       "code": "v1"
+      },
+      {
+       "n": 2,
+       "msgId": "m2",
+       "code": "v2"
+      }
+     ]
+    }
+   ]
+  ],
+  [
+   "an untitled block continues the newest of its kind",
+   [
+    {
+     "id": "m1#0",
+     "kind": "csv",
+     "title": "",
+     "lang": "csv",
+     "touched": 3,
+     "versions": [
+      {
+       "n": 1,
+       "msgId": "m1",
+       "code": "a,b"
+      },
+      {
+       "n": 2,
+       "msgId": "m3",
+       "code": "a,b,c"
+      }
+     ]
+    },
+    {
+     "id": "m2#0",
+     "kind": "html",
+     "title": "",
+     "lang": "html",
+     "touched": 2,
+     "versions": [
+      {
+       "n": 1,
+       "msgId": "m2",
+       "code": "<p>x</p>"
+      }
+     ]
+    }
+   ]
+  ],
+  [
+   "identical code stays with its own family",
+   [
+    {
+     "id": "m1#0",
+     "kind": "markdown",
+     "title": "",
+     "lang": "md",
+     "touched": 3,
+     "versions": [
+      {
+       "n": 1,
+       "msgId": "m1",
+       "code": "same"
+      }
+     ]
+    },
+    {
+     "id": "m2#0",
+     "kind": "html",
+     "title": "",
+     "lang": "html",
+     "touched": 2,
+     "versions": [
+      {
+       "n": 1,
+       "msgId": "m2",
+       "code": "x"
+      }
+     ]
+    }
+   ]
+  ],
+  [
+   "one message changes a family at most once",
+   [
+    {
+     "id": "m1#0",
+     "kind": "html",
+     "title": "a",
+     "lang": "html",
+     "touched": 2,
+     "versions": [
+      {
+       "n": 1,
+       "msgId": "m1",
+       "code": "one"
+      },
+      {
+       "n": 2,
+       "msgId": "m2",
+       "code": "two"
+      }
+     ]
+    },
+    {
+     "id": "m2#1",
+     "kind": "html",
+     "title": "a",
+     "lang": "html",
+     "touched": 3,
+     "versions": [
+      {
+       "n": 1,
+       "msgId": "m2",
+       "code": "three"
+      }
+     ]
+    }
+   ]
+  ],
+  [
+   "titles are compared without case",
+   [
+    {
+     "id": "m1#0",
+     "kind": "code",
+     "title": "Tool",
+     "lang": "js",
+     "touched": 2,
+     "versions": [
+      {
+       "n": 1,
+       "msgId": "m1",
+       "code": "x"
+      },
+      {
+       "n": 2,
+       "msgId": "m2",
+       "code": "y"
+      }
+     ]
+    }
+   ]
+  ],
+  [
+   "several kinds start their own families",
+   [
+    {
+     "id": "m1#0",
+     "kind": "html",
+     "title": "",
+     "lang": "html",
+     "touched": 3,
+     "versions": [
+      {
+       "n": 1,
+       "msgId": "m1",
+       "code": "<p/>"
+      },
+      {
+       "n": 2,
+       "msgId": "m2",
+       "code": "<p>2</p>"
+      }
+     ]
+    },
+    {
+     "id": "m1#1",
+     "kind": "svg",
+     "title": "",
+     "lang": "svg",
+     "touched": 2,
+     "versions": [
+      {
+       "n": 1,
+       "msgId": "m1",
+       "code": "<circle/>"
+      }
+     ]
+    }
+   ]
+  ]
+ ],
+ "file_name": [
+  [
+   {
+    "title": "My page",
+    "kind": "html",
+    "lang": "html"
+   },
+   "My-page.html"
+  ],
+  [
+   {
+    "title": "",
+    "kind": "html",
+    "lang": "html"
+   },
+   "artifact.html"
+  ],
+  [
+   {
+    "title": "weird:/chars*",
+    "kind": "markdown",
+    "lang": "md"
+   },
+   "weirdchars.md"
+  ],
+  [
+   {
+    "title": "table here",
+    "kind": "csv",
+    "lang": "csv"
+   },
+   "table-here.csv"
+  ],
+  [
+   {
+    "title": "script",
+    "kind": "code",
+    "lang": "python"
+   },
+   "script.py"
+  ],
+  [
+   {
+    "title": "script",
+    "kind": "code",
+    "lang": "unknownlang"
+   },
+   "script.txt"
+  ],
+  [
+   {
+    "title": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "kind": "code",
+    "lang": "rs"
+   },
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.rs"
+  ],
+  [
+   {
+    "title": "double  spaced name",
+    "kind": "code",
+    "lang": "js"
+   },
+   "double-spaced-name.js"
+  ]
+ ],
+ "parse_csv": [
+  [
+   [
+    "a",
+    "b",
+    "c"
+   ],
+   [
+    "1",
+    "2",
+    "3"
+   ]
+  ],
+  [
+   [
+    "name",
+    "age"
+   ],
+   [
+    "Smith; Jr",
+    "42"
+   ]
+  ],
+  [
+   [
+    "x",
+    "y"
+   ],
+   [
+    "1",
+    "2"
+   ]
+  ],
+  [
+   [
+    "quoted, field",
+    "b"
+   ],
+   [
+    "line\nbreak",
+    "2"
+   ]
+  ],
+  [],
+  [
+   [
+    "single"
+   ]
+  ],
+  [
+   [
+    "a",
+    "b"
+   ],
+   [
+    "1",
+    "2"
+   ]
+  ],
+  [
+   [
+    "a",
+    "",
+    "b"
+   ],
+   [
+    "1",
+    "",
+    "3"
+   ]
+  ],
+  [
+   [
+    "empty",
+    "rows",
+    "too"
+   ],
+   [
+    "",
+    "",
+    ""
+   ],
+   [
+    "real",
+    "data",
+    "here"
+   ]
+  ]
+ ]
+}

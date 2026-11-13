@@ -22,6 +22,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case", "perf"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
+rquickjs = "0.14.0"
 
 [dev-dependencies]
 iced_test = "0.14"

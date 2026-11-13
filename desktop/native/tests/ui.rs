@@ -54,6 +54,127 @@ fn settings() -> iced::Settings {
     iced::Settings { fonts: vec![fllm_app::app::FONT_REGULAR.into(), fllm_app::app::FONT_SEMIBOLD.into()], default_font: fllm_app::app::UI_FONT, ..Default::default() }
 }
 
+/// The artifacts of an answer: the buttons of a block, the panel with its versions, the previews
+/// and the output of a run under the block (the artifacts.js of the Studio).
+#[test]
+fn the_artifact_panel_opens_from_a_block_and_shows_the_versions() {
+    let first = rec(Role::Assistant, "Here is the page:\n\n```html title=\"page\"\n<p>Hi</p>\n```", None);
+    let second = rec(Role::Assistant, "The updated one:\n\n```html title=\"page\"\n<p>Hi again</p>\n```", None);
+    let chats = vec![ChatRecord {
+        id: 2,
+        title: "pages".into(),
+        messages: vec![rec(Role::User, "make a page", None), first, second],
+        ..Default::default()
+    }];
+    let (mut app, _dir) = app_with(chats, "light", true);
+    let _ = app.update(Message::OpenChat(2));
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        ui.find("Preview").expect("the block is an artifact: its button says so");
+        ui.find("Copy code").expect("the copy button of the block is still there");
+    }
+    // a click opens the panel with the family of the title (buildFamilies)
+    let clicked: Vec<Message> = {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        ui.click("Preview").expect("the button is there");
+        ui.into_messages().collect()
+    };
+    assert!(clicked.iter().any(|m| matches!(m, Message::ArtOpen(_, _))), "{clicked:?}");
+    for m in clicked {
+        let _ = app.update(m);
+    }
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        ui.find("page").expect("the title of the artifact is in the head");
+        ui.find("HTML page").expect("the kind beside it");
+        ui.find("v1 / 2").expect("two versions of the same title");
+        ui.find("Preview").expect("the preview tab is active for a page");
+        ui.find("Download").expect("the tools of the panel");
+        ui.find("Larger").expect("the large view of the panel");
+        ui.find("Close").expect("the way out of the panel");
+        ui.find("<p>Hi</p>").expect("the code of the first version");
+    }
+    let msgs: Vec<Message> = {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        ui.click("›").expect("the next version is clickable");
+        ui.into_messages().collect()
+    };
+    assert!(!msgs.is_empty(), "the click sends its button: {msgs:?}");
+    for m in msgs {
+        let _ = app.update(m);
+    }
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        ui.find("v2 / 2").expect("the second version");
+        ui.find("<p>Hi again</p>").expect("its code");
+    }
+    // the large view sits over everything; Esc leaves it first, the panel stays (the keydown of
+    // artifacts.js only knows that state)
+    let _ = app.update(Message::ArtAction(fllm_app::artifacts::ArtAction::Larger));
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        ui.find("Smaller").expect("the large view says so");
+    }
+    let _ = app.update(Message::Esc);
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        ui.find("Larger").expect("Esc left the large view, the panel is back at the side");
+        ui.find("v2 / 2").expect("the panel with its second version is still open");
+    }
+    save_png(&app, "artifact-panel");
+    // Close takes the panel away
+    let _ = app.update(Message::ArtAction(fllm_app::artifacts::ArtAction::Close));
+    assert!(app.run_of("nothing").is_none());
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        assert!(ui.find("v2 / 2").is_err(), "the panel is closed");
+        ui.find("Preview").expect("the block of the answer is still there");
+    }
+}
+
+/// A JavaScript block runs: the Run button, the lines of its console and the value of it under the
+/// block (the card of the Studio's runBlock).
+#[test]
+fn a_code_block_runs_and_shows_its_output_under_itself() {
+    let answer = rec(Role::Assistant, "```js\nconsole.log('hi', 2); 41 + 1\n```", None);
+    let chats = vec![ChatRecord { id: 1, title: "run".into(), messages: vec![rec(Role::User, "run it", None), answer], ..Default::default() }];
+    let (mut app, _dir) = app_with(chats, "light", true);
+    let _ = app.update(Message::OpenChat(1));
+    let clicked: Vec<Message> = {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        ui.find("Run").expect("the button of a JavaScript block");
+        ui.click("Run").expect("the button is there");
+        ui.into_messages().collect()
+    };
+    let code = match clicked.first() {
+        Some(Message::RunCode(code)) => code.clone(),
+        other => panic!("the Run button sends its block: {other:?}"),
+    };
+    for m in clicked {
+        let _ = app.update(m);
+    }
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        ui.find("Running...").expect("the card under the block says it goes");
+        ui.find("Stop").expect("the same button stops it now");
+    }
+    // the runner of the window reports over its channel (the engine itself is tested in
+    // tests/artifacts.rs); here the messages arrive the way the stream delivers them
+    let _ = app.update(Message::RunEvent { code: code.clone(), ev: fllm_app::artifacts::RunEvent::Log { level: "log", text: "hi 2".into() } });
+    let _ = app.update(Message::RunEvent {
+        code: code.clone(),
+        ev: fllm_app::artifacts::RunEvent::Done { ms: 12, value: Some("42".into()), error: None },
+    });
+    {
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+        ui.find("hi 2").expect("the console line under the block");
+        ui.find("-> 42").expect("the value of the answer");
+        ui.find("Done in 12 ms").expect("the status of the card");
+        ui.find("Run").expect("the button is back");
+    }
+    save_png(&app, "artifact-run");
+}
+
 /// Esc ends a running answer and does nothing when nothing runs (the title of the Studio's send
 /// button: "Stop the answer (Esc)").
 #[test]

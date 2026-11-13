@@ -162,6 +162,20 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   could not run: … The model answers on its own instead.*; *Stop* cancels the run and its requests,
   and the run comes back with the chat. Checked against the routes themselves with a small server
   that answers plan, search, fetch, notes, reflection and report (4 tests, 5 mutations).
+- Artifacts: a fenced block of an answer with a title (`title="…"`) or that can be previewed
+  (HTML, SVG, Markdown, CSV) becomes an artifact; *Preview* or *Open* in the header of the block
+  opens the panel beside the chat with the artifact and all its versions (`‹ v N / M ›`) — the
+  blocks of a conversation group into families exactly the way the Studio's `buildFamilies` does,
+  checked against fixtures the JavaScript itself produced. The panel has the *Preview* and *Code*
+  tabs (Markdown renders, a CSV becomes its table of at most 500 rows with the note of the rest,
+  code and pages show their text), *Reload*, *Copy*, *Download* (your downloads, the name of the
+  Studio) and *Larger* — the large view sits over a dimmed chat. A page has no window to be drawn
+  in here, so *Open in browser* writes the file and shows it in the browser of your computer. A
+  JavaScript block has a *Run* button: it runs on the quickjs engine with the script of the
+  Studio's `runner.js` — the same console lines with the same formatting and limits, no network,
+  the async fallback, errors as `name: message`, the value of the last line, five seconds at most
+  — and its output appears under the block (*Running…* then *Done in N ms*, the lines and `->`
+  value; the same button becomes *Stop*).
 - Code (sidebar > Code): a coding agent in a folder. Open a folder (type the path, *Choose…* for the folder dialog of the server's computer, or one of the last six), tell the agent what to do; the model
   gets the server's agent tools (read, search, edit, run commands, ...) and answers with tool calls, which the window runs through
   `/api/studio/agent/tool` and feeds back until the model answers without one (at most 30 model calls per message). Every call is a card:

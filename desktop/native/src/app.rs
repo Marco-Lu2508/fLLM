@@ -5,6 +5,7 @@ use crate::assistants::{self, Assistant, SysMode};
 use crate::memory;
 use crate::promptlib;
 use crate::speech;
+use crate::artifacts;
 use crate::research;
 use crate::tools;
 use crate::rag::{self, IndexedDoc};
@@ -271,6 +272,10 @@ pub struct App {
     research_no_schema: bool,
     /// The sources of the report that is streaming: added to the answer when it is over.
     research_sources: Option<Vec<(u32, String, String, String)>>,
+    /// The artifact panel: which family and version it shows (the Studio's `ART` state).
+    art: Option<artifacts::Panel>,
+    /// The JavaScript runs that are going or standing under their code block, by the code that runs.
+    runs: std::collections::HashMap<String, artifacts::CodeRun>,
     /// The text box of a prompt library row per id (so a half-typed row keeps its place).
     plib_texts: std::collections::HashMap<String, Content>,
     /// The copy on the server: the text that is up there, whether it is off, and one request at a time.
@@ -328,6 +333,17 @@ pub enum Message {
     Esc,
     /// The reasoning of a message is shown or folded away (the `details` box of the Studio).
     ReasoningToggle(usize),
+    /// Open a fenced block of an answer in the artifact panel (the Open/Preview button of the
+    /// block): the code of it, and the info string of its fence.
+    ArtOpen(String, String),
+    /// A button of the artifact panel (the `data-art` buttons of the Studio).
+    ArtAction(artifacts::ArtAction),
+    /// Run the JavaScript of a code block in the sandboxed runner (the Run button of the block).
+    RunCode(String),
+    /// Stop the run that is going under this block (the same button while it runs).
+    RunStop(String),
+    /// One message of the runner for this block (the `worker.onmessage` of the Studio).
+    RunEvent { code: String, ev: artifacts::RunEvent },
     /// Open an address of the sources in the browser of the computer.
     OpenUrl(String),
     /// The chip in the composer: the question becomes a research project (btnToggleResearch).
@@ -607,6 +623,8 @@ impl App {
             research: false,
             research_no_schema: false,
             research_sources: None,
+            art: None,
+            runs: std::collections::HashMap::new(),
             plib_texts: std::collections::HashMap::new(),
             mem_synced_text: None,
             mem_sync_off: false,
@@ -1875,7 +1893,141 @@ impl App {
                     }
                 }
             }
+            Message::ArtOpen(code, info) => {
+                let families = artifacts::chat_families(&self.art_messages());
+                // the Studio's openFromBlock: the family whose version holds this code, the message
+                // it came from first; else a family of its own for this one block
+                let mut hit: Option<(artifacts::Family, usize)> = None;
+                for f in &families {
+                    if let Some(j) = f.versions.iter().position(|v| v.code.trim() == code.trim()) {
+                        let better = hit.as_ref().is_none();
+                        if better {
+                            hit = Some((f.clone(), j));
+                        }
+                    }
+                }
+                self.art = Some(match hit {
+                    Some((f, j)) => artifacts::Panel::open(f, j, false),
+                    None => {
+                        let lang = info.split_whitespace().next().unwrap_or("").to_lowercase();
+                        let fam = artifacts::Family {
+                            id: "adhoc".into(),
+                            kind: artifacts::artifact_kind(&lang),
+                            title: artifacts::parse_info(&info),
+                            lang,
+                            versions: vec![artifacts::Version { n: 1, msg_id: String::new(), code }],
+                            touched: 0,
+                        };
+                        artifacts::Panel::open(fam, 0, true)
+                    }
+                });
+                Task::none()
+            }
+            Message::ArtAction(action) => {
+                use artifacts::ArtAction as Act;
+                match action {
+                    Act::Close => self.art = None,
+                    Act::Prev => {
+                        if let Some(p) = self.art.as_mut() {
+                            p.set_version(p.ver.saturating_sub(1));
+                        }
+                    }
+                    Act::Next => {
+                        if let Some(p) = self.art.as_mut() {
+                            p.set_version(p.ver + 1);
+                        }
+                    }
+                    Act::TabPreview => {
+                        if let Some(p) = self.art.as_mut() {
+                            p.set_tab(artifacts::Tab::Preview);
+                        }
+                    }
+                    Act::TabCode => {
+                        if let Some(p) = self.art.as_mut() {
+                            p.set_tab(artifacts::Tab::Code);
+                        }
+                    }
+                    Act::Reload => {
+                        if let Some(p) = self.art.as_mut() {
+                            p.render_body();
+                        }
+                    }
+                    Act::OpenInBrowser => {
+                        let file = self.art.as_ref().map(|p| {
+                            (
+                                chatlist::export_dir().join(artifacts::file_name(&p.fam.title, p.fam.kind, &p.fam.lang)),
+                                p.version().code.clone(),
+                            )
+                        });
+                        if let Some((path, text)) = file {
+                            let _ = std::fs::write(&path, text);
+                            return self.update(Message::OpenUrl(format!("file://{}", path.display())));
+                        }
+                    }
+                    Act::Larger => {
+                        if let Some(p) = self.art.as_mut() {
+                            p.large = !p.large;
+                        }
+                    }
+                    Act::Copy => {
+                        if let Some(p) = self.art.as_ref() {
+                            return iced::clipboard::write(p.version().code.clone());
+                        }
+                    }
+                    Act::Download => {
+                        let file = self.art.as_ref().map(|p| {
+                            (
+                                chatlist::export_dir().join(artifacts::file_name(&p.fam.title, p.fam.kind, &p.fam.lang)),
+                                p.version().code.clone(),
+                            )
+                        });
+                        if let Some((path, text)) = file {
+                            // the file is small: written right here, like the exports of the chat list
+                            let _ = std::fs::write(&path, text);
+                            self.toast = Some("Saved to your downloads.".into());
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::RunCode(code) => {
+                if self.runs.contains_key(&code) {
+                    // the same button stops a run that is going (`runBlock` toggles like this)
+                    if let Some(run) = self.runs.get_mut(&code) {
+                        run.stop("Stopped");
+                    }
+                    return Task::none();
+                }
+                use futures::StreamExt;
+                let (tx, rx) = futures::channel::mpsc::unbounded();
+                let key = code.clone();
+                let events = rx.map(move |ev| Message::RunEvent { code: key.clone(), ev });
+                self.runs.insert(code.clone(), artifacts::CodeRun::starting());
+                std::thread::spawn(move || artifacts::run_javascript(&code, tx));
+                Task::stream(events)
+            }
+            Message::RunStop(code) => {
+                if let Some(run) = self.runs.get_mut(&code) {
+                    run.stop("Stopped");
+                }
+                Task::none()
+            }
+            Message::RunEvent { code, ev } => {
+                // a finished run keeps its output under the block until the next one starts
+                if let Some(run) = self.runs.get_mut(&code) {
+                    run.apply(ev);
+                }
+                Task::none()
+            }
             Message::Esc => {
+                // the large view of the panel goes first (the keydown of artifacts.js), then a
+                // run that goes
+                if self.art.as_ref().is_some_and(|p| p.large) {
+                    if let Some(p) = self.art.as_mut() {
+                        p.large = false;
+                    }
+                    return Task::none();
+                }
                 // only something that runs is stopped; everything else ignores the key
                 let stopping = self.live.is_some()
                     || self.messages.last().is_some_and(|m| m.research.as_ref().is_some_and(|r| r.running));
@@ -2941,7 +3093,18 @@ impl App {
                 _ if self.messages.is_empty() => self.welcome(t),
                 _ => self.conversation(t),
             };
-            column![self.topbar(t), content, self.composer(t)].width(Length::Fill).height(Length::Fill).into()
+            let chat = column![self.topbar(t), content, self.composer(t)].width(Length::Fill).height(Length::Fill);
+            // the panel of the Studio takes its side of the chat; the large view is a layer over
+            // everything (the fixed box of `.art-panel.is-large`)
+            if self.art.is_some() && !self.art.as_ref().is_some_and(|p| p.large) {
+                row![chat, container(self.art_panel(t)).width(Length::Fill).max_width(580.0).height(Length::Fill)]
+                    .spacing(0)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+            } else {
+                chat.into()
+            }
         };
         if !self.picker_open
             && !self.asst_menu
@@ -2951,10 +3114,30 @@ impl App {
             && self.remember.is_none()
             && !self.mem_clear
             && !self.temp_close
+            // the large view of the artifact panel is a layer of its own
+            && !self.art.as_ref().is_some_and(|p| p.large)
         {
             return page;
         }
         let mut layers = stack![page];
+        if self.art.as_ref().is_some_and(|p| p.large) {
+            // the large view of the panel: dimmed over the chat, the panel itself in the middle
+            // (the fixed inset of `.art-panel.is-large`)
+            layers = layers
+                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::ArtAction(artifacts::ArtAction::Larger)))
+                .push(
+                    container(self.art_panel(t))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .max_width(1100.0)
+                        .padding(24)
+                        .style(move |_| iced::widget::container::Style {
+                            background: Some(iced::Background::Color(t.surface)),
+                            border: iced::Border { radius: 12.0.into(), width: 1.0, color: t.separator },
+                            ..Default::default()
+                        }),
+                );
+        }
         if self.picker_open {
             layers = layers
                 .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::ClosePicker))
@@ -2998,6 +3181,107 @@ impl App {
                 .push(self.temp_close_window(t));
         }
         layers.into()
+    }
+
+    /// The artifact panel: header with the versions, the tabs and tools of the Studio, and the
+    /// body — the code, the rendered Markdown, the table of a CSV, or the text of a page (the app
+    /// draws no HTML: *Open in browser* shows it rendered there).
+    fn art_panel(&self, t: Tokens) -> Element<'_, Message> {
+        use artifacts::{ArtAction as Act, Kind, Tab};
+        let Some(p) = &self.art else { return Space::new().width(0).height(0).into() };
+        let kind_label = if p.fam.title.is_empty() { "" } else { p.fam.kind.label() };
+        let title = if p.fam.title.is_empty() { p.fam.kind.label().to_string() } else { p.fam.title.clone() };
+        let head = row![
+            column![text(title).size(13.5).font(bold()), text(kind_label).size(11.5).color(t.muted)].spacing(1),
+            Space::new().width(Length::Fill),
+            {
+                let versions: Element<'_, Message> = if p.fam.versions.len() > 1 {
+                    row![
+                        iced::widget::button(text("‹").size(14))
+                            .on_press(Message::ArtAction(Act::Prev))
+                            .padding([0, 8])
+                            .style(theme::ghost_button(t)),
+                        text(format!("v{} / {}", p.fam.versions[p.ver].n, p.fam.versions.len())).size(11.5).color(t.muted),
+                        iced::widget::button(text("›").size(14))
+                            .on_press(Message::ArtAction(Act::Next))
+                            .padding([0, 8])
+                            .style(theme::ghost_button(t)),
+                    ]
+                    .spacing(2)
+                    .align_y(Alignment::Center)
+                    .into()
+                } else {
+                    Space::new().width(0).height(0).into()
+                };
+                versions
+            },
+            iced::widget::button(text("Close").size(12)).on_press(Message::ArtAction(Act::Close)).padding([2, 10]).style(theme::ghost_button(t)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .padding([8, 10]);
+        let mut tools = row![].spacing(2);
+        if p.fam.kind != Kind::Code && p.tab == Tab::Preview && matches!(p.fam.kind, Kind::Html | Kind::Svg) {
+            tools = tools.push(iced::widget::button(text("Reload").size(12)).on_press(Message::ArtAction(Act::Reload)).padding([2, 8]).style(theme::ghost_button(t)));
+        }
+        tools = tools
+            .push(iced::widget::button(text("Copy").size(12)).on_press(Message::ArtAction(Act::Copy)).padding([2, 8]).style(theme::ghost_button(t)))
+            .push(iced::widget::button(text("Download").size(12)).on_press(Message::ArtAction(Act::Download)).padding([2, 8]).style(theme::ghost_button(t)))
+            .push(
+                iced::widget::button(text(if p.large { "Smaller" } else { "Larger" }).size(12))
+                    .on_press(Message::ArtAction(Act::Larger))
+                    .padding([2, 8])
+                    .style(theme::ghost_button(t)),
+            );
+        let mut toolbar = row![].spacing(8).align_y(Alignment::Center).padding([6, 10]);
+        if p.fam.kind != Kind::Code {
+            toolbar = toolbar.push(settings::segmented(
+                t,
+                vec![
+                    ("Preview", p.tab == Tab::Preview, Message::ArtAction(Act::TabPreview)),
+                    ("Code", p.tab == Tab::Code, Message::ArtAction(Act::TabCode)),
+                ],
+            ));
+        }
+        toolbar = toolbar.push(Space::new().width(Length::Fill)).push(tools);
+        let body: Element<'_, Message> = match (p.tab, p.fam.kind) {
+            (Tab::Code, _) | (_, Kind::Html) | (_, Kind::Svg) => {
+                let mut col = column![].spacing(8);
+                if p.tab == Tab::Preview && matches!(p.fam.kind, Kind::Html | Kind::Svg) {
+                    // no web view in this window: the page is opened in the browser of the computer
+                    col = col.push(
+                        iced::widget::button(text("Open in browser").size(13))
+                            .on_press(Message::ArtAction(Act::OpenInBrowser))
+                            .padding([6, 12])
+                            .style(theme::ghost_button(t)),
+                    );
+                }
+                col = col.push(
+                    scrollable(
+                        container(text(p.version().code.clone()).size(12.5).color(t.fg_soft).font(Font { weight: iced::font::Weight::Normal, ..crate::app::UI_FONT }).width(Length::Fill))
+                            .padding([10, 12]),
+                    )
+                    .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::default().width(6).scroller_width(6))),
+                );
+                col.into()
+            }
+            (_, Kind::Markdown) | (_, Kind::Csv) => {
+                let body = p.body.as_ref().expect("the rendered body of the preview");
+                scrollable(container(md::view(body, t, &self.theme())).padding([4, 2])).into()
+            }
+            _ => Space::new().width(0).height(0).into(),
+        };
+        let mut col = column![head, toolbar].spacing(0);
+        col = col.push(container(body).padding([8, 6]).height(Length::Fill).width(Length::Fill));
+        container(col)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| iced::widget::container::Style {
+                background: Some(iced::Background::Color(t.surface)),
+                border: iced::Border { width: 1.0, color: t.separator, ..Default::default() },
+                ..Default::default()
+            })
+            .into()
     }
 
     fn switching_card(&self, t: Tokens) -> Element<'_, Message> {
@@ -4549,6 +4833,22 @@ impl App {
         self.research
     }
 
+    /// The answers of the open chat as `(id, text, streaming)` for the artifact families: the id is
+    /// the place in the chat, so a version knows where it came from.
+    fn art_messages(&self) -> Vec<(String, String, bool)> {
+        self.messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == Role::Assistant)
+            .map(|(i, m)| (i.to_string(), m.content.clone(), self.live.is_some() && i + 1 == self.messages.len()))
+            .collect()
+    }
+
+    /// The runs that stand under a block of this code (the card reads its own).
+    pub fn run_of(&self, code: &str) -> Option<&artifacts::CodeRun> {
+        self.runs.get(code)
+    }
+
     /// The line for the user, when there is one.
     pub fn toast(&self) -> Option<&str> {
         self.toast.as_deref()
@@ -4779,7 +5079,7 @@ impl App {
                     }
                 }
                 if !m.content.is_empty() {
-                    col = col.push(md::view(&m.md, t, &self.theme()));
+                    col = col.push(md::view_runs(&m.md, t, &self.theme(), &self.runs));
                 } else if live {
                     col = col.push(text("…").size(15).color(t.muted));
                 }
