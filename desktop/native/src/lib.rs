@@ -21,6 +21,7 @@ pub mod research;
 pub mod rag;
 pub mod settings;
 pub mod tex;
+pub mod tour;
 pub mod sidecar;
 pub mod store;
 pub mod theme;

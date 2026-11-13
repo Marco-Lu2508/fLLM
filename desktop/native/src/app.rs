@@ -5,6 +5,7 @@ use crate::assistants::{self, Assistant, SysMode};
 use crate::memory;
 use crate::promptlib;
 use crate::speech;
+use crate::tour;
 use crate::artifacts;
 use crate::research;
 use crate::tools;
@@ -253,6 +254,11 @@ pub struct App {
     temp_next: bool,
     /// The dialog before a temporary chat with messages is gone for good.
     temp_close: bool,
+    /// The welcome tour: the step that is open (None = it is closed; the Studio's `tourModal`).
+    pub tour: Option<usize>,
+    /// What the tour has to say (the line about this computer, a model's memory, the loaded model
+    /// and the suggestions of the hub).
+    pub tour_data: tour::TourData,
     /// The notice under the messages: how many messages a rewind hides, until when it stands.
     rewind_notice: Option<(usize, u64)>,
     /// Whether the model may use the web tools of the server (the Studio's `state.useWeb`: a
@@ -537,6 +543,21 @@ pub enum Message {
     TempToggle,
     TempCloseOk,
     TempCloseCancel,
+    /// The welcome tour opens (the first start, or *Show the welcome tour* of Settings).
+    TourShow,
+    /// One step forward; the last step closes it (*Get started*).
+    TourNext,
+    /// One step back.
+    TourBack,
+    /// The tour closes (*Skip*, or the click beside it).
+    TourSkip,
+    /// *Open Models* on the third step closes the tour and goes to the Models page.
+    TourOpenModels,
+    /// What the tour waits for: the hub and the hardware of this machine.
+    TourLoaded {
+        overview: Result<models::Overview, String>,
+        hardware: Result<tour::Hardware, String>,
+    },
     Code(code::CodeMsg),
 }
 
@@ -618,6 +639,8 @@ impl App {
             new_style: "default".into(),
             temp_next: false,
             temp_close: false,
+            tour: None,
+            tour_data: tour::TourData::default(),
             rewind_notice: None,
             use_web: false,
             answer_budget: None,
@@ -1004,6 +1027,19 @@ impl App {
             Message::Connected(Ok(model)) => {
                 self.server = Server::Ready(model);
                 self.switching = false;
+                // the first start shows the tour once, after the hardware is known (the Studio
+                // waits for it too); an existing user never sees it
+                if !self.store.prefs.tour_seen && self.store.chats.is_empty() {
+                    let base = self.base.clone();
+                    return Task::perform(
+                        async move {
+                            let overview = models::fetch_overview(base.clone()).await;
+                            let hardware = models::fetch_hardware(base).await;
+                            Message::TourLoaded { overview, hardware }
+                        },
+                        |m| m,
+                    );
+                }
                 Task::none()
             }
             Message::Connected(Err(e)) if e == models::NO_MODEL => {
@@ -2161,6 +2197,65 @@ impl App {
                 self.temp_close = false;
                 Task::none()
             }
+            Message::TourShow => {
+                // the Studio's openTour: the key is written, the first step opens, and the chat is
+                // what it opens over (`switchSurface('chat')`)
+                self.page = View::Chat;
+                self.store.prefs.tour_seen = true;
+                self.tour = Some(0);
+                self.save();
+                if self.tour_data.computer().is_none() {
+                    let base = self.base.clone();
+                    return Task::perform(
+                        async move {
+                            let overview = models::fetch_overview(base.clone()).await;
+                            let hardware = models::fetch_hardware(base).await;
+                            Message::TourLoaded { overview, hardware }
+                        },
+                        |m| m,
+                    );
+                }
+                Task::none()
+            }
+            Message::TourNext => {
+                // the last step says *Get started* and closes (the Next button of `voice.js`)
+                match self.tour {
+                    Some(step) if step + 1 < tour::STEPS.len() => self.tour = Some(step + 1),
+                    _ => self.tour = None,
+                }
+                Task::none()
+            }
+            Message::TourBack => {
+                if let Some(0) | Some(1) | Some(2) | Some(3) = self.tour {
+                    self.tour = self.tour.map(|step| step.saturating_sub(1));
+                }
+                Task::none()
+            }
+            Message::TourSkip => {
+                self.tour = None;
+                Task::none()
+            }
+            Message::TourOpenModels => {
+                self.tour = None;
+                self.page = View::Models;
+                Task::none()
+            }
+            Message::TourLoaded { overview, hardware } => {
+                match hardware {
+                    Ok(hw) => self.tour_data.read_hardware(&hw),
+                    Err(e) => self.tour_data.read_error(&e),
+                }
+                if let Ok(o) = &overview {
+                    self.tour_data.read_overview(o, o);
+                }
+                // the data was for the first start: open it now (nothing else opened the tour)
+                if self.tour.is_none() && !self.store.prefs.tour_seen && self.store.chats.is_empty() {
+                    self.store.prefs.tour_seen = true;
+                    self.tour = Some(0);
+                    self.save();
+                }
+                Task::none()
+            }
             Message::StylePick(style) => {
                 self.style_menu = false;
                 // the Studio writes the choice into the chat, or into state.newStyle without one
@@ -3149,6 +3244,7 @@ impl App {
             && self.remember.is_none()
             && !self.mem_clear
             && !self.temp_close
+            && self.tour.is_none()
             // the large view of the artifact panel is a layer of its own
             && !self.art.as_ref().is_some_and(|p| p.large)
         {
@@ -3214,6 +3310,12 @@ impl App {
             layers = layers
                 .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::TempCloseCancel))
                 .push(self.temp_close_window(t));
+        }
+        if self.tour.is_some() {
+            // the backdrop of `.modal-backdrop`: a click beside the window closes the tour
+            layers = layers
+                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::TourSkip))
+                .push(self.tour_window(t));
         }
         layers.into()
     }
@@ -3605,6 +3707,171 @@ impl App {
         .width(460)
         .style(theme::card(t, theme::R_LG, false));
         container(window).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
+    }
+
+    /// The welcome tour of the Studio (`tourModal` of `shell.html`, the steps and buttons of
+    /// `voice.js`): the dots, the title, what the step says, and Skip / Back / Next.
+    fn tour_window(&self, t: Tokens) -> Element<'_, Message> {
+        let step = self.tour.unwrap_or(0);
+        let last = step + 1 == tour::STEPS.len();
+        // the dots above the title (`tour-dots`)
+        let mut dots: Vec<Element<'_, Message>> = Vec::new();
+        for i in 0..tour::STEPS.len() {
+            let on = i == step;
+            dots.push(
+                container(Space::new().width(7).height(7))
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(iced::Background::Color(if on { t.primary } else { t.separator })),
+                        border: iced::Border {
+                            radius: 4.0.into(),
+                            width: 0.0,
+                            color: iced::Color::TRANSPARENT,
+                        },
+                        ..Default::default()
+                    })
+                    .into(),
+            );
+        }
+        let mut parts: Vec<Element<'_, Message>> = vec![
+            row(dots).spacing(6).into(),
+            text(tour::STEPS[step]).size(16).font(bold()).into(),
+        ];
+
+        // what this step says (`tourBody`)
+        match self.tour_data.body(step) {
+            tour::Body::Welcome => {
+                for paragraph in tour::WELCOME {
+                    parts.push(text(paragraph).size(13).color(t.fg_soft).into());
+                }
+            }
+            tour::Body::Computer { text: about, hint } => {
+                // the box of `.tour-box` around the line about this computer
+                parts.push(
+                    container(text(about).size(13).color(t.fg))
+                        .padding([8, 10])
+                        .width(Length::Fill)
+                        .style(move |_| iced::widget::container::Style {
+                            background: Some(iced::Background::Color(t.surface_2)),
+                            border: iced::Border {
+                                radius: 8.0.into(),
+                                width: 1.0,
+                                color: t.separator,
+                            },
+                            ..Default::default()
+                        })
+                        .into(),
+                );
+                if !hint.is_empty() {
+                    parts.push(text(hint).size(13).color(t.fg_soft).into());
+                }
+            }
+            tour::Body::Model {
+                loaded,
+                hint,
+                suggested,
+                open_models,
+            } => {
+                if let Some(loaded) = loaded {
+                    // `A model is already loaded: <strong>name</strong> You can start ...`
+                    parts.push(
+                        row![
+                            text("A model is already loaded: ").size(13).color(t.fg),
+                            text(loaded).size(13).font(bold()),
+                            text(hint).size(13).color(t.fg),
+                        ]
+                        .spacing(0)
+                        .into(),
+                    );
+                } else {
+                    parts.push(text(hint).size(13).color(t.fg_soft).into());
+                }
+                if !suggested.is_empty() {
+                    parts.push(
+                        container(
+                            text(format!("Suggested: {}", suggested.join(", ")))
+                                .size(13)
+                                .color(t.fg),
+                        )
+                        .padding([8, 10])
+                        .width(Length::Fill)
+                        .style(move |_| iced::widget::container::Style {
+                            background: Some(iced::Background::Color(t.surface_2)),
+                            border: iced::Border {
+                                radius: 8.0.into(),
+                                width: 1.0,
+                                color: t.separator,
+                            },
+                            ..Default::default()
+                        })
+                        .into(),
+                    );
+                }
+                if open_models {
+                    parts.push(
+                        button(text("Open Models").size(13))
+                            .on_press(Message::TourOpenModels)
+                            .padding([6, 12])
+                            .style(theme::ghost_button(t))
+                            .into(),
+                    );
+                }
+            }
+            tour::Body::Tips(tips) => {
+                let mut list: Vec<Element<'_, Message>> = Vec::new();
+                for tip in tips {
+                    list.push(
+                        row![
+                            text(format!("• {}", tip.lead)).size(13).font(bold()),
+                            text(tip.rest).size(13).color(t.fg_soft),
+                        ]
+                        .spacing(4)
+                        .into(),
+                    );
+                }
+                parts.push(column(list).spacing(8).into());
+            }
+        }
+
+        // the actions: Skip, Back, Next — the last step says *Get started* and hides Skip
+        let mut actions: Vec<Element<'_, Message>> = vec![Space::new().width(Length::Fill).into()];
+        if !last {
+            actions.push(
+                button(text("Skip").size(13))
+                    .on_press(Message::TourSkip)
+                    .padding([6, 12])
+                    .style(theme::ghost_button(t))
+                    .into(),
+            );
+        }
+        if step > 0 {
+            actions.push(
+                button(text("Back").size(13))
+                    .on_press(Message::TourBack)
+                    .padding([6, 12])
+                    .style(theme::ghost_button(t))
+                    .into(),
+            );
+        }
+        actions.push(
+            button(text(if last { "Get started" } else { "Next" }).size(13))
+                .on_press(Message::TourNext)
+                .padding([6, 12])
+                .style(theme::primary_button(t))
+                .into(),
+        );
+        parts.push(row(actions).spacing(8).into());
+
+        let window = container(column(parts).spacing(12))
+            .padding(16)
+            .width(460)
+            .style(theme::card(t, theme::R_LG, false));
+        container(window)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(24)
+            .into()
     }
 
     /// The dialog that forgets everything (the Studio's askDialog for memClear).

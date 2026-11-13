@@ -144,6 +144,12 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   four calls); the sources are numbered `[n]` under the answer (*Sources*, a click opens the page
   in the browser). The texts, cards, budget and error lines are checked against `ctRunTool` of the
   Studio itself — the fixtures are produced by that code.
+- The welcome tour: the first start shows it once (`TOUR_KEY` of the Studio: no key and no chats), four
+  steps in the modal of `shell.html` — *Welcome to fLLM*, *Your computer* with the line of `describeComputer`
+  (`models.js`, one entry per physical device through the merging of `npu.js`, the processor first), *Pick a
+  model* with the loaded model, up to four suggestions of the hub by display name and *Open Models*, and
+  *Three tips* with the keys as `formatCombo` writes them. Skip, Back, Next / *Get started*, a click beside it
+  closes; Settings > General brings it back. Checked in the window with five drawings and three mutations.
 - The math of an answer, typeset: `$x$`, `$$x$$`, `\(x\)` and `\[x\]` in the Markdown of the chat are found
   by the recognizers of `markdown.js` (with their lookbehind and lookahead as character checks, which a Rust regex
   cannot express) and given to the typesetter of the Studio (`tex.rs`, the `typeset` and `toHTML` of `markdown.js`

@@ -36,7 +36,7 @@ checks at the bottom pass.
 
 | Studio feature | State |
 |---|---|
-| Welcome tour / first start | todo |
+| Welcome tour / first start | done — `tour.rs` carries the four steps of `voice.js` (what every step says, with the line about this computer from `describeComputer` of `models.js` and the keys of the shortcuts as `formatCombo` writes them), the window is the `tourModal` of `shell.html` (dots, title, body, Skip / Back / Next with *Get started* on the last step, *Open Models* on the third, a click beside it closes), the first start opens it once when there are no chats (`TOUR_KEY`), and Settings > General brings it back — 8 tests for what each step says and how the devices are merged, 5 for the window with five drawings, three mutations |
 | Keyboard shortcuts list | todo |
 | Command palette (Ctrl+K) | todo |
 | Dictation, reading aloud, alerts | todo |

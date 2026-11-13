@@ -53,6 +53,15 @@ behaviour between versions).
   `assistantInner`. Tests: Esc stopping and ignoring, the fold with its click, the open box while it
   thinks, and the research run stopped by the key; four mutations each turn one red; the open box is
   drawn to a PNG and read back.
+- **The welcome tour in the native app.** The Studio shows a tour on the first start (`voice.js`, four
+  steps in the `tourModal` of `shell.html`); the native app shows the same one. `tour.rs` holds what each
+  step says — the two paragraphs of the welcome, the line about this computer from `describeComputer` of
+  `models.js` (with `mergeDevices` of `npu.js` behind it: one entry per physical device, the vendor's own
+  interface first), the loaded model with up to four suggestions of the hub by display name, the three tips
+  with the keys as `formatCombo` of `boot.js` writes them — and the window draws the modal: dots, title,
+  body, Skip / Back / Next with *Get started* on the last step, *Open Models* on the third, a click beside it
+  closes. The first start opens it once when there are no chats, and Settings > General brings it back. Eight
+  tests for the words and the device merging, five for the window with five drawings, three mutations.
 - **The math of an answer in the native app.** The Studio typesets the math of an answer with `markdown.js`
   (`typeset` and `toHTML`); the native chat now does it too. The recognizers of `markdown.js` for `$$..$$`, `\[..\]`,
   `\(..\)` and `$..$` are character checks in Rust (a Rust regex has no lookbehind or lookahead), the typesetter is

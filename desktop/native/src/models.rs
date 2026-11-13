@@ -31,6 +31,8 @@ pub struct Variant {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogEntry {
     pub id: String,
+    /// The name people see (`display_name` of the catalog; the id stands in without one).
+    pub display_name: String,
     pub default_quant: String,
     pub parameters_b: f64,
     pub context: u64,
@@ -52,6 +54,8 @@ pub struct Overview {
     pub memory: u64,
     pub installed: Vec<Installed>,
     pub catalog: Vec<CatalogEntry>,
+    /// The ids the hub suggests (the welcome tour shows the first four of them as names).
+    pub recommended: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,6 +149,10 @@ pub fn parse_overview(v: &Value) -> Overview {
         .flatten()
         .map(|e| CatalogEntry {
             id: text_of(e, "id"),
+            display_name: {
+                let name = text_of(e, "display_name");
+                if name.is_empty() { text_of(e, "id") } else { name }
+            },
             default_quant: if e.get("recommended_quant").and_then(Value::as_str).is_some() { text_of(e, "recommended_quant") } else { text_of(e, "default_quant") },
             parameters_b: e.get("parameters_billion").and_then(Value::as_f64).unwrap_or(0.0),
             context: number_of(e, "context_length"),
@@ -160,7 +168,24 @@ pub fn parse_overview(v: &Value) -> Overview {
         })
         .filter(|e| !e.id.is_empty())
         .collect();
-    Overview { loaded, loaded_detail, memory: number_of(v, "available_memory_bytes"), installed, catalog }
+    let recommended = v
+        .get("recommended")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Overview {
+        loaded,
+        loaded_detail,
+        memory: number_of(v, "available_memory_bytes"),
+        installed,
+        catalog,
+        recommended,
+    }
 }
 
 pub fn parse_downloads(v: &Value) -> Vec<Download> {
@@ -231,6 +256,15 @@ async fn post(base: &str, path: &str, body: Value) -> Result<Value, String> {
 
 pub async fn fetch_overview(base: String) -> Result<Overview, String> {
     get_json(&base, "/api/studio/models").await.map(|v| parse_overview(&v))
+}
+
+/// The hardware of this machine (`GET /api/studio/hardware`) — what the welcome tour says about
+/// the computer (`describeComputer` of the Studio).
+pub async fn fetch_hardware(base: String) -> Result<crate::tour::Hardware, String> {
+    match get_json(&base, "/api/studio/hardware").await {
+        Ok(v) => Ok(crate::tour::Hardware::from_json(&v)),
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn fetch_downloads(base: String) -> Result<Vec<Download>, String> {

@@ -588,8 +588,22 @@ pub fn page<'a>(
             .style(theme::secondary_button(t)),
     );
 
+    // the General card of the Studio (shell.html): the welcome tour comes back from here
+    let general = column![setting(
+        t,
+        "Welcome tour",
+        "A short introduction to fLLM, your computer and the first steps.",
+        button(text("Show the welcome tour").size(13))
+            .on_press(Message::TourShow)
+            .padding([5, 12])
+            .style(theme::secondary_button(t))
+            .into(),
+    )]
+    .spacing(14);
+
     let content = column![
         container(text("Settings").size(26).font(bold())).padding(Padding { top: 14.0, right: 0.0, bottom: 4.0, left: 2.0 }),
+        card(t, "General", general.into()),
         card(t, "Answers", answers.into()),
         card(t, "Personalization", pers.into()),
         engine,
