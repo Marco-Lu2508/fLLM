@@ -518,6 +518,48 @@ pub fn chat_stream_with_tools(base: String, model: String, messages: Vec<WireMes
     })
 }
 
+/// One non-streaming completion for the research run (the Studio's `researchChat`):
+/// temperature 0.2, and a JSON schema when the server takes it — a 400 with the schema means it
+/// does not, so the same question is asked again without it (and the run remembers that).
+pub async fn chat_once(
+    base: &str,
+    model: &str,
+    messages: Vec<WireMessage>,
+    max_tokens: u32,
+    schema: Option<&str>,
+    no_schema: bool,
+) -> Result<(String, bool), String> {
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "stream": false,
+        "temperature": 0.2,
+        "max_tokens": max_tokens,
+    });
+    let mut refused = no_schema;
+    if let Some(schema) = schema.filter(|_| !no_schema) {
+        let schema: serde_json::Value = serde_json::from_str(schema).map_err(|e| e.to_string())?;
+        body["response_format"] = serde_json::json!({ "type": "json_schema", "json_schema": { "name": "research", "strict": true, "schema": schema } });
+    }
+    let url = format!("{base}/v1/chat/completions");
+    let mut resp = reqwest::Client::new().post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() && body.get("response_format").is_some() && resp.status().as_u16() == 400 {
+        // this server does not take the schema: the tolerant parser reads plain text
+        refused = true;
+        body.as_object_mut().map(|o| o.remove("response_format"));
+        resp = reqwest::Client::new().post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    }
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let detail = resp.text().await.unwrap_or_default();
+        let detail: String = detail.chars().take(200).collect();
+        return Err(if detail.is_empty() { format!("The server answered with error {status}") } else { format!("{detail} (error {status})") });
+    }
+    let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let text = data.pointer("/choices/0/message/content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    Ok((crate::research::clean(&text), refused))
+}
+
 /// How a chat asks the server for its web tools: the routes of the Studio
 /// (`/api/studio/web/search` and `/api/studio/web/fetch`).
 pub struct EngineFetcher {

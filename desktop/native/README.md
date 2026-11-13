@@ -137,6 +137,24 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   four calls); the sources are numbered `[n]` under the answer (*Sources*, a click opens the page
   in the browser). The texts, cards, budget and error lines are checked against `ctRunTool` of the
   Studio itself — the fixtures are produced by that code.
+- Research mode: the chip *Research* in the composer (between web and style; one press and the
+  line of the Studio says what it means) turns a question without attachments into a research run:
+  the plan asks the model for 3–6 search queries (with the JSON schema, read plain when the server
+  refuses it), the searches of a round run together and the best pages are read and given their
+  passages by the same BM25 as a local document; per page the model takes notes (in parallel, with
+  the room of the context bounded to 200–500 tokens) and the reflection says whether the notes are
+  enough — if not, one more round with the queries it names, two rounds at most. The notes are
+  budgeted for the context (the reserve of 400 tokens, at most 240 characters per note, condensed
+  per page when they are too big) and the report is streamed as its own answer with what is left
+  of the context after the margin (at least 200 tokens), ending with the sources under *##
+  Sources* (`n. [title](url)`). While it runs, the answer shows the progress line with the round,
+  step, phase and pages read, the notice of a fallback or *Research stopped.* over it, and under it
+  the log with a click: queries, pages (date, notes), problems, steps with the seconds. A server
+  without the web routes (404) or with them blocked (403), an unreadable plan, no pages and no
+  notes all end the run before the model is asked again — it answers on its own with *Research
+  could not run: … The model answers on its own instead.*; *Stop* cancels the run and its requests,
+  and the run comes back with the chat. Checked against the routes themselves with a small server
+  that answers plan, search, fetch, notes, reflection and report (4 tests, 5 mutations).
 - Code (sidebar > Code): a coding agent in a folder. Open a folder (type the path, *Choose…* for the folder dialog of the server's computer, or one of the last six), tell the agent what to do; the model
   gets the server's agent tools (read, search, edit, run commands, ...) and answers with tool calls, which the window runs through
   `/api/studio/agent/tool` and feeds back until the model answers without one (at most 30 model calls per message). Every call is a card:
@@ -161,7 +179,7 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 | 3b | Code mode: sub-agents, a terminal view |
 | 4a | One download per system with the app and the engine side by side: the `native-bundle` workflow (started by hand with a release tag; it takes the engine of that release, checks its checksum, adds the app and, with `upload`, signs and attaches the archives) |
 | 4 | The engine inside the process (no second program; for now the app starts the server next to it, see above), installers per system that put both side by side, the tray, autostart, updates; then the Tauri app and the web Studio files can go |
-| later | Voice, artifacts, the research mode, the command palette |
+| later | Voice, artifacts, the command palette |
 
 Until stage 4 the Tauri app stays the supported desktop app.
 

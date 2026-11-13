@@ -5,6 +5,7 @@ use crate::assistants::{self, Assistant, SysMode};
 use crate::memory;
 use crate::promptlib;
 use crate::speech;
+use crate::research;
 use crate::tools;
 use crate::rag::{self, IndexedDoc};
 use crate::store::{self, Record, Role, Stats, Store};
@@ -50,6 +51,7 @@ const ICON_CHEVRON: &[u8] = include_bytes!("../icons/chevron-down.svg");
 const ICON_LINES: &[u8] = include_bytes!("../icons/lines.svg");
 const ICON_GHOST: &[u8] = include_bytes!("../icons/ghost.svg");
 const ICON_GLOBE: &[u8] = include_bytes!("../icons/globe.svg");
+const ICON_SEARCH: &[u8] = include_bytes!("../icons/search.svg");
 const ICON_CHECK: &[u8] = include_bytes!("../icons/check.svg");
 const ICON_FOLDER: &[u8] = include_bytes!("../icons/folder.svg");
 const ICON_CHEVRON_RIGHT: &[u8] = include_bytes!("../icons/chevron-right.svg");
@@ -75,6 +77,8 @@ pub struct Msg {
     pub tool_cards: Vec<crate::memory::ToolCard>,
     /// The sources of an answer that used the web tools (`ctSourcesHtml` under it).
     pub sources: Vec<tools::Source>,
+    /// The research run of this message, with its log (the Studio's `node.research`).
+    pub research: Option<research::ResearchUi>,
     pub md: markdown::Content,
 }
 
@@ -92,6 +96,7 @@ impl Msg {
             tool_call_id: r.tool_call_id.clone(),
             tool_cards: r.tool_cards.clone(),
             sources: r.sources.clone(),
+            research: r.research.clone(),
             md: markdown::Content::parse(&r.content),
         }
     }
@@ -109,6 +114,7 @@ impl Msg {
             tool_call_id: self.tool_call_id.clone(),
             tool_cards: self.tool_cards.clone(),
             sources: self.sources.clone(),
+            research: self.research.clone(),
         }
     }
 }
@@ -249,6 +255,12 @@ pub struct App {
     /// until it came), and which of them the server still has to answer.
     tool_hold: Vec<Option<(String, String, crate::memory::ToolCard)>>,
     tool_web_jobs: Vec<(usize, String, String, String)>,
+    /// The chip in the composer: the question becomes a research project (btnToggleResearch).
+    research: bool,
+    /// Whether the server refused the JSON schema of the plan (the run asks plainly then).
+    research_no_schema: bool,
+    /// The sources of the report that is streaming: added to the answer when it is over.
+    research_sources: Option<Vec<(u32, String, String, String)>>,
     /// The text box of a prompt library row per id (so a half-typed row keeps its place).
     plib_texts: std::collections::HashMap<String, Content>,
     /// The copy on the server: the text that is up there, whether it is off, and one request at a time.
@@ -303,6 +315,14 @@ pub enum Message {
     ToolRound(ToolRoundResult),
     /// Open an address of the sources in the browser of the computer.
     OpenUrl(String),
+    /// The chip in the composer: the question becomes a research project (btnToggleResearch).
+    ResearchToggle,
+    /// How the research run goes right now (the progress line above the answer).
+    ResearchProgress(Box<research::ResearchUi>),
+    /// The run prepared the report — or gave up and the model answers on its own.
+    ResearchDone(Box<research::Prepared>),
+    /// The log under the answer of a research run, opened or closed.
+    ResearchLogToggle(usize),
     Hover(Option<u64>),
     ToggleTheme,
     LinkClicked(markdown::Uri),
@@ -560,6 +580,9 @@ impl App {
             answer_sources: Vec::new(),
             tool_hold: Vec::new(),
             tool_web_jobs: Vec::new(),
+            research: false,
+            research_no_schema: false,
+            research_sources: None,
             plib_texts: std::collections::HashMap::new(),
             mem_synced_text: None,
             mem_sync_off: false,
@@ -773,6 +796,10 @@ impl App {
         }
         let first = self.messages.is_empty();
         self.tool_round = 0;
+        // research mode takes the question when there is nothing attached (the Studio's
+        // `state.research && text && !images.length`; a question with anything attached goes the
+        // normal way, so nothing that was attached is left out of the answer)
+        let research_ok = self.research && !prompt.trim().is_empty() && self.attachments.is_empty();
         // the attachments of this question: images and whole files on the message, texts that do not
         // fit as documents of this chat (the Studio's addChild and ragStoreDocs). Editing a message
         // keeps the images and files it had and leaves the pending attachments where they are.
@@ -807,7 +834,8 @@ impl App {
             tool_calls: None,
             tool_call_id: None,
             tool_cards: Vec::new(),
-        sources: Vec::new(),
+            sources: Vec::new(),
+            research: None,
         });
         self.messages.push(Msg {
             role: Role::Assistant,
@@ -821,6 +849,7 @@ impl App {
             tool_call_id: None,
             tool_cards: Vec::new(),
             sources: Vec::new(),
+            research: None,
             md: markdown::Content::new(),
         });
         // the passages of the knowledge travel with this question (the project's documents first,
@@ -840,8 +869,59 @@ impl App {
         self.save();
         self.error = None;
         self.editor = Content::new();
+        self.research_sources = None;
 
+        if research_ok {
+            return self.research_begin(id, prompt, model);
+        }
         self.stream(id, model.id)
+    }
+
+    /// Research mode: the question becomes a small research project — plan the searches, read the
+    /// best pages, take notes, then a cited report (the Studio's `researchRun`). The window is
+    /// repainted through the progress stream; the run itself is the task behind `live`, so Stop
+    /// cancels every request of it.
+    fn research_begin(&mut self, id: u64, question: String, model: ModelInfo) -> Task<Message> {
+        use futures::StreamExt;
+        let ui = research::ResearchUi::new(research::now_ms());
+        if let Some(last) = self.messages.last_mut() {
+            last.research = Some(ui);
+        }
+        let base = self.base.clone();
+        let model_id = model.id.clone();
+        let ctx = model.max_context;
+        let no_schema = self.research_no_schema;
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let progress = Task::stream(rx.map(|ui| Message::ResearchProgress(Box::new(ui))));
+        let (work, handle) = Task::perform(
+            async move { research::prepare(&base, &model_id, ctx, &question, no_schema, tx).await },
+            |prepared| match prepared {
+                Some(p) => Message::ResearchDone(Box::new(p)),
+                None => Message::DismissToast,
+            },
+        )
+        .abortable();
+        self.live = Some(Live { chat: id, _handle: handle.abort_on_drop() });
+        Task::batch([progress, work])
+    }
+
+    /// The report of a research run: its own two messages, with the size of the answer cut to
+    /// what is left of the context (the Studio's `researchStream`).
+    fn stream_research(&mut self, id: u64, system: String, user: String) -> Task<Message> {
+        self.hold_clock(id);
+        let Server::Ready(model) = self.server.clone() else { return Task::none() };
+        let wire = vec![
+            WireMessage { role: "system".into(), content: system.clone(), parts: None, tool_calls: None, tool_call_id: None },
+            WireMessage { role: "user".into(), content: user.clone(), parts: None, tool_calls: None, tool_call_id: None },
+        ];
+        let prompt_tokens = (system.chars().count().div_ceil(4) + user.chars().count().div_ceil(4)) as f64 * 1.1;
+        let max = research::research_max_tokens(model.max_context, prompt_tokens.ceil() as usize, 1800).max(200);
+        let mut params = self.chat_params();
+        params.max_tokens = Some(max as u32);
+        let events = api::chat_stream(self.base.clone(), model.id, wire, params);
+        let (task, handle) = Task::stream(events).map(move |ev| Message::Stream(id, ev)).abortable();
+        self.live = Some(Live { chat: id, _handle: handle.abort_on_drop() });
+        task
     }
 
     /// Starts the answer to the messages as they are (the last one is the empty answer).
@@ -942,6 +1022,7 @@ impl App {
                     tool_call_id: None,
                     tool_cards: Vec::new(),
                     sources: Vec::new(),
+                    research: None,
                     md: markdown::Content::new(),
                 });
                 self.sync_current();
@@ -1738,6 +1819,57 @@ impl App {
                     }
                 }
             }
+            Message::ResearchToggle => {
+                self.research = !self.research;
+                if self.research {
+                    self.toast = Some(
+                        "Research: your question is searched on the web in several steps and answered with a cited report. It takes longer than a normal answer."
+                            .into(),
+                    );
+                }
+                Task::none()
+            }
+            Message::ResearchLogToggle(i) => {
+                if let Some(ui) = self.messages.get_mut(i).and_then(|m| m.research.as_mut()) {
+                    ui.log_open = !ui.log_open;
+                }
+                self.sync_current();
+                self.save();
+                Task::none()
+            }
+            Message::ResearchProgress(ui) => {
+                // the run repaints its progress line above the answer
+                if let Some(last) = self.messages.last_mut() {
+                    if last.research.is_some() {
+                        last.research = Some(*ui);
+                    }
+                }
+                Task::none()
+            }
+            Message::ResearchDone(prepared) => {
+                let chat = self.live.as_ref().map(|l| l.chat);
+                let prepared = *prepared;
+                if let Some(last) = self.messages.last_mut() {
+                    last.research = Some(prepared.ui.clone());
+                }
+                self.research_no_schema = prepared.no_schema;
+                self.research_sources = if prepared.fallback { None } else { Some(prepared.sources) };
+                self.error = None;
+                let Server::Ready(model) = self.server.clone() else {
+                    self.finish();
+                    return Task::none();
+                };
+                match chat {
+                    // the model answers on its own: a normal answer, the notice says why
+                    Some(id) if prepared.fallback => self.stream(id, model.id),
+                    // the report of the run is streamed into the answer
+                    Some(id) => self.stream_research(id, prepared.system, prepared.user),
+                    None => {
+                        self.finish();
+                        Task::none()
+                    }
+                }
+            }
             Message::StyleMenu => {
                 self.style_menu = !self.style_menu;
                 Task::none()
@@ -1952,6 +2084,18 @@ impl App {
                 Task::none()
             }
             Message::Stop => {
+                // a research run that is still planning says so under its answer (the Studio's
+                // `r.stopped` in the finally of researchRun)
+                if let Some(ui) = self.messages.last_mut().and_then(|m| m.research.as_mut()) {
+                    if ui.running {
+                        let now = research::now_ms();
+                        ui.seconds = now.saturating_sub(ui.t0_ms) / 1000;
+                        ui.running = false;
+                        ui.stopped = true;
+                        ui.event((now.saturating_sub(ui.t0_ms)) as f64 / 1000.0, "Stopped.".to_string());
+                    }
+                }
+                self.research_sources = None;
                 self.finish();
                 Task::none()
             }
@@ -2342,6 +2486,20 @@ impl App {
                 if self.tool_calls_pending() {
                     return self.run_tool_round();
                 }
+                // the report of a research run ends with its sources (researchSourcesMarkdown)
+                if let Some(sources) = self.research_sources.take() {
+                    let text = research::sources_markdown(&sources);
+                    if let Some(last) = self.messages.last_mut() {
+                        last.content.push_str(&text);
+                        last.md = markdown::Content::parse(&last.content);
+                        if let Some(ui) = last.research.as_mut() {
+                            let now = research::now_ms();
+                            ui.seconds = now.saturating_sub(ui.t0_ms) / 1000;
+                            ui.running = false;
+                            ui.event((now.saturating_sub(ui.t0_ms)) as f64 / 1000.0, "Done.".to_string());
+                        }
+                    }
+                }
                 self.finish();
             }
             StreamEvent::Error(e) => {
@@ -2502,6 +2660,7 @@ impl App {
                 tool_call_id: Some(id),
                 tool_cards: Vec::new(),
                 sources: Vec::new(),
+                research: None,
                 md: markdown::Content::new(),
             });
         }
@@ -2517,6 +2676,7 @@ impl App {
             tool_call_id: None,
             tool_cards: Vec::new(),
             sources: Vec::new(),
+            research: None,
             md: markdown::Content::new(),
         });
         self.tool_round += 1;
@@ -4279,6 +4439,11 @@ impl App {
         &self.list
     }
 
+    /// The chip of the research mode (tests read it).
+    pub fn research_state(&self) -> bool {
+        self.research
+    }
+
     /// The line for the user, when there is one.
     pub fn toast(&self) -> Option<&str> {
         self.toast.as_deref()
@@ -4471,6 +4636,20 @@ impl App {
             Role::Assistant => {
                 let live = self.live.is_some() && i + 1 == self.messages.len();
                 let mut col = column![].spacing(8);
+                // the progress of a research run above the answer, its log under it
+                // (the Studio's researchSlotsHtml)
+                let mut log_button: Option<Element<'_, Message>> = None;
+                if let Some(ui) = &m.research {
+                    let now = research::now_ms();
+                    let line = ui.progress(now);
+                    if !line.is_empty() {
+                        col = col.push(text(line).size(13).color(if ui.notice.is_some() || ui.stopped { t.danger } else { t.muted }));
+                    }
+                    if !ui.queries.is_empty() || !ui.pages.is_empty() || !ui.events.is_empty() || !ui.failures.is_empty() {
+                        let summary = ui.summary(now);
+                        log_button = Some(button(text(summary).size(12).color(t.muted)).on_press(Message::ResearchLogToggle(i)).padding([3, 0]).style(theme::ghost_button(t)).into());
+                    }
+                }
                 if !m.reasoning.is_empty() {
                     col = col.push(text(format!("Thought process · {} characters", m.reasoning.chars().count())).size(12).color(t.muted));
                 }
@@ -4489,6 +4668,57 @@ impl App {
                         line = line.push(button(text("Undo").size(12)).on_press(Message::MemoryUndo(i, ci)).padding([2, 6]).style(theme::ghost_button(t)));
                     }
                     col = col.push(container(line).padding([4, 10]).style(theme::inset(t)));
+                }
+                if let Some(ui) = &m.research {
+                    if ui.log_open {
+                        // the sections of the Studio's researchLogHtml: queries, pages, problems, steps
+                        if !ui.queries.is_empty() {
+                            let mut list = column![text("Queries").size(12).font(bold())].spacing(2);
+                            for (n, q) in ui.queries.iter().enumerate() {
+                                list = list.push(text(format!("{}. {q}", n + 1)).size(12).color(t.fg_soft));
+                            }
+                            col = col.push(container(list).padding([6, 10]).style(theme::inset(t)));
+                        }
+                        if !ui.pages.is_empty() {
+                            let mut list = column![text("Pages").size(12).font(bold())].spacing(4);
+                            for p in &ui.pages {
+                                let head = if p.n > 0 { format!("[{}] {}", p.n, p.title) } else { p.title.clone() };
+                                let mut line = column![button(text(head).size(12).color(t.primary)).on_press(Message::OpenUrl(p.url.clone())).padding([0, 0]).style(theme::ghost_button(t))]
+                                    .spacing(1);
+                                if !p.date.is_empty() {
+                                    line = line.push(text(p.date.clone()).size(11).color(t.muted));
+                                }
+                                if !p.ok {
+                                    line = line.push(text(p.error.clone()).size(11).color(t.danger));
+                                } else if p.snippet_only {
+                                    line = line.push(text("search snippet only").size(11).color(t.muted));
+                                } else if !p.notes.is_empty() {
+                                    line = line.push(text(p.notes.clone()).size(11).color(t.fg_soft));
+                                } else {
+                                    line = line.push(text("(nothing relevant)").size(11).color(t.muted));
+                                }
+                                list = list.push(line);
+                            }
+                            col = col.push(container(list).padding([6, 10]).style(theme::inset(t)));
+                        }
+                        if !ui.failures.is_empty() {
+                            let mut list = column![text("Problems").size(12).font(bold())].spacing(2);
+                            for f in &ui.failures {
+                                list = list.push(text(f.clone()).size(11).color(t.danger));
+                            }
+                            col = col.push(container(list).padding([6, 10]).style(theme::inset(t)));
+                        }
+                        if !ui.events.is_empty() {
+                            let mut list = column![text("Steps").size(12).font(bold())].spacing(2);
+                            for (s, text_line) in &ui.events {
+                                list = list.push(text(format!("{s} s  {text_line}")).size(11).color(t.muted));
+                            }
+                            col = col.push(container(list).padding([6, 10]).style(theme::inset(t)));
+                        }
+                    }
+                }
+                if let Some(button_el) = log_button {
+                    col = col.push(button_el);
                 }
                 if !live && !m.sources.is_empty() {
                     // the sources of the answer, numbered like the model cites them (ctSourcesHtml)
@@ -4682,6 +4912,20 @@ impl App {
         .on_press(Message::ToggleWeb)
         .padding([5, 10])
         .style(slash_button(t, self.use_web));
+        // the chip for the research run (the Studio's btnToggleResearch between web and style)
+        let research_chip = button(
+            row![
+                svg(icon(ICON_SEARCH)).width(14).height(14).style(move |theme, status| {
+                    if self.research { accent_svg(t)(theme, status) } else { muted_svg(t)(theme, status) }
+                }),
+                text("Research").size(13),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::ResearchToggle)
+        .padding([5, 10])
+        .style(slash_button(t, self.research));
         // the chip of the response style with its menu (the Studio's #btnStyle and #styleMenu in the
         // composer toolbar: "Style", or "Style: Concise" for a chat that has one)
         let staged = self
@@ -4773,7 +5017,7 @@ impl App {
                 })
                 .into()
         };
-        let card = container(column![banner, attachments, slash_menu, editor, style_menu, row![attach, web_chip, style_chip, hint, Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 16.0 })])
+        let card = container(column![banner, attachments, slash_menu, editor, style_menu, row![attach, web_chip, research_chip, style_chip, hint, Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 16.0 })])
             .style(theme::card(t, theme::R_XL, false))
             .max_width(780);
         container(card).width(Length::Fill).center_x(Length::Fill).padding(Padding { top: 8.0, right: 24.0, bottom: 20.0, left: 24.0 }).into()
@@ -5127,6 +5371,7 @@ mod tests {
             tool_call_id: None,
             tool_cards: Vec::new(),
             sources: Vec::new(),
+            research: None,
             md: markdown::Content::new(),
         };
         assert_eq!(estimate_tokens(&[m(&"a".repeat(40))]), 14);
