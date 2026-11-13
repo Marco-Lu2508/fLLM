@@ -114,6 +114,9 @@ pub struct ChatRecord {
     /// The chat menu says: memory is not used or changed here (the Studio's `t.noMemory`).
     #[serde(default)]
     pub no_memory: bool,
+    /// The response style of this chat (the Studio's `t.style`; empty means the default).
+    #[serde(default)]
+    pub style: String,
 }
 
 /// Which version of a message is shown out of how many.

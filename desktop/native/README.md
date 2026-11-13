@@ -94,6 +94,15 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   title the text with the whitespace collapsed and cut at 80 characters. The matching is checked
   against `plibMatch` of the Studio itself (the fixtures are produced by that code). Not ported:
   the built-in commands as commands of their own.
+- Response style and the tool texts of the prompt: the chip *Style* in the composer (with the
+  lines icon; "Style: Concise" for a chat that has a style) opens the menu of the five styles of
+  the Studio — Default, Concise, Explanatory, Formal, Casual — the current one tinted. The choice
+  goes into the chat (saved with it), or without a chat into the staging that the next new chat
+  takes. The instruction of the style rides at the very end of the system prompt, project and
+  assistant included; the default adds nothing. The texts for the tools of the prompt (web,
+  memory, chat search, the call line and the line for a chat without tools) are the SP_TOOL_TEXT
+  of the Studio word for word — memory is live with the memory round, the web and chat-search
+  texts wait for their rounds.
 - Code (sidebar > Code): a coding agent in a folder. Open a folder (type the path, *Choose…* for the folder dialog of the server's computer, or one of the last six), tell the agent what to do; the model
   gets the server's agent tools (read, search, edit, run commands, ...) and answers with tool calls, which the window runs through
   `/api/studio/agent/tool` and feeds back until the model answers without one (at most 30 model calls per message). Every call is a card:
@@ -125,9 +134,9 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 190 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+cargo test --locked      # 196 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
                          # window driven headless (new chat, send, stream, stop, error, delete, theme, assistants, projects,
-                         # attachments, personalization, prompt library) and drawn to PNG files
+                         # attachments, personalization, prompt library, response style) and drawn to PNG files
 ```
 
 The window tests use iced's software renderer, so they need no display and no GPU. The pictures go to
@@ -136,7 +145,9 @@ with their page, dialogs and passage chip, the attachment chips and the bubble w
 in `finish`, of the guard against late events, of the project filter of the sidebar, of the passage prefix, of the project header line, of
 the files in the request, of the image parts, of the documents of the chat in the search, of the personalization in the prompt, of the
 capture of "remember that …", of the saving of the memory tool, of the sort of the library, of
-the menu on every change of the box and of the limit of a hundred prompts each turn a test red.
+the menu on every change of the box, of the limit of a hundred prompts, of the style in the
+prompt, of the staged style for a new chat and of the web text of the Studio each turn a test
+red.
 
 Not checked: a window on a real screen (this machine has none), scaling on a HiDPI display, input methods, the macOS and Windows builds
 (the CI workflow `native-app` builds and tests all three).

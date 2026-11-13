@@ -191,14 +191,61 @@ pub struct Tools {
     pub chats: bool,
 }
 
-const WEB: &str = "Web tools (web_search, web_fetch): use them only for current or changing facts (news, prices, versions, events after your training), for specific facts you do not know or are unsure about, or when the user asks you to look something up or gives a link. Answer explanations, writing, code and small talk directly, without a search. Cite the sources you used as [n]; never invent a source.";
+const WEB: &str = "Web tools (web_search, web_fetch): use them only for current or changing facts (news, prices, versions, events after your training), for specific facts you do not know or are unsure about, or when the user asks you to look something up or to open a link. For everything else (explanations, writing, code, math, advice, small talk) answer directly without searching. When you used the web, cite the sources as [n] with the numbers from the results and never invent a source. If a search fails, say so.";
 const WEB_COMPACT: &str = "Web tools: search only for current or unknown facts, otherwise answer directly. Cite sources as [n]; never invent sources.";
-const MEMORY: &str = "Memory tool (memory): save a short fact when you learn something durable about the user (name, preferences, projects, constraints) or when they ask you to remember something. Never save trivia, one-off requests or secrets such as passwords and keys.";
+const MEMORY: &str = "Memory tool (memory): save a short fact when you learn something durable about the user (name, preferences, projects, constraints) or when they ask you to remember something. Never save trivia, one-off requests or secrets such as passwords, keys or card numbers. Use update or remove when a fact changed or the user wants it forgotten. Mention a saved fact only briefly, if at all.";
 const MEMORY_COMPACT: &str = "Memory tool: save durable facts about the user (name, preferences, projects); never trivia or secrets.";
 const CHATS: &str = "Chat search tool (search_chats): use it when the user refers to an earlier conversation that you cannot see (\"as we discussed\", \"last time\").";
 const CHATS_COMPACT: &str = "search_chats finds earlier conversations the user refers to.";
 const CALL: &str = "Call tools with valid JSON arguments. After a tool result, answer the user; do not repeat the same call.";
 const NONE: &str = "You have no tools in this chat: you cannot browse the web, open links, run code or read files except what the user shares here. Say so instead of pretending.";
+
+/// The response styles of the Studio (artifacts.js): a chip in the composer, and an extra
+/// instruction at the end of the system prompt of the chat.
+pub mod style {
+    /// One style: what the chip says and what it adds to the prompt.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Style {
+        pub id: &'static str,
+        pub label: &'static str,
+        pub prompt: &'static str,
+    }
+
+    /// The styles of the Studio (`STYLES` in artifacts.js).
+    pub const STYLES: [Style; 5] = [
+        Style { id: "default", label: "Default", prompt: "" },
+        Style { id: "concise", label: "Concise", prompt: "Keep answers short and to the point. Skip preamble and repetition." },
+        Style { id: "explanatory", label: "Explanatory", prompt: "Explain your reasoning step by step with clear examples, and define terms that may be unfamiliar." },
+        Style { id: "formal", label: "Formal", prompt: "Use a formal, professional tone and precise wording." },
+        Style { id: "casual", label: "Casual", prompt: "Use a relaxed, friendly, conversational tone." },
+    ];
+
+    /// What a chat's stored style means: empty or unknown falls back to the default (`styleOf`).
+    pub fn style_of(style: &str) -> &'static str {
+        STYLES.iter().find(|s| s.id == style).map(|s| s.id).unwrap_or("default")
+    }
+
+    /// The label of a style: the chip says "Style: Concise", the default keeps just "Style".
+    pub fn label_of(style: &str) -> &'static str {
+        STYLES.iter().find(|s| s.id == style_of(style)).map(|s| s.label).unwrap_or("Default")
+    }
+
+    /// What the style adds to the prompt; nothing for the default (`withStylePrompt`).
+    pub fn instruction(style: &str) -> Option<&'static str> {
+        let s = STYLES.iter().find(|s| s.id == style_of(style))?;
+        if s.prompt.is_empty() { None } else { Some(s.prompt) }
+    }
+
+    /// The base of a request with the instruction of the style behind it (`withStylePrompt`).
+    pub fn with_style_prompt(base: &str, style: &str) -> String {
+        let Some(add) = instruction(style) else { return base.to_string() };
+        if base.is_empty() {
+            add.to_string()
+        } else {
+            format!("{base}\n\n{add}")
+        }
+    }
+}
 
 /// What the default prompt is built from.
 #[derive(Debug, Clone)]
@@ -486,5 +533,61 @@ mod tests {
         assert_eq!(m[0].0, "system");
         assert!(m[1].1.starts_with("User: qqq") && m[1].1.ends_with("Title:"));
         assert_eq!(m[1].1.matches('q').count(), 300, "the question is cut");
+    }
+}
+
+#[cfg(test)]
+mod tool_texts_and_style {
+    use super::*;
+
+    /// The tool texts of the prompt, word for word like SP_TOOL_TEXT in the Studio's prompts.js
+    /// (the round "Use the web / Research mode" brings the web tools; the texts wait for them here).
+    #[test]
+    fn the_tool_texts_are_the_studios_word_for_word() {
+        assert_eq!(
+            WEB,
+            "Web tools (web_search, web_fetch): use them only for current or changing facts (news, prices, versions, events after your training), for specific facts you do not know or are unsure about, or when the user asks you to look something up or to open a link. For everything else (explanations, writing, code, math, advice, small talk) answer directly without searching. When you used the web, cite the sources as [n] with the numbers from the results and never invent a source. If a search fails, say so."
+        );
+        assert_eq!(
+            MEMORY,
+            "Memory tool (memory): save a short fact when you learn something durable about the user (name, preferences, projects, constraints) or when they ask you to remember something. Never save trivia, one-off requests or secrets such as passwords, keys or card numbers. Use update or remove when a fact changed or the user wants it forgotten. Mention a saved fact only briefly, if at all."
+        );
+        assert_eq!(WEB_COMPACT, "Web tools: search only for current or unknown facts, otherwise answer directly. Cite sources as [n]; never invent sources.");
+        assert_eq!(MEMORY_COMPACT, "Memory tool: save durable facts about the user (name, preferences, projects); never trivia or secrets.");
+        assert_eq!(CHATS, "Chat search tool (search_chats): use it when the user refers to an earlier conversation that you cannot see (\"as we discussed\", \"last time\").");
+        assert_eq!(CHATS_COMPACT, "search_chats finds earlier conversations the user refers to.");
+        assert_eq!(CALL, "Call tools with valid JSON arguments. After a tool result, answer the user; do not repeat the same call.");
+        assert_eq!(NONE, "You have no tools in this chat: you cannot browse the web, open links, run code or read files except what the user shares here. Say so instead of pretending.");
+    }
+
+    /// The styles of the prompt against the Studio's own output (the fixtures come from
+    /// artifacts.js, see fixtures/style_fixtures.js).
+    #[test]
+    fn the_styles_are_the_studios() {
+        let data: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/style_fixtures.json")).expect("the fixtures are json");
+        // the catalog itself: id, label and instruction of every style
+        let styles = data["styles"].as_array().expect("the styles of the Studio");
+        assert_eq!(styles.len(), style::STYLES.len(), "the five styles of the Studio");
+        for (i, s) in styles.iter().enumerate() {
+            assert_eq!(s["id"].as_str(), Some(style::STYLES[i].id), "id {i}");
+            assert_eq!(s["label"].as_str(), Some(style::STYLES[i].label), "label {i}");
+            assert_eq!(s["prompt"].as_str(), Some(style::STYLES[i].prompt), "prompt {i}");
+        }
+        // withStylePrompt for every combination the fixtures hold
+        let cases = data["cases"].as_array().expect("the cases");
+        assert_eq!(cases.len(), 18, "three bases over five styles, plus unknown, empty and missing");
+        for case in cases {
+            let base = case["base"].as_str().expect("a base");
+            let style = case["style"].as_str().unwrap_or("default");
+            assert_eq!(style::with_style_prompt(base, style), case["out"], "for {base:?} + {style:?}");
+        }
+        // what a stored style means and what the chip says
+        assert_eq!(style::style_of(""), "default");
+        assert_eq!(style::style_of("nope"), "default");
+        assert_eq!(style::label_of("concise"), "Concise");
+        assert_eq!(style::label_of("nope"), "Default");
+        assert_eq!(style::instruction("default"), None, "the default adds nothing");
+        assert_eq!(style::instruction("formal"), Some(style::STYLES[3].prompt));
     }
 }

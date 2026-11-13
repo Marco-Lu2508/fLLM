@@ -45,6 +45,7 @@ pub(crate) const ICON_MORE: &[u8] = include_bytes!("../icons/more.svg");
 pub(crate) const ICON_PIN: &[u8] = include_bytes!("../icons/pin.svg");
 const ICON_CODE: &[u8] = include_bytes!("../icons/code.svg");
 const ICON_CHEVRON: &[u8] = include_bytes!("../icons/chevron-down.svg");
+const ICON_LINES: &[u8] = include_bytes!("../icons/lines.svg");
 const ICON_CHECK: &[u8] = include_bytes!("../icons/check.svg");
 const ICON_FOLDER: &[u8] = include_bytes!("../icons/folder.svg");
 const ICON_CHEVRON_RIGHT: &[u8] = include_bytes!("../icons/chevron-right.svg");
@@ -219,6 +220,10 @@ pub struct App {
     /// The menu under a "/" in the box: which saved prompts are listed and which one is highlighted.
     slash: Vec<usize>,
     slash_index: usize,
+    /// Whether the menu of the response styles is open over the composer.
+    style_menu: bool,
+    /// The style staged for the next new chat (the Studio's `state.newStyle`).
+    new_style: String,
     /// The text box of a prompt library row per id (so a half-typed row keeps its place).
     plib_texts: std::collections::HashMap<String, Content>,
     /// The copy on the server: the text that is up there, whether it is off, and one request at a time.
@@ -424,6 +429,9 @@ pub enum Message {
     SlashDown,
     SlashEnter,
     SlashClose,
+    /// The menu of the response styles over the composer.
+    StyleMenu,
+    StylePick(String),
     Code(code::CodeMsg),
 }
 
@@ -490,6 +498,8 @@ impl App {
             remember_text: String::new(),
             slash: Vec::new(),
             slash_index: 0,
+            style_menu: false,
+            new_style: "default".into(),
             plib_texts: std::collections::HashMap::new(),
             mem_synced_text: None,
             mem_sync_off: false,
@@ -651,6 +661,8 @@ impl App {
                 let id = self.store.new_chat();
                 if let Some(chat) = self.store.chat_mut(id) {
                     chat.assistant = wanted;
+                    // the style that was staged for a new chat becomes this chat's (state.newStyle)
+                    chat.style = self.new_style.clone();
                 }
                 if let Some(pid) = self.prj_pending.take().filter(|pid| self.store.projects.iter().any(|p| p.id == *pid)) {
                     if let Some(chat) = self.store.chat_mut(id) {
@@ -1583,6 +1595,21 @@ impl App {
             Message::SlashClose => {
                 self.slash.clear();
                 self.slash_index = 0;
+                Task::none()
+            }
+            Message::StyleMenu => {
+                self.style_menu = !self.style_menu;
+                Task::none()
+            }
+            Message::StylePick(style) => {
+                self.style_menu = false;
+                // the Studio writes the choice into the chat, or into state.newStyle without one
+                if let Some(chat) = self.current.and_then(|id| self.store.chat_mut(id)) {
+                    chat.style = style;
+                    self.save();
+                } else {
+                    self.new_style = style;
+                }
                 Task::none()
             }
             Message::MemoryUndo(mi, ci) => {
@@ -3812,6 +3839,13 @@ impl App {
         if let Some(a) = active.as_ref().filter(|a| !a.system.trim().is_empty()) {
             choices.push((prompts::Mode::Append, a.system.as_str()));
         }
+        // the response style of this chat rides at the very end (artifacts.js applies withStylePrompt
+        // to the base that composeSystem appends last); without a chat yet the style staged for the
+        // next one counts
+        let staged = chat.as_ref().map(|c| c.style.as_str()).unwrap_or(self.new_style.as_str());
+        if let Some(instruction) = prompts::style::instruction(prompts::style::style_of(staged)) {
+            choices.push((prompts::Mode::Append, instruction));
+        }
         prompts::resolve(&prompts::build(&facts), &choices, &now, &locale)
     }
 
@@ -4163,6 +4197,52 @@ impl App {
             .on_press_maybe((!busy).then_some(Message::Attach))
             .padding(6)
             .style(theme::ghost_button(t));
+        // the chip of the response style with its menu (the Studio's #btnStyle and #styleMenu in the
+        // composer toolbar: "Style", or "Style: Concise" for a chat that has one)
+        let staged = self
+            .current
+            .and_then(|id| self.store.chat(id))
+            .map(|c| c.style.as_str())
+            .unwrap_or(self.new_style.as_str());
+        let style_id = prompts::style::style_of(staged);
+        let style_chip = button(
+            row![
+                svg(icon(ICON_LINES)).width(14).height(14).style(move |theme, status| {
+                    if style_id == "default" { muted_svg(t)(theme, status) } else { accent_svg(t)(theme, status) }
+                }),
+                text(if style_id == "default" { "Style".to_string() } else { format!("Style: {}", prompts::style::label_of(style_id)) })
+                    .size(13),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::StyleMenu)
+        .padding([5, 10])
+        .style(slash_button(t, style_id != "default"));
+        let style_menu: Element<'_, Message> = if self.style_menu {
+            let mut items = column![].spacing(1);
+            for s in prompts::style::STYLES.iter() {
+                items = items.push(
+                    button(text(s.label).size(13).width(Length::Fill).align_x(iced::alignment::Horizontal::Left))
+                        .on_press(Message::StylePick(s.id.to_string()))
+                        .padding([6, 10])
+                        .width(Length::Fill)
+                        // the CSS marks the current one with a tint of the primary colour
+                        .style(slash_button(t, s.id == style_id)),
+                );
+            }
+            container(items)
+                .width(Length::Fill)
+                .padding(Padding { top: 4.0, right: 6.0, bottom: 4.0, left: 6.0 })
+                .style(move |_| container::Style {
+                    background: Some(iced::Background::Color(t.surface_2)),
+                    border: iced::border::rounded(10).width(1.0).color(t.separator),
+                    ..Default::default()
+                })
+                .into()
+        } else {
+            Space::new().height(0).into()
+        };
         let hint = text("Enter sends, Shift+Enter adds a new line").size(12).color(t.muted);
         let banner: Element<'_, Message> = if self.editing.is_some() {
             row![text("Changing a message: the answers after it are written again, the old ones stay as a version.").size(12).color(t.muted).width(Length::Fill), button(text("Cancel").size(12)).on_press(Message::CancelEdit).padding([2, 8]).style(theme::ghost_button(t))]
@@ -4208,7 +4288,7 @@ impl App {
                 })
                 .into()
         };
-        let card = container(column![banner, attachments, slash_menu, editor, row![attach, hint, Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 16.0 })])
+        let card = container(column![banner, attachments, slash_menu, editor, style_menu, row![attach, style_chip, hint, Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 16.0 })])
             .style(theme::card(t, theme::R_XL, false))
             .max_width(780);
         container(card).width(Length::Fill).center_x(Length::Fill).padding(Padding { top: 8.0, right: 24.0, bottom: 20.0, left: 24.0 }).into()

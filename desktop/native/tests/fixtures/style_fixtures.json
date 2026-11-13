@@ -1,0 +1,120 @@
+{
+  "styles": [
+    {
+      "id": "default",
+      "label": "Default",
+      "prompt": ""
+    },
+    {
+      "id": "concise",
+      "label": "Concise",
+      "prompt": "Keep answers short and to the point. Skip preamble and repetition."
+    },
+    {
+      "id": "explanatory",
+      "label": "Explanatory",
+      "prompt": "Explain your reasoning step by step with clear examples, and define terms that may be unfamiliar."
+    },
+    {
+      "id": "formal",
+      "label": "Formal",
+      "prompt": "Use a formal, professional tone and precise wording."
+    },
+    {
+      "id": "casual",
+      "label": "Casual",
+      "prompt": "Use a relaxed, friendly, conversational tone."
+    }
+  ],
+  "cases": [
+    {
+      "base": "",
+      "style": "default",
+      "out": ""
+    },
+    {
+      "base": "",
+      "style": "concise",
+      "out": "Keep answers short and to the point. Skip preamble and repetition."
+    },
+    {
+      "base": "",
+      "style": "explanatory",
+      "out": "Explain your reasoning step by step with clear examples, and define terms that may be unfamiliar."
+    },
+    {
+      "base": "",
+      "style": "formal",
+      "out": "Use a formal, professional tone and precise wording."
+    },
+    {
+      "base": "",
+      "style": "casual",
+      "out": "Use a relaxed, friendly, conversational tone."
+    },
+    {
+      "base": "You are a helpful assistant.",
+      "style": "default",
+      "out": "You are a helpful assistant."
+    },
+    {
+      "base": "You are a helpful assistant.",
+      "style": "concise",
+      "out": "You are a helpful assistant.\n\nKeep answers short and to the point. Skip preamble and repetition."
+    },
+    {
+      "base": "You are a helpful assistant.",
+      "style": "explanatory",
+      "out": "You are a helpful assistant.\n\nExplain your reasoning step by step with clear examples, and define terms that may be unfamiliar."
+    },
+    {
+      "base": "You are a helpful assistant.",
+      "style": "formal",
+      "out": "You are a helpful assistant.\n\nUse a formal, professional tone and precise wording."
+    },
+    {
+      "base": "You are a helpful assistant.",
+      "style": "casual",
+      "out": "You are a helpful assistant.\n\nUse a relaxed, friendly, conversational tone."
+    },
+    {
+      "base": "Line one\nLine two",
+      "style": "default",
+      "out": "Line one\nLine two"
+    },
+    {
+      "base": "Line one\nLine two",
+      "style": "concise",
+      "out": "Line one\nLine two\n\nKeep answers short and to the point. Skip preamble and repetition."
+    },
+    {
+      "base": "Line one\nLine two",
+      "style": "explanatory",
+      "out": "Line one\nLine two\n\nExplain your reasoning step by step with clear examples, and define terms that may be unfamiliar."
+    },
+    {
+      "base": "Line one\nLine two",
+      "style": "formal",
+      "out": "Line one\nLine two\n\nUse a formal, professional tone and precise wording."
+    },
+    {
+      "base": "Line one\nLine two",
+      "style": "casual",
+      "out": "Line one\nLine two\n\nUse a relaxed, friendly, conversational tone."
+    },
+    {
+      "base": "You are a helpful assistant.",
+      "style": "unknown-style",
+      "out": "You are a helpful assistant."
+    },
+    {
+      "base": "You are a helpful assistant.",
+      "style": "",
+      "out": "You are a helpful assistant."
+    },
+    {
+      "base": "You are a helpful assistant.",
+      "out": "You are a helpful assistant."
+    }
+  ]
+}
