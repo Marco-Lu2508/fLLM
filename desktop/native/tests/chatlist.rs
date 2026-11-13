@@ -50,6 +50,20 @@ fn sim(app: &App) -> Simulator<'_, Message> {
     Simulator::with_size(settings, iced::Size::new(1280.0, 900.0), app.view())
 }
 
+/// Writes one PNG of the given view into the snapshot dir of the run (the pattern of `tests/ui.rs`).
+fn save_png(app: &App, name: &str) {
+    let theme = app.theme();
+    let mut ui = sim(app);
+    let shot = ui.snapshot(&theme).expect("the software renderer draws the view");
+    let dir = std::path::PathBuf::from(std::env::var("FLLM_SNAPSHOT_DIR").unwrap_or_else(|_| "/opt/data/cache/scratch/fLLM/desktop/native/ui-snapshots".into()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let prefix = format!("{name}-");
+    for old in std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&prefix)) {
+        let _ = std::fs::remove_file(old.path());
+    }
+    shot.matches_image(dir.join(format!("{name}.png"))).expect("the picture is written");
+}
+
 #[test]
 fn chats_are_grouped_by_the_day_of_their_last_use_pinned_first() {
     let n = now();
@@ -214,4 +228,51 @@ fn the_sidebar_draws_the_groups_the_search_box_and_the_row_of_actions() {
     list(&mut app, ListMsg::Search("nothing like it".into()));
     let mut ui = sim(&app);
     ui.find("No chat matches").expect("the empty search says so");
+}
+
+/// The import of chats: a file of exports becomes chats of this window, the id of the file stays
+/// when it is free and gets a new one when it is taken, and the lines of the Studio say what
+/// happened (the `importThreads` of the Studio behind btnImportThreads).
+#[test]
+fn chats_of_a_file_are_imported_and_take_free_ids() {
+    let (mut app, _dir) = app_with(vec![chat(3, "there", now(), "hi")]);
+    {
+        let mut ui = sim(&app);
+        ui.find("Import").expect("the import beside the select mode");
+    }
+    save_png(&app, "chatlist-import");
+    // two chats, one with an id that this window already uses
+    let file = r#"[
+        {"title": "one", "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]},
+        {"title": "two", "id": 3, "messages": [{"role": "user", "content": "q2"}]}
+    ]"#;
+    let _ = app.update(Message::ImportChosen(Ok(("export.json".into(), Some(file.into())))));
+    assert_eq!(app.toast(), Some("2 chats imported"), "the line of the Studio");
+    let store = reload_store(&app);
+    assert_eq!(store.chats.len(), 3, "the old one and the two new");
+    let mut ids: Vec<u64> = store.chats.iter().map(|c| c.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 3, "every chat has its own id: {ids:?}");
+    assert!(store.chats.iter().any(|c| c.title == "one" && c.messages.len() == 2), "{:?}", store.chats);
+    assert!(store.chats.iter().any(|c| c.title == "two" && c.messages[0].content == "q2"), "the taken id was replaced");
+
+    // the file of this window's own export comes back in one piece
+    let export = fllm_app::chatlist::json_of(&chat(9, "round", now(), "hello"));
+    let _ = app.update(Message::ImportChosen(Ok(("mine.json".into(), Some(export)))));
+    assert_eq!(app.toast(), Some("1 chat imported"));
+    assert_eq!(reload_store(&app).chats.len(), 4, "the roundtrip of an export");
+    assert_eq!(reload_store(&app).chats.last().unwrap().messages[0].content, "hello");
+
+    // the three lines the Studio shows
+    let _ = app.update(Message::ImportChosen(Ok(("bad.json".into(), Some("{nope".into())))));
+    assert_eq!(app.toast(), Some("The file is not valid JSON."));
+    let _ = app.update(Message::ImportChosen(Ok(("none.json".into(), Some(r#"[{"foo": 1}]"#.into())))));
+    assert_eq!(app.toast(), Some("No chats were found in the file."), "a file without chats");
+    // a closed dialog changes nothing
+    let before = reload_store(&app).chats.len();
+    let _ = app.update(Message::ImportChosen(Ok(("x.json".into(), None))));
+    assert_eq!(reload_store(&app).chats.len(), before, "no file, no chat");
+    let _ = app.update(Message::ImportChosen(Err("no server".into())));
+    assert_eq!(reload_store(&app).chats.len(), before);
 }

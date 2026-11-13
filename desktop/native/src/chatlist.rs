@@ -1,7 +1,7 @@
 //! The list of chats in the sidebar: search, pinned and archived chats, rename, duplicate, export, delete (one or many) and the date groups.
 
 use crate::app::{ellipsize, icon, muted_svg, Message, ICON_MORE, ICON_PIN};
-use crate::store::{ChatRecord, Role, Store};
+use crate::store::{ChatRecord, Record, Role, Store};
 use crate::theme::{self, Tokens};
 use chrono::{Datelike, Local, TimeZone};
 use iced::widget::{button, column, container, mouse_area, row, svg, text, text_input, Space};
@@ -116,6 +116,60 @@ pub fn file_stem(title: &str) -> String {
     let s: String = title.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
     let s = s.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
     if s.is_empty() { "chat".into() } else { s.chars().take(60).collect() }
+}
+
+/// The chats of an imported file: an array of them or one chat, in the shape `json_of` writes
+/// (an id that is already taken gets a new one — the `importThreads` of the Studio). The error is
+/// the line the Studio shows when the file is no JSON at all.
+pub fn parse_import(text: &str, next_id: &mut u64, taken: &std::collections::HashSet<u64>) -> Result<Vec<ChatRecord>, String> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|_| "The file is not valid JSON.".to_string())?;
+    let list = match value {
+        serde_json::Value::Array(items) => items,
+        other => vec![other],
+    };
+    let mut out = Vec::new();
+    for raw in list {
+        let Some(messages) = raw.get("messages").and_then(|m| m.as_array()) else { continue };
+        // an id of the file that is free stays, any other chat gets the next one of this window
+        // (`state.threads.some((x) => x.id === t.id)` of importThreads)
+        let id = match raw.get("id").and_then(|i| i.as_u64()) {
+            Some(id) if !taken.contains(&id) => id,
+            _ => *next_id,
+        };
+        *next_id = (*next_id).max(id + 1);
+        let chat = ChatRecord::new(
+            id,
+            raw.get("title").and_then(|t| t.as_str()).unwrap_or(""),
+            messages
+                .iter()
+                .filter_map(|m| {
+                    let content = m.get("content")?.as_str()?.to_string();
+                    let role = match m.get("role")?.as_str().unwrap_or("assistant") {
+                        "user" => Role::User,
+                        "tool" => Role::Tool,
+                        _ => Role::Assistant,
+                    };
+                    Some(Record {
+                        role,
+                        content,
+                        reasoning: String::new(),
+                        stats: None,
+                        passages: None,
+                        images: Vec::new(),
+                        files: Vec::new(),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        tool_cards: Vec::new(),
+                        sources: Vec::new(),
+                        research: None,
+                        logprobs: Vec::new(),
+                    })
+                })
+                .collect(),
+        );
+        out.push(chat);
+    }
+    Ok(out)
 }
 
 pub fn export_dir() -> std::path::PathBuf {
@@ -341,7 +395,12 @@ impl ChatList {
             .on_press(Message::List(ListMsg::SelectMode(!self.select)))
             .padding([2, 8])
             .style(theme::ghost_button(t));
-        let mut col = column![row![search, mode_button].spacing(6).align_y(Alignment::Center)].spacing(6);
+        // the import beside it (the btnImportThreads of the Studio's chat header)
+        let import_button = button(text("Import").size(12))
+            .on_press(Message::ImportChats)
+            .padding([2, 8])
+            .style(theme::ghost_button(t));
+        let mut col = column![row![search, mode_button, import_button].spacing(6).align_y(Alignment::Center)].spacing(6);
         if self.select {
             let n = self.selected.len();
             col = col.push(

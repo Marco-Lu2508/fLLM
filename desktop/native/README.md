@@ -162,6 +162,10 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   could not run: … The model answers on its own instead.*; *Stop* cancels the run and its requests,
   and the run comes back with the chat. Checked against the routes themselves with a small server
   that answers plan, search, fetch, notes, reflection and report (4 tests, 5 mutations).
+- Chats: *Select* beside the search takes several at once to delete, archive, move to a project
+  or export; *Import* beside it takes a file of exports back (an array of chats or one, the shape
+  the export writes — an id that this window already has gets a new one), with the lines of the
+  Studio (*The file is not valid JSON.*, *No chats were found in the file.*, *2 chats imported*).
 - Artifacts: a fenced block of an answer with a title (`title="…"`) or that can be previewed
   (HTML, SVG, Markdown, CSV) becomes an artifact; *Preview* or *Open* in the header of the block
   opens the panel beside the chat with the artifact and all its versions (`‹ v N / M ›`) — the

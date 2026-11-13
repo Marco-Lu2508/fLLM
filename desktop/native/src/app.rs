@@ -333,6 +333,10 @@ pub enum Message {
     Esc,
     /// The reasoning of a message is shown or folded away (the `details` box of the Studio).
     ReasoningToggle(usize),
+    /// The import of chats beside the select mode (the btnImportThreads of the Studio).
+    ImportChats,
+    /// The chosen file of that import: its path and its text.
+    ImportChosen(Result<(String, Option<String>), String>),
     /// Open a fenced block of an answer in the artifact panel (the Open/Preview button of the
     /// block): the code of it, and the info string of its fence.
     ArtOpen(String, String),
@@ -1892,6 +1896,37 @@ impl App {
                         Task::none()
                     }
                 }
+            }
+            Message::ImportChats => {
+                let base = self.base.clone();
+                Task::perform(api::pick_file_with_text(base), Message::ImportChosen)
+            }
+            Message::ImportChosen(result) => {
+                let text = match result {
+                    Ok((_, text)) => text,
+                    Err(_) => None,
+                };
+                if let Some(text) = text {
+                    let taken: std::collections::HashSet<u64> = self.store.chats.iter().map(|c| c.id).collect();
+                    let mut next = self.store.next_id;
+                    match chatlist::parse_import(&text, &mut next, &taken) {
+                        Ok(chats) => {
+                            if chats.is_empty() {
+                                self.toast = Some("No chats were found in the file.".into());
+                            } else {
+                                let n = chats.len();
+                                for chat in chats {
+                                    self.store.chats.push(chat);
+                                }
+                                self.store.next_id = next;
+                                self.save();
+                                self.toast = Some(if n == 1 { "1 chat imported".into() } else { format!("{n} chats imported") });
+                            }
+                        }
+                        Err(message) => self.toast = Some(message),
+                    }
+                }
+                Task::none()
             }
             Message::ArtOpen(code, info) => {
                 let families = artifacts::chat_families(&self.art_messages());
