@@ -194,6 +194,7 @@ fn the_status_of_the_setup_server_has_what_the_screen_needs() {
         uptime_secs: 0.0,
         generated_tokens_total: 0,
         slots_running: 0,
+        device_fallbacks: None,
     };
     assert_eq!(status, expected, "the setup server's answer");
     let plain = parse_status(&json!({}));

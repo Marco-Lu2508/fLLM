@@ -12,6 +12,7 @@ use serde_json::json;
 /// A device of `GET /api/studio/hardware`.
 fn dev(name: &str, backend: &str, api: &str, dev_type: &str, total: u64) -> Device {
     Device {
+        id: name.into(),
         name: name.into(),
         backend: backend.into(),
         api: api.into(),

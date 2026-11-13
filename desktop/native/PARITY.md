@@ -54,7 +54,7 @@ checks at the bottom pass.
 | Model picker (file / folder / HF name, inspect first) | part (list; inspect and file dialog: todo) |
 | Settings > General / Appearance / Personalization | part |
 | Settings > Engine (caches, order of dropping work, telemetry, live controls) | part |
-| Settings > Hardware (GPU check, device list, NPU, AMD NPU) | todo |
+| Settings > Hardware (GPU check, device list, NPU, AMD NPU) | part — the `gpucheck.js` half is ported: `fallback_notice` is `fallbackNotice` (the three modes with their titles, the counts line, the reasons and the operations without the by-design ones, the squeezed one-line footer) shown as the amber notice of `hwFallbackNotice` with the `fllm-rs doctor --gpu` hint, and the devices card of `Compute devices` lists what this machine has — the processor and the cards with their memory, a device without memory stays out as in `panels.js` — with *Test this GPU* (`gpu_check_view` skips the CPU and the NPU, *Testing ...* while it runs, `POST /api/studio/gpu-check`) and the result lines coloured ok/warn/bad by `gpuVerdictLine`; eleven fixtures from the Studio's own `@pure` zone, five unit tests, two window tests with one drawing and four mutations. Still open: the speed test, the processor feature limit, the repack switch, the system-memory line with its buttons, `mergeDevices`/`deviceRole`/the choice sentence of the device grid, the NPU card and AMD NPU |
 | Settings > Runtime (sandbox, turbo, automatic approval) | todo |
 | Settings > Providers (cloud and other servers, keys) | todo |
 | Settings > Local API server, API keys, logs, tokenizer | todo |

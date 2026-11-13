@@ -114,6 +114,7 @@ impl Hardware {
             .map(|a| {
                 a.iter()
                     .map(|d| Device {
+                        id: d.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
                         name: d.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
                         backend: d.get("backend").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
                         api: d.get("api").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
@@ -209,6 +210,8 @@ pub fn format_combo(combo: &str, is_mac: bool) -> String {
 /// memory (`devices` of the route, the fields `describeComputer` reads).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Device {
+    /// What `gpu-check` and the load route call it by.
+    pub id: String,
     pub name: String,
     pub backend: String,
     pub api: String,

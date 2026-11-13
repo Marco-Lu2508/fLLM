@@ -238,6 +238,15 @@ fn value_slider<'a>(t: Tokens, range: std::ops::RangeInclusive<f32>, value: f32,
     row![s, text(format!("{value:.2}")).size(13).font(iced::Font::MONOSPACE).width(44)].spacing(10).align_y(Alignment::Center).into()
 }
 
+/// What the hardware card shows: the devices of this machine, the notice of what runs on the CPU,
+/// and what every card's check answered (`Settings > Hardware` of the Studio).
+pub struct HardwareView<'a> {
+    pub devices: &'a [crate::tour::Device],
+    pub notice: Option<&'a crate::gpucheck::FallbackNotice>,
+    pub busy: &'a [String],
+    pub results: &'a [(String, Vec<crate::gpucheck::GpuResult>)],
+}
+
 /// What the appearance card shows: the four choices of the Studio's `selThemeMode`,
 /// `accentPickerRow`, `selFontSize` and the two switches.
 pub struct LookView<'a> {
@@ -292,6 +301,117 @@ impl std::fmt::Display for VoiceChoice {
 
 // the page of the settings carries every block of it (the Studio reads its rows from the page)
 #[allow(clippy::too_many_arguments)]
+/// The hardware card of the Studio (`spane-hardware` of `shell.html`): what this machine has, the
+/// notice of what runs on the CPU, and a check button on every card that can be tested.
+fn hardware_card<'a>(t: Tokens, view: HardwareView<'a>) -> Element<'a, Message> {
+    let mut body = column![].spacing(14);
+    body = body.push(
+        text("The processor and graphics cards fLLM can use, and a few ways to check that they work.")
+            .size(13)
+            .color(t.muted),
+    );
+
+    // the amber notice of what runs on the CPU (`hwFallbackNotice` of the Studio)
+    if let Some(notice) = view.notice {
+        let mut notice_body = column![].spacing(6);
+        notice_body = notice_body.push(text(notice.title.clone()).size(13).font(bold()));
+        notice_body = notice_body.push(text(notice.summary.clone()).size(13).color(t.muted));
+        for line in &notice.lines {
+            notice_body = notice_body.push(text(line.clone()).size(13).color(t.fg_soft));
+        }
+        let hint = if notice.detail.is_empty() {
+            String::from(
+                "Run fllm-rs doctor --gpu in a terminal, or press \"Test this GPU\" below, to see in one line whether the card does the work.",
+            )
+        } else {
+            format!(
+                "Run fllm-rs doctor --gpu in a terminal, or press \"Test this GPU\" below, to see in one line whether the card does the work. {}",
+                notice.detail
+            )
+        };
+        notice_body = notice_body.push(text(hint).size(12).color(t.muted));
+        body = body.push(
+            container(notice_body)
+                .width(Length::Fill)
+                .padding(12)
+                .style(move |_| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(if t.dark {
+                        iced::Color { r: 0.35, g: 0.25, b: 0.05, a: 1.0 }
+                    } else {
+                        iced::Color { r: 1.0, g: 0.95, b: 0.8, a: 1.0 }
+                    })),
+                    text_color: Some(t.fg),
+                    border: iced::Border { radius: theme::R_MD.into(), width: 1.0, color: t.separator },
+                    ..Default::default()
+                }),
+        );
+    }
+
+    // the devices, one under the other (`hwDevicesGrid` is a column too)
+    let mut devices = column![].spacing(10);
+    for device in view.devices {
+        // a device that reports no memory cannot hold a model: it stays out of the list
+        if device.backend != "cpu" && device.total_memory_bytes == 0 {
+            continue;
+        }
+        let busy = view.busy.contains(&device.id);
+        let results = view
+            .results
+            .iter()
+            .find(|(key, _)| key == &device.id)
+            .map(|(_, lines)| lines.as_slice())
+            .unwrap_or(&[]);
+        let check = crate::gpucheck::gpu_check_view(&device.backend, busy, results);
+        let mut card_row = column![].spacing(4);
+        let backend_label = if device.backend == "cpu" {
+            String::from("the processor")
+        } else {
+            device.backend.clone()
+        };
+        let mut head = row![].spacing(8).align_y(Alignment::Center);
+        head = head.push(text(device.name.clone()).size(14).font(bold()));
+        head = head.push(text(backend_label).size(12).color(t.muted));
+        if device.total_memory_bytes > 0 {
+            head = head.push(
+                text(format!("· {}", crate::app::format_bytes(device.total_memory_bytes)))
+                    .size(12)
+                    .color(t.muted),
+            );
+        }
+        card_row = card_row.push(head);
+        if check.show_button && !device.id.is_empty() {
+            let id = device.id.clone();
+            card_row = card_row.push(
+                button(text(check.label).size(12).color(t.fg_soft))
+                    .on_press(Message::GpuCheck(id))
+                    .padding([5, 10])
+                    .style(crate::app::starter_style(t)),
+            );
+        }
+        for line in &check.lines {
+            let colour = match line.cls {
+                "ok" => t.ok,
+                "warn" => t.primary,
+                _ => t.danger,
+            };
+            card_row = card_row.push(text(line.text.clone()).size(13).color(colour));
+        }
+        devices = devices.push(
+            container(card_row)
+                .width(Length::Fill)
+                .padding(10)
+                .style(theme::card(t, theme::R_MD, false)),
+        );
+    }
+    if view.devices.is_empty() {
+        body = body.push(text("Reading the devices of this machine …").size(13).color(t.muted));
+    } else {
+        body = body.push(text("Compute devices").size(15).font(bold()));
+        body = body.push(devices);
+    }
+    body.into()
+}
+
 /// The appearance card of the Studio (the `Appearance` card of `shell.html`): the theme, the accent
 /// people pick, the base size of the text and the two switches under it.
 fn appearance_card<'a>(t: Tokens, look: LookView<'a>) -> Element<'a, Message> {
@@ -553,6 +673,7 @@ pub fn page<'a>(
     voice: VoiceView<'a>,
     usage: UsageView<'a>,
     look: LookView<'a>,
+    hardware: HardwareView<'a>,
 ) -> Element<'a, Message> {
     let mut answers = column![].spacing(14);
     answers = answers.push(setting(
@@ -1061,6 +1182,7 @@ pub fn page<'a>(
         // of voice.js has its own place in the Studio's menu; the drawing of the settings takes
         // its own height for these)
         card(t, "Appearance", appearance_card(t, look)),
+        hardware_card(t, hardware),
         card(t, "Usage and cost", usage_card(t, usage)),
         card(t, "Dictation", dictation.into()),
         card(t, "Reading aloud", reading.into()),

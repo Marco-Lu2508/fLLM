@@ -319,6 +319,14 @@ pub struct App {
     pub inbox: Vec<models::Note>,
     /// Whether the panel of the mailbox is open over the top bar.
     pub inbox_open: bool,
+    /// The devices this machine has (`GET /api/studio/hardware`), for the settings card.
+    pub hardware_devices: Vec<tour::Device>,
+    /// The devices whose check is running right now (`gpuCheckBusy` of `gpucheck.js`).
+    pub gpu_busy: Vec<String>,
+    /// The result lines of every card that was tested, in the order they came back.
+    pub gpu_results: Vec<(String, Vec<crate::gpucheck::GpuResult>)>,
+    /// What runs on the CPU although a GPU was chosen (the amber notice of the hardware card).
+    pub gpu_fallback: Option<crate::gpucheck::FallbackNotice>,
     /// What the tour has to say (the line about this computer, a model's memory, the loaded model
     /// and the suggestions of the hub).
     pub tour_data: tour::TourData,
@@ -664,6 +672,12 @@ pub enum Message {
     /// The price rows are written back (`Save prices` of the Studio).
     UsageSave,
     /// The theme of the appearance card (`selThemeMode` of the Studio).
+    /// The devices of this machine came back (the card of `Settings > Hardware`).
+    HardwareLoaded(Result<tour::Hardware, String>),
+    /// The check of one card was started (`gpuCheckHtml` of `gpucheck.js`).
+    GpuCheck(String),
+    /// The check of one card answered with its result lines.
+    GpuChecked { id: String, results: Result<Vec<crate::gpucheck::GpuResult>, String> },
     LookTheme(String),
     /// The accent colour (`accentPickerRow` of the Studio).
     LookAccent(String),
@@ -836,6 +850,10 @@ impl App {
             usage_status: None,
             inbox: Vec::new(),
             inbox_open: false,
+            hardware_devices: Vec::new(),
+            gpu_busy: Vec::new(),
+            gpu_results: Vec::new(),
+            gpu_fallback: None,
             tour_data: tour::TourData::default(),
             shortcuts_open: false,
             sc_capture: None,
@@ -2460,6 +2478,11 @@ impl App {
                     self.hero_samples.remove(0);
                 }
                 let setup = status.setup;
+                // the amber notice of the hardware card follows the status (renderFallbackNotice)
+                self.gpu_fallback = {
+                    let built = crate::gpucheck::fallback_notice(status.device_fallbacks.as_ref());
+                    built.show.then_some(built)
+                };
                 self.hero = Some(status);
                 // the models on this computer are asked once for the start screen (heroHubAsked)
                 if setup && !self.hero_hub_asked {
@@ -2547,6 +2570,47 @@ impl App {
             }
             Message::UsageStatus(text) => {
                 self.usage_status = Some(text);
+                Task::none()
+            }
+            Message::HardwareLoaded(Ok(hardware)) => {
+                self.hardware_devices = hardware.devices;
+                Task::none()
+            }
+            Message::HardwareLoaded(Err(_)) => {
+                self.hardware_devices = Vec::new();
+                Task::none()
+            }
+            Message::GpuCheck(id) => {
+                // one card at a time per device: the button says *Testing ...* while it runs
+                // (gpuCheckBusy of gpucheck.js, its lines cleared before the run)
+                if self.gpu_busy.contains(&id) {
+                    return Task::none();
+                }
+                self.gpu_busy.push(id.clone());
+                self.gpu_results.retain(|(key, _)| key != &id);
+                let base = self.base.clone();
+                let device = id.clone();
+                Task::perform(
+                    async move { models::gpu_check(base, device).await },
+                    move |results| Message::GpuChecked { id: id.clone(), results },
+                )
+            }
+            Message::GpuChecked { id, results } => {
+                self.gpu_busy.retain(|key| key != &id);
+                match results {
+                    Ok(lines) => self.gpu_results.push((id, lines)),
+                    Err(error) => {
+                        // the Studio writes the error as a line of its own
+                        self.gpu_results.push((
+                            id.clone(),
+                            vec![crate::gpucheck::GpuResult {
+                                device: id,
+                                status: String::from("error"),
+                                verdict: error,
+                            }],
+                        ));
+                    }
+                }
                 Task::none()
             }
             Message::LookTheme(mode) => {
@@ -3223,17 +3287,22 @@ impl App {
                     // the prices of the usage pane come with them (loadPrices of usage.js)
                     let prices =
                         Task::perform(models::fetch_prices(self.base.clone()), Message::PricesLoaded);
+                    let devices = Task::perform(
+                        models::fetch_hardware(self.base.clone()),
+                        Message::HardwareLoaded,
+                    );
                     if !matches!(self.server, Server::Down(_)) {
                         return Task::batch(vec![
                             voices,
                             prices,
+                            devices,
                             Task::perform(
                                 engine_settings::fetch(self.base.clone()),
                                 Message::EngineLoaded,
                             ),
                         ]);
                     }
-                    return Task::batch(vec![voices, prices]);
+                    return Task::batch(vec![voices, prices, devices]);
                 }
                 Task::none()
             }
@@ -4002,6 +4071,12 @@ impl App {
                     font_size: self.store.font_size,
                     tint: self.store.colored_bubble,
                     speed: self.store.show_speed,
+                },
+                settings::HardwareView {
+                    devices: &self.hardware_devices,
+                    notice: self.gpu_fallback.as_ref(),
+                    busy: &self.gpu_busy,
+                    results: &self.gpu_results,
                 },
             )
         } else if self.page == View::Project {

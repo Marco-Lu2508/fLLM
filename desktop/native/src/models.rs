@@ -307,6 +307,9 @@ pub struct Status {
     pub uptime_secs: f64,
     pub generated_tokens_total: u64,
     pub slots_running: u64,
+    /// What runs on the CPU although a GPU was chosen (`device_fallbacks` of the status, the
+    /// engine's placement report; `None` while everything runs where it should).
+    pub device_fallbacks: Option<Value>,
 }
 
 pub fn parse_status(v: &Value) -> Status {
@@ -321,6 +324,7 @@ pub fn parse_status(v: &Value) -> Status {
         uptime_secs: v.pointer("/metrics/uptime_secs").and_then(Value::as_f64).unwrap_or(0.0),
         generated_tokens_total: v.pointer("/metrics/generated_tokens_total").and_then(Value::as_u64).unwrap_or(0),
         slots_running: v.pointer("/metrics/slots_running").and_then(Value::as_u64).unwrap_or(0),
+        device_fallbacks: v.get("device_fallbacks").cloned(),
     }
 }
 
@@ -383,6 +387,14 @@ fn urlencode(text: &str) -> String {
         }
     }
     out
+}
+
+/// Runs the quantized matrix product of a check on one device and on the CPU
+/// (`POST /api/studio/gpu-check` with `{device}`) — the answer holds the result lines.
+pub async fn gpu_check(base: String, device: String) -> Result<Vec<crate::gpucheck::GpuResult>, String> {
+    post(&base, "/api/studio/gpu-check", json!({ "device": device }))
+        .await
+        .map(|v| crate::gpucheck::GpuResult::from_json(&v))
 }
 
 /// The prices per million tokens the user entered (`GET /api/studio/prices`).

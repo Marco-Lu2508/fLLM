@@ -53,6 +53,20 @@ behaviour between versions).
   `assistantInner`. Tests: Esc stopping and ignoring, the fold with its click, the open box while it
   thinks, and the research run stopped by the key; four mutations each turn one red; the open box is
   drawn to a PNG and read back.
+- **The hardware card of the native app (first half).** The Studio tells in one place whether the
+  GPU does the work (`gpucheck.js`); the native app has the part of it that answers that question.
+  The amber notice follows `device_fallbacks` of the status exactly as `fallbackNotice` computes it:
+  *The whole model runs on the CPU* / *Weights in GPU memory, compute mostly on the CPU* / *Part of
+  this model runs on the CPU*, the line of how many operations run where, the reasons, the
+  operations that are not there by design, and the one-line footer with the hint to `fllm-rs doctor
+  --gpu`. The *Compute devices* card lists what this machine has — the processor and the cards with
+  their memory, a device without memory stays out as in `panels.js` — and every card that can be
+  tested carries *Test this GPU* (*Testing ...* while it runs; the CPU and the NPU are skipped as in
+  `gpuCheckHtml`) with the answer lines coloured ok, warn or bad by `gpuVerdictLine`. Eleven
+  fixtures from the Studio's own pure zone, five unit tests, two window tests with one drawing of
+  the card, four mutations. The speed test, the processor feature limit, the repack switch, the
+  system-memory line, the grouping of the grid, the NPU card and AMD NPU come with their own
+  sources in a follow-up round.
 - **The look of the native app: accent, size, tint and speed.** The Studio's *Appearance* card is
   complete in the settings of the native app. *Theme* chooses system, dark or light; *Accent color*
   offers the eight accents of the Studio (Copper first, the colour of the material) with the chosen

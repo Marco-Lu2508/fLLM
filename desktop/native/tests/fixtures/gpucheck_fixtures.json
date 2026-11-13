@@ -1,0 +1,216 @@
+[
+  {
+    "fn": "fallbackNotice",
+    "args": [
+      null
+    ],
+    "got": {
+      "show": false
+    },
+    "note": "show: false"
+  },
+  {
+    "fn": "fallbackNotice",
+    "args": [
+      {}
+    ],
+    "got": {
+      "show": false
+    },
+    "note": "show: false"
+  },
+  {
+    "fn": "fallbackNotice",
+    "args": [
+      {
+        "fallback": false,
+        "mode": "cpu"
+      }
+    ],
+    "got": {
+      "show": false
+    },
+    "note": "the flag decides"
+  },
+  {
+    "fn": "fallbackNotice",
+    "args": [
+      {
+        "fallback": true,
+        "mode": "cpu",
+        "device": "NVIDIA GPU",
+        "backend": "cuda",
+        "whole_model_on_cpu": true
+      }
+    ],
+    "got": {
+      "show": true,
+      "level": "cpu",
+      "title": "The whole model runs on the CPU",
+      "short": "Model runs on the CPU",
+      "summary": "The whole model runs on the CPU",
+      "detail": "",
+      "lines": [
+        "NVIDIA GPU (cuda) is not used for this model."
+      ],
+      "footerTitle": "The whole model runs on the CPU. Open Settings, Hardware for the details, or run \"fllm-rs doctor --gpu\"."
+    },
+    "note": "the whole model on the CPU"
+  },
+  {
+    "fn": "fallbackNotice",
+    "args": [
+      {
+        "fallback": true,
+        "mode": "mostly_cpu"
+      }
+    ],
+    "got": {
+      "show": true,
+      "level": "mostly",
+      "title": "Weights in GPU memory, compute mostly on the CPU",
+      "short": "Part of the model runs on the CPU",
+      "summary": "Weights in GPU memory, compute mostly on the CPU",
+      "detail": "",
+      "lines": [],
+      "footerTitle": "Weights in GPU memory, compute mostly on the CPU. Open Settings, Hardware for the details, or run \"fllm-rs doctor --gpu\"."
+    },
+    "note": "the middle mode without a device"
+  },
+  {
+    "fn": "fallbackNotice",
+    "args": [
+      {
+        "fallback": true,
+        "mode": "layer_offload",
+        "device": "GPU",
+        "backend": "vulkan",
+        "operations_on_cpu": 12,
+        "operations_total": 48,
+        "layers_on_device": 30,
+        "reasons": [
+          {
+            "reason": "no kernel",
+            "operations": "attention"
+          }
+        ],
+        "operation_fallbacks": [
+          {
+            "operation": "rms_norm",
+            "reason": "unsupported",
+            "calls": 4,
+            "by_design": false
+          },
+          {
+            "operation": "rope",
+            "reason": "by design",
+            "calls": 9,
+            "by_design": true
+          }
+        ],
+        "headline": "Some blocks run on the processor.",
+        "notices": [
+          "The card has 4 GB."
+        ],
+        "summary": "Half or more of the work is on the CPU."
+      }
+    ],
+    "got": {
+      "show": true,
+      "level": "partial",
+      "title": "Part of this model runs on the CPU",
+      "short": "Part of the model runs on the CPU",
+      "summary": "Half or more of the work is on the CPU.",
+      "detail": "Some blocks run on the processor. The card has 4 GB.",
+      "lines": [
+        "12 of 48 operations (attention or feed-forward blocks of the layers) run on the CPU. 30 layers run completely on GPU (vulkan).",
+        "Why: no kernel (attention)",
+        "Operation on the CPU: rms_norm: unsupported (4 calls)"
+      ],
+      "footerTitle": "Part of this model runs on the CPU. Some blocks run on the processor. The card has 4 GB. Open Settings, Hardware for the details, or run \"fllm-rs doctor --gpu\"."
+    },
+    "note": "counts, reasons, operations and the two texts"
+  },
+  {
+    "fn": "fallbackNotice",
+    "args": [
+      {
+        "fallback": true,
+        "mode": "other",
+        "device": "Radeon",
+        "notices": []
+      }
+    ],
+    "got": {
+      "show": true,
+      "level": "partial",
+      "title": "Part of this model runs on the CPU",
+      "short": "Part of the model runs on the CPU",
+      "summary": "Part of this model runs on the CPU",
+      "detail": "",
+      "lines": [],
+      "footerTitle": "Part of this model runs on the CPU. Open Settings, Hardware for the details, or run \"fllm-rs doctor --gpu\"."
+    },
+    "note": "a device without a backend and without counts"
+  },
+  {
+    "fn": "gpuVerdictLine",
+    "args": [
+      {
+        "device": "cuda:0",
+        "status": "ok",
+        "verdict": "the card does the work"
+      }
+    ],
+    "got": {
+      "text": "cuda:0: the card does the work",
+      "cls": "ok"
+    },
+    "note": "green"
+  },
+  {
+    "fn": "gpuVerdictLine",
+    "args": [
+      {
+        "device": "cuda:0",
+        "status": "slow",
+        "verdict": "half of it"
+      }
+    ],
+    "got": {
+      "text": "cuda:0: half of it",
+      "cls": "warn"
+    },
+    "note": "a warning"
+  },
+  {
+    "fn": "gpuVerdictLine",
+    "args": [
+      {
+        "device": "cpu",
+        "status": "error",
+        "verdict": "The check could not run."
+      }
+    ],
+    "got": {
+      "text": "cpu: The check could not run.",
+      "cls": "bad"
+    },
+    "note": "red"
+  },
+  {
+    "fn": "gpuVerdictLine",
+    "args": [
+      {
+        "device": "cuda:0",
+        "status": "weird",
+        "verdict": "?"
+      }
+    ],
+    "got": {
+      "text": "cuda:0: ?",
+      "cls": "bad"
+    },
+    "note": "anything else is red"
+  }
+]

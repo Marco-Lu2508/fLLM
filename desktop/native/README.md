@@ -144,6 +144,13 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   four calls); the sources are numbered `[n]` under the answer (*Sources*, a click opens the page
   in the browser). The texts, cards, budget and error lines are checked against `ctRunTool` of the
   Studio itself — the fixtures are produced by that code.
+- Hardware card: what this machine has (the processor and the cards with their memory; a device
+  without memory stays out) with *Test this GPU* on the cards that can be tested — the CPU and the
+  NPU are skipped, *Testing ...* while it runs, and the answers come back coloured ok/warn/bad. The
+  amber notice of what runs on the CPU is the `fallbackNotice` of the Studio with its titles, count
+  line, reasons and operations. Eleven fixtures of the Studio's own pure zone, five unit tests, two
+  window tests with one drawing, four mutations. (The speed test, the processor limits, the RAM
+  line, the NPU card and the choice sentence are still open.)
 - Appearance: the settings card of the Studio — theme (system/dark/light), the eight accent
   colors with the chosen one ringed, the base size of the text (14–18px), *Tint your messages* and
   *Show generation speed*. The accent colours the whole page exactly as the Studio computes it
