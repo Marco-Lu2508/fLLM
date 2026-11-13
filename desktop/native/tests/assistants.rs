@@ -7,7 +7,7 @@ use fllm_app::store::{ChatRecord, Record, Role, Store};
 use iced_test::Simulator;
 
 fn rec(role: Role, content: &str) -> Record {
-    Record { role, content: content.into(), reasoning: String::new(), stats: None, passages: None }
+    Record { role, content: content.into(), reasoning: String::new(), stats: None, passages: None , images: Vec::new(), files: Vec::new() }
 }
 
 fn chat(id: u64) -> ChatRecord {

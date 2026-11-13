@@ -1,7 +1,7 @@
 //! The server side: what the window asks an fLLM server over HTTP (`/v1/models`, `/v1/chat/completions` with a stream).
 
 use futures::stream::{self, Stream, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::VecDeque;
 use std::pin::Pin;
 
@@ -176,21 +176,48 @@ pub fn chat_body_with_tools(model: &str, messages: &[WireMessage], params: ChatP
     body
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct WireMessage {
     pub role: String,
     pub content: String,
+    /// With images: the content as OpenAI parts instead of the plain string (`content` stays the text).
+    pub parts: Option<Vec<serde_json::Value>>,
     /// On an assistant message: the calls the model made (OpenAI format).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<serde_json::Value>,
     /// On a `tool` message: the call it answers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
 }
 
 impl WireMessage {
     pub fn new(role: &str, content: impl Into<String>) -> WireMessage {
-        WireMessage { role: role.into(), content: content.into(), tool_calls: None, tool_call_id: None }
+        WireMessage { role: role.into(), content: content.into(), parts: None, tool_calls: None, tool_call_id: None }
+    }
+
+    /// A message whose content is an array of parts (the text first, then the images as data URLs).
+    pub fn with_parts(role: &str, content: impl Into<String>, parts: Vec<serde_json::Value>) -> WireMessage {
+        WireMessage { role: role.into(), content: content.into(), parts: Some(parts), tool_calls: None, tool_call_id: None }
+    }
+}
+
+/// Sends `content` as the parts array when there are images, as the plain string otherwise; the extra
+/// fields are only written when they are set (the shape the `/v1` route of the server takes).
+impl serde::Serialize for WireMessage {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let len = 2 + self.tool_calls.is_some() as usize + self.tool_call_id.is_some() as usize;
+        let mut st = s.serialize_struct("WireMessage", len)?;
+        st.serialize_field("role", &self.role)?;
+        match &self.parts {
+            Some(parts) => st.serialize_field("content", parts)?,
+            None => st.serialize_field("content", &self.content)?,
+        }
+        if let Some(calls) = &self.tool_calls {
+            st.serialize_field("tool_calls", calls)?;
+        }
+        if let Some(id) = &self.tool_call_id {
+            st.serialize_field("tool_call_id", id)?;
+        }
+        st.end()
     }
 }
 

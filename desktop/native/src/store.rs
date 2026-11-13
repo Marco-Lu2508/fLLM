@@ -30,6 +30,15 @@ pub struct Stats {
     pub prompt_per_second: f64,
 }
 
+/// A file whose text travels with a question as a whole (the Studio's `node.files`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct MsgFile {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Record {
     pub role: Role,
@@ -41,6 +50,12 @@ pub struct Record {
     /// The passages of the documents that travelled with this question (the Studio's node.passages).
     #[serde(default)]
     pub passages: Option<Vec<Passage>>,
+    /// The images of this question as data URLs (the Studio's `node.images`).
+    #[serde(default)]
+    pub images: Vec<String>,
+    /// The files whose text went into this question whole (the Studio's `node.files`).
+    #[serde(default)]
+    pub files: Vec<MsgFile>,
 }
 
 /// Another way the conversation went: editing a message or asking for a new answer keeps the old version.
@@ -78,6 +93,9 @@ pub struct ChatRecord {
     /// The project this chat belongs to (None: it is a chat of its own).
     #[serde(default)]
     pub project: Option<String>,
+    /// The documents of this chat itself: searched for every question of it (the Studio's `t.docs`).
+    #[serde(default)]
+    pub docs: Vec<ProjectDoc>,
 }
 
 /// Which version of a message is shown out of how many.
@@ -433,6 +451,26 @@ impl Store {
                 // the same cleanup the Studio runs on every load: a broken entry is dropped, the rest is clamped
                 s.assistants = s.assistants.drain(..).filter_map(Assistant::cleaned).collect();
                 s.projects = s.projects.drain(..).filter_map(Project::cleaned).collect();
+                // the documents of a chat: the same limits the Studio keeps (RAG_MAX_DOC_CHARS, RAG_MAX_CHAT_CHARS)
+                for c in s.chats.iter_mut() {
+                    let mut docs: Vec<ProjectDoc> = Vec::new();
+                    let mut used: usize = c.docs.iter().map(|d| d.text.chars().count()).sum();
+                    for d in c.docs.drain(..) {
+                        if d.id.is_empty() || d.text.is_empty() {
+                            continue;
+                        }
+                        let room = crate::rag::MAX_DOC_CHARS.saturating_sub(0).min(crate::rag::MAX_CHAT_CHARS.saturating_sub(used));
+                        if room < 2000 {
+                            break;
+                        }
+                        let mut d = d;
+                        d.text = d.text.chars().take(room).collect();
+                        d.chars = d.text.chars().count().min(crate::rag::MAX_DOC_CHARS);
+                        used += d.chars;
+                        docs.push(d);
+                    }
+                    c.docs = docs;
+                }
                 s
             }
             Err(_) => {
@@ -491,7 +529,7 @@ mod tests {
         let a = s.new_chat();
         let b = s.new_chat();
         assert_ne!(a, b);
-        s.chat_mut(a).unwrap().messages.push(Record { role: Role::User, content: "Hi".into(), reasoning: String::new(), stats: None, passages: None });
+        s.chat_mut(a).unwrap().messages.push(Record { role: Role::User, content: "Hi".into(), reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new() });
         s.save(&path).unwrap();
         let back = Store::load(&path);
         assert_eq!(back, s);
@@ -501,7 +539,7 @@ mod tests {
     }
 
     fn rec(role: Role, text: &str) -> Record {
-        Record { role, content: text.into(), reasoning: String::new(), stats: None, passages: None }
+        Record { role, content: text.into(), reasoning: String::new(), stats: None, passages: None, images: Vec::new(), files: Vec::new() }
     }
 
     fn chat(lines: &[(Role, &str)]) -> ChatRecord {

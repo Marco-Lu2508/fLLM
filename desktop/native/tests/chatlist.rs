@@ -9,7 +9,7 @@ use iced_test::Simulator;
 const DAY: i64 = 86_400;
 
 fn rec(role: Role, content: &str) -> Record {
-    Record { role, content: content.into(), reasoning: String::new(), stats: None, passages: None }
+    Record { role, content: content.into(), reasoning: String::new(), stats: None, passages: None , images: Vec::new(), files: Vec::new() }
 }
 
 fn chat(id: u64, title: &str, updated: i64, text: &str) -> ChatRecord {

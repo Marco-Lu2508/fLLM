@@ -59,6 +59,17 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   under *Archived*). Every question in a chat of a project searches its knowledge (BM25, `src/rag.rs`); the passages travel with the
   newest question and the window shows them under it, and the instructions sit in the system prompt between the default prompt and the
   assistant's own text with the Studio's header line. Limits, clamps and messages follow `PRJ_LIMITS` and `projects.js`.
+- Attachments: the + beside the input (and files dropped onto the window) attaches an image or a file to the next question. An image is
+  shrunk the way the Studio shrinks one (at most 1280 pixels on the long side, JPEG) and travels as an image part with the question — an
+  image without a question says *Describe the image.* A text file goes in whole when it fits 35% of the context of the model (the
+  Studio's line *too long for the context* when it does not, and then it becomes a document of this chat), PDF, DOCX, XLSX, EPUB and HTML
+  are read by the server (`POST /api/studio/extract`, the 50 MB line of the Studio), a text file over 20 MB says so. The chips over the
+  input show the documents of this chat — a cross takes one out — and what is attached to the next question; the bubble of the question
+  shows the thumbnails and the file chips. Every question searches the documents of the chat together with the knowledge of its project
+  (the passages travel with the question as they do for a project), the context meter counts an image with 256 tokens, and a question of
+  nothing but an attachment is sent and names the chat after its first attachment. Chats from before the feature load unchanged. Not
+  ported: pasting an image from the clipboard (the window gets no such event) and several files in one dialog (the dialog of the server
+  picks one file at a time).
 - Code (sidebar > Code): a coding agent in a folder. Open a folder (type the path, *Choose…* for the folder dialog of the server's computer, or one of the last six), tell the agent what to do; the model
   gets the server's agent tools (read, search, edit, run commands, ...) and answers with tool calls, which the window runs through
   `/api/studio/agent/tool` and feeds back until the model answers without one (at most 30 model calls per message). Every call is a card:
@@ -90,15 +101,16 @@ Until stage 4 the Tauri app stays the supported desktop app.
 ## Tests
 
 ```sh
-cargo test --locked      # 160 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
-                         # window driven headless (new chat, send, stream, stop, error, delete, theme, assistants, projects) and drawn
-                         # to PNG files
+cargo test --locked      # 166 tests: the SSE parser and the client against a small server, the chat store, the contrast of the palette, the
+                         # window driven headless (new chat, send, stream, stop, error, delete, theme, assistants, projects,
+                         # attachments) and drawn to PNG files
 ```
 
 The window tests use iced's software renderer, so they need no display and no GPU. The pictures go to
 `target/tmp/ui-snapshots/` (conversation, start screen and offline screen, light and dark, the assistant menu and editor, the projects
-with their page, dialogs and passage chip). A mutation of the line buffer, of the save in `finish`, of the guard against late events, of
-the project filter of the sidebar, of the passage prefix and of the project header line each turn a test red.
+with their page, dialogs and passage chip, the attachment chips and the bubble with an image). A mutation of the line buffer, of the save
+in `finish`, of the guard against late events, of the project filter of the sidebar, of the passage prefix, of the project header line, of
+the files in the request, of the image parts and of the documents of the chat in the search each turn a test red.
 
 Not checked: a window on a real screen (this machine has none), scaling on a HiDPI display, input methods, the macOS and Windows builds
 (the CI workflow `native-app` builds and tests all three).

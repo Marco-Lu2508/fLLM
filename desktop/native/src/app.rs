@@ -57,16 +57,36 @@ pub struct Msg {
     pub stats: Option<Stats>,
     /// The passages of the documents that went with this question (shown under it).
     pub passages: Option<Vec<crate::rag::Passage>>,
+    /// The images of this question as data URLs and the files whose text went in whole.
+    pub images: Vec<String>,
+    pub files: Vec<store::MsgFile>,
     pub md: markdown::Content,
 }
 
 impl Msg {
     fn from_record(r: &Record) -> Msg {
-        Msg { role: r.role, content: r.content.clone(), reasoning: r.reasoning.clone(), stats: r.stats.clone(), passages: r.passages.clone(), md: markdown::Content::parse(&r.content) }
+        Msg {
+            role: r.role,
+            content: r.content.clone(),
+            reasoning: r.reasoning.clone(),
+            stats: r.stats.clone(),
+            passages: r.passages.clone(),
+            images: r.images.clone(),
+            files: r.files.clone(),
+            md: markdown::Content::parse(&r.content),
+        }
     }
 
     fn record(&self) -> Record {
-        Record { role: self.role, content: self.content.clone(), reasoning: self.reasoning.clone(), stats: self.stats.clone(), passages: self.passages.clone() }
+        Record {
+            role: self.role,
+            content: self.content.clone(),
+            reasoning: self.reasoning.clone(),
+            stats: self.stats.clone(),
+            passages: self.passages.clone(),
+            images: self.images.clone(),
+            files: self.files.clone(),
+        }
     }
 }
 
@@ -88,6 +108,17 @@ pub enum View {
     Code,
     /// The page of one project (the Studio's project window).
     Project,
+}
+
+/// A file or image chosen for the next question (the Studio's `state.attachments`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Attachment {
+    /// An image as a data URL, shrunk the way the Studio shrinks one.
+    Image { name: String, data_url: String },
+    /// Text that goes into the question whole because it fits the context.
+    Text { name: String, text: String, size: u64 },
+    /// Text that does not fit: the passages that match the question are used instead.
+    Doc { name: String, text: String, size: u64, pages: Option<u64>, truncated: bool },
 }
 
 /// The search index of the project knowledge, with the signature of the documents it was built from.
@@ -151,6 +182,8 @@ pub struct App {
     rag_cache: Option<RagCache>,
     /// The questions whose passage chip is open (the Studio's <details> under the message).
     rag_open: std::collections::BTreeSet<usize>,
+    /// The images and files chosen for the next question (the Studio's `state.attachments`).
+    attachments: Vec<Attachment>,
     code: CodeState,
     /// How many of the newest messages the conversation draws: laying out hundreds of messages on every frame of a stream would stall the window.
     window: usize,
@@ -296,6 +329,20 @@ pub enum Message {
     PrjPick(Option<String>),
     /// Shows or hides the passages under the question at `i` (the chip of the Studio's ragChipsHtml).
     RagToggle(usize),
+    /// Attaches an image or a file to the next question (the + of the composer).
+    Attach,
+    /// The dialog of *Attach* with its path and the text when the file is UTF-8 text.
+    AttachChosen(Result<(String, Option<String>), String>),
+    /// The image is read and shrunk: its name and its data URL.
+    ImageReady(Result<(String, String), String>),
+    /// The server read a document: its name, its text, its pages, whether it was cut short and the size of the file.
+    AttachExtracted(Result<(String, String, Option<u64>, bool, u64), String>),
+    /// Files dropped onto the window.
+    FilesDropped(Vec<PathBuf>),
+    /// Removes the pending attachment at `i`.
+    AttachmentRemove(usize),
+    /// Removes the document with this id from the knowledge of this chat.
+    ChatDocRemove(String),
     Code(code::CodeMsg),
 }
 
@@ -353,6 +400,7 @@ impl App {
             prj_instr: Content::new(),
             rag_cache: None,
             rag_open: Default::default(),
+            attachments: Vec::new(),
             code: CodeState::default(),
             window: CHAT_WINDOW,
             list: ChatList::default(),
@@ -397,6 +445,16 @@ impl App {
     /// The passages under the message at `i` (what the chip under it draws).
     pub fn message_passages(&self, i: usize) -> Option<&[crate::rag::Passage]> {
         self.messages.get(i).and_then(|m| m.passages.as_deref())
+    }
+
+    /// What is attached to the next question (the Studio's `state.attachments`).
+    pub fn attachments(&self) -> &[Attachment] {
+        &self.attachments
+    }
+
+    /// The tokens of the open chat as the meter counts them (an estimate until the server says more).
+    pub fn used_tokens(&self) -> u64 {
+        self.used_tokens
     }
 
     /// What is in the message box.
@@ -460,13 +518,14 @@ impl App {
         }
     }
 
-    fn can_send(&self) -> bool {
-        matches!(self.server, Server::Ready(_)) && self.live.is_none() && !self.editor.text().trim().is_empty()
+    pub fn can_send(&self) -> bool {
+        matches!(self.server, Server::Ready(_)) && self.live.is_none() && (!self.editor.text().trim().is_empty() || !self.attachments.is_empty())
     }
 
     fn send(&mut self, prompt: String) -> Task<Message> {
         let Server::Ready(model) = self.server.clone() else { return Task::none() };
-        if self.live.is_some() || prompt.trim().is_empty() {
+        // a question may be nothing but an attachment (the Studio's `if (!text && !state.attachments.length)`)
+        if self.live.is_some() || (prompt.trim().is_empty() && self.attachments.is_empty()) {
             return Task::none();
         }
         let id = match self.current {
@@ -487,9 +546,11 @@ impl App {
                 id
             }
         };
+        let mut carried: Option<(Vec<String>, Vec<store::MsgFile>)> = None;
         if let Some(i) = self.editing.take() {
             // the changed message starts a new version of everything after it
             if i < self.messages.len() {
+                carried = Some((self.messages[i].images.clone(), self.messages[i].files.clone()));
                 self.sync_current();
                 if let Some(chat) = self.store.chat_mut(id) {
                     chat.branch_at(i);
@@ -498,16 +559,59 @@ impl App {
             }
         }
         let first = self.messages.is_empty();
-        self.messages.push(Msg { role: Role::User, md: markdown::Content::parse(&prompt), content: prompt.clone(), reasoning: String::new(), stats: None, passages: None });
-        self.messages.push(Msg { role: Role::Assistant, content: String::new(), reasoning: String::new(), stats: None, passages: None, md: markdown::Content::new() });
-        // the passages of the project knowledge travel with this question
+        // the attachments of this question: images and whole files on the message, texts that do not
+        // fit as documents of this chat (the Studio's addChild and ragStoreDocs). Editing a message
+        // keeps the images and files it had and leaves the pending attachments where they are.
+        let mut images: Vec<String> = Vec::new();
+        let mut files: Vec<store::MsgFile> = Vec::new();
+        let mut seed_name: Option<String> = None;
+        if let Some((old_images, old_files)) = carried {
+            images = old_images;
+            files = old_files;
+        } else {
+            let pending = std::mem::take(&mut self.attachments);
+            seed_name = pending.first().map(|a| match a {
+                Attachment::Image { name, .. } | Attachment::Text { name, .. } | Attachment::Doc { name, .. } => name.clone(),
+            });
+            for a in pending {
+                match a {
+                    Attachment::Image { data_url, .. } => images.push(data_url),
+                    Attachment::Text { name, text, .. } => files.push(store::MsgFile { name, text }),
+                    Attachment::Doc { name, text, pages, truncated, .. } => self.store_chat_doc(id, name, text, pages, truncated),
+                }
+            }
+        }
+        self.messages.push(Msg {
+            role: Role::User,
+            md: markdown::Content::parse(&prompt),
+            content: prompt.clone(),
+            reasoning: String::new(),
+            stats: None,
+            passages: None,
+            images,
+            files,
+        });
+        self.messages.push(Msg {
+            role: Role::Assistant,
+            content: String::new(),
+            reasoning: String::new(),
+            stats: None,
+            passages: None,
+            images: Vec::new(),
+            files: Vec::new(),
+            md: markdown::Content::new(),
+        });
+        // the passages of the knowledge travel with this question (the project's documents first,
+        // then the documents of this chat)
         let passages = self.passages_for(&prompt);
         if let Some(user) = self.messages.iter_mut().filter(|m| m.role == Role::User).last() {
             user.passages = passages;
         }
         if first {
+            // the Studio names a chat after its first attachment when the question is empty
+            let seed = if !prompt.trim().is_empty() { prompt.clone() } else { seed_name.unwrap_or_default() };
             if let Some(chat) = self.store.chat_mut(id) {
-                chat.title = store::title_from(&prompt);
+                chat.title = store::title_from(&seed);
             }
         }
         self.sync_current();
@@ -594,7 +698,16 @@ impl App {
                     chat.branch_at(i);
                 }
                 self.messages.truncate(i);
-                self.messages.push(Msg { role: Role::Assistant, content: String::new(), reasoning: String::new(), stats: None, passages: None, md: markdown::Content::new() });
+                self.messages.push(Msg {
+                    role: Role::Assistant,
+                    content: String::new(),
+                    reasoning: String::new(),
+                    stats: None,
+                    passages: None,
+                    images: Vec::new(),
+                    files: Vec::new(),
+                    md: markdown::Content::new(),
+                });
                 self.sync_current();
                 self.save();
                 self.error = None;
@@ -1095,6 +1208,53 @@ impl App {
                 }
                 Task::none()
             }
+            Message::Attach => {
+                let base = self.base.clone();
+                Task::perform(api::pick_file_with_text(base), Message::AttachChosen)
+            }
+            Message::AttachChosen(result) => match result {
+                // the dialog was closed
+                Err(e) if e.is_empty() => Task::none(),
+                Err(e) => {
+                    self.toast = Some(e);
+                    Task::none()
+                }
+                Ok((path, text)) => self.add_picked(path, text),
+            },
+            Message::ImageReady(result) => {
+                match result {
+                    Ok((name, data_url)) => self.attachments.push(Attachment::Image { name, data_url }),
+                    Err(e) => self.toast = Some(e),
+                }
+                Task::none()
+            }
+            Message::AttachExtracted(result) => {
+                match result {
+                    Ok((name, text, pages, truncated, size)) => self.rag_place(name, text, size, pages, truncated),
+                    Err(e) => self.toast = Some(e),
+                }
+                Task::none()
+            }
+            Message::FilesDropped(paths) => {
+                let tasks: Vec<Task<Message>> = paths.into_iter().map(|p| self.add_picked(p.to_string_lossy().into_owned(), None)).collect();
+                Task::batch(tasks)
+            }
+            Message::AttachmentRemove(i) => {
+                if i < self.attachments.len() {
+                    self.attachments.remove(i);
+                }
+                Task::none()
+            }
+            Message::ChatDocRemove(id) => {
+                if let Some(cid) = self.current {
+                    if let Some(chat) = self.store.chat_mut(cid) {
+                        chat.docs.retain(|d| d.id != id);
+                    }
+                    self.rag_cache = None;
+                    self.save();
+                }
+                Task::none()
+            }
             Message::Connected(Err(e)) => {
                 self.server = Server::Down(e);
                 Task::none()
@@ -1513,7 +1673,12 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([retry, poll])
+        // files dragged onto the window are attached the way the dialog attaches them
+        let dropped =iced::event::listen_with(|event, _status, _id| match event {
+            iced::Event::Window(iced::window::Event::FileDropped(path)) => Some(Message::FilesDropped(vec![path])),
+            _ => None,
+        });
+        Subscription::batch([retry, poll, dropped])
     }
 
     // ---- view ------------------------------------------------------------------------------------------------------------
@@ -2471,13 +2636,25 @@ impl App {
         };
         let last_user = self.messages[..upto].iter().rposition(|m| m.role == Role::User);
         wire.extend(self.messages[..upto].iter().enumerate().map(|(i, m)| {
-            let mut content = m.content.clone();
-            if Some(i) == last_user {
-                if let Some(passages) = &m.passages {
-                    content = format!("{}{}", rag::prefix(passages), content);
+            // the passages only with the newest question, the whole files before the question, and
+            // an empty question that has passages or an image says so (the Studio's userContent)
+            let context = if Some(i) == last_user { m.passages.as_ref().map(|p| rag::prefix(p)).unwrap_or_default() } else { String::new() };
+            let files_block: String = m.files.iter().map(|f| format!("File {}:\n```\n{}\n```\n\n", f.name, f.text)).collect();
+            let tail = if m.content.is_empty() {
+                if !context.is_empty() { "Summarize the key points." } else { "" }
+            } else {
+                m.content.as_str()
+            };
+            let text = format!("{context}{files_block}{tail}");
+            if !m.images.is_empty() {
+                let mut parts = vec![serde_json::json!({ "type": "text", "text": if text.is_empty() { "Describe the image." } else { text.as_str() } })];
+                for url in &m.images {
+                    parts.push(serde_json::json!({ "type": "image_url", "image_url": { "url": url } }));
                 }
+                WireMessage::with_parts(m.role.wire(), text, parts)
+            } else {
+                WireMessage::new(m.role.wire(), text)
             }
-            WireMessage::new(m.role.wire(), content)
         }));
         wire
     }
@@ -2529,6 +2706,118 @@ impl App {
         self.messages.iter().rev().find_map(|m| m.stats.as_ref().map(|s| s.prompt_per_second).filter(|v| *v > 0.0)).unwrap_or(0.0)
     }
 
+    /// The answer of the *Attach* dialog or a dropped path: images are shrunk here, documents go
+    /// through the server, text is read and placed with the next question (the Studio's addFiles).
+    fn add_picked(&mut self, path: String, text: Option<String>) -> Task<Message> {
+        let name = path.rsplit(['/', '\\']).next().unwrap_or(path.as_str()).to_string();
+        let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        let base = self.base.clone();
+        if IMAGE_EXTS.contains(&ext.as_str()) {
+            return Task::perform(
+                async move {
+                    let bytes = std::fs::read(&path).map_err(|e| format!("The file could not be read: {e}"))?;
+                    let data_url = shrink_image(&bytes).map_err(|e| format!("{name}: {e}"))?;
+                    Ok::<(String, String), String>((name, data_url))
+                },
+                Message::ImageReady,
+            );
+        }
+        if server_ext(&ext) {
+            return Task::perform(
+                async move {
+                    let bytes = std::fs::read(&path).map_err(|e| format!("The file could not be read: {e}"))?;
+                    if bytes.len() as u64 > RAG_MAX_UPLOAD {
+                        return Err(format!("{name} is too large (more than 50 MB)."));
+                    }
+                    let size = bytes.len() as u64;
+                    let (text, pages, truncated) = api::extract_file(base, name.clone(), bytes).await?;
+                    Ok((name, text, pages, truncated, size))
+                },
+                Message::AttachExtracted,
+            );
+        }
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if size > rag::MAX_TEXT_ATTACHMENT {
+            self.toast = Some(format!("{name} is too large (more than {}).", format_bytes(rag::MAX_TEXT_ATTACHMENT)));
+            return Task::none();
+        }
+        let text = match text {
+            Some(t) => t,
+            None => match std::fs::read(&path) {
+                Err(e) => {
+                    self.toast = Some(format!("The file could not be read: {e}"));
+                    return Task::none();
+                }
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Err(_) => {
+                        self.toast = Some(format!("{name} is not a text file."));
+                        return Task::none();
+                    }
+                    Ok(t) => t,
+                },
+            },
+        };
+        if text.contains('\0') {
+            self.toast = Some(format!("{name} is not a text file."));
+            return Task::none();
+        }
+        self.rag_place(name, text, size, None, false);
+        Task::none()
+    }
+
+    /// Text with the next question: whole when it fits the context, else as a document of this chat
+    /// whose passages are searched (the Studio's ragPlace).
+    fn rag_place(&mut self, name: String, text: String, size: u64, pages: Option<u64>, truncated: bool) {
+        let whole: u64 = self
+            .attachments
+            .iter()
+            .filter_map(|a| match a {
+                Attachment::Text { text, .. } => Some(text.chars().count() as u64 / 4 + 4),
+                _ => None,
+            })
+            .sum();
+        let room = (self.model_info().max_context as f64 * rag::FIT_SHARE) as u64;
+        if text.chars().count() as u64 / 4 + 4 + whole <= room {
+            self.attachments.push(Attachment::Text { name, text, size });
+        } else {
+            self.toast = Some(format!("{name} is too long for the context: the passages that match your question are used."));
+            self.attachments.push(Attachment::Doc { name, text, size, pages, truncated });
+        }
+    }
+
+    /// Stores a too-long attachment in the documents of this chat, within the limits (the Studio's
+    /// ragStoreDocs): the same numbers as the documents of a project, a separate storage.
+    fn store_chat_doc(&mut self, id: u64, name: String, text: String, pages: Option<u64>, truncated: bool) {
+        let room = {
+            let Some(chat) = self.store.chat_mut(id) else { return };
+            let used: usize = chat.docs.iter().map(|d| d.chars).sum();
+            rag::MAX_DOC_CHARS.min(rag::MAX_CHAT_CHARS.saturating_sub(used))
+        };
+        if room < 2000 {
+            self.toast = Some(format!(
+                "{name} was not added: the documents of this chat already use the storage limit ({} characters). Remove one first.",
+                group(rag::MAX_CHAT_CHARS as u64)
+            ));
+            return;
+        }
+        let mut note = None;
+        let mut text = text;
+        if text.chars().count() > room {
+            text = text.chars().take(room).collect();
+            note = Some(format!("{name} is long: only its first {} characters are kept in this chat.", group(room as u64)));
+        } else if truncated {
+            note = Some(format!("{name} is very long: only the first part was read."));
+        }
+        let chars = text.chars().count();
+        if let Some(chat) = self.store.chat_mut(id) {
+            chat.docs.push(store::ProjectDoc { id: store::uid("doc"), name, text, pages, chars, added: store::now_secs() });
+        }
+        self.rag_cache = None;
+        if note.is_some() {
+            self.toast = note;
+        }
+    }
+
     /// The project of the open chat, else the one a new chat joins (the Studio's prjChrome).
     fn active_project(&self) -> Option<&store::Project> {
         let id = match self.current {
@@ -2549,12 +2838,19 @@ impl App {
         self.prj_instr = Content::with_text(&text);
     }
 
-    /// The documents searched for a question: the knowledge of the project of this chat.
+    /// The documents searched for a question: the knowledge of the project of this chat first, then
+    /// the documents of the chat itself (the Studio's prjCombinedDocs).
     fn knowledge(&self) -> Vec<(String, String, String)> {
-        match self.active_project() {
+        let mut docs: Vec<(String, String, String)> = match self.active_project() {
             Some(p) => p.docs.iter().map(|d| (d.id.clone(), d.name.clone(), d.text.clone())).collect(),
             None => Vec::new(),
+        };
+        if let Some(cid) = self.current {
+            if let Some(chat) = self.store.chat(cid) {
+                docs.extend(chat.docs.iter().map(|d| (d.id.clone(), d.name.clone(), d.text.clone())));
+            }
         }
+        docs
     }
 
     /// The passages for a question, best first; `None` when there is nothing to search. The index is
@@ -2870,7 +3166,44 @@ impl App {
     fn message<'a>(&'a self, t: Tokens, i: usize, m: &'a Msg) -> Element<'a, Message> {
         match m.role {
             Role::User => {
-                let bubble = container(text(&m.content).size(15)).padding([9, 15]).max_width(560).style(theme::bubble(t));
+                // the attachments of the question above its text (the Studio's attachmentsHtml)
+                let mut bubble_col = column![].spacing(6);
+                if !m.images.is_empty() {
+                    let mut thumbs = row![].spacing(6);
+                    for url in &m.images {
+                        if let Some(bytes) = data_url_bytes(url) {
+                            thumbs = thumbs.push(
+                                iced::widget::image(iced::widget::image::Handle::from_bytes(bytes))
+                                    .width(140)
+                                    .height(140)
+                                    .content_fit(iced::ContentFit::Contain),
+                            );
+                        }
+                    }
+                    bubble_col = bubble_col.push(thumbs);
+                }
+                if !m.files.is_empty() {
+                    let mut chips = row![].spacing(6);
+                    for f in &m.files {
+                        chips = chips.push(
+                            container(
+                                row![
+                                    svg(icon(ICON_FILE)).width(12).height(12).style(muted_svg(t)),
+                                    text(ellipsize(&f.name, 24)).size(12),
+                                ]
+                                .spacing(4)
+                                .align_y(Alignment::Center),
+                            )
+                            .padding([3, 8])
+                            .style(theme::inset(t)),
+                        );
+                    }
+                    bubble_col = bubble_col.push(chips);
+                }
+                if !m.content.is_empty() {
+                    bubble_col = bubble_col.push(text(&m.content).size(15));
+                }
+                let bubble = container(bubble_col).padding([9, 15]).max_width(560).style(theme::bubble(t));
                 let mut col = column![row![Space::new().width(Length::Fill), bubble]].spacing(4);
                 if let Some(passages) = m.passages.as_ref().filter(|p| !p.is_empty()) {
                     col = col.push(row![Space::new().width(Length::Fill), self.passage_chip(t, i, passages)]);
@@ -2917,6 +3250,65 @@ impl App {
         }
     }
 
+    /// The row over the input: the documents of this chat, then what is attached to the next
+    /// question (the Studio's attachmentsRow with ragDocsChipsHtml).
+    fn attachments_row(&self, t: Tokens) -> Element<'_, Message> {
+        let mut items: Vec<Element<'_, Message>> = Vec::new();
+        if let Some(cid) = self.current {
+            if let Some(chat) = self.store.chat(cid) {
+                for d in &chat.docs {
+                    let title = format!(
+                        "{}: {} characters{}. Searched for every question in this chat.",
+                        d.name,
+                        group(d.chars as u64),
+                        d.pages.map(|n| format!(", {n} pages")).unwrap_or_default()
+                    );
+                    items.push(file_chip(t, &ellipsize(&d.name, 24), Some(title), Some(Message::ChatDocRemove(d.id.clone()))));
+                }
+            }
+        }
+        for (i, a) in self.attachments.iter().enumerate() {
+            match a {
+                Attachment::Image { data_url, .. } => {
+                    let thumb: Element<'_, Message> = match data_url_bytes(data_url) {
+                        Some(bytes) => iced::widget::image(iced::widget::image::Handle::from_bytes(bytes))
+                            .width(34)
+                            .height(34)
+                            .content_fit(iced::ContentFit::Cover)
+                            .into(),
+                        None => Space::new().width(34).height(34).into(),
+                    };
+                    items.push(
+                        row![
+                            thumb,
+                            button(svg(icon(ICON_X)).width(10).height(10).style(muted_svg(t)))
+                                .on_press(Message::AttachmentRemove(i))
+                                .padding(3)
+                                .style(theme::ghost_button(t)),
+                        ]
+                        .spacing(4)
+                        .align_y(Alignment::Center)
+                        .into(),
+                    );
+                }
+                Attachment::Text { name, .. } => {
+                    items.push(file_chip(t, &ellipsize(name, 24), None, Some(Message::AttachmentRemove(i))));
+                }
+                Attachment::Doc { name, .. } => {
+                    let title = format!("{name}: too long for the context, the passages that match your question are used");
+                    items.push(file_chip(t, &ellipsize(name, 24), Some(title), Some(Message::AttachmentRemove(i))));
+                }
+            }
+        }
+        if items.is_empty() {
+            return Space::new().height(0).into();
+        }
+        scrollable(row(items).spacing(6))
+            .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new()))
+            .width(Length::Fill)
+            .into()
+    }
+
     fn composer(&self, t: Tokens) -> Element<'_, Message> {
         let editor = text_editor(&self.editor)
             .placeholder("Ask anything or give an instruction")
@@ -2949,6 +3341,10 @@ impl App {
                 .padding(9)
                 .style(theme::primary_button(t))
         };
+        let attach = button(svg(icon(ICON_PLUS)).width(14).height(14).style(muted_svg(t)))
+            .on_press_maybe((!busy).then_some(Message::Attach))
+            .padding(6)
+            .style(theme::ghost_button(t));
         let hint = text("Enter sends, Shift+Enter adds a new line").size(12).color(t.muted);
         let banner: Element<'_, Message> = if self.editing.is_some() {
             row![text("Changing a message: the answers after it are written again, the old ones stay as a version.").size(12).color(t.muted).width(Length::Fill), button(text("Cancel").size(12)).on_press(Message::CancelEdit).padding([2, 8]).style(theme::ghost_button(t))]
@@ -2958,7 +3354,8 @@ impl App {
         } else {
             Space::new().height(0).into()
         };
-        let card = container(column![banner, editor, row![hint, Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 16.0 })])
+        let attachments = self.attachments_row(t);
+        let card = container(column![banner, attachments, editor, row![attach, hint, Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 16.0 })])
             .style(theme::card(t, theme::R_XL, false))
             .max_width(780);
         container(card).width(Length::Fill).center_x(Length::Fill).padding(Padding { top: 8.0, right: 24.0, bottom: 20.0, left: 24.0 }).into()
@@ -2968,7 +3365,15 @@ impl App {
 /// A rough count of the tokens of a chat (four characters to a token) until the server has counted the real ones. The meter says so with a tilde.
 /// The passages that travel with the newest question count too (the Studio's `ragTokens`).
 fn estimate_tokens(messages: &[Msg]) -> u64 {
-    let mut total: u64 = messages.iter().map(|m| m.content.chars().count() as u64 / 4 + 4).sum();
+    let mut total: u64 = messages
+        .iter()
+        .map(|m| {
+            m.content.chars().count() as u64 / 4
+                + 4
+                + m.images.len() as u64 * 256
+                + m.files.iter().map(|f| f.text.chars().count() as u64 / 4).sum::<u64>()
+        })
+        .sum();
     if let Some(i) = messages.iter().rposition(|m| m.role == Role::User) {
         if let Some(passages) = &messages[i].passages {
             total += rag::prefix(passages).chars().count() as u64 / 4;
@@ -3001,6 +3406,89 @@ pub fn group(n: u64) -> String {
     let mut parts: Vec<&str> = digits.as_bytes().rchunks(3).map(|c| std::str::from_utf8(c).unwrap_or("")).collect();
     parts.reverse();
     parts.join(",")
+}
+
+/// The images the window shrinks itself (the `file.type.startsWith('image/')` of the Studio).
+const IMAGE_EXTS: [&str; 10] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif", "ico", "tiff"];
+
+/// What a file may weigh before the attach flow sends it to the server's extract route
+/// (the Studio's `RAG_MAX_UPLOAD`; text files have their own `rag::MAX_TEXT_ATTACHMENT`).
+const RAG_MAX_UPLOAD: u64 = 50 * 1024 * 1024;
+
+/// The documents only the server can read (the Studio's `RAG_SERVER_EXT`).
+fn server_ext(ext: &str) -> bool {
+    matches!(ext, "pdf" | "docx" | "xlsx" | "epub" | "html" | "htm" | "xhtml")
+}
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// The media type of an image from its first bytes (what the browser knows from the file type).
+fn mime_of(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else if bytes.starts_with(&[0xFF, 0xD8]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+/// The bytes behind a data URL (for the thumbnails of the window).
+fn data_url_bytes(url: &str) -> Option<Vec<u8>> {
+    let encoded = url.split_once("base64,")?.1;
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(encoded).ok()
+}
+
+/// The image shrunk the way the Studio shrinks one: at most 1280 pixels on the long side and then
+/// JPEG (quality 0.84); a small image keeps its bytes, and an image that cannot be decoded keeps
+/// them too (the Studio keeps the original data URL when the browser cannot draw it).
+fn shrink_image(bytes: &[u8]) -> Result<String, String> {
+    let original = format!("data:{};base64,{}", mime_of(bytes), b64(bytes));
+    let img = match image::load_from_memory(bytes) {
+        Err(_) => return Ok(original),
+        Ok(img) => img,
+    };
+    let long = img.width().max(img.height()) as f64;
+    let scale = (1280.0 / long).min(1.0_f64);
+    if scale == 1.0 && bytes.len() < 300 * 1024 {
+        return Ok(original);
+    }
+    let tw = ((img.width() as f64 * scale).round() as u32).max(1);
+    let th = ((img.height() as f64 * scale).round() as u32).max(1);
+    let small = if scale < 1.0 { img.resize_exact(tw, th, image::imageops::FilterType::Lanczos3) } else { img };
+    let mut out = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 214);
+    encoder.encode_image(&small).map_err(|e| format!("the image could not be read: {e}"))?;
+    Ok(format!("data:image/jpeg;base64,{}", b64(&out)))
+}
+
+/// A chip of the attachment row: an icon, a name (a hover tells the size and what it is good for)
+/// and a cross that removes it (the file-chip of the Studio).
+fn file_chip(t: Tokens, name: &str, title: Option<String>, remove: Option<Message>) -> Element<'static, Message> {
+    let mut line = row![
+        svg(icon(ICON_FILE)).width(12).height(12).style(muted_svg(t)),
+        text(name.to_string()).size(12),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+    if let Some(msg) = remove {
+        line = line.push(
+            button(svg(icon(ICON_X)).width(10).height(10).style(muted_svg(t))).on_press(msg).padding(3).style(theme::ghost_button(t)),
+        );
+    }
+    let chip: Element<'static, Message> = container(line).padding([3, 8]).style(theme::inset(t)).into();
+    // the Studio shows the details of a chip as the title of a hover; the window has no hover text,
+    // so an attachment that is not a plain file says it in the toast when it is added instead
+    let _ = title;
+    chip
 }
 
 /// The names of the documents of the passages: "A and B", and with more than two "A, B and N more"
@@ -3178,7 +3666,16 @@ mod tests {
 
     #[test]
     fn the_estimate_is_four_characters_to_a_token_plus_a_little_for_the_frame() {
-        let m = |c: &str| Msg { role: Role::User, content: c.into(), reasoning: String::new(), stats: None, passages: None, md: markdown::Content::new() };
+        let m = |c: &str| Msg {
+            role: Role::User,
+            content: c.into(),
+            reasoning: String::new(),
+            stats: None,
+            passages: None,
+            images: Vec::new(),
+            files: Vec::new(),
+            md: markdown::Content::new(),
+        };
         assert_eq!(estimate_tokens(&[m(&"a".repeat(40))]), 14);
         assert_eq!(estimate_tokens(&[]), 0);
     }
