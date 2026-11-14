@@ -19,6 +19,7 @@ pub mod models;
 pub mod palette;
 pub mod prompts;
 pub mod providers;
+pub mod connect;
 pub mod runtime;
 pub mod localapi;
 pub mod memory;

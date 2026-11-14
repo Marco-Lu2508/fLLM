@@ -23,3 +23,6 @@ target-*/
 /desktop/src-tauri/icons/
 /desktop/src-tauri/gen/
 /.claude/
+
+# ui snapshots the native tests write on a local run (FLLM_SNAPSHOT_DIR)
+/desktop/native/ui-snapshots/

@@ -26,11 +26,12 @@ url = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
 rquickjs = "0.14.0"
+# the Copy button of the connect card reads *Copied* until 1500 ms have passed (a sleep in a task)
+tokio = { version = "1", features = ["net", "io-util", "macros", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
 iced_test = "0.14"
 tempfile = "3"
-tokio = { version = "1", features = ["net", "io-util", "macros", "rt-multi-thread"] }
 
 [profile.release]
 lto = "thin"

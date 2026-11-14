@@ -531,6 +531,14 @@ pub async fn fetch_npu(base: String) -> Result<Value, String> {
 
 /// `GET /api/studio/runtime`: the sandbox mode, the turbo switch, what the computer can do and
 /// what the sandbox really enforces here (`load()` of `runtime.js` reads the same answer).
+/// `GET /api/studio/connect?tool=`: what a coding tool needs to talk to this server, written by
+/// the same code as `fllm-rs connect`.
+pub async fn fetch_connect(base: String, tool: String) -> Result<crate::connect::Plan, String> {
+    get_json(&base, &format!("/api/studio/connect?tool={tool}"))
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
 pub async fn fetch_runtime(base: String) -> Result<crate::runtime::Status, String> {
     get_json(&base, "/api/studio/runtime")
         .await

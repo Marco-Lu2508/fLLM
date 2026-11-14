@@ -222,6 +222,13 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   nothing for a box that is no JSON, the answer pretty when it is JSON), and *Server statistics
   (`/metrics`)* with the line of `detailsPrometheusLog` and its box behind it, filled when Refresh
   is pressed. Three unit tests, one window test, three mutations.
+- Connect other apps: the four examples of `sdkSnippetTabs` (Claude Code CLI, OpenAI Python,
+  OpenAI TypeScript, cURL) with the text of `updateCliAndSdkSnippets` and its Copy button — the
+  header says *bash* for all four, as the page does —; and *Connect a coding tool* with the tool
+  select of the answer and the shell select, the plan of `GET /api/studio/connect?tool=` drawn in
+  the order of `render()` (notes, `Environment` of the chosen shell, one card per file, the
+  snippet, *Start*), the line of `statusLine` and *Copied* for 1500 ms on its buttons. Five unit
+  tests, three window tests, five mutations.
 - Tokenizer: the two cards of `spane-tokenizer` — the box and the switch that ask `/tokenize`
   (`with_pieces`, on every keystroke that changes the text and on the switch), the line
   `{n} tokens · {bytes} bytes` and the wall with a pill per piece in the six hues of

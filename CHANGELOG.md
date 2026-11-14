@@ -7,6 +7,18 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **The two cards of *Connect other apps* in the native app: the examples and the settings of a
+  coding tool.** *Connect other apps* with the four tabs of `sdkSnippetTabs`, the example of
+  `updateCliAndSdkSnippets` (origin, `fllm-sk-local`, the loaded model or `fllm-studio-demo`, the
+  temperature of the sampler box), its Copy button with the toast *Example copied*, and a header
+  that reads **bash** for every tab because the Studio writes it once and never again. *Connect a
+  coding tool* with the tool select of the answer and the shell select, the plan of
+  `GET /api/studio/connect?tool=` in the order `render()` builds it — notes, `Environment` of the
+  chosen shell, a card per file with ` (cannot be created here)` and its reason where the content
+  would be, the snippet, *Start* —, *Could not read the settings: …* standing until a read
+  succeeds, the line of `statusLine`, and the Copy buttons reading *Copied* for the 1500 ms of the
+  page. Read once when the page opens (`__connectLoaded`) and again when the tool changes; the
+  shell only redraws. Five unit tests, three window tests, five mutations.
 - **The tokenizer cards in the native app: how the model splits text, and what it receives for a
   chat.** The two cards of `spane-tokenizer` — *See how the model splits text into tokens* with the
   box and the switch that ask `/tokenize` (`with_pieces`, every keystroke that changes the text and

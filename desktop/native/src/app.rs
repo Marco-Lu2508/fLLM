@@ -394,6 +394,18 @@ pub struct App {
     pub tok_tokens: Vec<crate::localapi::Token>,
     pub jinja_messages: iced::widget::text_editor::Content,
     pub jinja_out: String,
+    /// Settings > Connect other apps: which example is shown, and the plan the server wrote for
+    /// a coding tool (`spane-claude-code` of `shell.html`).
+    pub sdk_lang: &'static str,
+    connect_tool: String,
+    connect_shell: &'static str,
+    connect_plan: Option<crate::connect::Plan>,
+    connect_say: String,
+    /// Set when the first read starts — the flag of `state.__connectLoaded`, which keeps the pane
+    /// from asking twice when the menu is clicked again.
+    connect_loaded: bool,
+    /// Which block was copied last: its button reads *Copied* until the Studio's 1500 ms pass.
+    copied: Option<String>,
     /// The answer under *Run speed test* (`speedTestResult` of `models.js`).
     pub speed_test: Option<String>,
     /// Whether the speed test is running (the button is off while it does).
@@ -868,6 +880,17 @@ pub enum Message {
     TokReq(iced::widget::text_editor::Action),
     TokSpecial(bool),
     TokLoaded(Result<crate::localapi::Tokenized, String>),
+    /// Settings > Connect other apps: the tabs of the examples, its Copy button and the plan of
+    /// the server (`sdkSnippetTabs`, `btnCopySdkSnippet`, `loadConnect`).
+    SdkTab(&'static str),
+    SdkCopy,
+    ConnectLoaded(Result<crate::connect::Plan, String>),
+    ConnectTool(String),
+    ConnectShell(&'static str),
+    /// One of the Copy buttons of the plan: the text goes to the clipboard and the button reads
+    /// *Copied* until the Studio's 1500 ms pass (`render()` of `connect.js`).
+    CopyBlock(String),
+    CopyBlockDone,
     /// The messages box and the button of the second card (`jinjaMessagesInput`, `btnRenderJinja`).
     JinjaReq(iced::widget::text_editor::Action),
     JinjaRender,
@@ -1108,6 +1131,13 @@ impl App {
             tok_tokens: Vec::new(),
             jinja_messages: iced::widget::text_editor::Content::with_text(crate::localapi::JINJA_MESSAGES),
             jinja_out: String::new(),
+            sdk_lang: "claude",
+            connect_tool: "claude-code".into(),
+            connect_shell: crate::connect::default_shell(),
+            connect_plan: None,
+            connect_say: String::new(),
+            connect_loaded: false,
+            copied: None,
             speed_test: None,
             speed_test_busy: false,
             selftest: None,
@@ -3226,6 +3256,67 @@ impl App {
                 self.jinja_out = format!("Invalid JSON: {e}");
                 Task::none()
             }
+            Message::SdkTab(lang) => {
+                // the tabs only change which example is drawn (`sdkSnippetTabs`)
+                self.sdk_lang = lang;
+                Task::none()
+            }
+            Message::SdkCopy => {
+                let model = match &self.server {
+                    Server::Ready(model) if !model.detail.name.is_empty() => model.detail.name.clone(),
+                    // `state.models.find(...)?.name || state.model || 'fllm-studio-demo'`
+                    _ => "fllm-studio-demo".into(),
+                };
+                let example = crate::connect::snippet(
+                    self.sdk_lang,
+                    &self.base,
+                    // `state.apiKey || 'fllm-sk-local'`: nothing here stores a key of its own
+                    "fllm-sk-local",
+                    &model,
+                    self.store.prefs.temperature,
+                );
+                self.toast = Some("Example copied".into());
+                iced::clipboard::write(example)
+            }
+            Message::ConnectLoaded(Ok(plan)) => {
+                self.connect_plan = Some(plan);
+                self.connect_say.clear();
+                Task::none()
+            }
+            Message::ConnectLoaded(Err(e)) => {
+                self.connect_say = format!("Could not read the settings: {e}");
+                Task::none()
+            }
+            Message::ConnectTool(id) => {
+                // a tool that is chosen is read right away (`selConnectTool` of `listeners.js`)
+                self.connect_tool = id;
+                Task::perform(
+                    models::fetch_connect(self.base.clone(), self.connect_tool.clone()),
+                    Message::ConnectLoaded,
+                )
+            }
+            Message::ConnectShell(shell) => {
+                // the shell only changes what is drawn (`render()` of `connect.js`)
+                self.connect_shell = shell;
+                Task::none()
+            }
+            Message::CopyBlock(text) => {
+                self.copied = Some(text.clone());
+                Task::batch([
+                    iced::clipboard::write(text),
+                    // the button of the page reads *Copied* until 1500 ms have passed
+                    Task::perform(
+                        async {
+                            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                        },
+                        |_| Message::CopyBlockDone,
+                    ),
+                ])
+            }
+            Message::CopyBlockDone => {
+                self.copied = None;
+                Task::none()
+            }
             Message::MetricsOpen => {
                 self.metrics_open = !self.metrics_open;
                 Task::none()
@@ -4300,6 +4391,18 @@ impl App {
                     } else {
                         Task::perform(crate::providers::fetch_providers(self.base.clone()), Message::ProvLoaded)
                     };
+                    // the settings for a coding tool are read once, the first time the pane is
+                    // opened (`loadConnect` runs on the first click of its menu entry), and again
+                    // when the tool of the select changes
+                    let connect = if self.connect_loaded {
+                        Task::none()
+                    } else {
+                        self.connect_loaded = true;
+                        Task::perform(
+                            models::fetch_connect(self.base.clone(), self.connect_tool.clone()),
+                            Message::ConnectLoaded,
+                        )
+                    };
                     if !matches!(self.server, Server::Down(_)) {
                         return Task::batch(vec![
                             voices,
@@ -4310,6 +4413,7 @@ impl App {
                             slots,
                             runtime,
                             prov,
+                            connect,
                             logs,
                             keys,
                             Task::perform(
@@ -5285,6 +5389,21 @@ impl App {
                     messages: &self.jinja_messages,
                     output: &self.jinja_out,
                 },
+                crate::connect::ConnectView {
+                    sdk_lang: self.sdk_lang,
+                    origin: &self.base,
+                    model: match &self.server {
+                        Server::Ready(model) if !model.detail.name.is_empty() => model.detail.name.as_str(),
+                        _ => "fllm-studio-demo",
+                    },
+                    temperature: self.store.prefs.temperature,
+                    tool: &self.connect_tool,
+                    shell: self.connect_shell,
+                    plan: self.connect_plan.as_ref(),
+                    say: &self.connect_say,
+                    auth_required: self.key_list.auth_required,
+                },
+                &self.copied,
             )
         } else if self.page == View::Project {
             // the page of a project sits where the conversation sits, so the dialogs can open over it
