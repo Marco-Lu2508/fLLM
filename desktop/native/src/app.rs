@@ -377,6 +377,15 @@ pub struct App {
     key_admin: bool,
     /// The secret that was made, shown once (`newKeyBanner`).
     new_key: Option<String>,
+    /// Settings > Try the API: the route, what is typed into its request box and the answer of the
+    /// last call (`selRouteTest`, `txtRouteReq`, `preRouteRes`).
+    pub route: String,
+    pub route_req: iced::widget::text_editor::Content,
+    route_res: String,
+    /// The statistics behind their own line, and what `/metrics` answered
+    /// (`prePrometheusMetrics`).
+    metrics: String,
+    metrics_open: bool,
     /// The answer under *Run speed test* (`speedTestResult` of `models.js`).
     pub speed_test: Option<String>,
     /// Whether the speed test is running (the button is off while it does).
@@ -840,6 +849,16 @@ pub enum Message {
     KeyCreated(Result<crate::localapi::CreatedKey, String>),
     KeyRevoke(String),
     KeyRevoked(Result<serde_json::Value, String>),
+    /// The tester of the routes: which one, its box, and the button that sends it
+    /// (`selRouteTest`, `txtRouteReq`, `btnRunRouteTest`).
+    RouteSelect(&'static str),
+    RouteReq(iced::widget::text_editor::Action),
+    RouteSend,
+    RouteAnswer(Result<String, String>),
+    /// The line of the statistics and its Refresh button (`detailsPrometheusLog`).
+    MetricsOpen,
+    MetricsRefresh,
+    MetricsLoaded(Result<String, String>),
     /// Settings > Logs: read the last lines of the server (`btnRefreshLogs`).
     LogsRefresh,
     LogsLoaded(Result<crate::localapi::Logs, String>),
@@ -1061,6 +1080,11 @@ impl App {
             key_tpm: String::new(),
             key_admin: false,
             new_key: None,
+            route: "POST:/v1/chat/completions".into(),
+            route_req: iced::widget::text_editor::Content::new(),
+            route_res: "// Click \"Send Request\" to inspect response".into(),
+            metrics: "Loading /metrics...".into(),
+            metrics_open: false,
             speed_test: None,
             speed_test_busy: false,
             selftest: None,
@@ -3090,6 +3114,56 @@ impl App {
                 self.runtime_say = e;
                 Task::none()
             }
+            Message::RouteSelect(value) => {
+                self.route = value.to_string();
+                // the sample of `updateRouteTesterSample` fills the box when the route changes
+                let model = match &self.server {
+                    Server::Ready(m) => m.detail.name.clone(),
+                    _ => String::new(),
+                };
+                let sample = crate::localapi::route_sample(value, &model);
+                self.route_req = iced::widget::text_editor::Content::with_text(&sample);
+                Task::none()
+            }
+            Message::RouteReq(action) => {
+                self.route_req.perform(action);
+                Task::none()
+            }
+            Message::RouteSend => {
+                // `JSON.parse($('txtRouteReq').value || '{}')`: an empty box sends an object, and
+                // a box with something that is no JSON throws in the window — nothing is sent then
+                let typed = self.route_req.text().trim().to_string();
+                let body = if typed.is_empty() {
+                    Some(serde_json::json!({}))
+                } else {
+                    serde_json::from_str::<serde_json::Value>(&typed).ok()
+                };
+                match body {
+                    Some(body) => Task::perform(
+                        crate::localapi::run_route(self.base.clone(), self.route.clone(), Some(body)),
+                        Message::RouteAnswer,
+                    ),
+                    None => Task::none(),
+                }
+            }
+            // a call that could not be made leaves the box as it was (the promise of the Studio
+            // rejects and nothing happens)
+            Message::RouteAnswer(Ok(answer)) => {
+                self.route_res = answer;
+                Task::none()
+            }
+            Message::RouteAnswer(Err(_)) => Task::none(),
+            Message::MetricsOpen => {
+                self.metrics_open = !self.metrics_open;
+                Task::none()
+            }
+            Message::MetricsRefresh => Task::perform(crate::localapi::fetch_metrics(self.base.clone()), Message::MetricsLoaded),
+            Message::MetricsLoaded(Ok(text)) => {
+                self.metrics = text;
+                Task::none()
+            }
+            // `catch {}` of `refreshPrometheus`: a failure leaves the box as it was
+            Message::MetricsLoaded(Err(_)) => Task::none(),
             Message::KeysRefresh => Task::perform(crate::localapi::fetch_keys(self.base.clone()), Message::KeysLoaded),
             Message::KeysLoaded(Ok(list)) => {
                 // the boxes of the limits are filled from the answer
@@ -5119,6 +5193,15 @@ impl App {
                     admin: self.key_admin,
                     new_key: self.new_key.as_deref(),
                     no_model: matches!(self.server, Server::NoModel),
+                    model: match &self.server {
+                        Server::Ready(m) => m.detail.name.as_str(),
+                        _ => "",
+                    },
+                    route: &self.route,
+                    request: &self.route_req,
+                    answer: &self.route_res,
+                    metrics_open: self.metrics_open,
+                    metrics: &self.metrics,
                 },
                 &self.logs_text,
             )

@@ -7,7 +7,7 @@
 use crate::app::Message;
 use crate::models::{bold, card};
 use crate::theme::{self, Tokens};
-use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
+use iced::widget::{button, column, container, pick_list, row, scrollable, svg, text, text_editor, text_input, Space};
 use iced::{Alignment, Element, Font, Length};
 
 /// The answer of `GET /api/studio/logs?lines=300`.
@@ -164,6 +164,83 @@ pub async fn delete_key(base: String, id: String) -> Result<serde_json::Value, S
     crate::models::delete_json(&base, &format!("/api/studio/keys/{id}"), serde_json::json!({}), "The key could not be revoked").await
 }
 
+/// The routes of the tester, as the select of `shell.html` offers them: the value
+/// (`METHOD:path`, what the window sends) and the label (what the row shows).
+pub const ROUTES: [(&str, &str); 8] = [
+    ("POST:/v1/chat/completions", "POST /v1/chat/completions (OpenAI Chat)"),
+    ("POST:/v1/messages", "POST /v1/messages (Anthropic Messages)"),
+    ("POST:/v1/responses", "POST /v1/responses (OpenAI Responses)"),
+    ("POST:/api/chat", "POST /api/chat (Ollama Chat)"),
+    ("POST:/v1/embeddings", "POST /v1/embeddings (Embeddings)"),
+    ("POST:/v1/rerank", "POST /v1/rerank (Document Reranker)"),
+    ("GET:/v1/models", "GET /v1/models (Models List)"),
+    ("GET:/props", "GET:/props (llama.cpp Server Properties)"),
+];
+
+/// What the request box holds for one of those routes when nothing was typed yet
+/// (`updateRouteTesterSample` of `panels.js`); the two GET routes take no body.
+pub fn route_sample(route: &str, model: &str) -> String {
+    let m = if model.is_empty() { "your-model" } else { model };
+    let body = match route {
+        "POST:/v1/chat/completions" => serde_json::json!({"model": m, "messages": [{"role": "user", "content": "Hello! Answer briefly."}], "max_tokens": 48}),
+        "POST:/v1/messages" => serde_json::json!({"model": m, "max_tokens": 48, "messages": [{"role": "user", "content": "Hello via Anthropic API!"}]}),
+        "POST:/v1/responses" => serde_json::json!({"model": m, "input": "Three facts about Rust.", "max_output_tokens": 48}),
+        "POST:/api/chat" => serde_json::json!({"model": m, "stream": false, "messages": [{"role": "user", "content": "Hello via Ollama API!"}]}),
+        "POST:/v1/embeddings" => serde_json::json!({"model": m, "input": ["Local AI in Rust", "SIMD Kernels"]}),
+        "POST:/v1/rerank" => serde_json::json!({"model": m, "query": "SIMD CPU acceleration", "documents": ["AVX-512 accelerates dot products.", "Apple pie recipe."]}),
+        _ => return String::new(),
+    };
+    serde_json::to_string_pretty(&body).unwrap_or_default()
+}
+
+/// One answer of the tester: pretty when it is JSON, the text as it came when not
+/// (`JSON.stringify(JSON.parse(txt), null, 2)` of `btnRunRouteTest`). One difference to that
+/// line: the JSON of Rust keeps the keys of an object in the order they were written in the file,
+/// JavaScript keeps the order they came in — so a pretty answer lists them in the order of the
+/// parser (sorted), which says nothing about the answer itself.
+pub fn pretty_answer(text: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_else(|_| text.to_string()),
+        Err(_) => text.to_string(),
+    }
+}
+
+/// `selRouteTest` + `Send Request`: one call to the route of the select. The answer is shown
+/// whatever status it came with, the way the window shows it.
+pub async fn run_route(base: String, route: String, body: Option<serde_json::Value>) -> Result<String, String> {
+    let (method, path) = route.split_once(':').unwrap_or(("GET", route.as_str()));
+    let client = reqwest::Client::new();
+    let request = if method == "POST" {
+        client
+            .post(format!("{base}{path}"))
+            .json(&body.unwrap_or_else(|| serde_json::json!({})))
+    } else {
+        client.get(format!("{base}{path}"))
+    };
+    let text = request.send().await.map_err(|e| e.to_string())?.text().await.map_err(|e| e.to_string())?;
+    Ok(pretty_answer(&text))
+}
+
+/// `GET /metrics`: the text of the page as it comes (`refreshPrometheus` of `panels.js`).
+pub async fn fetch_metrics(base: String) -> Result<String, String> {
+    crate::models::get_text(&base, "/metrics").await
+}
+
+/// The labels of the tester's select, in the order `shell.html` offers them.
+pub fn route_labels() -> Vec<&'static str> {
+    ROUTES.iter().map(|(_, label)| *label).collect()
+}
+
+/// The label of the route the select shows for its value.
+pub fn route_label(value: &str) -> &'static str {
+    ROUTES.iter().find(|(v, _)| *v == value).map(|(_, l)| *l).unwrap_or(ROUTES[0].1)
+}
+
+/// The value of a row the user chose in the select.
+pub fn route_value(label: &str) -> &'static str {
+    ROUTES.iter().find(|(_, l)| *l == label).map(|(v, _)| *v).unwrap_or(ROUTES[0].0)
+}
+
 /// What the settings page needs for the two cards of `spane-local-api-server`.
 #[derive(Clone, Copy)]
 pub struct ServerView<'a> {
@@ -188,6 +265,16 @@ pub struct ServerView<'a> {
     pub new_key: Option<&'a str>,
     /// Without a model the server has no key routes (`state.setup` of the Studio).
     pub no_model: bool,
+    /// The model the sample bodies of the tester name (`state.selectedModel` of the Studio).
+    pub model: &'a str,
+    /// The route of the tester (`selRouteTest`) and what is in its request box.
+    pub route: &'a str,
+    pub request: &'a text_editor::Content,
+    /// The answer of the last request, or the line the page starts with (`preRouteRes`).
+    pub answer: &'a str,
+    /// The statistics behind their own line, and what `/metrics` answered (`prePrometheusMetrics`).
+    pub metrics_open: bool,
+    pub metrics: &'a str,
 }
 
 /// The first card of `spane-local-api-server`: where the server listens and what it accepts.
@@ -439,6 +526,118 @@ fn input_style<'a>(t: Tokens) -> impl Fn(&iced::Theme, text_input::Status) -> te
     }
 }
 
+/// The third card of `spane-local-api-server`: one request to any of the eight routes and the
+/// answer of the server beside it (`Try the API` of `shell.html`).
+pub fn tester_card<'a>(t: Tokens, v: ServerView<'a>) -> Element<'a, Message> {
+    let mut body = column![].spacing(10);
+    body = body.push(
+        row![
+            pick_list(route_labels(), Some(route_label(v.route)), |label| Message::RouteSelect(route_value(label)))
+                .padding([6, 10])
+                .style(select_style(t)),
+            button(text("Send Request").size(13))
+                .on_press(Message::RouteSend)
+                .padding([6, 14])
+                .style(theme::primary_button(t)),
+        ]
+        .spacing(8),
+    );
+    let left = text_editor(v.request)
+        .on_action(Message::RouteReq)
+        .padding(10)
+        .size(12)
+        .height(Length::Fixed(175.0))
+        .style(editor_style(t));
+    let right = scrollable(
+        container(text(v.answer.to_string()).size(11).font(Font::MONOSPACE).color(t.fg_soft))
+            .width(Length::Fill)
+            .padding(10)
+            .style(theme::inset(t)),
+    )
+    .height(Length::Fixed(175.0));
+    body = body.push(row![left, right].spacing(10));
+    card(t, "Try the API", body.into())
+}
+
+/// The last card of `spane-local-api-server`: the statistics of the server behind their own line
+/// (`<details id="detailsPrometheusLog">` of `shell.html` — the line is its summary, so the card
+/// is drawn with the line as its header).
+pub fn metrics_card<'a>(t: Tokens, v: ServerView<'a>) -> Element<'a, Message> {
+    let head = row![
+        button(
+            row![
+                svg(crate::app::icon(if v.metrics_open {
+                    crate::app::ICON_CHEVRON
+                } else {
+                    crate::app::ICON_CHEVRON_RIGHT
+                }))
+                .width(14)
+                .height(14)
+                .style(crate::app::muted_svg(t)),
+                text("Server statistics (/metrics)").size(13).font(bold()).color(t.fg_soft),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::MetricsOpen)
+        .padding([3, 4])
+        .style(theme::ghost_button(t)),
+        Space::new().width(Length::Fill),
+        button(text("Refresh").size(12))
+            .on_press(Message::MetricsRefresh)
+            .padding([5, 10])
+            .style(crate::app::starter_style(t)),
+    ]
+    .align_y(Alignment::Center);
+    let mut col = column![head].spacing(10);
+    if v.metrics_open {
+        col = col.push(
+            scrollable(
+                container(text(v.metrics.to_string()).size(12).font(Font::MONOSPACE).color(t.fg_soft))
+                    .width(Length::Fill)
+                    .padding(10)
+                    .style(theme::inset(t)),
+            )
+            .height(Length::Fixed(220.0)),
+        );
+    }
+    container(col)
+        .padding(16)
+        .width(Length::Fill)
+        .style(theme::card(t, theme::R_LG, false))
+        .into()
+}
+
+/// The select of the routes (`ui-select` of the Studio).
+fn select_style<'a>(t: Tokens) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list::Style + 'a {
+    move |_, status| pick_list::Style {
+        background: iced::Background::Color(t.surface_2),
+        border: iced::Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: if matches!(status, pick_list::Status::Hovered) { t.fg_soft } else { t.separator },
+        },
+        text_color: t.fg,
+        placeholder_color: t.muted,
+        handle_color: t.muted,
+    }
+}
+
+/// The request box (`ui-textarea` of the Studio).
+fn editor_style<'a>(t: Tokens) -> impl Fn(&iced::Theme, text_editor::Status) -> text_editor::Style + 'a {
+    move |_, status| text_editor::Style {
+        background: iced::Background::Color(t.surface_2),
+        border: iced::Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: if matches!(status, text_editor::Status::Focused { .. }) { t.fg_soft } else { t.separator },
+        },
+        placeholder: t.muted,
+        value: t.fg,
+        selection: iced::Color { a: 0.35, ..t.primary },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,5 +668,53 @@ mod tests {
     fn a_key_without_a_limit_of_its_own_says_default() {
         assert_eq!(limit_line(None), "Default");
         assert_eq!(limit_line(Some(60)), "60 per minute");
+    }
+
+    /// The label of a route and the value behind it go together, and the select offers all eight.
+    #[test]
+    fn the_select_offers_the_eight_routes_of_the_studio() {
+        let labels = route_labels();
+        assert_eq!(labels.len(), ROUTES.len());
+        assert_eq!(labels[0], "POST /v1/chat/completions (OpenAI Chat)");
+        assert_eq!(labels[7], "GET:/props (llama.cpp Server Properties)");
+        for (value, label) in ROUTES {
+            assert_eq!(route_label(value), label, "{value}");
+            assert_eq!(route_value(label), value, "{label}");
+        }
+        // something the select does not know falls back on the first row, as the map of
+        // `updateRouteTesterSample` falls back on an empty body
+        assert_eq!(route_value("no such route"), ROUTES[0].0);
+    }
+
+    /// The sample of a route (`updateRouteTesterSample`): the body of the Studio, and nothing for
+    /// the two routes that take no body.
+    #[test]
+    fn a_sample_is_the_body_of_the_studio_for_that_route() {
+        let rerank = route_sample("POST:/v1/rerank", "llama3");
+        assert!(rerank.contains("\"query\": \"SIMD CPU acceleration\""), "{rerank}");
+        assert!(rerank.contains("\"model\": \"llama3\""), "{rerank}");
+        // without a model the sample says what the Studio says
+        assert!(route_sample("POST:/v1/chat/completions", "").contains("\"model\": \"your-model\""));
+        let chat = route_sample("POST:/v1/chat/completions", "m");
+        assert!(chat.contains("\"max_tokens\": 48"), "{chat}");
+        assert!(chat.contains("Hello! Answer briefly."), "{chat}");
+        // the two GET routes take no body
+        assert_eq!(route_sample("GET:/v1/models", "m"), "");
+        assert_eq!(route_sample("GET:/props", "m"), "");
+        assert!(route_sample("POST:/v1/embeddings", "m").contains("SIMD Kernels"), "the two inputs of the Studio");
+    }
+
+    /// An answer of the tester is pretty when it is JSON, and the text as it came when not
+    /// (`JSON.stringify(JSON.parse(txt), null, 2)` of `btnRunRouteTest`).
+    #[test]
+    fn an_answer_is_pretty_when_it_is_json_and_raw_when_not() {
+        // the keys come out in the order of Rust's JSON parser, not in the order JavaScript keeps
+        // (`JSON.parse` of the Studio would answer `b` before `a` here)
+        assert_eq!(pretty_answer("{\"b\":1,\"a\":2}"), "{\n  \"a\": 2,\n  \"b\": 1\n}");
+        assert_eq!(pretty_answer("not json at all"), "not json at all");
+        assert_eq!(pretty_answer(""), "");
+        // a plain number is JSON too, and a broken object falls back on the text
+        assert_eq!(pretty_answer("42"), "42");
+        assert_eq!(pretty_answer("{broken"), "{broken");
     }
 }

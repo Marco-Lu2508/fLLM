@@ -1661,6 +1661,8 @@ pub fn page<'a>(
         // Studio's settings menu has them (right after the hardware page)
         crate::localapi::server_card(t, server),
         crate::localapi::keys_card(t, server),
+        crate::localapi::tester_card(t, server),
+        crate::localapi::metrics_card(t, server),
         // Settings > Logs: the card of `spane-logs`, where the Studio's menu has it (after the
         // server pages, before the panes the menu appends)
         crate::localapi::logs_card(t, logs_text),

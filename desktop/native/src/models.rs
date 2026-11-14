@@ -266,6 +266,18 @@ pub(crate) async fn get_json(base: &str, path: &str) -> Result<Value, String> {
         .map_err(|e| e.to_string())
 }
 
+/// A GET whose answer is plain text and not JSON (`/metrics` of the server, which is the
+/// Prometheus exposition format). Whatever status came, the text is the answer — the window shows
+/// it the way `refreshPrometheus` shows it.
+pub(crate) async fn get_text(base: &str, path: &str) -> Result<String, String> {
+    reqwest::get(format!("{base}{path}"))
+        .await
+        .map_err(|e| format!("no server at {base}: {e}"))?
+        .text()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// A POST that the server answers with a JSON error body on failure: that message is what the user should read.
 async fn post(base: &str, path: &str, body: Value) -> Result<Value, String> {
     let resp = reqwest::Client::new().post(format!("{base}{path}")).json(&body).send().await.map_err(|e| format!("no server at {base}: {e}"))?;

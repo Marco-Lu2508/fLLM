@@ -7,6 +7,18 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **The tester of the routes and the statistics of the server in the native app.** The last two
+  cards of `spane-local-api-server`: *Try the API* carries the select of `selRouteTest` with its
+  eight routes, *Send Request*, the request box and the answer beside it — the sample of
+  `updateRouteTesterSample` fills the box on every change (with the model the window has, or
+  *your-model*), an empty box sends `{}`, a box that holds no JSON sends nothing (the Studio throws
+  there and does nothing either), and the answer is pretty when it is JSON and the text as it came
+  when not; *Server statistics (`/metrics`)* keeps its line with the Refresh button of
+  `detailsPrometheusLog` and the box of `prePrometheusMetrics` behind it, filled only when Refresh
+  is pressed, with `catch {}` leaving it as it was. One difference to `JSON.stringify` of the
+  Studio: an object of Rust's JSON comes out with its keys in the order of the parser instead of
+  the order JavaScript keeps — it says nothing about the answer. Three unit tests, one window test,
+  three mutations.
 - **Settings > Server and API in the native app: where the server listens and which keys it hands
   out.** The first card of `spane-local-api-server` — its line about the OpenAI, Anthropic and
   Ollama APIs, the chip *Running* that is only there while the server answers (the Studio's page

@@ -216,6 +216,12 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   with the *admin* chip, the masked key, the limit, requests, tokens, refused, *Revoke*) with the
   sentences for a server without keys and for one that runs without a model. Three unit tests,
   three window tests.
+- Try the API and the statistics: the last two cards of `spane-local-api-server` — the select of
+  `selRouteTest` with its eight routes and *Send Request* with the request box and the answer
+  beside it (the sample of `updateRouteTesterSample` on every change, `{}` for an empty box,
+  nothing for a box that is no JSON, the answer pretty when it is JSON), and *Server statistics
+  (`/metrics`)* with the line of `detailsPrometheusLog` and its box behind it, filled when Refresh
+  is pressed. Three unit tests, one window test, three mutations.
 - Logs: what the server wrote lately — the card of `spane-logs` with its line, *Refresh* and
   *Copy*, and the box of `preLogs` at the height the Studio gives it (480px of scrolling
   monospace). The lines of `GET /api/studio/logs?lines=300` joined, *Nothing has been logged yet.*

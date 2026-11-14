@@ -131,6 +131,62 @@ fn the_keys_card_says_what_the_server_has() {
     assert_eq!(app.rate_tpm, "30000", "and the tokens per minute");
 }
 
+/// The tester of the routes and the statistics behind their own line (`Try the API` and
+/// *Server statistics* of `spane-local-api-server`).
+#[test]
+fn the_tester_fills_its_box_from_the_route_and_the_statistics_wait_for_their_button() {
+    let (mut app, _dir) = app("dark");
+    let _ = app.update(Message::Go(View::Settings));
+
+    let mut ui = sim(&app);
+    ui.find("Try the API").expect("the title of the third card");
+    ui.find("Send Request").expect("the button beside the select");
+    // the select draws its label through the renderer, so the route is read from the state
+    // (`selRouteTest` of the Studio holds the same value)
+    assert_eq!(app.route, "POST:/v1/chat/completions", "the route the select starts with");
+    assert_eq!(
+        fllm_app::localapi::route_label(&app.route),
+        "POST /v1/chat/completions (OpenAI Chat)",
+        "and its label"
+    );
+    ui.find("// Click \"Send Request\" to inspect response").expect("the line the answer starts with");
+    ui.find("Server statistics (/metrics)").expect("the line of the statistics");
+    assert!(
+        ui.find("Loading /metrics...").is_err(),
+        "their box is behind the line at first (`<details>` without `open`)"
+    );
+    drop(ui);
+
+    // choosing a route fills the request box with the sample of the Studio
+    // (`updateRouteTesterSample` runs on every change of the select)
+    let _ = app.update(Message::RouteSelect("POST:/v1/rerank"));
+    assert_eq!(app.route, "POST:/v1/rerank", "the route that was chosen");
+    assert_eq!(
+        app.route_req.text(),
+        fllm_app::localapi::route_sample("POST:/v1/rerank", ""),
+        "the sample of that route, with the model the window has (none: `your-model`)"
+    );
+    // and the two routes that take no body leave it empty
+    let _ = app.update(Message::RouteSelect("GET:/props"));
+    assert_eq!(app.route_req.text(), "", "no body for a GET");
+
+    // opening the line shows the box, and Refresh reads the statistics
+    let _ = app.update(Message::MetricsOpen);
+    let mut ui = sim(&app);
+    ui.find("Loading /metrics...").expect("the box of the statistics");
+    drop(ui);
+
+    let _ = app.update(Message::MetricsLoaded(Ok("# HELP fllm_requests_total 1".into())));
+    let mut ui = sim(&app);
+    ui.find("# HELP fllm_requests_total 1").expect("the text of /metrics");
+    drop(ui);
+
+    // a failure leaves the box as it was (`catch {}` of `refreshPrometheus`)
+    let _ = app.update(Message::MetricsLoaded(Err("no server".into())));
+    let mut ui = sim(&app);
+    ui.find("# HELP fllm_requests_total 1").expect("the old text stays");
+}
+
 /// Without a model the server has no key routes, and the card says so (`state.setup`).
 #[test]
 fn without_a_model_the_card_says_so_and_the_button_refuses() {
