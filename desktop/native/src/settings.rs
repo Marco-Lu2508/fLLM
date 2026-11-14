@@ -1144,6 +1144,7 @@ pub fn page<'a>(
     usage: UsageView<'a>,
     look: LookView<'a>,
     hardware: HardwareView<'a>,
+    runtime: crate::runtime::RuntimeView<'a>,
 ) -> Element<'a, Message> {
     let mut answers = column![].spacing(14);
     answers = answers.push(setting(
@@ -1654,6 +1655,9 @@ pub fn page<'a>(
         card(t, "Appearance", appearance_card(t, look)),
         hardware_card(t, hardware),
         card(t, "Usage and cost", usage_card(t, usage)),
+        // Settings > Runtime: the three cards of `runtime.js` (the sandbox, computer use and
+        // turbo), in the order the Studio's pane draws them
+        crate::runtime::section(t, runtime),
         card(t, "Dictation", dictation.into()),
         card(t, "Reading aloud", reading.into()),
         card(t, "Alerts", alerts.into()),

@@ -517,6 +517,23 @@ pub async fn fetch_npu(base: String) -> Result<Value, String> {
     get_json(&base, "/api/npu").await
 }
 
+/// `GET /api/studio/runtime`: the sandbox mode, the turbo switch, what the computer can do and
+/// what the sandbox really enforces here (`load()` of `runtime.js` reads the same answer).
+pub async fn fetch_runtime(base: String) -> Result<crate::runtime::Status, String> {
+    get_json(&base, "/api/studio/runtime")
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /api/studio/runtime`: one of `{sandbox, turbo, computer_use, computer_rate,
+/// computer_max_steps}`; the answer is the status again. A failure reads the way `save()` of
+/// `runtime.js` writes it: the message of the server, or `Could not save it.` when it sent none.
+pub async fn post_runtime(base: String, body: Value) -> Result<crate::runtime::Status, String> {
+    post_fallback(&base, "/api/studio/runtime", body, "Could not save it.")
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
 /// The error words of a request whose failures must read the way the Studio writes them: what the
 /// server sent in `error.message` (or `error`), and `fallback` when it sent nothing at all.
 fn fail_words(data: &Value, fallback: &str) -> String {

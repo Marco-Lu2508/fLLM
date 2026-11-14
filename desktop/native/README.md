@@ -185,6 +185,16 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   report arrives). The table of *Chats answered at the same time* (`GET /slots`) closes the pane.
   Eleven fixtures of the Studio's own pure zone, seven unit tests, seven window tests with five
   drawings, ten mutations.
+- Runtime card: how freely the app works — the three cards of `runtime.js`. *Sandbox for agent
+  commands* with its description, the modes `off`/`workspace`/`strict` (dead while turbo is on or
+  `FLLM_SANDBOX` chose for this server), the line of `show()` with ` · ` between its parts and the
+  block of `Enforced:`/`Not enforced:`/`Verification:`; *Computer use* and *Turbo* on red rings with
+  their warnings, the On/Off switches and the two limit boxes that send only a rounded number of at
+  least one (`Math.round`, and the server clamps to 600 and 5000). Both switches ask the question of
+  `confirmDialog` before they go on, over the dim of `.modal-backdrop`, and the line of `rtStatus`
+  says `Saved.`, the message of the server, or `Could not read the setting: …`. `GET`/`POST
+  /api/studio/runtime`, and nothing of a card is drawn before an answer came. Five unit tests, four
+  window tests with two drawings, eight mutations.
 - Appearance: the settings card of the Studio — theme (system/dark/light), the eight accent
   colors with the chosen one ringed, the base size of the text (14–18px), *Tint your messages* and
   *Show generation speed*. The accent colours the whole page exactly as the Studio computes it

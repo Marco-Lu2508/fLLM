@@ -18,6 +18,7 @@ pub mod npu;
 pub mod models;
 pub mod palette;
 pub mod prompts;
+pub mod runtime;
 pub mod memory;
 pub mod promptlib;
 pub mod speech;

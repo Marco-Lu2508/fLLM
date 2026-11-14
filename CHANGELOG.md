@@ -7,6 +7,16 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **Settings > Runtime in the native app: how freely the app works.** The three cards of
+  `runtime.js` — *Sandbox for agent commands* (its description, the modes `off`/`workspace`/`strict`
+  of `rtSandbox`, dead while turbo is on or `FLLM_SANDBOX` chose for this server, the line of
+  `show()` with ` · ` between its parts and the block of `Enforced:`/`Not enforced:`/`Verification:`),
+  *Computer use* and *Turbo* on red rings with their warnings, the On/Off switches and the two limit
+  boxes that send only a rounded number of at least one (`Math.round`, and the server clamps to 600
+  and 5000). Both switches ask the question of `confirmDialog` before they go on, over the dim of
+  `.modal-backdrop`. The line of `rtStatus` says `Saved.`, the message of the server when a save was
+  refused, or `Could not read the setting: …` when the read failed, and nothing of a card is drawn
+  before `GET /api/studio/runtime` answered. `Settings > Runtime` in the PARITY list: done.
 - **The hardware card of the native app is complete: what this machine can do, and the buttons
   that check it.** The first card of *Settings > Hardware* now carries the header of the Studio —
   *Measure memory speed* (asks for `?benchmark=true`) and *Check the processor*

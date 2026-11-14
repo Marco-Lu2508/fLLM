@@ -335,6 +335,17 @@ pub struct App {
     /// The dialog before the OpenVINO runtime goes away (the `confirmDialog` the Studio puts in
     /// front of *Remove the runtime*).
     pub npu_remove: bool,
+    /// Settings > Runtime: what the server says about the sandbox, computer use and turbo
+    /// (`GET /api/studio/runtime`).
+    runtime: crate::runtime::Status,
+    runtime_loaded: bool,
+    /// The line of `rtStatus`: `Saved.` or what went wrong.
+    runtime_say: String,
+    /// The two limit boxes, as typed.
+    runtime_rate: String,
+    runtime_steps: String,
+    /// The question before computer use or turbo goes on.
+    pub runtime_confirm: Option<crate::runtime::Confirm>,
     /// The answer under *Run speed test* (`speedTestResult` of `models.js`).
     pub speed_test: Option<String>,
     /// Whether the speed test is running (the button is off while it does).
@@ -731,6 +742,27 @@ pub enum Message {
     /// The dialog was answered: take the runtime away, or leave it.
     NpuRemoveOk,
     NpuRemoveCancel,
+    /// Settings > Runtime: read what the server says (`load()` of `runtime.js`).
+    RuntimeLoad,
+    /// The answer of that read.
+    RuntimeLoaded(Result<crate::runtime::Status, String>),
+    /// One of the three sandbox modes was chosen (`rtSandbox`).
+    RuntimeSandbox(&'static str),
+    /// Turbo goes on (the Studio asks first) or off (`rtTurbo`).
+    RuntimeTurbo(bool),
+    /// Computer use goes on (the Studio asks first) or off (`rtComputer`).
+    RuntimeComputer(bool),
+    /// What is typed into one of the two limit boxes, and the box is left (`change`).
+    RuntimeRate(String),
+    RuntimeRateSave,
+    RuntimeSteps(String),
+    RuntimeStepsSave,
+    /// The question before a switch goes on (`confirmDialog` of `runtime.js`).
+    RuntimeConfirm(crate::runtime::Confirm),
+    RuntimeConfirmOk,
+    RuntimeConfirmCancel,
+    /// The save answered (`POST /api/studio/runtime`).
+    RuntimeSaved(Result<crate::runtime::Status, String>),
     /// The state of the AMD NPU card came back (`refreshAmdNpu` of `amdnpu.js`).
     AmdNpuState(Result<serde_json::Value, String>),
     /// One action of the AMD NPU card (`amdNpuAction` of `amdnpu.js`).
@@ -920,6 +952,12 @@ impl App {
             npu_state: None,
             npu_runtime: false,
             npu_remove: false,
+            runtime: crate::runtime::Status::default(),
+            runtime_loaded: false,
+            runtime_say: String::new(),
+            runtime_rate: String::new(),
+            runtime_steps: String::new(),
+            runtime_confirm: None,
             speed_test: None,
             speed_test_busy: false,
             selftest: None,
@@ -2863,6 +2901,92 @@ impl App {
                     Task::none()
                 }
             },
+            Message::RuntimeLoad => {
+                Task::perform(models::fetch_runtime(self.base.clone()), Message::RuntimeLoaded)
+            }
+            Message::RuntimeLoaded(Ok(status)) => {
+                self.fill_runtime(status);
+                Task::none()
+            }
+            Message::RuntimeLoaded(Err(e)) => {
+                // `load()` of `runtime.js`: `Could not read the setting: …`
+                self.runtime_say = format!("Could not read the setting: {e}");
+                Task::none()
+            }
+            Message::RuntimeSandbox(mode) => Task::perform(
+                models::post_runtime(self.base.clone(), serde_json::json!({ "sandbox": mode })),
+                Message::RuntimeSaved,
+            ),
+            Message::RuntimeTurbo(true) => {
+                // the question of `runtime.js` before the switch goes on
+                self.runtime_confirm = Some(crate::runtime::Confirm::Turbo);
+                Task::none()
+            }
+            Message::RuntimeTurbo(on) => Task::perform(
+                models::post_runtime(self.base.clone(), serde_json::json!({ "turbo": on })),
+                Message::RuntimeSaved,
+            ),
+            Message::RuntimeComputer(true) => {
+                self.runtime_confirm = Some(crate::runtime::Confirm::Computer);
+                Task::none()
+            }
+            Message::RuntimeComputer(on) => Task::perform(
+                models::post_runtime(self.base.clone(), serde_json::json!({ "computer_use": on })),
+                Message::RuntimeSaved,
+            ),
+            Message::RuntimeRate(text) => {
+                self.runtime_rate = text;
+                Task::none()
+            }
+            Message::RuntimeRateSave => match crate::runtime::limit(&self.runtime_rate) {
+                Some(n) => Task::perform(
+                    models::post_runtime(self.base.clone(), serde_json::json!({ "computer_rate": n })),
+                    Message::RuntimeSaved,
+                ),
+                // a box that is not a number of at least one sends nothing (`if (n >= 1)`)
+                None => Task::none(),
+            },
+            Message::RuntimeSteps(text) => {
+                self.runtime_steps = text;
+                Task::none()
+            }
+            Message::RuntimeStepsSave => match crate::runtime::limit(&self.runtime_steps) {
+                Some(n) => Task::perform(
+                    models::post_runtime(self.base.clone(), serde_json::json!({ "computer_max_steps": n })),
+                    Message::RuntimeSaved,
+                ),
+                None => Task::none(),
+            },
+            Message::RuntimeConfirm(kind) => {
+                self.runtime_confirm = Some(kind);
+                Task::none()
+            }
+            Message::RuntimeConfirmOk => match self.runtime_confirm.take() {
+                Some(crate::runtime::Confirm::Computer) => Task::perform(
+                    models::post_runtime(self.base.clone(), serde_json::json!({ "computer_use": true })),
+                    Message::RuntimeSaved,
+                ),
+                Some(crate::runtime::Confirm::Turbo) => Task::perform(
+                    models::post_runtime(self.base.clone(), serde_json::json!({ "turbo": true })),
+                    Message::RuntimeSaved,
+                ),
+                None => Task::none(),
+            },
+            Message::RuntimeConfirmCancel => {
+                self.runtime_confirm = None;
+                Task::none()
+            }
+            Message::RuntimeSaved(Ok(status)) => {
+                self.fill_runtime(status);
+                // `save()` of `runtime.js` says `Saved.` after the answer was drawn
+                self.runtime_say = "Saved.".into();
+                Task::none()
+            }
+            Message::RuntimeSaved(Err(e)) => {
+                // the message of the server, or `Could not save it.` when it sent none
+                self.runtime_say = e;
+                Task::none()
+            }
             Message::OverlayClick => {
                 // `data-modal-static`: the click belongs to the overlay and runs nothing
                 Task::none()
@@ -3599,6 +3723,13 @@ impl App {
                     let amd = Task::perform(models::fetch_amd_npu(self.base.clone()), Message::AmdNpuState);
                     // and the table of the slots comes with the report (`refreshHardware`)
                     let slots = Task::perform(models::fetch_slots(self.base.clone()), Message::SlotsLoaded);
+                    // the Runtime card reads what the server says about the sandbox (`load()` of
+                    // `runtime.js` runs when the pane is built): once, and again when that read failed
+                    let runtime = if self.runtime_loaded {
+                        Task::none()
+                    } else {
+                        Task::perform(models::fetch_runtime(self.base.clone()), Message::RuntimeLoaded)
+                    };
                     if !matches!(self.server, Server::Down(_)) {
                         return Task::batch(vec![
                             voices,
@@ -3607,13 +3738,14 @@ impl App {
                             npu,
                             amd,
                             slots,
+                            runtime,
                             Task::perform(
                                 engine_settings::fetch(self.base.clone()),
                                 Message::EngineLoaded,
                             ),
                         ]);
                     }
-                    return Task::batch(vec![voices, prices, devices, npu, amd, slots]);
+                    return Task::batch(vec![voices, prices, devices, npu, amd, slots, runtime]);
                 }
                 Task::none()
             }
@@ -4365,6 +4497,12 @@ impl App {
                 .push(backdrop(Message::PaletteClose))
                 .push(self.palette_window(t));
         }
+        if let Some(kind) = self.runtime_confirm {
+            // the `confirmDialog` of `runtime.js` before computer use or turbo goes on
+            layers = layers
+                .push(backdrop(Message::RuntimeConfirmCancel))
+                .push(crate::runtime::confirm_window(t, kind));
+        }
         if self.switching {
             // `switchOverlay` of the Studio: `data-modal-static`, so a click on the dim is
             // captured and does nothing — the page waits behind the glass until the engine is back
@@ -4519,6 +4657,14 @@ impl App {
                     amd_npu: self.amd_npu.as_ref(),
                     amd_chosen: &self.amd_npu_chosen,
                     slots: &self.slots,
+                },
+                crate::runtime::RuntimeView {
+                    // nothing of the card is drawn until the answer came (`show()` of
+                    // `runtime.js` runs with the data of the pane)
+                    status: self.runtime_loaded.then_some(&self.runtime),
+                    say: &self.runtime_say,
+                    rate: &self.runtime_rate,
+                    steps: &self.runtime_steps,
                 },
             )
         } else if self.page == View::Project {
@@ -7075,6 +7221,23 @@ impl App {
     }
 
     /// Whether a load, unload or restart is under way.
+    /// Takes a fresh answer of `GET /api/studio/runtime` and fills the boxes of the card with it
+    /// (`show()` of `runtime.js`).
+    fn fill_runtime(&mut self, status: crate::runtime::Status) {
+        self.runtime_rate = status
+            .computer
+            .as_ref()
+            .map(|c| c.rate_per_minute.to_string())
+            .unwrap_or_default();
+        self.runtime_steps = status
+            .computer
+            .as_ref()
+            .map(|c| c.max_steps.to_string())
+            .unwrap_or_default();
+        self.runtime = status;
+        self.runtime_loaded = true;
+    }
+
     pub fn switching(&self) -> bool {
         self.switching
     }
