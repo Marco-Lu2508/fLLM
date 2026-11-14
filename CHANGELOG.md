@@ -444,6 +444,13 @@ behaviour between versions).
 - **The composer is calm: neutral at rest, one neutral hairline on focus, and a chip that is on (Thinking, Web access) has a neutral fill with the accent only on its icon.** The frame and the chip were copper and orange at the same time as the send button.
 
 ### Fixed
+- **On macOS the native app now shows the keys it actually answers.** The window read `Mod` as the
+  command key there but drew it as `Ctrl` everywhere — in the palette, in the shortcut list and in
+  the tour — so *Cmd+N* was the key while the row said *Ctrl+N*; the labels follow the platform now,
+  the way the key pipeline reads it and the way `shortcutLabel` of the Studio does
+  (`formatCombo(combo, isMacOs)`). The two refusal messages of `checkCombo` stay platform-neutral
+  because `boot.js` writes them with `false` on every system. The tests press the key of their own
+  platform and expect its label, which is what made `Native app (macOS)` red.
 - **The window pictures of the native app's tests land where the workflow uploads them, on all
   three systems.** Twenty-one test files fell back to `/opt/data/cache/scratch/fLLM/...` — the
   path of the machine they were written on — when `FLLM_SNAPSHOT_DIR` is not set, which it never

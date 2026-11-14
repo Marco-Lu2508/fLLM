@@ -4,7 +4,7 @@
 //! shortcut a combination triggers. `format_combo` lives in `tour.rs` (the tour shows the same
 //! keys). The drawing of the overview is `shortcuts_window` in `app.rs`.
 
-use crate::tour::format_combo;
+use crate::tour::{format_combo, is_mac};
 use std::collections::HashMap;
 
 /// One shortcut of the list (`SHORTCUTS` of `boot.js`): its id, its default keys and what it says
@@ -146,6 +146,8 @@ pub fn check_combo(combos: &HashMap<String, String>, id: &str, text: &str) -> Re
         if s.id != id && combos.get(s.id).map(String::as_str) == Some(combo.as_str()) {
             return Err(format!(
                 "{} is already used for: {}.",
+                // the Studio writes these two messages with `formatCombo(combo, false)`, so the
+                // reason of a refused key reads the same on every platform (`checkCombo`)
                 format_combo(&combo, false),
                 s.desc
             ));
@@ -162,9 +164,10 @@ pub fn shortcut_for(combos: &HashMap<String, String>, combo: &str) -> Option<&'s
         .map(|s| s.id)
 }
 
-/// The keys of `combo` as people see them in the list (`formatCombo` of `boot.js`).
+/// The keys of `combo` as people see them in the list (`formatCombo` of `boot.js`): what this
+/// platform's `Mod` is called, joined the way this platform joins it.
 pub fn format(combo: &str) -> String {
-    format_combo(combo, false)
+    format_combo(combo, is_mac())
 }
 
 /// The combination of a keyboard event, or nothing while only a modifier key is down

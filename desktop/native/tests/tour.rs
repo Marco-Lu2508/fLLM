@@ -9,6 +9,16 @@ use fllm_app::tour::{
 };
 use serde_json::json;
 
+/// The word the window shows for `Mod`, and the sign that joins it to the key (`formatCombo` of
+/// `boot.js`: `Ctrl+N` on this platform, `Cmd N` on macOS).
+fn mod_label(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("Cmd {key}")
+    } else {
+        format!("Ctrl+{key}")
+    }
+}
+
 /// A device of `GET /api/studio/hardware`.
 fn dev(name: &str, backend: &str, api: &str, dev_type: &str, total: u64) -> Device {
     Device {
@@ -44,9 +54,9 @@ fn the_shortcut_keys_are_written_the_way_the_studio_writes_them() {
     assert_eq!(format_combo("Mod+Shift+P", false), "Ctrl+Shift+P");
     assert_eq!(format_combo("Mod+K", true), "Cmd K");
     // the three the tour names
-    assert_eq!(shortcut_label("shortcuts"), "Ctrl+/");
-    assert_eq!(shortcut_label("search"), "Ctrl+K");
-    assert_eq!(shortcut_label("newChat"), "Ctrl+N");
+    assert_eq!(shortcut_label("shortcuts"), mod_label("/"));
+    assert_eq!(shortcut_label("search"), mod_label("K"));
+    assert_eq!(shortcut_label("newChat"), mod_label("N"));
 }
 
 /// The line about this computer: the processor, one entry per graphics device with its memory and
@@ -196,12 +206,12 @@ fn every_step_says_what_the_studio_says() {
             assert_eq!(tips.len(), 3, "the three tips of the Studio");
             assert_eq!(tips[0].lead, "Shortcuts.");
             assert!(
-                tips[0].rest.contains("Press Ctrl+/ or ? to see all keys"),
+                tips[0].rest.contains(&format!("Press {} or ? to see all keys", mod_label("/"))),
                 "the keys of the tour: {}",
                 tips[0].rest
             );
             assert!(
-                tips[0].rest.ends_with("Ctrl+N starts a new chat."),
+                tips[0].rest.ends_with(&format!("{} starts a new chat.", mod_label("N"))),
                 "the keys of the tour: {}",
                 tips[0].rest
             );

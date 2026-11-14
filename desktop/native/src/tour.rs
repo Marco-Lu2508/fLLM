@@ -251,8 +251,15 @@ pub fn tier_label(tier: &str) -> String {
     }
 }
 
+/// Whether this window is on macOS: `Mod` is the command key there and the control key
+/// everywhere else. The key pipeline reads the platform the same way (`combo_of_key`), so the
+/// keys the window shows and the keys it answers are always the same ones.
+pub fn is_mac() -> bool {
+    cfg!(target_os = "macos")
+}
+
 /// The keys of a shortcut as people see them (`shortcutLabel`/`formatCombo` of `boot.js` with the
-/// defaults of the three shortcuts the tour names, `Mod` read as `Ctrl` off macOS).
+/// defaults of the three shortcuts the tour names, `Mod` read the way this platform reads it).
 pub fn shortcut_label(id: &str) -> String {
     let combo = match id {
         "newChat" => "Mod+N",
@@ -260,7 +267,7 @@ pub fn shortcut_label(id: &str) -> String {
         "shortcuts" => "Mod+/",
         _ => return String::new(),
     };
-    format_combo(combo, false)
+    format_combo(combo, is_mac())
 }
 
 /// The keys of `combo` as people see them (`formatCombo` of `boot.js`: the names of the arrow keys

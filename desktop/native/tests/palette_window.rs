@@ -8,6 +8,21 @@ use fllm_app::store::{ChatRecord, Record, Role, Store};
 use iced::keyboard::{key::Named, Key, Modifiers};
 use iced_test::Simulator;
 
+/// The key the window reads as `Mod`: Control on this platform, Command on macOS
+/// (`combo_of_key` reads the platform the same way).
+fn mod_key() -> Modifiers {
+    if cfg!(target_os = "macos") { Modifiers::LOGO } else { Modifiers::CTRL }
+}
+
+/// The word the window shows for `Mod`, and the sign that joins it (`formatCombo` of `boot.js`).
+fn mod_label(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("Cmd {key}")
+    } else {
+        format!("Ctrl+{key}")
+    }
+}
+
 fn rec(role: Role, content: &str) -> Record {
     Record {
         role,
@@ -101,7 +116,8 @@ fn the_palette_opens_with_the_commands_in_their_groups() {
     // without a query the first seven commands come, then the chats (rankPalette of palette.js);
     // with a chat open that is New chat, Regenerate, the two exports and the three pages
     ui.find("New chat").expect("the first command");
-    ui.find("Ctrl+N").expect("the keys of the shortcut on the row");
+    let new_chat = mod_label("N");
+    ui.find(new_chat.as_str()).expect("the keys of the shortcut on the row");
     ui.find("Regenerate the last answer").expect("a chat is open, so this row is there");
     ui.find("Export this chat as Markdown").expect("the export rows of an open chat");
     ui.find("Go to Code").expect("another command");
@@ -231,7 +247,7 @@ fn the_arrow_keys_walk_the_rows_and_a_row_runs() {
 #[test]
 fn the_search_shortcut_opens_the_palette_with_the_keys_in_force() {
     let (mut app, _dir) = app_with(store_with_chats());
-    let _ = app.update(Message::Key(Key::Character("k".into()), Modifiers::CTRL));
+    let _ = app.update(Message::Key(Key::Character("k".into()), mod_key()));
     assert!(app.palette_open, "Mod+K opens the palette");
     // the window takes the keys while it is open (like the input of palette.js), so the change
     // happens with it closed and the rows are built anew after it
@@ -239,11 +255,12 @@ fn the_search_shortcut_opens_the_palette_with_the_keys_in_force() {
     assert!(!app.palette_open, "Esc closes it");
 
     let _ = app.update(Message::ScChange("newChat".into()));
-    let _ = app.update(Message::Key(Key::Character("j".into()), Modifiers::CTRL));
+    let _ = app.update(Message::Key(Key::Character("j".into()), mod_key()));
     let _ = app.update(Message::PaletteOpen);
     {
         let mut ui = sim(&app);
-        ui.find("Ctrl+J").expect("the row shows the keys in force");
+        let changed = mod_label("J");
+        ui.find(changed.as_str()).expect("the row shows the keys in force");
         save_png(&app, "palette-changed-keys");
     }
     let _ = app.update(Message::Esc);

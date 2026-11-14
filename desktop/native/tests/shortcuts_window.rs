@@ -53,9 +53,20 @@ fn save_png(app: &App, name: &str) {
     shot.matches_image(dir.join(format!("{name}.png"))).expect("the picture is written");
 }
 
-/// Ctrl and a letter, as the window sees it.
-fn ctrl(key: char) -> (Key, Modifiers) {
-    (Key::Character(key.to_string().into()), Modifiers::CTRL)
+/// The letter with the key the window reads as `Mod`: Control on this platform, Command on
+/// macOS (`combo_of_key` reads the platform the same way).
+fn mod_key(key: char) -> (Key, Modifiers) {
+    let modifiers = if cfg!(target_os = "macos") { Modifiers::LOGO } else { Modifiers::CTRL };
+    (Key::Character(key.to_string().into()), modifiers)
+}
+
+/// The word the window shows for `Mod`, and the sign that joins it (`formatCombo` of `boot.js`).
+fn mod_label(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("Cmd {key}")
+    } else {
+        format!("Ctrl+{key}")
+    }
 }
 
 /// The overview lists the shortcuts with their keys, the fixed rows without the row of `?`, and
@@ -71,7 +82,8 @@ fn the_overview_lists_the_shortcuts_and_the_fixed_rows() {
     ui.find("Choose Change, then press the new keys. A combination that is already in use is refused.")
         .expect("the sentence of the Studio");
     ui.find("New chat (new session in Code)").expect("the first row says what it does");
-    ui.find("Ctrl+N").expect("its keys, as people see them");
+    let label = mod_label("N");
+    ui.find(label.as_str()).expect("its keys, as people see them");
     ui.find("Stop the answer or the agent, close a window").expect("the stop row");
     ui.find("Go to Chat").expect("a row of the surfaces");
     ui.find("Send").expect("the fixed row of Enter");
@@ -106,7 +118,7 @@ fn a_shortcut_is_changed_and_a_combination_in_use_is_refused() {
     save_png(&app, "shortcuts-capture");
 
     // the new keys: saved, and the row shows them
-    let (key, modifiers) = ctrl('j');
+    let (key, modifiers) = mod_key('j');
     let _ = app.update(Message::Key(key, modifiers));
     assert_eq!(app.sc_capture, None, "the capture ends");
     assert_eq!(app.sc_message, "Saved.", "the panel says Saved.");
@@ -117,7 +129,8 @@ fn a_shortcut_is_changed_and_a_combination_in_use_is_refused() {
     );
     {
         let mut ui = sim(&app);
-        ui.find("Ctrl+J").expect("the row shows the new keys");
+        let label = mod_label("J");
+        ui.find(label.as_str()).expect("the row shows the new keys");
         ui.find("Reset").expect("the row can be undone now");
         ui.find("Reset all").expect("so can everything");
     }
@@ -165,7 +178,7 @@ fn reset_puts_the_keys_back() {
     let (mut app, _dir) = app_with(Store::default());
     let _ = app.update(Message::ShortcutsOpen);
     let _ = app.update(Message::ScChange("newChat".into()));
-    let (key, modifiers) = ctrl('j');
+    let (key, modifiers) = mod_key('j');
     let _ = app.update(Message::Key(key, modifiers));
     assert_eq!(
         app.shortcut_override("newChat").map(String::as_str),
@@ -176,7 +189,7 @@ fn reset_puts_the_keys_back() {
     assert_eq!(app.shortcut_override("newChat"), None, "one is undone");
 
     let _ = app.update(Message::ScChange("newChat".into()));
-    let (key, modifiers) = ctrl('j');
+    let (key, modifiers) = mod_key('j');
     let _ = app.update(Message::Key(key, modifiers));
     let _ = app.update(Message::ScResetAll);
     assert_eq!(app.shortcut_override("newChat"), None, "everything is undone");
@@ -215,7 +228,8 @@ fn the_keys_do_the_work_of_the_studio() {
     assert_eq!(app.page(), View::Chat, "Alt+1 goes to Chat");
 
     // Mod+/ opens the overview itself
-    let _ = app.update(Message::Key(Key::Character("/".into()), Modifiers::CTRL));
+    let slash = mod_key('/');
+    let _ = app.update(Message::Key(slash.0, slash.1));
     assert!(app.shortcuts_open, "Mod+/ opens the overview");
     let _ = app.update(Message::ShortcutsClose);
 
@@ -227,10 +241,12 @@ fn the_keys_do_the_work_of_the_studio() {
     // the keys of a changed shortcut are the ones in force: change Mod+N to Mod+J
     let _ = app.update(Message::ShortcutsOpen);
     let _ = app.update(Message::ScChange("newChat".into()));
-    let _ = app.update(Message::Key(Key::Character("j".into()), Modifiers::CTRL));
+    let changed = mod_key('j');
+    let _ = app.update(Message::Key(changed.0, changed.1));
     let _ = app.update(Message::ShortcutsClose);
     let before = app.store().prefs.shortcut_overrides.clone();
-    let _ = app.update(Message::Key(Key::Character("n".into()), Modifiers::CTRL));
+    let moved = mod_key('n');
+    let _ = app.update(Message::Key(moved.0, moved.1));
     assert_eq!(
         app.store().prefs.shortcut_overrides,
         before,
@@ -239,7 +255,8 @@ fn the_keys_do_the_work_of_the_studio() {
     let _ = app.update(Message::ShortcutsOpen);
     {
         let mut ui = sim(&app);
-        ui.find("Ctrl+J").expect("the changed keys are in force");
+        let label = mod_label("J");
+        ui.find(label.as_str()).expect("the changed keys are in force");
         save_png(&app, "shortcuts-changed");
     }
 }
