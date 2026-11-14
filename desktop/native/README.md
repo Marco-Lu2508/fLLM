@@ -144,6 +144,11 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   four calls); the sources are numbered `[n]` under the answer (*Sources*, a click opens the page
   in the browser). The texts, cards, budget and error lines are checked against `ctRunTool` of the
   Studio itself — the fixtures are produced by that code.
+- Device grid: one card per physical device, grouped the way the Studio groups them (one chip
+  through several driver interfaces is one card with its interfaces beside it). Each card says what
+  it does right now — *the model runs here* or *the automatic choice* — with the interface label of
+  the Studio, its memory and a bar of how full it is, and above the list stands the sentence of
+  which card the automatic choice picks. Four window tests, four mutations.
 - NPU card: what the Studio's `npuCardModel` says — the state with its summary (the runtime to
   install, *Ready* with the version and the device, the progress of a setup run), the hardware rows
   with their badges, the errors, the formats and the four paragraphs of the explanation. Behind the

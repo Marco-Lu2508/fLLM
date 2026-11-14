@@ -139,7 +139,12 @@ impl Hardware {
                     .collect()
             })
             .unwrap_or_default();
-        Hardware { devices }
+        let auto_choice = v
+            .get("auto_choice")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("cpu")
+            .to_string();
+        Hardware { devices, auto_choice }
     }
 }
 
@@ -231,6 +236,8 @@ pub struct Device {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Hardware {
     pub devices: Vec<Device>,
+    /// The device the automatic choice picks (`auto_choice`) — the target of `deviceRole`.
+    pub auto_choice: String,
 }
 
 /// The name of a device without the marks it may carry (`deviceKey` of `npu.js`: `(R)` and `(TM)`

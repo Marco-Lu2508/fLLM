@@ -54,6 +54,7 @@ fn the_shortcut_keys_are_written_the_way_the_studio_writes_them() {
 #[test]
 fn the_line_about_the_computer_says_the_processor_and_the_graphics_devices() {
     let hw = Hardware {
+        auto_choice: String::from("cuda:0"),
         devices: vec![
             dev("Intel Core i5", "cpu", "native", "cpu", 0),
             dev("NVIDIA GeForce RTX 4060", "cuda", "native", "gpu", 8_000_000_000u64),
@@ -77,7 +78,7 @@ fn the_line_about_the_computer_says_the_processor_and_the_graphics_devices() {
 /// (`names.join(' · ') || 'Unknown processor'` and `usable ? … : 'memory unknown'`).
 #[test]
 fn the_line_falls_back_the_way_the_studio_falls_back() {
-    let line = describe_computer(Some(&Hardware { devices: vec![] }), 0, None);
+    let line = describe_computer(Some(&Hardware { auto_choice: String::from("cpu"), devices: vec![] }), 0, None);
     assert_eq!(line, "Unknown processor · memory unknown");
     let failed = describe_computer(None, 0, Some("permission denied"));
     assert_eq!(failed, "The hardware could not be read: permission denied");
@@ -122,6 +123,7 @@ fn every_step_says_what_the_studio_says() {
     // known hardware with memory: the box and the hint about memory
     let about = describe_computer(
         Some(&Hardware {
+            auto_choice: String::from("cpu"),
             devices: vec![dev("Intel Core i5", "cpu", "native", "cpu", 0)],
         }),
         7_000_000_000,

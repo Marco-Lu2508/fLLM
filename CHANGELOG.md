@@ -53,6 +53,16 @@ behaviour between versions).
   `assistantInner`. Tests: Esc stopping and ignoring, the fold with its click, the open box while it
   thinks, and the research run stopped by the key; four mutations each turn one red; the open box is
   drawn to a PNG and read back.
+- **The device grid of the native app says what the Studio says about it.** The cards of
+  *Compute devices* are now one per physical device, grouped by the ported `mergeDevices`: the same
+  chip through CUDA, Vulkan and the generic interface is one card with its interfaces beside it, the
+  processor and NPUs stand alone. Every card carries the role the Studio gives it (*the model runs
+  here*, *the automatic choice* — `deviceRole` with the device value of the loaded model, the
+  `auto_choice` of the report and the state of the server), the backend label of
+  `deviceBackendLabel` (*Processor*, *NVIDIA CUDA*, *Vulkan (generic)*), the memory of
+  `format_bytes` and the bar of `deviceMemory` with its ok/warn/high colour, and above the list
+  stands the choice sentence of `hwChoiceText` — which card the automatic choice picks and that the
+  processor is the fallback. Four window tests with a drawing, four mutations.
 - **The NPU card and the device logic of the native app.** The Studio's `npu.js` keeps what it
   shows for an NPU and everything it decides about the devices; the native app has both. The *NPU
   (neural processing unit)* card under the devices of `Settings > Hardware` is `npuCardModel`: the

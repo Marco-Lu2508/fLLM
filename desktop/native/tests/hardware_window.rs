@@ -77,6 +77,7 @@ fn save_png(app: &App, name: &str) {
 fn the_card_lists_the_devices_and_tests_the_ones_that_can_be_tested() {
     let (mut app, _dir) = app();
     let _ = app.update(Message::HardwareLoaded(Ok(Hardware {
+        auto_choice: String::from("cuda:0"),
         devices: vec![
             device("cpu0", "Intel Core i5", "cpu", 0),
             device("cuda:0", "NVIDIA GeForce RTX 4060", "cuda", 8_000_000_000),
@@ -99,6 +100,16 @@ fn the_card_lists_the_devices_and_tests_the_ones_that_can_be_tested() {
         ui.find("Ghost GPU").is_err(),
         "a device without memory stays out of the list (panels.js)"
     );
+    // the sentence above the list is the Studio's (`hwChoiceText`), and the card of the automatic
+    // choice says so beside its name
+    ui.find(
+        "With the automatic choice fLLM runs models on: NVIDIA GeForce RTX 4060 (NVIDIA CUDA). The processor is the \
+fallback.",
+    )
+    .expect("the choice sentence of the Studio");
+    ui.find("· the automatic choice").expect("the role of the card the automatic choice picks (deviceRole)");
+    ui.find("Processor").expect("the backend label of the CPU is its own word (deviceBackendLabel)");
+    ui.find("NVIDIA CUDA").expect("the backend label of the card");
     drop(ui);
 
     // the check button exists for the card, and not for the processor or the NPU

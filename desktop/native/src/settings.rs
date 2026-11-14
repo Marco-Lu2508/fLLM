@@ -247,6 +247,12 @@ pub struct HardwareView<'a> {
     pub results: &'a [(String, Vec<crate::gpucheck::GpuResult>)],
     /// The answer of `GET /api/npu`; `None` while the card is still checking.
     pub npu: Option<&'a serde_json::Value>,
+    /// The `--device` value of the loaded model (`auto` when the server chose).
+    pub load_device: &'a str,
+    /// The device the automatic choice picks (`auto_choice` of the report).
+    pub auto_choice: &'a str,
+    /// Whether a model is loaded (the roles of `deviceRole` say *running* then).
+    pub model_loaded: bool,
 }
 
 /// What the appearance card shows: the four choices of the Studio's `selThemeMode`,
@@ -349,9 +355,32 @@ fn hardware_card<'a>(t: Tokens, view: HardwareView<'a>) -> Element<'a, Message> 
         );
     }
 
-    // the devices, one under the other (`hwDevicesGrid` is a column too)
+    // the devices: one card per physical device, grouped the way `mergeDevices` of the Studio
+    // groups them, with the role of each one and the sentence of where the model runs
+    let target = if view.load_device == "auto" {
+        view.auto_choice
+    } else {
+        view.load_device
+    };
+    let groups = crate::npu::merge_devices(view.devices, target);
     let mut devices = column![].spacing(10);
-    for device in view.devices {
+    if !groups.is_empty() {
+        // what the Studio writes above the list (`hwChoiceText`)
+        let chosen = groups
+            .iter()
+            .find(|g| g.members.iter().any(|m| m.id.eq_ignore_ascii_case(view.auto_choice)));
+        let choice = match chosen {
+            Some(g) => format!(
+                "With the automatic choice fLLM runs models on: {} ({}). The processor is the fallback.",
+                g.primary.name,
+                crate::npu::device_backend_label(&g.primary)
+            ),
+            None => String::from("The processor runs the models: no usable graphics device was found."),
+        };
+        body = body.push(text(choice).size(13).color(t.muted));
+    }
+    for group in &groups {
+        let device = &group.primary;
         // a device that reports no memory cannot hold a model: it stays out of the list
         if device.backend != "cpu" && device.total_memory_bytes == 0 {
             continue;
@@ -364,15 +393,12 @@ fn hardware_card<'a>(t: Tokens, view: HardwareView<'a>) -> Element<'a, Message> 
             .map(|(_, lines)| lines.as_slice())
             .unwrap_or(&[]);
         let check = crate::gpucheck::gpu_check_view(&device.backend, busy, results);
+        let member_ids: Vec<String> = group.members.iter().map(|m| m.id.clone()).collect();
+        let role = crate::npu::device_role(&member_ids, &device.id, view.load_device, view.auto_choice, view.model_loaded);
         let mut card_row = column![].spacing(4);
-        let backend_label = if device.backend == "cpu" {
-            String::from("the processor")
-        } else {
-            device.backend.clone()
-        };
         let mut head = row![].spacing(8).align_y(Alignment::Center);
         head = head.push(text(device.name.clone()).size(14).font(bold()));
-        head = head.push(text(backend_label).size(12).color(t.muted));
+        head = head.push(text(crate::npu::device_backend_label(device)).size(12).color(t.muted));
         if device.total_memory_bytes > 0 {
             head = head.push(
                 text(format!("· {}", crate::app::format_bytes(device.total_memory_bytes)))
@@ -380,7 +406,51 @@ fn hardware_card<'a>(t: Tokens, view: HardwareView<'a>) -> Element<'a, Message> 
                     .color(t.muted),
             );
         }
+        if !role.is_empty() {
+            head = head.push(
+                text(if role == "running" { "· the model runs here" } else { "· the automatic choice" })
+                    .size(12)
+                    .color(t.ok),
+            );
+        }
+        if group.others.len() == 1 {
+            head = head.push(text(format!("+ {}", group.others[0].1)).size(12).color(t.muted));
+        } else if !group.others.is_empty() {
+            head = head.push(text(format!("+ {} more interfaces", group.others.len())).size(12).color(t.muted));
+        }
         card_row = card_row.push(head);
+        // the bar of what the card has used (`deviceMemory`: ok, a warning, high): the used part
+        // over the track, never nothing (the card would show no bar at all)
+        let memory = crate::npu::device_memory(device);
+        if memory.known {
+            let colour = match memory.level {
+                "high" => t.danger,
+                "warn" => t.primary,
+                _ => t.ok,
+            };
+            // the used part over the track: two portions add up to the whole width
+            let used = memory.pct.clamp(4, 100) as u16;
+            let rest = 100 - used;
+            let bar = row![
+                container(Space::new())
+                    .width(Length::FillPortion(used))
+                    .height(4.0)
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(iced::Background::Color(colour)),
+                        border: iced::Border { radius: 2.0.into(), ..Default::default() },
+                        ..Default::default()
+                    }),
+                container(Space::new())
+                    .width(Length::FillPortion(rest.max(1)))
+                    .height(4.0)
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(iced::Background::Color(t.separator)),
+                        border: iced::Border { radius: 2.0.into(), ..Default::default() },
+                        ..Default::default()
+                    }),
+            ];
+            card_row = card_row.push(bar);
+        }
         if check.show_button && !device.id.is_empty() {
             let id = device.id.clone();
             card_row = card_row.push(

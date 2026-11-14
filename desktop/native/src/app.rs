@@ -321,6 +321,8 @@ pub struct App {
     pub inbox_open: bool,
     /// The devices this machine has (`GET /api/studio/hardware`), for the settings card.
     pub hardware_devices: Vec<tour::Device>,
+    /// The device the automatic choice picks (`auto_choice` of the report).
+    pub hardware_auto_choice: String,
     /// The devices whose check is running right now (`gpuCheckBusy` of `gpucheck.js`).
     pub gpu_busy: Vec<String>,
     /// The result lines of every card that was tested, in the order they came back.
@@ -857,6 +859,7 @@ impl App {
             inbox: Vec::new(),
             inbox_open: false,
             hardware_devices: Vec::new(),
+            hardware_auto_choice: String::from("cpu"),
             gpu_busy: Vec::new(),
             gpu_results: Vec::new(),
             gpu_fallback: None,
@@ -2591,6 +2594,7 @@ impl App {
             }
             Message::HardwareLoaded(Ok(hardware)) => {
                 self.hardware_devices = hardware.devices;
+                self.hardware_auto_choice = hardware.auto_choice;
                 Task::none()
             }
             Message::HardwareLoaded(Err(_)) => {
@@ -4097,6 +4101,15 @@ impl App {
                     busy: &self.gpu_busy,
                     results: &self.gpu_results,
                     npu: self.npu_state.as_ref(),
+                    load_device: self
+                        .hero
+                        .as_ref()
+                        .map(|s| s.load_device.as_str())
+                        .unwrap_or("auto"),
+                    auto_choice: &self.hardware_auto_choice,
+                    // the Studio's roles speak of a loaded model when the server is not the
+                    // one without one (`!state.setup` of `deviceRole`)
+                    model_loaded: self.hero.as_ref().is_some_and(|s| !s.setup),
                 },
             )
         } else if self.page == View::Project {

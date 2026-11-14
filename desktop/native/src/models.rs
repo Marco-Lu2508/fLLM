@@ -310,6 +310,9 @@ pub struct Status {
     /// What runs on the CPU although a GPU was chosen (`device_fallbacks` of the status, the
     /// engine's placement report; `None` while everything runs where it should).
     pub device_fallbacks: Option<Value>,
+    /// The `--device` value the loaded model runs with (`model.load_options.device`, "auto" when
+    /// the server chose) — what `deviceRole` of `npu.js` asks for.
+    pub load_device: String,
 }
 
 pub fn parse_status(v: &Value) -> Status {
@@ -325,6 +328,11 @@ pub fn parse_status(v: &Value) -> Status {
         generated_tokens_total: v.pointer("/metrics/generated_tokens_total").and_then(Value::as_u64).unwrap_or(0),
         slots_running: v.pointer("/metrics/slots_running").and_then(Value::as_u64).unwrap_or(0),
         device_fallbacks: v.get("device_fallbacks").cloned(),
+        load_device: v
+            .pointer("/model/load_options/device")
+            .and_then(Value::as_str)
+            .unwrap_or("auto")
+            .to_string(),
     }
 }
 
