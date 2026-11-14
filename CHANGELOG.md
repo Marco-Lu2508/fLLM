@@ -7,6 +7,19 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **Settings > Server and API in the native app: where the server listens and which keys it hands
+  out.** The first card of `spane-local-api-server` — its line about the OpenAI, Anthropic and
+  Ollama APIs, the chip *Running* that is only there while the server answers (the Studio's page
+  comes from its server, so its chip is static), the address with `/v1` behind it and *Copy URL*,
+  and *Request limits* with the two boxes and *Apply*: `parseFloat(x) || null` the way the window
+  reads them, written through `POST /api/studio/config` as `rate_limit`, the toast *Global limit
+  saved* and the boxes filled from the answer again. The second card, *API keys*, carries its
+  description, the row that makes a key (name, requests, tokens, admin rights, *Create key*), the
+  banner with the secret that is shown once and *Copy key*, and the table of
+  `apiKeysTableContainer` — ID, name with the *admin* chip, the masked key, the limit
+  (`{n} per minute` or *Default*), requests, tokens, refused and *Revoke* — with the two sentences
+  for a server without keys and for one that runs without a model (which also refuses *Create key*
+  with the toast of `btnCreateKey`). Three unit tests, three window tests.
 - **Settings > Logs in the native app: what the server wrote lately.** The card of `spane-logs` —
   its line, the *Refresh* and *Copy* buttons of its header, and the box of `preLogs` at the height
   the Studio gives it (480px of scrolling monospace): the lines of

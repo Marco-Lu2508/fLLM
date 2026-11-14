@@ -363,6 +363,20 @@ pub struct App {
     /// Settings > Logs: what the `<pre id="preLogs">` holds — `Loading ...` until the server
     /// answered, the lines after that, and the sentence of `refreshLogs` when it could not.
     pub logs_text: String,
+    /// Settings > Server and API: the keys of the server and the limits it accepts
+    /// (`state.keysData` of `panels.js`).
+    pub key_list: crate::localapi::KeyList,
+    keys_loaded: bool,
+    /// The boxes of the limits (`inpGlobalRpm`, `inpGlobalTpm`), filled from the answer.
+    pub rate_rpm: String,
+    pub rate_tpm: String,
+    /// The boxes above the table (`inpKeyLabel`, `inpKeyRpm`, `inpKeyTpm`, `chkKeyAdmin`).
+    key_label: String,
+    key_rpm: String,
+    key_tpm: String,
+    key_admin: bool,
+    /// The secret that was made, shown once (`newKeyBanner`).
+    new_key: Option<String>,
     /// The answer under *Run speed test* (`speedTestResult` of `models.js`).
     pub speed_test: Option<String>,
     /// Whether the speed test is running (the button is off while it does).
@@ -438,7 +452,7 @@ pub struct App {
     window: usize,
     list: ChatList,
     /// A line for the user that stays until it is clicked or the next message is sent ("Saved to ...").
-    toast: Option<String>,
+    pub toast: Option<String>,
     /// The clock the model was told in this chat (held for 30 minutes, so that the start of the prompt stays the same and can be cached).
     clock: Option<(u64, i64)>,
     sampling_text: settings::SamplingTexts,
@@ -809,6 +823,23 @@ pub enum Message {
     ProvToggle(String, bool),
     ProvEnabled(Result<serde_json::Value, String>),
     ProvRefreshAll,
+    /// Settings > Server and API: read the keys and the limits (`refreshApiKeys`).
+    KeysRefresh,
+    KeysLoaded(Result<crate::localapi::KeyList, String>),
+    /// The boxes of the limits (`inpGlobalRpm`, `inpGlobalTpm`) and the button under them.
+    RateRpm(String),
+    RateTpm(String),
+    RateApply,
+    RateSaved(Result<serde_json::Value, String>),
+    /// The boxes above the table (`inpKeyLabel`, `inpKeyRpm`, `inpKeyTpm`, `chkKeyAdmin`).
+    KeyLabel(String),
+    KeyRpm(String),
+    KeyTpm(String),
+    KeyAdmin(bool),
+    KeyCreate,
+    KeyCreated(Result<crate::localapi::CreatedKey, String>),
+    KeyRevoke(String),
+    KeyRevoked(Result<serde_json::Value, String>),
     /// Settings > Logs: read the last lines of the server (`btnRefreshLogs`).
     LogsRefresh,
     LogsLoaded(Result<crate::localapi::Logs, String>),
@@ -1021,6 +1052,15 @@ impl App {
             prov_remove: None,
             prov_loaded: false,
             logs_text: "Loading ...".into(),
+            key_list: crate::localapi::KeyList::default(),
+            keys_loaded: false,
+            rate_rpm: String::new(),
+            rate_tpm: String::new(),
+            key_label: String::new(),
+            key_rpm: String::new(),
+            key_tpm: String::new(),
+            key_admin: false,
+            new_key: None,
             speed_test: None,
             speed_test_busy: false,
             selftest: None,
@@ -3050,6 +3090,108 @@ impl App {
                 self.runtime_say = e;
                 Task::none()
             }
+            Message::KeysRefresh => Task::perform(crate::localapi::fetch_keys(self.base.clone()), Message::KeysLoaded),
+            Message::KeysLoaded(Ok(list)) => {
+                // the boxes of the limits are filled from the answer
+                // (`inpGlobalRpm.value = rl.requests_per_minute || ''`)
+                self.rate_rpm = list
+                    .rate_limit
+                    .requests_per_minute
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                self.rate_tpm = list
+                    .rate_limit
+                    .tokens_per_minute
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                self.key_list = list;
+                self.keys_loaded = true;
+                Task::none()
+            }
+            // the Studio reads them and says nothing when it cannot (`if (!res.ok) return;`)
+            Message::KeysLoaded(Err(_)) => Task::none(),
+            Message::RateRpm(v) => {
+                self.rate_rpm = v;
+                Task::none()
+            }
+            Message::RateTpm(v) => {
+                self.rate_tpm = v;
+                Task::none()
+            }
+            Message::RateApply => {
+                // `parseFloat(x) || null`: an empty box means no limit at all
+                let body = serde_json::json!({ "rate_limit": {
+                    "requests_per_minute": crate::localapi::js_number(&self.rate_rpm),
+                    "tokens_per_minute": crate::localapi::js_number(&self.rate_tpm),
+                }});
+                Task::perform(models::post_config(self.base.clone(), body), Message::RateSaved)
+            }
+            Message::RateSaved(Ok(_)) => {
+                self.toast = Some("Global limit saved".into());
+                Task::perform(crate::localapi::fetch_keys(self.base.clone()), Message::KeysLoaded)
+            }
+            Message::RateSaved(Err(e)) => {
+                self.toast = Some(e);
+                Task::none()
+            }
+            Message::KeyLabel(v) => {
+                self.key_label = v;
+                Task::none()
+            }
+            Message::KeyRpm(v) => {
+                self.key_rpm = v;
+                Task::none()
+            }
+            Message::KeyTpm(v) => {
+                self.key_tpm = v;
+                Task::none()
+            }
+            Message::KeyAdmin(on) => {
+                self.key_admin = on;
+                Task::none()
+            }
+            Message::KeyCreate => {
+                if matches!(self.server, Server::NoModel) {
+                    // `btnCreateKey` refuses the same way when the server runs without a model
+                    self.toast = Some("Load a model first: keys are made by the running server.".into());
+                    return Task::none();
+                }
+                let label = if self.key_label.trim().is_empty() {
+                    "My key".to_string()
+                } else {
+                    self.key_label.trim().to_string()
+                };
+                let body = serde_json::json!({
+                    "label": label,
+                    "rpm": crate::localapi::js_number(&self.key_rpm),
+                    "tpm": crate::localapi::js_number(&self.key_tpm),
+                    "admin": self.key_admin,
+                });
+                Task::perform(crate::localapi::create_key(self.base.clone(), body), Message::KeyCreated)
+            }
+            Message::KeyCreated(Ok(created)) => {
+                // the secret is shown once, the boxes are cleared, the table comes again
+                self.new_key = Some(created.secret.clone());
+                self.toast = Some(format!("API key \"{}\" created", created.key.label));
+                self.key_label.clear();
+                self.key_rpm.clear();
+                self.key_tpm.clear();
+                self.key_admin = false;
+                Task::perform(crate::localapi::fetch_keys(self.base.clone()), Message::KeysLoaded)
+            }
+            Message::KeyCreated(Err(e)) => {
+                self.toast = Some(e);
+                Task::none()
+            }
+            Message::KeyRevoke(id) => Task::perform(crate::localapi::delete_key(self.base.clone(), id), Message::KeyRevoked),
+            Message::KeyRevoked(Ok(_)) => {
+                self.toast = Some("API key revoked".into());
+                Task::perform(crate::localapi::fetch_keys(self.base.clone()), Message::KeysLoaded)
+            }
+            Message::KeyRevoked(Err(e)) => {
+                self.toast = Some(e);
+                Task::none()
+            }
             Message::LogsRefresh => Task::perform(crate::localapi::fetch_logs(self.base.clone()), Message::LogsLoaded),
             Message::LogsLoaded(Ok(logs)) => {
                 self.logs_text = crate::localapi::logs_text(&logs.lines);
@@ -3997,6 +4139,13 @@ impl App {
                     // the logs are read again every time the page opens (`if (pane === 'logs')
                     // refreshLogs()` of `models.js` runs on every click of the menu entry)
                     let logs = Task::perform(crate::localapi::fetch_logs(self.base.clone()), Message::LogsLoaded);
+                    // the keys and the limits of the server come with the pane (`refreshApiKeys`
+                    // runs when the pane is opened and after every change of it)
+                    let keys = if self.keys_loaded {
+                        Task::none()
+                    } else {
+                        Task::perform(crate::localapi::fetch_keys(self.base.clone()), Message::KeysLoaded)
+                    };
                     // the list of the providers comes with the pane (`provRefresh` runs when the
                     // menu entry of the Studio is clicked)
                     let prov = if self.prov_loaded {
@@ -4015,13 +4164,14 @@ impl App {
                             runtime,
                             prov,
                             logs,
+                            keys,
                             Task::perform(
                                 engine_settings::fetch(self.base.clone()),
                                 Message::EngineLoaded,
                             ),
                         ]);
                     }
-                    return Task::batch(vec![voices, prices, devices, npu, amd, slots, runtime, prov, logs]);
+                    return Task::batch(vec![voices, prices, devices, npu, amd, slots, runtime, prov, logs, keys]);
                 }
                 Task::none()
             }
@@ -4955,6 +5105,20 @@ impl App {
                     result: self.prov_result.as_ref().map(|(line, ok)| (line.as_str(), *ok)),
                     file_info: &self.prov_file_info,
                     network_open: self.prov_net_open,
+                },
+                crate::localapi::ServerView {
+                    base: &self.base,
+                    running: !matches!(self.server, Server::Down(_)),
+                    rpm: &self.rate_rpm,
+                    tpm: &self.rate_tpm,
+                    keys: &self.key_list.keys,
+                    keys_loaded: self.keys_loaded,
+                    label: &self.key_label,
+                    key_rpm: &self.key_rpm,
+                    key_tpm: &self.key_tpm,
+                    admin: self.key_admin,
+                    new_key: self.new_key.as_deref(),
+                    no_model: matches!(self.server, Server::NoModel),
                 },
                 &self.logs_text,
             )

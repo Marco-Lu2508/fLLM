@@ -565,6 +565,21 @@ pub(crate) async fn post_fallback(base: &str, path: &str, body: Value, fallback:
     Err(fail_words(&data, fallback))
 }
 
+/// A DELETE whose failures read the way the POSTs of the window do: the message of the server,
+/// `fallback` when it sent none (`fail_words` above).
+pub(crate) async fn delete_json(base: &str, path: &str, body: Value, fallback: &str) -> Result<Value, String> {
+    let resp = match reqwest::Client::new().delete(format!("{base}{path}")).json(&body).send().await {
+        Ok(r) => r,
+        Err(_) => return Err(fallback.to_string()),
+    };
+    let status = resp.status();
+    let data: Value = resp.json().await.unwrap_or(Value::Null);
+    if status.is_success() {
+        return Ok(data);
+    }
+    Err(fail_words(&data, fallback))
+}
+
 /// Writes one engine setting (`POST /api/studio/config`) — the *Processor feature limit* select and
 /// the *Faster reading of long prompts* switch of the hardware card.
 pub async fn post_config(base: String, body: Value) -> Result<Value, String> {

@@ -757,22 +757,7 @@ pub async fn test_provider(base: String, body: Value) -> Result<TestAnswer, Stri
 
 /// `DELETE /api/studio/providers` with `{id}`.
 pub async fn delete_provider(base: String, id: String) -> Result<Value, String> {
-    delete_json(&base, "/api/studio/providers", json!({ "id": id }), "Could not remove it.").await
-}
-
-/// A DELETE whose failures read the way the POSTs of the window do: the message of the server,
-/// `fallback` when it sent none (`fail_words` of `models.rs`).
-async fn delete_json(base: &str, path: &str, body: Value, fallback: &str) -> Result<Value, String> {
-    let resp = match reqwest::Client::new().delete(format!("{base}{path}")).json(&body).send().await {
-        Ok(r) => r,
-        Err(_) => return Err(fallback.to_string()),
-    };
-    let status = resp.status();
-    let data: Value = resp.json().await.unwrap_or(Value::Null);
-    if status.is_success() {
-        return Ok(data);
-    }
-    Err(crate::models::fail_words(&data, fallback))
+    crate::models::delete_json(&base, "/api/studio/providers", json!({ "id": id }), "Could not remove it.").await
 }
 
 /// The window's own line under the list: `Testing...` while a test runs, then the summary or the

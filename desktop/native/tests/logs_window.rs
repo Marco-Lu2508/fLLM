@@ -24,8 +24,11 @@ fn app(theme: &str) -> (App, tempfile::TempDir) {
     (app, dir)
 }
 
+/// The page is tall — the two cards of *Server and API* sit above this one now — and `click`
+/// needs the button inside the window, so this one is generous (no picture is taken of it: the
+/// drawing below builds the card on its own).
 fn sim(app: &App) -> Simulator<'_, Message> {
-    Simulator::with_size(settings(), Size::new(1280.0, 2600.0), app.view())
+    Simulator::with_size(settings(), Size::new(1280.0, 5000.0), app.view())
 }
 
 /// Writes the drawing of the Logs card alone under `ui-snapshots/<name>.png`: the settings page is

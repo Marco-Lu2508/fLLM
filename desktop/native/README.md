@@ -206,6 +206,16 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   server on this computer, and Save / Test connection / Clear with the toast *Saved <name>* and the
   test that follows it. The whole `@pure` block of `providers.js` with the fixtures it produced:
   nine unit tests, four window tests with two drawings, nine mutations.
+- Server and API: where the server listens and which keys it hands out — the two cards of
+  `spane-local-api-server`. *Server and API* with its line about the OpenAI, Anthropic and Ollama
+  APIs, the chip *Running* while the server answers, the address with `/v1` behind it and *Copy
+  URL*, and *Request limits* (the two boxes read `parseFloat(x) || null` and are written as
+  `rate_limit` through `POST /api/studio/config`, with the toast *Global limit saved* and the
+  boxes filled from the answer again). *API keys* with its description, the row that makes a key,
+  the banner with the secret that is shown once, and the table of `apiKeysTableContainer` (ID, name
+  with the *admin* chip, the masked key, the limit, requests, tokens, refused, *Revoke*) with the
+  sentences for a server without keys and for one that runs without a model. Three unit tests,
+  three window tests.
 - Logs: what the server wrote lately — the card of `spane-logs` with its line, *Refresh* and
   *Copy*, and the box of `preLogs` at the height the Studio gives it (480px of scrolling
   monospace). The lines of `GET /api/studio/logs?lines=300` joined, *Nothing has been logged yet.*
