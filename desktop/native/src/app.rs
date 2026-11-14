@@ -8047,11 +8047,12 @@ pub fn backdrop_colour() -> iced::Color {
     iced::Color { a: 0.55, ..iced::Color::BLACK }
 }
 
-/// The dimmed layer behind a dialog (`.modal-backdrop` of `style.css`). The click on it is the
+/// The dimmed layer behind a dialog (`.modal-backdrop` of `style.css`). The window tests draw it
+/// under a dialog of their own, so it is public. The click on it is the
 /// click beside the dialog, and it closes the dialog the way the Studio's backdrop does. The two
 /// dropdowns of the top bar (the assistant menu and the session mailbox) are not modals and keep
 /// their plain click-catcher.
-fn backdrop<'a>(on_press: Message) -> Element<'a, Message> {
+pub fn backdrop<'a>(on_press: Message) -> Element<'a, Message> {
     mouse_area(
         container(Space::new())
             .width(Length::Fill)

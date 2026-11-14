@@ -30,12 +30,26 @@ fn sim(app: &App) -> Simulator<'_, Message> {
     Simulator::with_size(settings(), Size::new(1280.0, 1600.0), app.view())
 }
 
-/// Writes the drawing of the current window under `ui-snapshots/<name>.png`. The window is as
-/// tall as the page needs: the three cards sit under six other ones, and the scrollable of the
-/// settings clips at its own height (the drawings of the hardware card are taken the same way).
-fn save_png(app: &App, name: &str) {
+/// Writes the drawing under `ui-snapshots/<name>.png`: the three cards of the pane on their own,
+/// with the question over them when there is one. The settings page is taller than a texture the
+/// CI GPUs accept — wgpu refuses more than 4096 there, which is what turned the wide drawing of
+/// the whole page red on Windows and macOS — and the drawing is of the section either way; the
+/// `find` assertions of the tests walk the whole page, whatever the window is.
+fn save_png(app: &App, name: &str, say: &str, confirm: Option<Confirm>) {
+    let t = app.tokens();
     let theme = app.theme();
-    let mut ui = Simulator::with_size(settings(), Size::new(1280.0, 6200.0), app.view());
+    let status = answer(false, false);
+    let view = fllm_app::runtime::RuntimeView { status: Some(&status), say, rate: "30", steps: "40" };
+    let mut content = fllm_app::runtime::section(t, view);
+    if let Some(kind) = confirm {
+        content = iced::widget::stack![
+            content,
+            fllm_app::app::backdrop(Message::RuntimeConfirmCancel),
+            fllm_app::runtime::confirm_window(t, kind)
+        ]
+        .into();
+    }
+    let mut ui = Simulator::with_size(settings(), Size::new(1100.0, 1700.0), content);
     let shot = ui.snapshot(&theme).expect("the software renderer draws the view");
     let dir = std::path::PathBuf::from(
         std::env::var("FLLM_SNAPSHOT_DIR").unwrap_or_else(|_| format!("{}/ui-snapshots", env!("CARGO_TARGET_TMPDIR"))),
@@ -95,7 +109,7 @@ fn the_three_cards_say_what_the_server_said() {
     ui.find("actions per task").expect("the second limit");
     ui.find("Turbo").expect("the third card");
     ui.find("Enable turbo").expect("its switch");
-    save_png(&app, "runtime-cards");
+    save_png(&app, "runtime-cards", "", None);
 }
 
 /// A switch asks before it goes on, and the answer of the save is drawn and said (`Saved.` of
@@ -111,7 +125,7 @@ fn a_switch_asks_before_it_goes_on_and_the_answer_says_so() {
     let mut ui = sim(&app);
     ui.find("Turbo removes every permission question and the sandbox. Continue?")
         .expect("the question of `confirmDialog`");
-    save_png(&app, "runtime-confirm");
+    save_png(&app, "runtime-confirm", "", Some(Confirm::Turbo));
     drop(ui);
 
     // the dialog is answered with Cancel: nothing is asked of the server again
