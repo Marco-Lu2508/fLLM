@@ -222,6 +222,11 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   nothing for a box that is no JSON, the answer pretty when it is JSON), and *Server statistics
   (`/metrics`)* with the line of `detailsPrometheusLog` and its box behind it, filled when Refresh
   is pressed. Three unit tests, one window test, three mutations.
+- Skills: *Skills* with the list and its editor, *Skill improvements* with the feed of changes,
+  the drafts of the model behind their dialogs and *Consolidate now*, *Write a skill* with the
+  template, *Scheduled tasks* with its rows and *New task* with its schedule preview, and the two
+  cards of `skilllibrary.js` — the skills that come with the app and the finder for GitHub and
+  skills.sh. Eleven unit tests, four window tests, six mutations.
 - MCP servers: *Tools (MCP)* with the list of what runs and the Resources box of every row
   (list, Read, *This server publishes no resources.*), *Find servers* with its two sources, its
   rows and the *Use* buttons that fill the form, and *Add a server* with its six fields, *Save and

@@ -1153,6 +1153,7 @@ pub fn page<'a>(
     copied: &'a Option<String>,
     search: crate::search::SearchView<'a>,
     mcp: crate::mcp::McpView<'a>,
+    skills: crate::skills::SkillsView<'a>,
 ) -> Element<'a, Message> {
     let mut answers = column![].spacing(14);
     answers = answers.push(setting(
@@ -1684,6 +1685,8 @@ pub fn page<'a>(
         crate::search::section(t, search),
         // Settings > MCP servers: the three cards of `spane-mcp`, where the table has this row
         crate::mcp::section(t, mcp),
+        // Settings > Skills: the cards of `spane-skills`, where the table has this row
+        crate::skills::section(t, skills),
         card(t, "Usage and cost", usage_card(t, usage)),
         // Settings > Runtime: the three cards of `runtime.js` (the sandbox, computer use and
         // turbo), in the order the Studio's pane draws them

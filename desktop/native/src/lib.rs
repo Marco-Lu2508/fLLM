@@ -22,6 +22,7 @@ pub mod providers;
 pub mod connect;
 pub mod mcp;
 pub mod runtime;
+pub mod skills;
 pub mod search;
 pub mod localapi;
 pub mod memory;

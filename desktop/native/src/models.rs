@@ -664,6 +664,231 @@ fn urlencoding_lite(value: &str) -> String {
     out
 }
 
+/// The query of `skQuery` of `skills.js`: only the values that are there, encoded.
+pub(crate) fn sk_query(pairs: &[(&str, &str)]) -> String {
+    pairs
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| format!("{k}={}", urlencoding_lite(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// `GET /api/studio/skills?workspace=` — the skills and the folder they are kept in.
+pub async fn fetch_skills(base: String, workspace: String) -> Result<crate::skills::SkillsAnswer, String> {
+    let path = format!("/api/studio/skills?{}", sk_query(&[("workspace", &workspace)]));
+    mcp_request(&base, reqwest::Method::GET, &path, None)
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `GET /api/studio/skills/read?name=&scope=&workspace=` — the text of one skill.
+pub async fn read_skill(
+    base: String,
+    name: String,
+    scope: String,
+    workspace: String,
+) -> Result<String, String> {
+    let path = format!(
+        "/api/studio/skills/read?{}",
+        sk_query(&[("name", &name), ("scope", &scope), ("workspace", &workspace)])
+    );
+    let answer = mcp_request(&base, reqwest::Method::GET, &path, None).await?;
+    Ok(answer
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string())
+}
+
+/// `POST /api/studio/skills` — writing a skill (`skSave` of `skills.js`).
+pub async fn write_skill(
+    base: String,
+    name: String,
+    scope: String,
+    workspace: String,
+    content: String,
+) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({ "name": name, "scope": scope, "workspace": workspace, "content": content });
+    mcp_request(&base, reqwest::Method::POST, "/api/studio/skills", Some(body)).await
+}
+
+/// `DELETE /api/studio/skills?name=&scope=&workspace=` (`skDelete`).
+pub async fn delete_skill(
+    base: String,
+    name: String,
+    scope: String,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    let path = format!(
+        "/api/studio/skills?{}",
+        sk_query(&[("name", &name), ("scope", &scope), ("workspace", &workspace)])
+    );
+    mcp_request(&base, reqwest::Method::DELETE, &path, None).await
+}
+
+/// `GET /api/studio/skills/library` — the skills that come with the app.
+pub async fn fetch_library(base: String) -> Result<crate::skills::LibraryAnswer, String> {
+    mcp_request(&base, reqwest::Method::GET, "/api/studio/skills/library", None)
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /api/studio/skills/library {name}` — writing one of them into the folder.
+pub async fn install_library(base: String, name: String) -> Result<serde_json::Value, String> {
+    mcp_request(&base, reqwest::Method::POST, "/api/studio/skills/library", Some(serde_json::json!({ "name": name })))
+        .await
+}
+
+/// `POST /api/studio/skills/import` — from a URL, and from a row of a repository.
+pub async fn import_skill(base: String, url: String, name: Option<String>) -> Result<serde_json::Value, String> {
+    let mut body = serde_json::json!({ "url": url });
+    if let Some(name) = name {
+        body["name"] = serde_json::json!(name);
+    }
+    mcp_request(&base, reqwest::Method::POST, "/api/studio/skills/import", Some(body)).await
+}
+
+/// `GET /api/studio/skills/github?repo=` — the skills of a repository.
+pub async fn github_skills(base: String, repo: String) -> Result<crate::skills::GithubAnswer, String> {
+    let path = format!("/api/studio/skills/github?repo={}", urlencoding_lite(&repo));
+    mcp_request(&base, reqwest::Method::GET, &path, None)
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `GET /api/studio/skills/directory?q=&view=` — the skills.sh directory.
+pub async fn directory_skills(
+    base: String,
+    query: String,
+    view: String,
+) -> Result<crate::skills::DirectoryAnswer, String> {
+    let path = format!(
+        "/api/studio/skills/directory?{}",
+        sk_query(&[("q", &query), ("view", &view)])
+    );
+    mcp_request(&base, reqwest::Method::GET, &path, None)
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /api/studio/skills/directory/install {id}` — installing one from there.
+pub async fn directory_install(base: String, id: String) -> Result<serde_json::Value, String> {
+    mcp_request(
+        &base,
+        reqwest::Method::POST,
+        "/api/studio/skills/directory/install",
+        Some(serde_json::json!({ "id": id })),
+    )
+    .await
+}
+
+/// `POST /api/studio/skills/directory/token {token}` — saving (or with an empty token removing)
+/// the Vercel token of the directory.
+pub async fn directory_token(base: String, token: String) -> Result<serde_json::Value, String> {
+    mcp_request(
+        &base,
+        reqwest::Method::POST,
+        "/api/studio/skills/directory/token",
+        Some(serde_json::json!({ "token": token })),
+    )
+    .await
+}
+
+/// `GET /api/studio/schedule` — the tasks and whether the clock of the server runs.
+pub async fn fetch_schedule(base: String) -> Result<crate::skills::ScheduleAnswer, String> {
+    mcp_request(&base, reqwest::Method::GET, "/api/studio/schedule", None)
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /api/studio/schedule` — a new task or a changed one (`scSave`).
+pub async fn save_schedule(
+    base: String,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    mcp_request(&base, reqwest::Method::POST, "/api/studio/schedule", Some(body)).await
+}
+
+/// `DELETE /api/studio/schedule?id=`.
+pub async fn delete_schedule(base: String, id: String) -> Result<serde_json::Value, String> {
+    let path = format!("/api/studio/schedule?{}", sk_query(&[("id", &id)]));
+    mcp_request(&base, reqwest::Method::DELETE, &path, None).await
+}
+
+/// `POST /api/studio/schedule/run {id}` — *Run now*.
+pub async fn run_schedule(base: String, id: String) -> Result<serde_json::Value, String> {
+    mcp_request(
+        &base,
+        reqwest::Method::POST,
+        "/api/studio/schedule/run",
+        Some(serde_json::json!({ "id": id })),
+    )
+    .await
+}
+
+/// `GET /api/studio/schedule/results?id=` — what a task answered the last times.
+pub async fn schedule_results(base: String, id: String) -> Result<crate::skills::ResultsAnswer, String> {
+    let path = format!("/api/studio/schedule/results?{}", sk_query(&[("id", &id)]));
+    mcp_request(&base, reqwest::Method::GET, &path, None)
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `GET /api/studio/schedule/check?when=` — whether a schedule means what it says, and when the
+/// first runs would be (`scCheckWhen`; a request that failed gives the same line the page gives).
+pub async fn check_schedule(base: String, when: String) -> Result<crate::skills::CheckAnswer, String> {
+    let path = format!("/api/studio/schedule/check?{}", sk_query(&[("when", &when)]));
+    match mcp_request(&base, reqwest::Method::GET, &path, None).await {
+        Ok(v) => serde_json::from_value(v).map_err(|e| e.to_string()),
+        Err(e) => Ok(crate::skills::CheckAnswer { ok: false, next: Vec::new(), error: Some(e) }),
+    }
+}
+
+/// `GET /api/studio/learn?workspace=` — what waits for a decision and when it last ran.
+pub async fn learn_overview(base: String, workspace: String) -> Result<crate::skills::LearnOverview, String> {
+    let path = format!("/api/studio/learn?{}", sk_query(&[("workspace", &workspace)]));
+    mcp_request(&base, reqwest::Method::GET, &path, None)
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `GET /api/studio/learn/log?limit=` — every automatic change with its time and its diff.
+pub async fn learn_log(base: String) -> Result<crate::skills::LearnLog, String> {
+    mcp_request(&base, reqwest::Method::GET, "/api/studio/learn/log?limit=40", None)
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `GET /api/studio/learn/skills?workspace=` — the skills as the learning loop saw them.
+pub async fn learn_skills(base: String, workspace: String) -> Result<crate::skills::LearnSkills, String> {
+    let path = format!("/api/studio/learn/skills?{}", sk_query(&[("workspace", &workspace)]));
+    mcp_request(&base, reqwest::Method::GET, &path, None)
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /api/studio/learn/skills` — Improve now, Approve, Reject and Roll back.
+pub async fn learn_skill_action(base: String, body: serde_json::Value) -> Result<serde_json::Value, String> {
+    mcp_request(&base, reqwest::Method::POST, "/api/studio/learn/skills", Some(body)).await
+}
+
+/// `POST /api/studio/learn/undo {id}` — taking back an automatic change.
+pub async fn learn_undo(base: String, id: String) -> Result<serde_json::Value, String> {
+    mcp_request(&base, reqwest::Method::POST, "/api/studio/learn/undo", Some(serde_json::json!({ "id": id }))).await
+}
+
+/// `POST /api/studio/learn/consolidate {workspace}` — *Consolidate now*.
+pub async fn learn_consolidate(base: String, workspace: String) -> Result<serde_json::Value, String> {
+    mcp_request(
+        &base,
+        reqwest::Method::POST,
+        "/api/studio/learn/consolidate",
+        Some(serde_json::json!({ "workspace": workspace })),
+    )
+    .await
+}
+
 /// `GET /api/studio/embeddings`: the address of the embeddings server and whether the document
 /// search reaches it with it (`route_status`).
 pub async fn fetch_embed(base: String) -> Result<crate::search::EmbedConfig, String> {

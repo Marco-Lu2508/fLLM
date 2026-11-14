@@ -418,6 +418,62 @@ pub struct App {
     pub eng_status: String,
     /// Read once the first time the page is opened — the pane is built once in the Studio, too.
     search_loaded: bool,
+    /// Settings > Skills: what the pane holds (`spane-skills` of the page — the list, the
+    /// improvements, the form, the tasks, the task form and the two cards of `skilllibrary.js`).
+    pub sk_workspace: String,
+    pub sk_skills: Vec<crate::skills::Skill>,
+    pub sk_folder_info: String,
+    pub sk_list_say: String,
+    pub sk_name: String,
+    pub sk_scope: String,
+    pub sk_text: iced::widget::text_editor::Content,
+    /// The skill waiting for the answer of *Delete the skill "…"*, and the one that is open in
+    /// the form (`skCurrent` of `skills.js`).
+    pub sk_remove: Option<(String, String)>,
+    pub sk_current: Option<(String, String)>,
+    /// The change of *Skill improvements* waiting for the answer of its dialog (the page's
+    /// `askDialog` before a rollback or an approval).
+    pub ln_confirm: Option<crate::skills::LnConfirm>,
+    /// What waits for a decision, the last step, the feed and the rows of *Skills with a history*.
+    pub ln_pending: String,
+    pub ln_last: String,
+    pub ln_feed: Vec<crate::skills::LearnEntry>,
+    pub ln_revisions: Vec<crate::skills::LearnSkill>,
+    pub ln_revisions_say: String,
+    pub ln_versions: std::collections::HashMap<String, String>,
+    /// The tasks, what their Results buttons read, and the form over them.
+    pub sc_note: String,
+    pub sc_tasks: Vec<crate::skills::Task>,
+    pub sc_tasks_say: String,
+    pub sc_results: std::collections::HashMap<String, crate::skills::ResultsState>,
+    pub sc_name: String,
+    pub sc_prompt: iced::widget::text_editor::Content,
+    pub sc_when: String,
+    pub sc_preview: String,
+    pub sc_preview_err: bool,
+    pub sc_mode: String,
+    pub sc_folder: String,
+    pub sc_deliver: String,
+    pub sc_notify: bool,
+    pub sc_enabled: bool,
+    pub sc_editing: Option<String>,
+    /// The task waiting for the answer of *Delete the task "…"*, with the name the page puts into
+    /// the question (`scRemove` takes the row's task, not only its id).
+    pub sc_remove: Option<(String, String)>,
+    /// The skills that come with the app, its line and the box over *Import from URL*.
+    pub lib: Vec<crate::skills::LibrarySkill>,
+    pub lib_list_say: String,
+    pub lib_status: String,
+    pub lib_url: String,
+    pub lib_loaded: bool,
+    /// What *Find skills on GitHub* holds.
+    pub repo: String,
+    pub repo_say: String,
+    pub github: Vec<crate::skills::GithubSkill>,
+    pub dir_q: String,
+    pub dir_view: String,
+    pub dir_token: String,
+    pub dir: Vec<crate::skills::DirectorySkill>,
     /// Settings > MCP servers: what `GET /api/studio/mcp/servers` answered, the line under the
     /// form, and the sentence that replaces the list when the read failed.
     pub mcp: Vec<crate::mcp::Server>,
@@ -946,6 +1002,91 @@ pub enum Message {
     EngRemove(usize),
     EngSave,
     EngSaved(Result<crate::search::EngineAnswer, String>),
+    /// Settings > Skills: the workspace box, the list, the form of *Write a skill* and its
+    /// buttons (`skWorkspace`, `skList`, `skName`, `skScope`, `skText`, `btnSkSave`, `btnSkNew`).
+    SkWorkspace(String),
+    SkName(String),
+    SkScope(&'static str),
+    SkText(iced::widget::text_editor::Action),
+    SkNew,
+    SkSave,
+    SkEdit(String, String),
+    SkRead(String, String, Result<String, String>),
+    SkDelete(String, String),
+    SkDeleteOk,
+    SkDeleteCancel,
+    /// Deleting says which skill it was, so the form knows whether it held that one.
+    SkDeleted(String, String, Result<serde_json::Value, String>),
+    SkWritten(Result<serde_json::Value, String>),
+    /// The dialog of *Skill improvements* (`askDialog` before a rollback or an approval).
+    LnConfirmOk,
+    LnConfirmCancel,
+    SkLoaded(Result<crate::skills::SkillsAnswer, String>),
+    /// *Skill improvements*: its lists, its feed, the buttons of its rows and *Consolidate now*.
+    LnRevisionsLoaded(Result<crate::skills::LearnSkills, String>),
+    LnLogLoaded(Result<crate::skills::LearnLog, String>),
+    LnStatusLoaded(Result<crate::skills::LearnOverview, String>),
+    LnVersion(String, String),
+    /// The skills list again after the 20000 ms the page waits after *Improve now*.
+    LnImproveTick,
+    /// Improve now, Approve, Reject and Roll back — with what the page sends for them.
+    LnAction(String, String, String, String, Option<u64>),
+    LnActionDone(String, Result<serde_json::Value, String>),
+    LnUndo(String),
+    LnUndoDone(Result<serde_json::Value, String>),
+    LnConsolidate,
+    LnConsolidated(Result<serde_json::Value, String>),
+    /// The task form: its eight fields, its two buttons and the preview of what the schedule means.
+    ScName(String),
+    ScPrompt(iced::widget::text_editor::Action),
+    ScWhen(String),
+    ScPreset(&'static str),
+    ScMode(String),
+    ScFolder(String),
+    ScDeliver(String),
+    ScNotify(bool),
+    ScEnabled(bool),
+    ScSave,
+    ScClear,
+    ScPreviewed(Result<crate::skills::CheckAnswer, String>),
+    /// The preview of what a schedule means, asked for after the 350 ms the page waits
+    /// (`setTimeout(scPreview, 350)` of `skills.js`).
+    ScPreviewNow,
+    /// The list of tasks and the four buttons of every row (`scList`).
+    ScLoaded(Result<crate::skills::ScheduleAnswer, String>),
+    /// Run now, Results, Edit and Delete — with the id of the row they stand for.
+    ScAction(String, String),
+    ScSaved(Result<serde_json::Value, String>),
+    ScRan(String, Result<serde_json::Value, String>),
+    ScResultsLoaded(String, Result<crate::skills::ResultsAnswer, String>),
+    ScDeleteOk,
+    ScDeleteCancel,
+    ScDeleted(Result<serde_json::Value, String>),
+    /// *Skills that come with the app*: its list, *Install from the list* and *Import from URL*.
+    LibLoaded(Result<crate::skills::LibraryAnswer, String>),
+    LibUrl(String),
+    LibInstall(String),
+    LibImport,
+    /// Installing one of the library says which, importing one brings its own line
+    /// (`Installed {name}. …` and `Imported {name} ({bytes} bytes).` of `skilllibrary.js`).
+    LibInstalled(String, Result<serde_json::Value, String>),
+    LibImported(Result<serde_json::Value, String>),
+    /// *Find skills on GitHub*: its box, its list, and the directory below it.
+    RepoQuery(String),
+    RepoGo,
+    RepoLoaded(Result<crate::skills::GithubAnswer, String>),
+    GithubInstall(String, String),
+    GithubInstalled(String, String, Result<serde_json::Value, String>),
+    DirQuery(String),
+    DirView(String),
+    DirGo,
+    DirLoaded(Result<crate::skills::DirectoryAnswer, String>),
+    DirInstall(String),
+    DirToken(String),
+    DirTokenSave,
+    DirTokenRemove,
+    DirInstalled(String, Result<serde_json::Value, String>),
+    DirTokenDone(bool, Result<serde_json::Value, String>),
     /// Settings > MCP servers: the list, the six fields of the form and its buttons (`mcpName` …
     /// `btnMcpSave`, `btnMcpCancel`, and the four buttons of every row).
     McpLoaded(Result<crate::mcp::ServersAnswer, String>),
@@ -966,6 +1107,8 @@ pub enum Message {
     McpResourcesLoaded(String, Result<crate::mcp::ResourcesAnswer, String>),
     McpRead(String, String),
     McpReadLoaded(String, String, Result<String, String>),
+    /// The list of tasks again after the 400 ms the page waits after *Run now*.
+    ScRunTick,
     /// The list again after 1500 ms, while a server is starting (`mcpTimer` of `mcp.js`).
     McpTick,
     /// The question before a server is removed (`confirmDialog`).
@@ -1265,6 +1408,50 @@ impl App {
             reg_status: String::new(),
             reg_found: Vec::new(),
             reg_next: None,
+            sk_workspace: String::new(),
+            sk_skills: Vec::new(),
+            sk_folder_info: String::new(),
+            sk_list_say: String::new(),
+            sk_name: String::new(),
+            sk_scope: "user".into(),
+            sk_text: iced::widget::text_editor::Content::default(),
+            sk_remove: None,
+            sk_current: None,
+            ln_confirm: None,
+            ln_pending: String::new(),
+            ln_last: String::new(),
+            ln_feed: Vec::new(),
+            ln_revisions: Vec::new(),
+            ln_revisions_say: String::new(),
+            ln_versions: std::collections::HashMap::new(),
+            sc_note: String::new(),
+            sc_tasks: Vec::new(),
+            sc_tasks_say: String::new(),
+            sc_results: std::collections::HashMap::new(),
+            sc_name: String::new(),
+            sc_prompt: iced::widget::text_editor::Content::default(),
+            sc_when: String::new(),
+            sc_preview: String::new(),
+            sc_preview_err: false,
+            sc_mode: "chat".into(),
+            sc_folder: String::new(),
+            sc_deliver: String::new(),
+            sc_notify: false,
+            sc_enabled: true,
+            sc_editing: None,
+            sc_remove: None,
+            lib: Vec::new(),
+            lib_list_say: String::new(),
+            lib_status: String::new(),
+            lib_url: String::new(),
+            lib_loaded: false,
+            repo: String::new(),
+            repo_say: String::new(),
+            github: Vec::new(),
+            dir_q: String::new(),
+            dir_view: "all-time".into(),
+            dir_token: String::new(),
+            dir: Vec::new(),
             speed_test: None,
             speed_test_busy: false,
             selftest: None,
@@ -3856,6 +4043,727 @@ impl App {
             ),
             // the page never reads what the server answered for a link
             Message::McpOpened(_) => Task::none(),
+            Message::SkWorkspace(workspace) => {
+                // the list follows the box (`skWorkspace` of the page listens to `change`)
+                self.sk_workspace = workspace;
+                self.sk_refresh()
+            }
+            Message::SkName(name) => {
+                self.sk_name = name;
+                Task::none()
+            }
+            Message::SkScope(scope) => {
+                self.sk_scope = scope.into();
+                Task::none()
+            }
+            Message::SkText(action) => {
+                self.sk_text.perform(action);
+                // typing into the box fills the name with the one of the front matter when the
+                // name box is still empty (`skText` input of `skills.js`)
+                if self.sk_name.is_empty() {
+                    let name = crate::skills::parse(&self.sk_text.text()).meta.get("name").cloned().unwrap_or_default();
+                    if crate::skills::valid_name(&name) {
+                        self.sk_name = name;
+                    }
+                }
+                Task::none()
+            }
+            Message::SkNew => {
+                // `btnSkNew`: nothing is open in the form any more, and the box starts with the
+                // template of the page
+                self.sk_current = None;
+                self.sk_name.clear();
+                self.sk_scope = "user".into();
+                self.sk_text = iced::widget::text_editor::Content::with_text(&crate::skills::template());
+                Task::none()
+            }
+            Message::SkSave => {
+                let name = self.sk_name.trim().to_string();
+                if !crate::skills::valid_name(&name) {
+                    self.toast =
+                        Some("The name uses lowercase letters, digits, - and _ (up to 64 characters).".into());
+                    return Task::none();
+                }
+                let workspace = self.sk_workspace.trim().to_string();
+                Task::perform(
+                    models::write_skill(
+                        self.base.clone(),
+                        name,
+                        self.sk_scope.clone(),
+                        workspace,
+                        self.sk_text.text().to_string(),
+                    ),
+                    Message::SkWritten,
+                )
+            }
+            Message::SkWritten(Ok(_)) => {
+                // `skSave`: the toast, the skill that is open in the form, and the list again
+                self.toast = Some("Skill saved".into());
+                self.sk_current = Some((self.sk_name.clone(), self.sk_scope.clone()));
+                self.sk_refresh()
+            }
+            Message::SkWritten(Err(e)) => {
+                self.toast = Some(e);
+                Task::none()
+            }
+            Message::SkEdit(name, scope) => {
+                let workspace = self.sk_workspace.trim().to_string();
+                Task::perform(
+                    models::read_skill(self.base.clone(), name.clone(), scope.clone(), workspace),
+                    move |result| Message::SkRead(name, scope, result),
+                )
+            }
+            Message::SkRead(name, scope, Ok(content)) => {
+                // `skEdit`: the name, the scope and the text go into the form
+                self.sk_name = name.clone();
+                self.sk_scope = scope;
+                self.sk_text = iced::widget::text_editor::Content::with_text(&content);
+                self.sk_current = Some((name, self.sk_scope.clone()));
+                Task::none()
+            }
+            Message::SkRead(_, _, Err(e)) => {
+                self.toast = Some(e);
+                Task::none()
+            }
+            Message::SkDelete(name, scope) => {
+                self.sk_remove = Some((name, scope));
+                Task::none()
+            }
+            Message::SkDeleteCancel => {
+                self.sk_remove = None;
+                Task::none()
+            }
+            Message::SkDeleteOk => match self.sk_remove.take() {
+                Some((name, scope)) => {
+                    let workspace = self.sk_workspace.trim().to_string();
+                    Task::perform(
+                        models::delete_skill(self.base.clone(), name.clone(), scope.clone(), workspace),
+                        move |result| Message::SkDeleted(name, scope, result),
+                    )
+                }
+                None => Task::none(),
+            },
+            Message::SkDeleted(name, scope, Ok(_)) => {
+                // a skill that was open in the form leaves it when it is the one that went
+                // (`skDelete` of `skills.js`)
+                if self.sk_current.as_ref() == Some(&(name.clone(), scope.clone())) {
+                    self.sk_current = None;
+                    self.sk_name.clear();
+                    self.sk_text = iced::widget::text_editor::Content::default();
+                }
+                self.sk_refresh()
+            }
+            Message::SkDeleted(_, _, Err(e)) => {
+                self.toast = Some(e);
+                Task::none()
+            }
+            Message::SkLoaded(Ok(answer)) => {
+                let info = crate::skills::folder_info(&answer);
+                self.sk_skills = answer.skills;
+                self.sk_folder_info = info;
+                self.sk_list_say.clear();
+                Task::none()
+            }
+            // a list that could not be read puts its sentence where the list was
+            Message::SkLoaded(Err(e)) => {
+                self.sk_list_say = e;
+                Task::none()
+            }
+            Message::LnRevisionsLoaded(Ok(answer)) => {
+                self.ln_revisions = answer.skills;
+                self.ln_revisions_say.clear();
+                Task::none()
+            }
+            Message::LnRevisionsLoaded(Err(e)) => {
+                self.ln_revisions_say = e;
+                Task::none()
+            }
+            Message::LnLogLoaded(Ok(answer)) => {
+                // the card shows the changes that are about a skill (`kind.startsWith('skill')`)
+                self.ln_feed = answer
+                    .log
+                    .into_iter()
+                    .filter(|entry| entry.kind.starts_with("skill"))
+                    .collect();
+                Task::none()
+            }
+            // the page never writes this failure into this card, so nothing changes here
+            Message::LnLogLoaded(Err(_)) => Task::none(),
+            Message::LnStatusLoaded(Ok(overview)) => {
+                let pending = crate::skills::pending_text(&overview);
+                let last = crate::skills::last_run_text(&overview);
+                self.ln_pending = pending;
+                self.ln_last = last;
+                Task::none()
+            }
+            // `fllmLearnStatus` answers null for a failed read and the lines stay as they were
+            Message::LnStatusLoaded(Err(_)) => Task::none(),
+            Message::LnVersion(name, label) => {
+                self.ln_versions.insert(name, label);
+                Task::none()
+            }
+            Message::LnAction(action, name, scope, workspace, version) => {
+                let mut body = serde_json::json!({ "action": action, "name": name, "scope": scope, "workspace": workspace });
+                if let Some(version) = version {
+                    body["version"] = serde_json::json!(version);
+                }
+                // Roll back and Approve ask first, the way the page's dialogs do — what is sent
+                // is built from the answer of the dialog, not from this click
+                if action == "rollback" {
+                    self.ln_confirm = Some(crate::skills::LnConfirm::Rollback(
+                        name,
+                        scope,
+                        workspace,
+                        version.unwrap_or_default(),
+                    ));
+                    return Task::none();
+                }
+                if action == "approve" {
+                    self.ln_confirm = Some(crate::skills::LnConfirm::Approve(name, scope, workspace));
+                    return Task::none();
+                }
+                Task::perform(
+                    models::learn_skill_action(self.base.clone(), body),
+                    move |result| Message::LnActionDone(action, result),
+                )
+            }
+            Message::LnConfirmCancel => {
+                self.ln_confirm = None;
+                Task::none()
+            }
+            Message::LnConfirmOk => match self.ln_confirm.take() {
+                Some(confirm) => {
+                    let action = match &confirm {
+                        crate::skills::LnConfirm::Rollback(..) => "rollback".to_string(),
+                        crate::skills::LnConfirm::Approve(..) => "approve".to_string(),
+                    };
+                    Task::perform(
+                        models::learn_skill_action(self.base.clone(), confirm.body()),
+                        move |result| Message::LnActionDone(action, result),
+                    )
+                }
+                None => Task::none(),
+            },
+            Message::LnActionDone(action, Ok(answer)) => {
+                self.toast = Some(match action.as_str() {
+                    "improve" => "Drafting a revision in the background. It appears here when it is ready."
+                        .into(),
+                    "approve" => "Revision applied.".into(),
+                    "reject" => "Revision dropped.".into(),
+                    "rollback" => format!(
+                        "Rolled back (the replaced text is version {}).",
+                        answer.get("version").and_then(serde_json::Value::as_u64).unwrap_or_default()
+                    ),
+                    other => format!("{other} done."),
+                });
+                if action == "improve" {
+                    // the page waits 20 seconds and reads the list again
+                    return Task::perform(
+                        async { tokio::time::sleep(std::time::Duration::from_millis(20000)).await; },
+                        |_| Message::LnImproveTick,
+                    );
+                }
+                // every answer of these buttons reads the lists again and tells the skills list
+                // to reload (`lnPost` and `fllmSkillsReload` of `learn.js`)
+                Task::batch([self.ln_refresh(), self.sk_refresh()])
+            }
+            Message::LnActionDone(_, Err(e)) => {
+                self.toast = Some(e);
+                Task::batch([self.ln_refresh(), self.sk_refresh()])
+            }
+            Message::LnImproveTick => self.ln_refresh(),
+            Message::LnUndo(id) => {
+                Task::perform(models::learn_undo(self.base.clone(), id), Message::LnUndoDone)
+            }
+            Message::LnUndoDone(Ok(answer)) => {
+                if let Some(message) = answer.get("message").and_then(serde_json::Value::as_str) {
+                    self.toast = Some(format!("Undone: {message}"));
+                }
+                Task::batch([self.ln_refresh(), self.sk_refresh()])
+            }
+            Message::LnUndoDone(Err(e)) => {
+                self.toast = Some(e);
+                Task::batch([self.ln_refresh(), self.sk_refresh()])
+            }
+            Message::LnConsolidate => {
+                let workspace = self.sk_workspace.trim().to_string();
+                Task::perform(
+                    models::learn_consolidate(self.base.clone(), workspace),
+                    Message::LnConsolidated,
+                )
+            }
+            Message::LnConsolidated(Ok(_)) => {
+                self.toast = Some("Consolidating in the background: revisions that are due are drafted and repeated memory entries are proposed for removal.".into());
+                Task::none()
+            }
+            Message::LnConsolidated(Err(e)) => {
+                self.toast = Some(e);
+                Task::none()
+            }
+            Message::ScLoaded(Ok(answer)) => {
+                let note = crate::skills::schedule_note(&answer);
+                self.sc_tasks = answer.tasks;
+                self.sc_note = note;
+                self.sc_tasks_say.clear();
+                // `scTimer`: while one of them runs and this page is open, the list is read again
+                // after 2000 ms
+                if self.sc_tasks.iter().any(|task| task.running) && self.page == View::Settings {
+                    return Task::perform(
+                        async { tokio::time::sleep(std::time::Duration::from_millis(2000)).await; },
+                        |_| Message::ScRunTick,
+                    );
+                }
+                Task::none()
+            }
+            Message::ScLoaded(Err(e)) => {
+                self.sc_tasks_say = e;
+                Task::none()
+            }
+            Message::ScName(name) => {
+                self.sc_name = name;
+                Task::none()
+            }
+            Message::ScPrompt(action) => {
+                self.sc_prompt.perform(action);
+                Task::none()
+            }
+            Message::ScWhen(when) => {
+                self.sc_when = when;
+                // the page waits 350 ms after the last key before it asks what the schedule means
+                Task::perform(
+                    async { tokio::time::sleep(std::time::Duration::from_millis(350)).await; },
+                    |_| Message::ScPreviewNow,
+                )
+            }
+            Message::ScPreset(preset) => {
+                // a preset goes into the box and asks right away (`scWhenPresets` change)
+                self.sc_when = preset.into();
+                self.update(Message::ScPreviewNow)
+            }
+            Message::ScPreviewNow => {
+                if self.sc_when.trim().is_empty() {
+                    self.sc_preview.clear();
+                    self.sc_preview_err = false;
+                    return Task::none();
+                }
+                Task::perform(
+                    models::check_schedule(self.base.clone(), self.sc_when.trim().to_string()),
+                    Message::ScPreviewed,
+                )
+            }
+            Message::ScPreviewed(Ok(check)) => {
+                if check.ok {
+                    let times: Vec<String> = check.next.iter().map(|t| crate::skills::when(*t)).collect();
+                    self.sc_preview = format!("Next runs: {}", times.join("; "));
+                    self.sc_preview_err = false;
+                } else {
+                    self.sc_preview = check.error.unwrap_or_default();
+                    self.sc_preview_err = true;
+                }
+                Task::none()
+            }
+            // a read that failed says so the way the page says it (`r.error` of the answer)
+            Message::ScPreviewed(Err(e)) => {
+                self.sc_preview = e;
+                self.sc_preview_err = true;
+                Task::none()
+            }
+            Message::ScMode(mode) => {
+                self.sc_mode = mode;
+                // consolidating needs no prompt of its own; the field only has to hold something
+                if self.sc_mode == "learn" && self.sc_prompt.text().trim().is_empty() {
+                    self.sc_prompt =
+                        iced::widget::text_editor::Content::with_text("Consolidate memory and skills");
+                }
+                Task::none()
+            }
+            Message::ScFolder(folder) => {
+                self.sc_folder = folder;
+                Task::none()
+            }
+            Message::ScDeliver(deliver) => {
+                self.sc_deliver = deliver;
+                Task::none()
+            }
+            Message::ScNotify(on) => {
+                self.sc_notify = on;
+                Task::none()
+            }
+            Message::ScEnabled(on) => {
+                self.sc_enabled = on;
+                Task::none()
+            }
+            Message::ScClear => {
+                self.clear_sc_form();
+                Task::none()
+            }
+            Message::ScSave => {
+                let mut body = serde_json::json!({
+                    "name": self.sc_name,
+                    "prompt": self.sc_prompt.text(),
+                    "when": self.sc_when,
+                    "mode": self.sc_mode,
+                    "folder": self.sc_folder,
+                    "notify": self.sc_notify,
+                    "enabled": self.sc_enabled,
+                    "deliver": self.sc_deliver.trim(),
+                });
+                if let Some(id) = self.sc_editing.clone() {
+                    body["id"] = serde_json::json!(id);
+                }
+                Task::perform(models::save_schedule(self.base.clone(), body), Message::ScSaved)
+            }
+            Message::ScSaved(Ok(_)) => {
+                self.toast = Some("Task saved".into());
+                self.clear_sc_form();
+                self.sc_refresh()
+            }
+            Message::ScSaved(Err(e)) => {
+                self.toast = Some(e);
+                Task::none()
+            }
+            Message::ScAction(action, id) => match action.as_str() {
+                "results" => {
+                    // the page shows the box it has and reads it only when it opens it
+                    if let Some(state) = self.sc_results.get_mut(&id) {
+                        if state.shown {
+                            state.shown = false;
+                            return Task::none();
+                        }
+                    }
+                    Task::perform(models::schedule_results(self.base.clone(), id.clone()), move |r| {
+                        Message::ScResultsLoaded(id, r)
+                    })
+                }
+                "edit" => match self.sc_tasks.iter().find(|task| task.id == id).cloned() {
+                    Some(task) => self.fill_sc_form(Some(&task)),
+                    None => Task::none(),
+                },
+                "run" => Task::perform(models::run_schedule(self.base.clone(), id.clone()), move |r| {
+                    Message::ScRan(id, r)
+                }),
+                "remove" => {
+                    let name = self
+                        .sc_tasks
+                        .iter()
+                        .find(|task| task.id == id)
+                        .map(|task| task.name.clone())
+                        .unwrap_or_default();
+                    self.sc_remove = Some((id, name));
+                    Task::none()
+                }
+                _ => Task::none(),
+            },
+            Message::ScRan(_, Ok(_)) => {
+                self.toast = Some("Task started".into());
+                // the page waits 400 ms and reads the list again
+                Task::perform(
+                    async { tokio::time::sleep(std::time::Duration::from_millis(400)).await; },
+                    |_| Message::ScRunTick,
+                )
+            }
+            Message::ScRan(_, Err(e)) => {
+                self.toast = Some(e);
+                Task::none()
+            }
+            Message::ScRunTick => self.sc_refresh(),
+            Message::ScResultsLoaded(id, Ok(answer)) => {
+                self.sc_results
+                    .entry(id)
+                    .and_modify(|state| {
+                        state.shown = true;
+                        state.filled = Some(Ok(answer.results.clone()));
+                    })
+                    .or_insert(crate::skills::ResultsState {
+                        shown: true,
+                        filled: Some(Ok(answer.results)),
+                    });
+                Task::none()
+            }
+            Message::ScResultsLoaded(id, Err(e)) => {
+                self.sc_results.insert(
+                    id,
+                    crate::skills::ResultsState { shown: true, filled: Some(Err(e)) },
+                );
+                Task::none()
+            }
+            Message::ScDeleteCancel => {
+                self.sc_remove = None;
+                Task::none()
+            }
+            Message::ScDeleteOk => match self.sc_remove.take() {
+                Some((id, _)) => {
+                    Task::perform(models::delete_schedule(self.base.clone(), id), Message::ScDeleted)
+                }
+                None => Task::none(),
+            },
+            Message::ScDeleted(Ok(_)) => self.sc_refresh(),
+            Message::ScDeleted(Err(e)) => {
+                self.toast = Some(e);
+                Task::none()
+            }
+            Message::LibLoaded(Ok(answer)) => {
+                self.lib = answer.skills;
+                self.lib_list_say.clear();
+                Task::none()
+            }
+            // the page writes this sentence where the list was
+            Message::LibLoaded(Err(e)) => {
+                self.lib_list_say = format!("Could not read the library: {e}");
+                Task::none()
+            }
+            Message::LibUrl(url) => {
+                self.lib_url = url;
+                Task::none()
+            }
+            Message::LibInstall(name) => {
+                self.lib_status = format!("Installing {name} ...");
+                Task::perform(models::install_library(self.base.clone(), name.clone()), move |r| {
+                    Message::LibInstalled(name, r)
+                })
+            }
+            Message::LibInstalled(name, Ok(_)) => {
+                self.lib_status =
+                    format!("Installed {name}. It is in your skills folder now and can be edited there.");
+                Task::batch([
+                    Task::perform(models::fetch_library(self.base.clone()), Message::LibLoaded),
+                    self.sk_refresh(),
+                ])
+            }
+            Message::LibInstalled(_, Err(e)) => {
+                // `error.message` when the server said one, its own sentence when it sent none,
+                // and the `catch` of the page when the request itself failed
+                self.lib_status = if e.starts_with("Request failed (") {
+                    "Could not install it.".into()
+                } else if e.starts_with("no server at") {
+                    format!("Could not install it: {e}")
+                } else {
+                    e
+                };
+                Task::none()
+            }
+            Message::LibImport => {
+                let url = self.lib_url.trim().to_string();
+                if url.is_empty() {
+                    self.lib_status = "Give the address of a SKILL.md.".into();
+                    return Task::none();
+                }
+                self.lib_status = "Fetching ...".into();
+                Task::perform(models::import_skill(self.base.clone(), url, None), Message::LibImported)
+            }
+            Message::LibImported(Ok(answer)) => {
+                let name = answer.get("name").and_then(serde_json::Value::as_str).unwrap_or_default();
+                let bytes = answer.get("bytes").and_then(serde_json::Value::as_u64).unwrap_or_default();
+                self.lib_url.clear();
+                self.lib_status = format!("Imported {name} ({bytes} bytes).");
+                Task::batch([
+                    Task::perform(models::fetch_library(self.base.clone()), Message::LibLoaded),
+                    self.sk_refresh(),
+                ])
+            }
+            Message::LibImported(Err(e)) => {
+                self.lib_status = if e.starts_with("Request failed (") {
+                    "Could not import it.".into()
+                } else if e.starts_with("no server at") {
+                    format!("Could not import it: {e}")
+                } else {
+                    e
+                };
+                Task::none()
+            }
+            Message::RepoQuery(repo) => {
+                self.repo = repo;
+                Task::none()
+            }
+            Message::RepoGo => {
+                let repo = self.repo.trim().to_string();
+                if repo.is_empty() {
+                    self.repo_say = "Type a repository like owner/repo.".into();
+                    return Task::none();
+                }
+                self.repo_say = "Looking ...".into();
+                self.github.clear();
+                Task::perform(models::github_skills(self.base.clone(), repo), Message::RepoLoaded)
+            }
+            Message::RepoLoaded(Ok(answer)) => {
+                self.repo_say = if answer.skills.is_empty() {
+                    format!("{} has no SKILL.md files.", answer.repo)
+                } else {
+                    format!(
+                        "{} skill{} in {}{}. ",
+                        answer.skills.len(),
+                        if answer.skills.len() == 1 { "" } else { "s" },
+                        answer.repo,
+                        if answer.truncated { " (the list is cut off)" } else { "" },
+                    )
+                };
+                self.github = answer.skills;
+                Task::none()
+            }
+            Message::RepoLoaded(Err(e)) => {
+                self.repo_say = if e.starts_with("Request failed (") {
+                    "Could not read the repository.".into()
+                } else {
+                    e
+                };
+                Task::none()
+            }
+            Message::GithubInstall(url, name) => {
+                // the row installs itself from the repository (`data-gh-install` of the page)
+                self.repo_say = format!("Installing {name} ...");
+                Task::perform(
+                    models::import_skill(self.base.clone(), url.clone(), Some(name.clone())),
+                    move |r| Message::GithubInstalled(name, url, r),
+                )
+            }
+            Message::GithubInstalled(name, url, Ok(_)) => {
+                self.repo_say =
+                    format!("Installed {name}. It is in your skills folder now and can be edited there. Extra files of the skill (scripts, references) are not copied.");
+                // the row says *installed* without being read again (`btn.textContent` of the page)
+                if let Some(skill) = self.github.iter_mut().find(|skill| skill.url == url) {
+                    skill.installed = true;
+                }
+                Task::batch([
+                    Task::perform(models::fetch_library(self.base.clone()), Message::LibLoaded),
+                    self.sk_refresh(),
+                ])
+            }
+            Message::GithubInstalled(_, _, Err(e)) => {
+                self.repo_say = if e.starts_with("Request failed (") {
+                    "Could not install it.".into()
+                } else if e.starts_with("no server at") {
+                    format!("Could not install it: {e}")
+                } else {
+                    e
+                };
+                Task::none()
+            }
+            Message::DirQuery(query) => {
+                self.dir_q = query;
+                Task::none()
+            }
+            Message::DirView(view) => {
+                self.dir_view = view;
+                Task::none()
+            }
+            Message::DirToken(token) => {
+                self.dir_token = token;
+                Task::none()
+            }
+            Message::DirTokenSave => {
+                let token = self.dir_token.trim().to_string();
+                if token.is_empty() {
+                    // the Save button of the page does nothing without a token
+                    return Task::none();
+                }
+                Task::perform(
+                    models::directory_token(self.base.clone(), token),
+                    move |r| Message::DirTokenDone(true, r),
+                )
+            }
+            Message::DirTokenRemove => Task::perform(
+                models::directory_token(self.base.clone(), String::new()),
+                move |r| Message::DirTokenDone(false, r),
+            ),
+            Message::DirTokenDone(saved, Ok(_)) => {
+                self.dir_token.clear();
+                self.repo_say = if saved { "Token saved.".into() } else { "Token removed.".into() };
+                if saved {
+                    // a saved token searches right away (`if (token) searchDirectory()`)
+                    return self.update(Message::DirGo);
+                }
+                Task::none()
+            }
+            Message::DirTokenDone(_, Err(e)) => {
+                self.repo_say = if e.starts_with("Request failed (") {
+                    "Could not save it.".into()
+                } else {
+                    e
+                };
+                Task::none()
+            }
+            Message::DirGo => {
+                self.repo_say = "Searching ...".into();
+                self.dir.clear();
+                Task::perform(
+                    models::directory_skills(
+                        self.base.clone(),
+                        self.dir_q.trim().to_string(),
+                        self.dir_view.clone(),
+                    ),
+                    Message::DirLoaded,
+                )
+            }
+            Message::DirLoaded(Ok(answer)) => {
+                if !answer.configured {
+                    self.repo_say = "Save a Vercel token first.".into();
+                    return Task::none();
+                }
+                self.repo_say = if answer.skills.is_empty() {
+                    "Nothing found.".into()
+                } else {
+                    format!("{} skills from skills.sh.", answer.skills.len())
+                };
+                self.dir = answer.skills;
+                Task::none()
+            }
+            Message::DirLoaded(Err(e)) => {
+                self.repo_say = if e.starts_with("Request failed (") {
+                    "The directory did not answer.".into()
+                } else {
+                    e
+                };
+                Task::none()
+            }
+            Message::DirInstall(id) => {
+                self.repo_say = "Installing ...".into();
+                Task::perform(models::directory_install(self.base.clone(), id.clone()), move |r| {
+                    Message::DirInstalled(id, r)
+                })
+            }
+            Message::DirInstalled(id, Ok(answer)) => {
+                let name = answer.get("name").and_then(serde_json::Value::as_str).unwrap_or_default();
+                let audits: Vec<String> = answer
+                    .get("audits")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .map(|audit| {
+                                let provider = audit.get("provider").and_then(serde_json::Value::as_str).unwrap_or_default();
+                                let status = audit.get("status").and_then(serde_json::Value::as_str).unwrap_or_default();
+                                let risk = audit.get("risk").and_then(serde_json::Value::as_str).unwrap_or_default();
+                                if risk.is_empty() {
+                                    format!("{provider}: {status}")
+                                } else {
+                                    format!("{provider}: {status} ({risk})")
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.repo_say = format!("Installed {name}.");
+                if !audits.is_empty() {
+                    self.repo_say.push_str(&format!(" Security audits: {}.", audits.join(", ")));
+                }
+                self.repo_say.push_str(" It is in your skills folder and can be edited there.");
+                if let Some(skill) = self.dir.iter_mut().find(|skill| skill.id == id) {
+                    skill.installed = true;
+                }
+                Task::batch([
+                    Task::perform(models::fetch_library(self.base.clone()), Message::LibLoaded),
+                    self.sk_refresh(),
+                ])
+            }
+            Message::DirInstalled(_, Err(e)) => {
+                self.repo_say = if e.starts_with("Request failed (") {
+                    "Could not install it.".into()
+                } else if e.starts_with("no server at") {
+                    format!("Could not install it: {e}")
+                } else {
+                    e
+                };
+                Task::none()
+            }
             Message::MetricsOpen => {
                 self.metrics_open = !self.metrics_open;
                 Task::none()
@@ -4948,6 +5856,19 @@ impl App {
                     // the list of the MCP servers is read again on every click of the menu
                     // entry, which is every time this page opens
                     let mcp = self.mcp_refresh();
+                    // the skills, the learning lists and the tasks are read on every click of
+                    // the menu entry (`skRefreshPane`, `lnRefreshAll` and `scRefreshPane`)
+                    let sk = self.sk_refresh();
+                    let ln = self.ln_refresh();
+                    let sc = self.sc_refresh();
+                    // the skills that come with the app are read once, when the pane is built
+                    // (`load()` at the end of `skilllibrary.js`)
+                    let lib = if self.lib_loaded {
+                        Task::none()
+                    } else {
+                        self.lib_loaded = true;
+                        Task::perform(models::fetch_library(self.base.clone()), Message::LibLoaded)
+                    };
                     let search = if self.search_loaded {
                         Task::none()
                     } else {
@@ -4970,6 +5891,10 @@ impl App {
                             connect,
                             search,
                             mcp,
+                            sk,
+                            ln,
+                            sc,
+                            lib,
                             logs,
                             keys,
                             Task::perform(
@@ -5742,6 +6667,32 @@ impl App {
                 .push(backdrop(Message::McpRemoveCancel))
                 .push(crate::mcp::remove_window(t, name));
         }
+        if let Some((name, _)) = self.sk_remove.as_ref() {
+            // the `askDialog` of `skills.js` before a skill is deleted
+            layers = layers.push(backdrop(Message::SkDeleteCancel)).push(crate::skills::delete_window(
+                t,
+                format!("Delete the skill \"{name}\"?"),
+                "The file is removed from disk.",
+                Message::SkDeleteOk,
+                Message::SkDeleteCancel,
+            ));
+        }
+        if let Some((_, name)) = self.sc_remove.as_ref() {
+            // the `askDialog` of `skills.js` before a task is deleted
+            layers = layers.push(backdrop(Message::ScDeleteCancel)).push(crate::skills::delete_window(
+                t,
+                format!("Delete the task \"{name}\"?"),
+                "Its saved results are deleted too.",
+                Message::ScDeleteOk,
+                Message::ScDeleteCancel,
+            ));
+        }
+        if let Some(confirm) = self.ln_confirm.as_ref() {
+            // the `askDialog` of `learn.js` before a rollback or an approval
+            layers = layers
+                .push(backdrop(Message::LnConfirmCancel))
+                .push(crate::skills::confirm_window(t, confirm));
+        }
         if let Some(kind) = self.runtime_confirm {
             // the `confirmDialog` of `runtime.js` before computer use or turbo goes on
             layers = layers
@@ -5994,6 +6945,45 @@ impl App {
                     reg_status: &self.reg_status,
                     reg_found: &self.reg_found,
                     reg_has_next: self.reg_next.is_some(),
+                },
+                crate::skills::SkillsView {
+                    workspace: &self.sk_workspace,
+                    skills: &self.sk_skills,
+                    folder_info: &self.sk_folder_info,
+                    list_say: &self.sk_list_say,
+                    pending: &self.ln_pending,
+                    last_run: &self.ln_last,
+                    feed: &self.ln_feed,
+                    revisions: &self.ln_revisions,
+                    revisions_say: &self.ln_revisions_say,
+                    name: &self.sk_name,
+                    scope: &self.sk_scope,
+                    text: &self.sk_text,
+                    schedule_note: &self.sc_note,
+                    tasks: &self.sc_tasks,
+                    tasks_say: &self.sc_tasks_say,
+                    results: &self.sc_results,
+                    task_name: &self.sc_name,
+                    task_prompt: &self.sc_prompt,
+                    task_when: &self.sc_when,
+                    task_preview: &self.sc_preview,
+                    task_mode: &self.sc_mode,
+                    task_folder: &self.sc_folder,
+                    task_deliver: &self.sc_deliver,
+                    task_notify: self.sc_notify,
+                    task_enabled: self.sc_enabled,
+                    task_editing: self.sc_editing.is_some(),
+                    library: &self.lib,
+                    library_list_say: &self.lib_list_say,
+                    library_say: &self.lib_status,
+                    import_url: &self.lib_url,
+                    repo: &self.repo,
+                    repo_say: &self.repo_say,
+                    github: &self.github,
+                    directory: &self.dir,
+                    directory_q: &self.dir_q,
+                    dir_view: &self.dir_view,
+                    dir_token: &self.dir_token,
                 },
             )
         } else if self.page == View::Project {
@@ -8565,6 +9555,76 @@ impl App {
             .unwrap_or_default();
         self.runtime = status;
         self.runtime_loaded = true;
+    }
+
+    /// The skills list again (`skRefreshPane` of `skills.js`, which runs on every click of the
+    /// menu entry and after every change of the list).
+    fn sk_refresh(&self) -> Task<Message> {
+        Task::perform(
+            models::fetch_skills(self.base.clone(), self.sk_workspace.trim().to_string()),
+            Message::SkLoaded,
+        )
+    }
+
+    /// The three reads of *Skill improvements* (`lnRefreshSkills`, `lnRefreshCounters` and
+    /// `lnRefreshFeed` of `learn.js`, which the page runs together).
+    fn ln_refresh(&self) -> Task<Message> {
+        let workspace = self.sk_workspace.trim().to_string();
+        Task::batch([
+            Task::perform(models::learn_skills(self.base.clone(), workspace.clone()), Message::LnRevisionsLoaded),
+            Task::perform(models::learn_overview(self.base.clone(), workspace), Message::LnStatusLoaded),
+            Task::perform(models::learn_log(self.base.clone()), Message::LnLogLoaded),
+        ])
+    }
+
+    /// The list of tasks again (`scRefreshPane` of `skills.js`).
+    fn sc_refresh(&self) -> Task<Message> {
+        Task::perform(models::fetch_schedule(self.base.clone()), Message::ScLoaded)
+    }
+
+    /// The eight fields of the task form back to what they start with (`scFill(null)`).
+    fn clear_sc_form(&mut self) {
+        self.sc_editing = None;
+        self.sc_name.clear();
+        self.sc_prompt = iced::widget::text_editor::Content::default();
+        self.sc_when.clear();
+        self.sc_preview.clear();
+        self.sc_preview_err = false;
+        self.sc_mode = "chat".into();
+        self.sc_folder.clear();
+        self.sc_notify = false;
+        self.sc_deliver.clear();
+        self.sc_enabled = true;
+    }
+
+    /// The eight fields of the task form filled with a task (`scFill(t)`).
+    fn fill_sc_form(&mut self, task: Option<&crate::skills::Task>) -> Task<Message> {
+        match task {
+            Some(task) => {
+                self.sc_editing = Some(task.id.clone());
+                self.sc_name = task.name.clone();
+                self.sc_prompt =
+                    iced::widget::text_editor::Content::with_text(&task.prompt);
+                self.sc_when = task.when.clone();
+                self.sc_mode = task.mode.clone();
+                self.sc_folder = task.folder.clone();
+                self.sc_notify = task.notify;
+                self.sc_deliver = task.deliver.clone();
+                self.sc_enabled = task.enabled;
+            }
+            None => {
+                self.clear_sc_form();
+                return Task::none();
+            }
+        }
+        // the title changes with the form, and the box of the schedule asks what it means
+        // (`scFolderVisibility()` and `scPreview()` at the end of `scFill`)
+        self.sc_preview.clear();
+        self.sc_preview_err = false;
+        if !self.sc_when.trim().is_empty() {
+            return self.update(Message::ScPreviewNow);
+        }
+        Task::none()
     }
 
     /// The six fields of *Add a server* back to what they start with (`mcpClearForm` of `mcp.js`).

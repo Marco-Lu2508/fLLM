@@ -7,6 +7,22 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **The seven cards of *Skills, scheduled tasks, skill library* in the native app.** *Skills* with
+  the list and its rows, *Edit* with the read of the skill, *Delete* behind the question of
+  `askDialog`, and *New from template* with the text of `skTemplate`; *Skill improvements* with
+  what waits for a decision, the last step, the feed with its *Undo* and its diffs in the colours
+  of `lnDiffHtml`, the rows with what `lnStatText` counts, **Improve now** (20 seconds), the
+  versions newest first and **Roll back** behind its dialog, the draft of the model with
+  **Approve**/**Reject** behind theirs, *Recent uses* and **Consolidate now**; *Scheduled tasks*
+  with its line over the list, its rows with their chips and their runs, **Run now** (400 ms),
+  **Results**, **Edit** and **Delete** behind its dialog, and the 2000 ms while one runs; *New
+  task* with its eight fields, the preview after 350 ms, the folder that shows for *agent* and
+  *learn*, and *Edit the task* while one is chosen; and the two cards `skilllibrary.js` appends —
+  **Skills that come with the app** with *Install* and *Import from URL*, and **Find skills on
+  GitHub** with the repository search, the directory behind its open block, its token and the
+  audits of an install. Eleven unit tests, four window tests, six mutations. The *Search of past
+  chats* card of that pane is not ported: its counts and its copy come out of the browser's
+  localStorage, which this window does not have (see PARITY.md).
 - **The three cards of *MCP servers* in the native app: what runs, where to find one and the form
   that writes one.** *Tools (MCP)* with the list of `mcpRender` — the state in the colour of the
   page with ` - {n} tool{s}` behind a ready one, the line of the address or of the command, a red
@@ -570,6 +586,9 @@ behaviour between versions).
 - **The composer is calm: neutral at rest, one neutral hairline on focus, and a chip that is on (Thinking, Web access) has a neutral fill with the accent only on its icon.** The frame and the chip were copper and orange at the same time as the send button.
 
 ### Fixed
+- **The seconds of a task answer carry their unit.** The line under a result of *Results* read
+  `(1.5)` where the page writes `(1.5s)` — `scShowResults` puts the `s` behind the number, and a
+  unit test of the module holds the line to it now.
 - **The description of *Connect other apps* is drawn as one sentence.** It was put together out of
   pieces beside each other; `app-item-desc` of the Studio is one paragraph, and both descriptions
   of that card are now a single text — with a test that finds each of them whole, so a split
