@@ -191,6 +191,14 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   (dark theme takes the accent, light theme its lighter twin, the text on it chosen by luminance),
   without the tint the messages fall back to the Studio's secondary. Three unit tests over every
   accent, three window tests with one drawing, four mutations.
+- Dialogs: every modal — the model picker, the assistant editor, the project picker and its
+  delete, *Forget everything*, *Remember*, the temporary-chat and *Remove the runtime* questions,
+  the welcome tour, the shortcut overview, the command palette and the large view of an artifact —
+  dims the window behind it the way `.modal-backdrop` does in the Studio (55 percent black; iced
+  has no blur, so only the colour comes across), and a test reads that rule out of the Studio's
+  stylesheet instead of typing it. A click beside a dialog still closes it; the two dropdowns of
+  the top bar (the assistant menu, the session mailbox) are no modals and stay undimmed. One unit
+  test.
 - Session mailbox: notes one session leaves for another wait in the workspace and show up as a badge
   *Inbox (n)* on the top bar. The panel lists them with what they say about themselves; one click puts
   a note into the message (a blank line between what was written and what comes from another session),

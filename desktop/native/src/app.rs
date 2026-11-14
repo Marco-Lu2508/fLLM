@@ -4449,9 +4449,9 @@ impl App {
         let mut layers = stack![page];
         if self.art.as_ref().is_some_and(|p| p.large) {
             // the large view of the panel: dimmed over the chat, the panel itself in the middle
-            // (the fixed inset of `.art-panel.is-large`)
+            // (the fixed inset of `.art-panel.is-large`, whose `box-shadow` is this colour)
             layers = layers
-                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::ArtAction(artifacts::ArtAction::Larger)))
+                .push(backdrop(Message::ArtAction(artifacts::ArtAction::Larger)))
                 .push(
                     container(self.art_panel(t))
                         .width(Length::Fill)
@@ -4467,7 +4467,7 @@ impl App {
         }
         if self.picker_open {
             layers = layers
-                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::ClosePicker))
+                .push(backdrop(Message::ClosePicker))
                 .push(self.picker(t));
         }
         if self.inbox_open && !self.inbox.is_empty() {
@@ -4489,58 +4489,59 @@ impl App {
                 .push(self.asst_menu_panel(t));
         }
         if self.asst_edit.is_some() {
-            // the editor is the top layer; a click beside it only takes the click (the menu is closed then)
+            // the editor is `assistantModal` of the Studio: dimmed, and a click beside it only
+            // takes the click (the menu is closed then)
             layers = layers
-                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::AsstMenuClose))
+                .push(backdrop(Message::AsstMenuClose))
                 .push(self.asst_editor(t));
         }
         if self.prj_pick.is_some() {
             layers = layers
-                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::PrjPick(None)))
+                .push(backdrop(Message::PrjPick(None)))
                 .push(self.prj_pick_window(t));
         }
         if self.prj_delete.is_some() {
             // the dialog of the Studio's askDialog: a click beside it only takes the click
             layers = layers
-                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::PrjDeleteCancel))
+                .push(backdrop(Message::PrjDeleteCancel))
                 .push(self.prj_delete_window(t));
         }
         if self.mem_clear {
             layers = layers
-                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::MemClearCancel))
+                .push(backdrop(Message::MemClearCancel))
                 .push(self.mem_clear_window(t));
         }
         if self.remember.is_some() {
             layers = layers
-                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::RememberCancel))
+                .push(backdrop(Message::RememberCancel))
                 .push(self.remember_window(t));
         }
         if self.temp_close {
             layers = layers
-                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::TempCloseCancel))
+                .push(backdrop(Message::TempCloseCancel))
                 .push(self.temp_close_window(t));
         }
         if self.npu_remove {
             layers = layers
-                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::NpuRemoveCancel))
+                .push(backdrop(Message::NpuRemoveCancel))
                 .push(self.npu_remove_window(t));
         }
         if self.tour.is_some() {
             // the backdrop of `.modal-backdrop`: a click beside the window closes the tour
             layers = layers
-                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::TourSkip))
+                .push(backdrop(Message::TourSkip))
                 .push(self.tour_window(t));
         }
         if self.shortcuts_open {
             // the backdrop of `.modal-backdrop`: a click beside the window closes the overview
             layers = layers
-                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::ShortcutsClose))
+                .push(backdrop(Message::ShortcutsClose))
                 .push(self.shortcuts_window(t));
         }
         if self.palette_open {
             // the backdrop of `.modal-backdrop`: a click beside the window closes the palette
             layers = layers
-                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::PaletteClose))
+                .push(backdrop(Message::PaletteClose))
                 .push(self.palette_window(t));
         }
         layers.into()
@@ -7860,6 +7861,31 @@ pub fn format_bytes(b: u64) -> String {
     }
 }
 
+/// The colour of the layer behind a dialog: what `.modal-backdrop` of the Studio's `style.css`
+/// paints over the window (`rgba(0, 0, 0, 0.55)` — iced has no blur, so only the colour comes
+/// across). A test reads that rule out of the stylesheet and compares it with this value.
+pub fn backdrop_colour() -> iced::Color {
+    iced::Color { a: 0.55, ..iced::Color::BLACK }
+}
+
+/// The dimmed layer behind a dialog (`.modal-backdrop` of `style.css`). The click on it is the
+/// click beside the dialog, and it closes the dialog the way the Studio's backdrop does. The two
+/// dropdowns of the top bar (the assistant menu and the session mailbox) are not modals and keep
+/// their plain click-catcher.
+fn backdrop<'a>(on_press: Message) -> Element<'a, Message> {
+    mouse_area(
+        container(Space::new())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| iced::widget::container::Style {
+                background: Some(iced::Background::Color(backdrop_colour())),
+                ..Default::default()
+            }),
+    )
+    .on_press(on_press)
+    .into()
+}
+
 pub(crate) fn muted_svg(t: Tokens) -> impl Fn(&Theme, svg::Status) -> svg::Style {
     move |_, _| svg::Style { color: Some(t.muted) }
 }
@@ -7996,6 +8022,52 @@ pub fn run() -> iced::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dim behind a dialog is the colour of the Studio's `.modal-backdrop`, read out of its
+    /// stylesheet instead of typed here: a change on either side turns this red.
+    #[test]
+    fn the_backdrop_is_the_colour_of_the_studios_modal_backdrop() {
+        let css = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../rust/engine/src/webui/style.css"
+        ))
+        .expect("the stylesheet of the Studio");
+        let block = css
+            .split(".modal-backdrop {")
+            .nth(1)
+            .expect("the rule of the backdrop")
+            .split('}')
+            .next()
+            .expect("its block");
+        let rgba = block
+            .split("rgba(")
+            .nth(1)
+            .expect("the backdrop has a colour")
+            .split(')')
+            .next()
+            .expect("the colour ends");
+        let parts: Vec<f32> = rgba
+            .split(',')
+            .map(|p| p.trim().parse::<f32>().expect("a number in rgba(...)"))
+            .collect();
+        assert_eq!(parts.len(), 4, "rgba() has four values: {rgba}");
+        let studio = iced::Color {
+            r: parts[0] / 255.0,
+            g: parts[1] / 255.0,
+            b: parts[2] / 255.0,
+            a: parts[3],
+        };
+        let mine = backdrop_colour();
+        let close = |a: f32, b: f32| (a - b).abs() < 0.001;
+        assert!(
+            close(mine.r, studio.r) && close(mine.g, studio.g) && close(mine.b, studio.b) && close(mine.a, studio.a),
+            "the Studio paints rgba({rgba}), the window paints rgba({}, {}, {}, {})",
+            (mine.r * 255.0).round(),
+            (mine.g * 255.0).round(),
+            (mine.b * 255.0).round(),
+            mine.a
+        );
+    }
 
     #[test]
     fn numbers_are_grouped_in_thousands() {
