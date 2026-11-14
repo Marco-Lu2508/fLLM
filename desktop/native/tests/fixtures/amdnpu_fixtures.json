@@ -1,0 +1,1202 @@
+[
+  {
+    "fn": "amdNpuText",
+    "args": [
+      {
+        "state": "flm_missing"
+      },
+      {
+        "state": "idle"
+      },
+      []
+    ],
+    "got": "An AMD NPU was found. fLLM runs models on it through FastFlowLM, which you install yourself (a free download).",
+    "note": "FastFlowLM is missing"
+  },
+  {
+    "fn": "amdNpuText",
+    "args": [
+      {
+        "state": "needs_attention"
+      },
+      {
+        "state": "idle"
+      },
+      [
+        "the driver is missing",
+        "no device"
+      ]
+    ],
+    "got": "FastFlowLM reports a problem with the NPU setup: the driver is missing; no device",
+    "note": "two problems, joined"
+  },
+  {
+    "fn": "amdNpuText",
+    "args": [
+      {
+        "state": "needs_attention"
+      },
+      {
+        "state": "idle"
+      },
+      []
+    ],
+    "got": "FastFlowLM reports a problem with the NPU setup: see the details",
+    "note": "no problems: the Studio's own words"
+  },
+  {
+    "fn": "amdNpuText",
+    "args": [
+      {
+        "state": "ready"
+      },
+      {
+        "state": "running",
+        "model": "qwen-7b-q4"
+      },
+      []
+    ],
+    "got": "Running qwen-7b-q4 on the NPU. Pick \"AMD NPU (FastFlowLM) · qwen-7b-q4\" in the model list of the chat.",
+    "note": "running, the model named twice"
+  },
+  {
+    "fn": "amdNpuText",
+    "args": [
+      {
+        "state": "ready"
+      },
+      {
+        "state": "starting",
+        "model": "qwen-7b-q4"
+      },
+      []
+    ],
+    "got": "Starting qwen-7b-q4 on the NPU ... (the first start of a model can take a few minutes)",
+    "note": "starting"
+  },
+  {
+    "fn": "amdNpuText",
+    "args": [
+      {
+        "state": "ready"
+      },
+      {
+        "state": "failed",
+        "model": "qwen-7b-q4"
+      },
+      []
+    ],
+    "got": "qwen-7b-q4 did not start.",
+    "note": "did not start"
+  },
+  {
+    "fn": "amdNpuText",
+    "args": [
+      {
+        "state": "ready"
+      },
+      {
+        "state": "idle"
+      },
+      []
+    ],
+    "got": "Ready. Choose a model and run it on the NPU.",
+    "note": "ready and waiting"
+  },
+  {
+    "fn": "amdNpuText",
+    "args": [
+      {
+        "state": "flm_missing"
+      },
+      {
+        "state": "running",
+        "model": "m"
+      },
+      []
+    ],
+    "got": "An AMD NPU was found. fLLM runs models on it through FastFlowLM, which you install yourself (a free download).",
+    "note": "the state of the setup speaks first"
+  },
+  {
+    "fn": "amdNpuNativeText",
+    "args": [
+      null
+    ],
+    "got": "",
+    "note": "no native kernels in the build"
+  },
+  {
+    "fn": "amdNpuNativeText",
+    "args": [
+      {}
+    ],
+    "got": "",
+    "note": "no compiled flag"
+  },
+  {
+    "fn": "amdNpuNativeText",
+    "args": [
+      {
+        "compiled": false,
+        "available": true
+      }
+    ],
+    "got": "",
+    "note": "not compiled: nothing to say"
+  },
+  {
+    "fn": "amdNpuNativeText",
+    "args": [
+      {
+        "compiled": true,
+        "available": true
+      }
+    ],
+    "got": "Native fLLM kernels: ready. Start the server with FLLM_NPU_HOST=1 and the long prompts of any model run on the NPU, the rest on the processor (or choose NPU under Advanced when you load a model).",
+    "note": "ready"
+  },
+  {
+    "fn": "amdNpuNativeText",
+    "args": [
+      {
+        "compiled": true,
+        "available": false
+      }
+    ],
+    "got": "Native fLLM kernels: not available. FastFlowLM, below, does not need them.",
+    "note": "not available"
+  },
+  {
+    "fn": "amdNpuNativeText",
+    "args": [
+      {
+        "compiled": true,
+        "available": false,
+        "reason": "no NPU driver"
+      }
+    ],
+    "got": "Native fLLM kernels: not available (no NPU driver). FastFlowLM, below, does not need them.",
+    "note": "not available, with the reason"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      null,
+      ""
+    ],
+    "got": {
+      "visible": false
+    },
+    "note": "nothing was asked"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "no_npu"
+      },
+      ""
+    ],
+    "got": {
+      "visible": false
+    },
+    "note": "this machine has none"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "no_npu",
+        "models": [
+          {
+            "tag": "m",
+            "installed": true
+          }
+        ]
+      },
+      "m"
+    ],
+    "got": {
+      "visible": false
+    },
+    "note": "none, even with a list"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "flm_missing",
+        "flm": {
+          "install": {
+            "text": "Install FastFlowLM",
+            "url": "https://example.com/flm"
+          }
+        }
+      },
+      ""
+    ],
+    "got": {
+      "visible": true,
+      "summary": "An AMD NPU was found. fLLM runs models on it through FastFlowLM, which you install yourself (a free download).",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "muted",
+      "hardware": [],
+      "install": {
+        "text": "Install FastFlowLM",
+        "url": "https://example.com/flm"
+      },
+      "problems": [],
+      "version": null,
+      "models": [],
+      "selected": "",
+      "start": false,
+      "stop": false,
+      "pull": false,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "the card that offers the install"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "flm": {
+          "version": "0.4.1"
+        },
+        "models": [
+          {
+            "tag": "a",
+            "installed": true
+          },
+          {
+            "tag": "b",
+            "installed": false
+          }
+        ]
+      },
+      ""
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Ready. Choose a model and run it on the NPU.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "muted",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": "0.4.1",
+      "models": [
+        {
+          "tag": "a",
+          "label": "a",
+          "installed": true
+        },
+        {
+          "tag": "b",
+          "label": "b (not downloaded)",
+          "installed": false
+        }
+      ],
+      "selected": "a",
+      "start": true,
+      "stop": false,
+      "pull": false,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "the first that is on disk is chosen"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "models": [
+          {
+            "tag": "a",
+            "installed": true
+          },
+          {
+            "tag": "b",
+            "installed": true
+          }
+        ]
+      },
+      "b"
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Ready. Choose a model and run it on the NPU.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "muted",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "a",
+          "label": "a",
+          "installed": true
+        },
+        {
+          "tag": "b",
+          "label": "b",
+          "installed": true
+        }
+      ],
+      "selected": "b",
+      "start": true,
+      "stop": false,
+      "pull": false,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "what was chosen stays"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "models": [
+          {
+            "tag": "a",
+            "installed": true
+          },
+          {
+            "tag": "b",
+            "installed": true
+          }
+        ]
+      },
+      "gone"
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Ready. Choose a model and run it on the NPU.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "muted",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "a",
+          "label": "a",
+          "installed": true
+        },
+        {
+          "tag": "b",
+          "label": "b",
+          "installed": true
+        }
+      ],
+      "selected": "a",
+      "start": true,
+      "stop": false,
+      "pull": false,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "a choice the list does not have"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "models": [
+          {
+            "tag": "z",
+            "installed": false
+          },
+          {
+            "tag": "a",
+            "installed": true
+          }
+        ]
+      },
+      ""
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Ready. Choose a model and run it on the NPU.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "muted",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "a",
+          "label": "a",
+          "installed": true
+        },
+        {
+          "tag": "z",
+          "label": "z (not downloaded)",
+          "installed": false
+        }
+      ],
+      "selected": "a",
+      "start": true,
+      "stop": false,
+      "pull": false,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "installed first, then by tag"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "models": [
+          {
+            "tag": "z"
+          },
+          {
+            "tag": "a"
+          }
+        ]
+      },
+      ""
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Ready. Choose a model and run it on the NPU.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "muted",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "a",
+          "label": "a (not downloaded)",
+          "installed": false
+        },
+        {
+          "tag": "z",
+          "label": "z (not downloaded)",
+          "installed": false
+        }
+      ],
+      "selected": "a",
+      "stop": false,
+      "pull": true,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "a list without the flag sorts by tag"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "models": [
+          {
+            "tag": "Qwen/Q2",
+            "installed": false
+          },
+          {
+            "tag": "qwen/q1",
+            "installed": false
+          }
+        ]
+      },
+      ""
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Ready. Choose a model and run it on the NPU.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "muted",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "qwen/q1",
+          "label": "qwen/q1 (not downloaded)",
+          "installed": false
+        },
+        {
+          "tag": "Qwen/Q2",
+          "label": "Qwen/Q2 (not downloaded)",
+          "installed": false
+        }
+      ],
+      "selected": "qwen/q1",
+      "start": false,
+      "stop": false,
+      "pull": true,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "the case decides only when the tags are otherwise equal"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "models": [
+          {
+            "tag": "qwen",
+            "installed": false
+          },
+          {
+            "tag": "Qwen",
+            "installed": false
+          }
+        ]
+      },
+      ""
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Ready. Choose a model and run it on the NPU.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "muted",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "qwen",
+          "label": "qwen (not downloaded)",
+          "installed": false
+        },
+        {
+          "tag": "Qwen",
+          "label": "Qwen (not downloaded)",
+          "installed": false
+        }
+      ],
+      "selected": "qwen",
+      "start": false,
+      "stop": false,
+      "pull": true,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "lower case before upper, as localeCompare does"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready"
+      },
+      ""
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Ready. Choose a model and run it on the NPU.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "muted",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [],
+      "selected": "",
+      "start": false,
+      "stop": false,
+      "pull": false,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "no models at all"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "serving": {
+          "state": "running",
+          "model": "qwen"
+        },
+        "models": [
+          {
+            "tag": "qwen",
+            "installed": true
+          }
+        ]
+      },
+      ""
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Running qwen on the NPU. Pick \"AMD NPU (FastFlowLM) · qwen\" in the model list of the chat.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "good",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "qwen",
+          "label": "qwen",
+          "installed": true
+        }
+      ],
+      "selected": "qwen",
+      "start": false,
+      "stop": true,
+      "pull": false,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "the running model is the one in the list"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "serving": {
+          "state": "running",
+          "model": "qwen"
+        },
+        "models": [
+          {
+            "tag": "other",
+            "installed": true
+          }
+        ]
+      },
+      ""
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Running qwen on the NPU. Pick \"AMD NPU (FastFlowLM) · qwen\" in the model list of the chat.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "good",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "other",
+          "label": "other",
+          "installed": true
+        }
+      ],
+      "selected": "qwen",
+      "start": false,
+      "stop": true,
+      "pull": false,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "the running model is not in the list"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "serving": {
+          "state": "starting",
+          "model": "qwen"
+        },
+        "models": [
+          {
+            "tag": "qwen",
+            "installed": true
+          }
+        ]
+      },
+      ""
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Starting qwen on the NPU ... (the first start of a model can take a few minutes)",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "muted",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "qwen",
+          "label": "qwen",
+          "installed": true
+        }
+      ],
+      "selected": "qwen",
+      "start": false,
+      "stop": true,
+      "pull": false,
+      "cancelPull": false,
+      "busy": true,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "starting: no start, but a stop"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "serving": {
+          "state": "failed",
+          "model": "qwen",
+          "error": "it died"
+        },
+        "models": [
+          {
+            "tag": "qwen",
+            "installed": true
+          }
+        ]
+      },
+      ""
+    ],
+    "got": {
+      "visible": true,
+      "summary": "qwen did not start.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "warn",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "qwen",
+          "label": "qwen",
+          "installed": true
+        }
+      ],
+      "selected": "qwen",
+      "start": true,
+      "stop": false,
+      "pull": false,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": "it died",
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "a failed start says so"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "pull": {
+          "busy": true,
+          "model": "qwen",
+          "line": "12%"
+        },
+        "models": [
+          {
+            "tag": "qwen",
+            "installed": false
+          }
+        ]
+      },
+      "qwen"
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Ready. Choose a model and run it on the NPU.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "muted",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "qwen",
+          "label": "qwen (not downloaded)",
+          "installed": false
+        }
+      ],
+      "selected": "qwen",
+      "start": false,
+      "stop": false,
+      "pull": false,
+      "cancelPull": true,
+      "busy": true,
+      "pullText": "Downloading qwen: 12%",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "downloading: the line and the cancel"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "pull": {
+          "busy": false,
+          "model": "qwen",
+          "line": "done"
+        },
+        "models": [
+          {
+            "tag": "qwen",
+            "installed": true
+          }
+        ]
+      },
+      "qwen"
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Ready. Choose a model and run it on the NPU.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "muted",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "qwen",
+          "label": "qwen",
+          "installed": true
+        }
+      ],
+      "selected": "qwen",
+      "start": true,
+      "stop": false,
+      "pull": false,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "qwen downloaded.",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "the download is done"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "pull": {
+          "error": "cancelled"
+        },
+        "error": "kept from before",
+        "models": [
+          {
+            "tag": "qwen",
+            "installed": true
+          }
+        ]
+      },
+      "qwen"
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Ready. Choose a model and run it on the NPU.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "muted",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "qwen",
+          "label": "qwen",
+          "installed": true
+        }
+      ],
+      "selected": "qwen",
+      "start": true,
+      "stop": false,
+      "pull": false,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "a cancelled download says nothing"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "pull": {
+          "error": "the network is gone"
+        },
+        "models": [
+          {
+            "tag": "qwen",
+            "installed": true
+          }
+        ]
+      },
+      "qwen"
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Ready. Choose a model and run it on the NPU.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "warn",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "qwen",
+          "label": "qwen",
+          "installed": true
+        }
+      ],
+      "selected": "qwen",
+      "start": true,
+      "stop": false,
+      "pull": false,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": "the network is gone",
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "a failed download"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "needs_attention",
+        "validation": {
+          "problems": [
+            "the NPU is busy"
+          ]
+        }
+      },
+      ""
+    ],
+    "got": {
+      "visible": true,
+      "summary": "FastFlowLM reports a problem with the NPU setup: the NPU is busy",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "warn",
+      "hardware": [],
+      "install": null,
+      "problems": [
+        "the NPU is busy"
+      ],
+      "version": null,
+      "models": [],
+      "selected": "",
+      "start": false,
+      "stop": false,
+      "pull": false,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "the problems of the setup"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "error": "FastFlowLM said no",
+        "models": [
+          {
+            "tag": "qwen",
+            "installed": true
+          }
+        ]
+      },
+      "qwen"
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Ready. Choose a model and run it on the NPU.",
+      "nativeText": "",
+      "nativeReady": false,
+      "tone": "warn",
+      "hardware": [],
+      "install": null,
+      "problems": [],
+      "version": null,
+      "models": [
+        {
+          "tag": "qwen",
+          "label": "qwen",
+          "installed": true
+        }
+      ],
+      "selected": "qwen",
+      "start": true,
+      "stop": false,
+      "pull": false,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": "FastFlowLM said no",
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "an error of the card itself"
+  },
+  {
+    "fn": "amdNpuModel",
+    "args": [
+      {
+        "state": "ready",
+        "flm": {
+          "version": "0.4.1",
+          "install": {
+            "text": "Install",
+            "url": "https://example.com"
+          }
+        },
+        "hardware": [
+          {
+            "name": "Ryzen AI 9 HX 370"
+          },
+          {
+            "name": "XDNA",
+            "problem": "busy"
+          }
+        ],
+        "native": {
+          "compiled": true,
+          "available": false,
+          "reason": "no toolkit"
+        },
+        "models": [
+          {
+            "tag": "qwen-7b",
+            "installed": true
+          },
+          {
+            "tag": "llama-8b",
+            "installed": false
+          }
+        ]
+      },
+      "llama-8b"
+    ],
+    "got": {
+      "visible": true,
+      "summary": "Ready. Choose a model and run it on the NPU.",
+      "nativeText": "Native fLLM kernels: not available (no toolkit). FastFlowLM, below, does not need them.",
+      "nativeReady": false,
+      "tone": "muted",
+      "hardware": [
+        {
+          "label": "Ryzen AI 9 HX 370",
+          "problem": null
+        },
+        {
+          "label": "XDNA",
+          "problem": "busy"
+        }
+      ],
+      "install": null,
+      "problems": [],
+      "version": "0.4.1",
+      "models": [
+        {
+          "tag": "qwen-7b",
+          "label": "qwen-7b",
+          "installed": true
+        },
+        {
+          "tag": "llama-8b",
+          "label": "llama-8b (not downloaded)",
+          "installed": false
+        }
+      ],
+      "selected": "llama-8b",
+      "start": false,
+      "stop": false,
+      "pull": true,
+      "cancelPull": false,
+      "busy": false,
+      "pullText": "",
+      "error": null,
+      "note": "FastFlowLM is a separate program (its NPU kernels are AMD's, free to use). It has its own model files, so a model here is not the same file as one in your fLLM model list."
+    },
+    "note": "the whole card at once"
+  }
+]

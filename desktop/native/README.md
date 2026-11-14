@@ -155,15 +155,36 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   device grid sits the whole pure zone of `npu.js`: how the same chip through several driver
   interfaces becomes one entry (`mergeDevices`), which interface stands first (`deviceRank`), the
   choice list of the load options, the memory bar of a card, the sentence of where the model runs
-  and the role of every device. Fifty-six fixtures against the Studio's own file, ten unit tests,
-  one window test with a drawing, four mutations.
+  and the role of every device. Its buttons do what the Studio's do: *Install the runtime* and
+  *Cancel* post to `/api/studio/npu/setup`, *Remove the runtime* asks first with the question of
+  `confirmDialog` before the DELETE, and while a setup runs or the prompt offload works the state
+  is asked again every two seconds. Fifty-six fixtures against the Studio's own file, ten unit
+  tests, two window tests with two drawings, four mutations.
+- AMD NPU card: the whole `@pure` zone of `amdnpu.js` — `amdNpuModel`, `amdNpuText` and
+  `amdNpuNativeText` — against thirty-seven fixtures that file produced itself. The card shows
+  itself only when the machine has an AMD NPU or FastFlowLM; it carries the summary of what
+  FastFlowLM is doing, the hardware rows, the model list with *(not downloaded)*, the
+  start/stop/download/cancel buttons, the install link, the problems, the line of the native
+  kernels and the note the Studio always writes, sorted the way `localeCompare` orders the tags
+  (lower case first, then the case as its own level). The actions go through
+  `POST /api/studio/npu/amd` with the chosen model.
 - Hardware card: what this machine has (the processor and the cards with their memory; a device
   without memory stays out) with *Test this GPU* on the cards that can be tested — the CPU and the
-  NPU are skipped, *Testing ...* while it runs, and the answers come back coloured ok/warn/bad. The
-  amber notice of what runs on the CPU is the `fallbackNotice` of the Studio with its titles, count
-  line, reasons and operations. Eleven fixtures of the Studio's own pure zone, five unit tests, two
-  window tests with one drawing, four mutations. (The speed test, the processor limits, the RAM
-  line, the NPU card and the choice sentence are still open.)
+  NPU are skipped, *Testing ...* while it runs, the check going over every interface of the card
+  behind the button, and the answers coming back coloured ok/warn/bad. The amber notice of what
+  runs on the CPU is the `fallbackNotice` of the Studio with its titles, count line, reasons and
+  operations. Over the devices sits the first card of the Studio's pane: the two buttons *Measure
+  memory speed* (`?benchmark=true`) and *Check the processor* (`POST /api/studio/selftest-cpu`,
+  which draws the *Processor check* card with one row per feature level and PASS/FAIL), and the
+  four rows *Speed test* (one short answer with the loaded model — *Load a model first.* without
+  one, *Testing, this takes a few seconds ...* while it runs, then the line with the tokens read
+  and written and the device that did it), *Processor feature limit* (`auto` plus every
+  instruction set this processor supports, written through `POST /api/studio/config`), *Faster
+  reading of long prompts* (the repack switch) and *System memory* (the instruction set, the
+  measured bandwidth when one was made, the bar and the numbers; *Measuring ...* and *—* until the
+  report arrives). The table of *Chats answered at the same time* (`GET /slots`) closes the pane.
+  Eleven fixtures of the Studio's own pure zone, seven unit tests, seven window tests with five
+  drawings, ten mutations.
 - Appearance: the settings card of the Studio — theme (system/dark/light), the eight accent
   colors with the chosen one ringed, the base size of the text (14–18px), *Tint your messages* and
   *Show generation speed*. The accent colours the whole page exactly as the Studio computes it

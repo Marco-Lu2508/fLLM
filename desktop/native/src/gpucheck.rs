@@ -40,6 +40,80 @@ pub struct VerdictLine {
     pub cls: &'static str,
 }
 
+/// What the *Processor check* card shows after `POST /api/studio/selftest-cpu`
+/// (`btnRunSimdSelftest` of `listeners-panels.js`): one line over the table and one line under it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Selftest {
+    /// *Processor check: X of Y checks passed in Z ms, N skipped (…)*
+    pub title: String,
+    /// The closing sentence of the Studio, with *All correct.* or *Some results deviate.*
+    pub note: String,
+    /// One row per feature level of the report.
+    pub rows: Vec<SelftestRow>,
+}
+
+/// One feature level of the self-test: how many checks it has, how many of them passed and failed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelftestRow {
+    pub tier: String,
+    pub checks: u64,
+    pub passed: u64,
+    pub failed: u64,
+    pub ok: bool,
+}
+
+impl Selftest {
+    pub fn from_json(v: &Value) -> Self {
+        let failed = v.get("failed").and_then(Value::as_u64).unwrap_or(0);
+        let checks = v.get("checks").and_then(Value::as_u64).unwrap_or(0);
+        let skipped = v.get("skipped").and_then(Value::as_u64).unwrap_or(0);
+        let duration = v.get("duration_ms").and_then(Value::as_f64).unwrap_or(0.0);
+        let ok_all = v.get("ok").and_then(Value::as_bool).unwrap_or(false) && failed == 0;
+        let title = format!(
+            "Processor check: {} of {} checks passed in {} ms, {} skipped (feature not supported by this processor)",
+            checks.saturating_sub(failed),
+            checks,
+            duration.round() as i64,
+            skipped
+        );
+        let note = format!(
+            "The calculations the model needs are checked against exact results for every processor feature level. {}",
+            if ok_all { "All correct." } else { "Some results deviate." }
+        );
+        let rows = v
+            .get("tested_tiers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|c| SelftestRow {
+                tier: c.get("tier").and_then(Value::as_str).unwrap_or("").to_string(),
+                checks: c.get("checks").and_then(Value::as_u64).unwrap_or(0),
+                passed: c.get("passed").and_then(Value::as_u64).unwrap_or(0),
+                failed: c.get("failed").and_then(Value::as_u64).unwrap_or(0),
+                ok: c.get("ok").and_then(Value::as_bool).unwrap_or(false),
+            })
+            .collect();
+        Selftest { title, note, rows }
+    }
+}
+
+/// The devices the check of one card runs over (`runGpuCheck` of `gpucheck.js`): every interface
+/// of the physical device behind the button — the button's own id when no group holds it.
+pub fn check_members(devices: &[crate::tour::Device], id: &str) -> Vec<String> {
+    let filtered: Vec<crate::tour::Device> = devices
+        .iter()
+        .filter(|d| d.backend != "cpu")
+        .cloned()
+        .collect();
+    for group in crate::npu::merge_devices(&filtered, id) {
+        // the Studio compares the ids as they stand (`g.id === id`)
+        if group.primary.id == id {
+            return group.members.iter().map(|m| m.id.clone()).collect();
+        }
+    }
+    vec![id.to_string()]
+}
+
 pub fn gpu_verdict_line(result: &GpuResult) -> VerdictLine {
     let cls = if result.status == "ok" {
         "ok"
@@ -308,5 +382,81 @@ mod tests {
         let with = gpu_check_view("cuda", false, &[GpuResult { device: "cuda:0".into(), status: "ok".into(), verdict: "fine".into() }]);
         assert_eq!(with.lines.len(), 1);
         assert_eq!(with.lines[0].text, "cuda:0: fine");
+    }
+
+    fn device(id: &str, name: &str, backend: &str, api: &str, bytes: u64) -> crate::tour::Device {
+        crate::tour::Device {
+            id: id.into(),
+            name: name.into(),
+            backend: backend.into(),
+            api: api.into(),
+            dev_type: String::new(),
+            total_memory_bytes: bytes,
+            free_memory_bytes: 0,
+            available: true,
+            has_id: !id.is_empty(),
+        }
+    }
+
+    /// The check of one card runs over every interface of the physical device behind the button,
+    /// and over nothing else (`runGpuCheck` of `gpucheck.js`).
+    #[test]
+    fn the_check_of_a_card_runs_over_its_members() {
+        let devices = vec![
+            device("cpu0", "Intel Core i5", "cpu", "cpu", 16_000_000_000u64),
+            device("cuda:0", "GeForce RTX 4060", "cuda", "cuda", 8_000_000_000u64),
+            device("vulkan:1", "GeForce RTX 4060", "vulkan", "vulkan", 8_100_000_000u64),
+            device("vulkan:2", "GeForce RTX 4060", "vulkan", "wgpu", 8_100_000_000u64),
+            device("npu0", "Intel AI Boost", "npu", "npu", 0),
+        ];
+        // the same card through three interfaces is one check: the processor is left out, the
+        // entries of the device come in the order the report gave them
+        assert_eq!(
+            check_members(&devices, "cuda:0"),
+            vec!["cuda:0", "vulkan:1", "vulkan:2"],
+            "every interface of the card is tested"
+        );
+        // the wanted id decides which group is meant (the Studio compares them as they stand)
+        assert_eq!(check_members(&devices, "CUDA:0"), vec!["CUDA:0"], "an id of no group is its own check");
+        // an NPU is never merged: its group holds it alone
+        assert_eq!(check_members(&devices, "npu0"), vec!["npu0"]);
+        // nothing to go on: the button's own id, once
+        assert_eq!(check_members(&[], "cuda:0"), vec!["cuda:0"]);
+        let no_id = vec![device("", "Nameless", "cuda", "cuda", 1_000u64)];
+        assert_eq!(check_members(&no_id, "cuda:0"), vec!["cuda:0"], "an entry without an id is no group");
+    }
+
+    /// The title and the closing line of the processor check are the Studio's own words
+    /// (`btnRunSimdSelftest` of `listeners-panels.js`).
+    #[test]
+    fn the_processor_check_says_what_the_studio_says() {
+        let report = Selftest::from_json(&json!({
+            "ok": true, "checks": 120, "failed": 0, "skipped": 4, "duration_ms": 5123.4,
+            "tested_tiers": [
+                {"tier": "avx2-fma", "checks": 40, "passed": 40, "failed": 0, "ok": true},
+                {"tier": "scalar", "checks": 40, "passed": 39, "failed": 1, "ok": false},
+            ],
+        }));
+        assert_eq!(
+            report.title,
+            "Processor check: 120 of 120 checks passed in 5123 ms, 4 skipped (feature not supported by this processor)"
+        );
+        assert!(
+            report.note.ends_with(" All correct."),
+            "{}",
+            report.note
+        );
+        assert_eq!(report.rows.len(), 2);
+        assert_eq!((report.rows[0].tier.as_str(), report.rows[0].ok), ("avx2-fma", true));
+        // a row says what the server says about it, not what the totals say
+        assert!(!report.rows[1].ok);
+        // one failed check, however the server flags itself: the note deviates
+        let bad = Selftest::from_json(&json!({"ok": true, "checks": 10, "failed": 2, "duration_ms": 1.4}));
+        assert!(bad.title.starts_with("Processor check: 8 of 10 checks passed in 1 ms"), "{}", bad.title);
+        assert!(bad.note.ends_with("Some results deviate."), "{}", bad.note);
+        // nothing at all: the line still reads
+        let empty = Selftest::from_json(&json!({}));
+        assert_eq!(empty.rows.len(), 0);
+        assert!(empty.title.starts_with("Processor check: 0 of 0"), "{}", empty.title);
     }
 }

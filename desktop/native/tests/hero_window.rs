@@ -196,6 +196,8 @@ fn the_status_of_the_setup_server_has_what_the_screen_needs() {
         slots_running: 0,
         device_fallbacks: None,
         load_device: String::from("auto"),
+        // the setup server says nothing about the engine settings
+        config: Default::default(),
     };
     assert_eq!(status, expected, "the setup server's answer");
     let plain = parse_status(&json!({}));

@@ -4,6 +4,7 @@
 //! window stays small. This first stage is the chat; Models, Settings and Code follow (see `README.md`).
 
 pub mod api;
+pub mod amdnpu;
 pub mod app;
 pub mod assistants;
 pub mod artifacts;

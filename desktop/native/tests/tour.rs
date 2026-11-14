@@ -4,8 +4,8 @@
 
 use fllm_app::models::{parse_overview, CatalogEntry};
 use fllm_app::tour::{
-    body, describe_computer, format_combo, merge_devices, shortcut_label, Body, Device, Hardware,
-    TourData, STEPS,
+    body, describe_computer, format_combo, merge_devices, shortcut_label, system_memory,
+    tier_label, tier_options, Body, Device, Hardware, TourData, STEPS,
 };
 use serde_json::json;
 
@@ -60,6 +60,7 @@ fn the_line_about_the_computer_says_the_processor_and_the_graphics_devices() {
             dev("NVIDIA GeForce RTX 4060", "cuda", "native", "gpu", 8_000_000_000u64),
             dev("NVIDIA GeForce RTX 4060", "vulkan", "native", "gpu", 8_000_000_000u64),
         ],
+        ..Hardware::default()
     };
     // the same graphics card through two interfaces is one entry (its memory once)
     let line = describe_computer(Some(&hw), 6_000_000_000u64, None);
@@ -78,7 +79,11 @@ fn the_line_about_the_computer_says_the_processor_and_the_graphics_devices() {
 /// (`names.join(' · ') || 'Unknown processor'` and `usable ? … : 'memory unknown'`).
 #[test]
 fn the_line_falls_back_the_way_the_studio_falls_back() {
-    let line = describe_computer(Some(&Hardware { auto_choice: String::from("cpu"), devices: vec![] }), 0, None);
+    let line = describe_computer(
+        Some(&Hardware { auto_choice: String::from("cpu"), devices: vec![], ..Hardware::default() }),
+        0,
+        None,
+    );
     assert_eq!(line, "Unknown processor · memory unknown");
     let failed = describe_computer(None, 0, Some("permission denied"));
     assert_eq!(failed, "The hardware could not be read: permission denied");
@@ -125,6 +130,7 @@ fn every_step_says_what_the_studio_says() {
         Some(&Hardware {
             auto_choice: String::from("cpu"),
             devices: vec![dev("Intel Core i5", "cpu", "native", "cpu", 0)],
+            ..Hardware::default()
         }),
         7_000_000_000,
         None,
@@ -296,5 +302,80 @@ fn a_catalog_entry_keeps_the_name_people_see() {
         overview.catalog[1].display_name,
         "y:1b",
         "without a display name the id is what people see"
+    );
+}
+
+/// The *System memory* row of Settings > Hardware: the line under its title, the numbers beside
+/// the bar and how much of the bar is filled (`refreshHardware` of `panels.js`).
+#[test]
+fn the_system_memory_row_reads_the_report_the_way_the_studio_does() {
+    let hw = Hardware {
+        devices: vec![dev("Intel Core i5", "cpu", "native", "cpu", 16_000_000_000u64)],
+        host_free_memory_bytes: 4_000_000_000u64,
+        active_cpu_tier: String::from("avx2-fma"),
+        supported_cpu_tiers: vec![String::from("avx512-vnni"), String::from("avx2-fma")],
+        threads: 8,
+        ..Hardware::default()
+    };
+    let row = system_memory(&hw);
+    assert_eq!(
+        row.desc,
+        "Instruction set: avx2-fma (available: avx512-vnni, avx2-fma). 8 threads."
+    );
+    assert_eq!(
+        row.free_text,
+        format!(
+            "{} free of {}",
+            fllm_app::app::format_bytes(4_000_000_000u64),
+            fllm_app::app::format_bytes(16_000_000_000u64)
+        )
+    );
+    assert_eq!(row.pct, 75, "a quarter of the machine is in use");
+
+    // a measured bandwidth replaces the list of tiers, rounded the way `toFixed(1)` does it
+    let measured = Hardware { measured_cpu_bandwidth_gbs: Some(48.25), ..hw.clone() };
+    assert_eq!(
+        system_memory(&measured).desc,
+        "Instruction set: avx2-fma. Measured memory bandwidth: 48.3 GB/s. 8 threads."
+    );
+
+    // the bar never stands still and never runs over: two percent at least, a hundred at most
+    let full = Hardware {
+        devices: vec![dev("cpu", "cpu", "cpu", "cpu", 1000)],
+        ..Hardware::default()
+    };
+    assert_eq!(system_memory(&full).pct, 100, "nothing of it is free");
+    let idle = Hardware {
+        devices: vec![dev("cpu", "cpu", "cpu", "cpu", 1000)],
+        host_free_memory_bytes: 1000,
+        ..Hardware::default()
+    };
+    assert_eq!(
+        system_memory(&idle).pct,
+        2,
+        "the Studio keeps two percent of the bar visible"
+    );
+    let none = Hardware::default();
+    assert_eq!(system_memory(&none).pct, 2, "without a size there is nothing to fill");
+    assert_eq!(
+        system_memory(&none).desc,
+        "Instruction set:  (available: ). 0 threads."
+    );
+}
+
+/// The choices of the *Processor feature limit* and how one of them is written in the select.
+#[test]
+fn the_feature_limit_offers_auto_and_every_supported_instruction_set() {
+    let hw = Hardware {
+        supported_cpu_tiers: vec![String::from("avx512-vnni"), String::from("avx2-fma")],
+        ..Hardware::default()
+    };
+    assert_eq!(tier_options(&hw), vec!["auto", "avx512-vnni", "avx2-fma"]);
+    assert_eq!(tier_label("auto"), "Auto (highest supported)");
+    assert_eq!(tier_label("avx2-fma"), "avx2-fma");
+    assert_eq!(
+        tier_options(&Hardware::default()),
+        vec!["auto"],
+        "without a report only the automatic one is offered"
     );
 }

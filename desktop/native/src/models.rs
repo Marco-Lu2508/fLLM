@@ -291,6 +291,14 @@ pub async fn fetch_hardware(base: String) -> Result<crate::tour::Hardware, Strin
     }
 }
 
+/// The same report after a bandwidth measurement (`refreshHardware(true)` of `panels.js`: the
+/// *Measure memory speed* button asks for `?benchmark=true`).
+pub async fn fetch_hardware_measured(base: String) -> Result<crate::tour::Hardware, String> {
+    get_json(&base, "/api/studio/hardware?benchmark=true")
+        .await
+        .map(|v| crate::tour::Hardware::from_json(&v))
+}
+
 /// What the start screen shows: what the engine is doing right now — the setup state of a server
 /// without a model, the model and the counters of its own clock (the hero of `panels.js` reads
 /// them from `GET /api/studio/status`).
@@ -313,9 +321,29 @@ pub struct Status {
     /// The `--device` value the loaded model runs with (`model.load_options.device`, "auto" when
     /// the server chose) — what `deviceRole` of `npu.js` asks for.
     pub load_device: String,
+    /// The engine's configuration as the status reports it (`config` of the route) — the two rows
+    /// of the hardware card read it before they are touched.
+    pub config: StatusConfig,
+}
+
+/// The engine settings the hardware card shows: the switch for repacking the weights and the
+/// instruction set cap (`cpu_repack` and `cpu_tier_cap` of `data.config` in `refreshStudioStatus`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatusConfig {
+    /// Whether long prompts are read faster with repacked weights.
+    pub cpu_repack: bool,
+    /// The instruction set cap the server runs with; `auto` when it does not say.
+    pub cpu_tier_cap: String,
+}
+
+impl Default for StatusConfig {
+    fn default() -> Self {
+        StatusConfig { cpu_repack: false, cpu_tier_cap: String::from("auto") }
+    }
 }
 
 pub fn parse_status(v: &Value) -> Status {
+    let config = v.get("config");
     Status {
         setup: v.get("setup").and_then(Value::as_bool).unwrap_or(false),
         last_model: v.get("last_model").and_then(Value::as_str).unwrap_or_default().to_string(),
@@ -333,6 +361,19 @@ pub fn parse_status(v: &Value) -> Status {
             .and_then(Value::as_str)
             .unwrap_or("auto")
             .to_string(),
+        config: StatusConfig {
+            cpu_repack: config
+                .and_then(|c| c.get("cpu_repack"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            // `data.config?.cpu_tier_cap || 'auto'`
+            cpu_tier_cap: config
+                .and_then(|c| c.get("cpu_tier_cap"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("auto")
+                .to_string(),
+        },
     }
 }
 
@@ -397,17 +438,242 @@ fn urlencode(text: &str) -> String {
     out
 }
 
-/// Runs the quantized matrix product of a check on one device and on the CPU
-/// (`POST /api/studio/gpu-check` with `{device}`) — the answer holds the result lines.
-pub async fn gpu_check(base: String, device: String) -> Result<Vec<crate::gpucheck::GpuResult>, String> {
-    post(&base, "/api/studio/gpu-check", json!({ "device": device }))
-        .await
-        .map(|v| crate::gpucheck::GpuResult::from_json(&v))
+/// The member loop of the check (`runGpuCheck` of `gpucheck.js`): every interface of the card is
+/// tested in turn and all the lines land under the one card. A server that says no leaves its
+/// line and the loop goes on with the next member; a server that cannot be reached ends the loop
+/// with the Studio's own line for the card itself.
+pub async fn gpu_check_members(
+    base: String,
+    card: String,
+    members: Vec<String>,
+) -> Vec<crate::gpucheck::GpuResult> {
+    let client = reqwest::Client::new();
+    let mut out = Vec::new();
+    for member in members {
+        let resp = match client
+            .post(format!("{base}/api/studio/gpu-check"))
+            .json(&json!({ "device": member }))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                out.push(crate::gpucheck::GpuResult {
+                    device: card.clone(),
+                    status: String::from("error"),
+                    verdict: format!("The check could not run ({e})."),
+                });
+                break;
+            }
+        };
+        let status = resp.status();
+        let data: Value = resp.json().await.unwrap_or(Value::Null);
+        if status.is_success() {
+            out.extend(crate::gpucheck::GpuResult::from_json(&data));
+        } else {
+            out.push(crate::gpucheck::GpuResult {
+                device: member,
+                status: String::from("error"),
+                verdict: fail_words(&data, "The check could not run."),
+            });
+        }
+    }
+    out
+}
+
+/// One slot of the scheduler (`GET /slots`): which of them is working right now — the table of
+/// *Chats answered at the same time* (`hwSlotsTableWrap` of `panels.js`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Slot {
+    pub id: u64,
+    pub state: String,
+    /// The context the slot was started with (`n_ctx`).
+    pub n_ctx: u64,
+    /// The Studio reads *Running* from `next_token`: anything but null is a task.
+    pub running: bool,
+}
+
+/// The answer of `/slots`: an array on its own, or under `slots`.
+pub fn parse_slots(v: &Value) -> Vec<Slot> {
+    let list = v.as_array().or_else(|| v.get("slots").and_then(Value::as_array));
+    list.into_iter()
+        .flatten()
+        .map(|s| Slot {
+            id: s.get("id").and_then(Value::as_u64).unwrap_or(0),
+            state: text_of(s, "state"),
+            n_ctx: s.get("n_ctx").and_then(Value::as_u64).unwrap_or(0),
+            running: s.get("next_token").is_some_and(|t| !t.is_null()),
+        })
+        .collect()
+}
+
+/// The slots of the running server (`GET /slots`).
+pub async fn fetch_slots(base: String) -> Result<Vec<Slot>, String> {
+    get_json(&base, "/slots").await.map(|v| parse_slots(&v))
 }
 
 /// The state of the NPU for the card (`GET /api/npu`); the card decides what of it shows.
 pub async fn fetch_npu(base: String) -> Result<Value, String> {
     get_json(&base, "/api/npu").await
+}
+
+/// The error words of a request whose failures must read the way the Studio writes them: what the
+/// server sent in `error.message` (or `error`), and `fallback` when it sent nothing at all.
+fn fail_words(data: &Value, fallback: &str) -> String {
+    data.pointer("/error/message")
+        .and_then(Value::as_str)
+        .or_else(|| data.get("error").and_then(Value::as_str))
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// A POST whose failures read like the Studio's own: the message of the server when it sent one,
+/// `fallback` when it sent none — and when the server could not be reached at all
+/// (`npuSetupAction` of `npu.js` shows `The NPU action failed.` for every failure but a message).
+async fn post_fallback(base: &str, path: &str, body: Value, fallback: &str) -> Result<Value, String> {
+    let resp = match reqwest::Client::new()
+        .post(format!("{base}{path}"))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return Err(fallback.to_string()),
+    };
+    let status = resp.status();
+    let data: Value = resp.json().await.unwrap_or(Value::Null);
+    if status.is_success() {
+        return Ok(data);
+    }
+    Err(fail_words(&data, fallback))
+}
+
+/// Writes one engine setting (`POST /api/studio/config`) — the *Processor feature limit* select and
+/// the *Faster reading of long prompts* switch of the hardware card.
+pub async fn post_config(base: String, body: Value) -> Result<Value, String> {
+    post(&base, "/api/studio/config", body).await
+}
+
+/// Runs the processor's own check (`POST /api/studio/selftest-cpu`) — the report the card
+/// *Processor check* draws (`btnRunSimdSelftest` of `listeners-panels.js`).
+pub async fn selftest_cpu(base: String) -> Result<crate::gpucheck::Selftest, String> {
+    post(&base, "/api/studio/selftest-cpu", json!({}))
+        .await
+        .map(|v| crate::gpucheck::Selftest::from_json(&v))
+}
+
+/// The speed test: one short answer with the loaded model, read for its timings. The prompt and
+/// the request are the ones of `btnSpeedTest` in `models.js`.
+pub async fn speed_test(base: String, model: String) -> Result<Value, String> {
+    let text = "The quick brown fox jumps over the lazy dog. ".repeat(24);
+    post_fallback(
+        &base,
+        "/v1/chat/completions",
+        json!({
+            "model": model,
+            "stream": false,
+            "temperature": 0,
+            "max_tokens": 64,
+            "messages": [{ "role": "user", "content": format!("{text}\nNow write a short story about a fox.") }],
+        }),
+        "The test failed.",
+    )
+    .await
+}
+
+/// The line under the speed test's button (`btnSpeedTest` of `models.js`): what the answer weighed,
+/// how fast it was read and written, and which device did it. The device name is the one of the
+/// automatic choice when the server picked it, the device value itself otherwise.
+pub fn speed_test_line(
+    timings: &Value,
+    load_device: &str,
+    devices: &[crate::tour::Device],
+    auto_choice: &str,
+) -> String {
+    let number = |key: &str| -> f64 {
+        match timings.get(key) {
+            Some(Value::String(s)) => s.parse::<f64>().unwrap_or(0.0),
+            other => other.and_then(Value::as_f64).unwrap_or(0.0),
+        }
+    };
+    // `(Number(value) > 0 ? … : 'too short to measure')`
+    let rate = |value: f64| {
+        if value > 0.0 {
+            // `Number(value).toFixed(1)`: half away from the zero, before Rust's own rounding
+            let tenth = (value * 10.0).round() / 10.0;
+            format!("{tenth:.1} tokens per second")
+        } else {
+            String::from("too short to measure")
+        }
+    };
+    // `nf`: `Number(n || 0).toLocaleString('en-US')`
+    let count = |value: f64| {
+        if value.is_finite() && value > 0.0 {
+            crate::app::group(value.round() as u64)
+        } else {
+            String::from("0")
+        }
+    };
+    let device = if load_device.is_empty() { "auto" } else { load_device };
+    let found = if device == "auto" {
+        devices.iter().find(|d| d.id == auto_choice).map(|d| d.name.clone())
+    } else {
+        Some(device.to_string())
+    };
+    let name = found.filter(|s| !s.is_empty()).unwrap_or_else(|| device.to_string());
+    format!(
+        "Reading the prompt: {} ({} tokens). Writing the answer: {} ({} tokens). Device: {}.",
+        rate(number("prompt_per_second")),
+        count(number("prompt_n")),
+        rate(number("predicted_per_second")),
+        count(number("predicted_n")),
+        name
+    )
+}
+
+/// The NPU setup actions (`npuSetupAction` of `npu.js`): `install` and `cancel` are a POST, an
+/// empty action takes the runtime away (the DELETE behind *Remove the runtime*).
+pub async fn npu_setup(base: String, action: &'static str) -> Result<Value, String> {
+    const FALLBACK: &str = "The NPU action failed.";
+    if action.is_empty() {
+        let resp = match reqwest::Client::new()
+            .delete(format!("{base}/api/studio/npu/setup"))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => return Err(String::from(FALLBACK)),
+        };
+        let status = resp.status();
+        let data: Value = resp.json().await.unwrap_or(Value::Null);
+        return if status.is_success() {
+            Ok(data)
+        } else {
+            Err(fail_words(&data, FALLBACK))
+        };
+    }
+    post_fallback(&base, "/api/studio/npu/setup", json!({ "action": action }), FALLBACK).await
+}
+
+/// The state of the AMD NPU card (`GET /api/studio/npu/amd`).
+pub async fn fetch_amd_npu(base: String) -> Result<Value, String> {
+    get_json(&base, "/api/studio/npu/amd").await
+}
+
+/// One action of the AMD NPU card (`amdNpuAction` of `amdnpu.js`): start, stop, pull,
+/// cancel_pull — always with the model the list holds.
+pub async fn amd_npu_action(
+    base: String,
+    action: &'static str,
+    model: String,
+) -> Result<Value, String> {
+    post_fallback(
+        &base,
+        "/api/studio/npu/amd",
+        json!({ "action": action, "model": model }),
+        "The NPU action failed.",
+    )
+    .await
 }
 
 /// The prices per million tokens the user entered (`GET /api/studio/prices`).
@@ -734,5 +1000,75 @@ mod tests {
     fn sizes_and_times_read_like_a_download_page() {
         assert_eq!((size(4_908_435_456).as_str(), size(428_730_208).as_str(), size(12_000).as_str()), ("4.9 GB", "429 MB", "12 KB"));
         assert_eq!((duration(45).as_str(), duration(61).as_str(), duration(3720).as_str()), ("45 s", "2 min", "1 h 2 min"));
+    }
+
+    /// The line under *Run speed test* is the Studio's own: what the answer weighed, how fast it
+    /// was read and written, and the device that did it (`btnSpeedTest` of `models.js`).
+    #[test]
+    fn the_speed_test_line_reads_the_way_the_studio_writes_it() {
+        let device = crate::tour::Device {
+            id: String::from("cuda:0"),
+            name: String::from("NVIDIA GeForce RTX 4060"),
+            backend: String::from("cuda"),
+            api: String::from("cuda"),
+            dev_type: String::from("gpu"),
+            total_memory_bytes: 8_000_000_000u64,
+            free_memory_bytes: 2_000_000_000u64,
+            available: true,
+            has_id: true,
+        };
+        let devices = vec![device];
+        let timings = json!({
+            "prompt_per_second": 812.34, "prompt_n": 1234,
+            "predicted_per_second": 42.0, "predicted_n": 64,
+        });
+        assert_eq!(
+            speed_test_line(&timings, "auto", &devices, "cuda:0"),
+            "Reading the prompt: 812.3 tokens per second (1,234 tokens). Writing the answer: 42.0 tokens per second (64 tokens). Device: NVIDIA GeForce RTX 4060."
+        );
+        // a timing the server does not send is zero: nothing to measure and no tokens
+        assert_eq!(
+            speed_test_line(&json!({}), "auto", &devices, "cuda:0"),
+            "Reading the prompt: too short to measure (0 tokens). Writing the answer: too short to measure (0 tokens). Device: NVIDIA GeForce RTX 4060."
+        );
+        // a device that was chosen is named as it stands, and a half number is rounded away from
+        // the zero the way `toFixed(1)` does it (Rust's own formatting would say 48.2)
+        let half = speed_test_line(&json!({"predicted_per_second": 48.25}), "cpu", &devices, "cuda:0");
+        assert!(half.contains("48.3 tokens per second"), "{half}");
+        assert!(half.ends_with("Device: cpu."), "{half}");
+        // without a report the Studio falls back to the device value itself
+        let none: Vec<crate::tour::Device> = Vec::new();
+        assert!(
+            speed_test_line(&timings, "auto", &none, "cuda:0").ends_with("Device: auto."),
+            "no report, no device name"
+        );
+    }
+
+    /// The table of *Chats answered at the same time*: an array or an object, and *Running* from
+    /// `next_token` (`hwSlotsTableWrap` of `panels.js`).
+    #[test]
+    fn the_slots_table_reads_what_the_server_says() {
+        let slots = parse_slots(&json!([
+            {"id": 0, "state": "idle", "n_ctx": 8192, "next_token": null},
+            {"id": 1, "state": "processing", "n_ctx": 4096, "next_token": 17},
+        ]));
+        assert_eq!(slots.len(), 2);
+        assert!(!slots[0].running && slots[0].id == 0 && slots[0].n_ctx == 8192);
+        assert!(slots[1].running && slots[1].state == "processing");
+        // the same answer under a key, and nothing at all
+        assert_eq!(parse_slots(&json!({"slots": [{"id": 3, "state": "idle", "n_ctx": 0}]})).len(), 1);
+        assert!(parse_slots(&json!({})).is_empty());
+    }
+
+    /// The two engine settings of the hardware card are read from `config` of the status, with the
+    /// words the Studio falls back to when the server says nothing.
+    #[test]
+    fn the_status_carries_the_repack_switch_and_the_instruction_set() {
+        let full = parse_status(&json!({"config": {"cpu_repack": true, "cpu_tier_cap": "avx2-fma"}}));
+        assert!(full.config.cpu_repack);
+        assert_eq!(full.config.cpu_tier_cap, "avx2-fma");
+        let plain = parse_status(&json!({"config": {"cpu_tier_cap": ""}}));
+        assert!(!plain.config.cpu_repack, "without the field the switch is off");
+        assert_eq!(plain.config.cpu_tier_cap, "auto", "an empty cap is the automatic one");
     }
 }

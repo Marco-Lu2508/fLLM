@@ -144,7 +144,110 @@ impl Hardware {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("cpu")
             .to_string();
-        Hardware { devices, auto_choice }
+        let host_free_memory_bytes = v
+            .get("host_free_memory_bytes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        let measured_cpu_bandwidth_gbs = v
+            .get("measured_cpu_bandwidth_gbs")
+            .and_then(serde_json::Value::as_f64);
+        let active_cpu_tier = v
+            .get("active_cpu_tier")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let supported_cpu_tiers = v
+            .get("supported_cpu_tiers")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let threads = v.get("threads").and_then(serde_json::Value::as_u64).unwrap_or_default();
+        Hardware {
+            devices,
+            auto_choice,
+            host_free_memory_bytes,
+            measured_cpu_bandwidth_gbs,
+            active_cpu_tier,
+            supported_cpu_tiers,
+            threads,
+        }
+    }
+}
+
+/// What the *System memory* row of Settings > Hardware shows (`refreshHardware` of `panels.js`):
+/// the line under its title, the text beside the bar and how much of the bar is filled.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SystemMemory {
+    /// The instruction set, the measured bandwidth when one exists, and the thread count.
+    pub desc: String,
+    /// `free of total`, in the app's own bytes.
+    pub free_text: String,
+    /// The used part of the bar in percent: never under two, never over a hundred.
+    pub pct: u32,
+}
+
+/// The *System memory* row from the hardware report. The size comes from the first device of the
+/// report and the free part from the host's own number when it has one, as the Studio reads them.
+pub fn system_memory(hw: &Hardware) -> SystemMemory {
+    let first = hw.devices.first();
+    let total = first.map(|d| d.total_memory_bytes).unwrap_or(0);
+    let free = if hw.host_free_memory_bytes > 0 {
+        hw.host_free_memory_bytes
+    } else {
+        first.map(|d| d.free_memory_bytes).unwrap_or(0)
+    };
+    let used = if total > 0 {
+        (total.saturating_sub(free) as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+    // `Math.min(100, Math.max(2, usedPct)).toFixed(0)`
+    let pct = used.clamp(2.0, 100.0).round() as u32;
+    // `Number(bw).toFixed(1)`: half away from the zero, which Rust's `{:.1}` does not do on its
+    // own (48.25 would read 48.2 there and 48.3 in the Studio), so round first
+    let tenth = |value: f64| (value * 10.0).round() / 10.0;
+    let head = match hw.measured_cpu_bandwidth_gbs {
+        Some(bw) => format!(
+            "Instruction set: {}. Measured memory bandwidth: {:.1} GB/s.",
+            hw.active_cpu_tier,
+            tenth(bw)
+        ),
+        None => format!(
+            "Instruction set: {} (available: {}).",
+            hw.active_cpu_tier,
+            hw.supported_cpu_tiers.join(", ")
+        ),
+    };
+    SystemMemory {
+        desc: format!("{head} {} threads.", hw.threads),
+        free_text: format!(
+            "{} free of {}",
+            crate::app::format_bytes(free),
+            crate::app::format_bytes(total)
+        ),
+        pct,
+    }
+}
+
+/// The choices of the *Processor feature limit* select: `auto` first, then every instruction set
+/// this processor supports (`wanted` of `refreshHardware`).
+pub fn tier_options(hw: &Hardware) -> Vec<String> {
+    let mut out = vec![String::from("auto")];
+    out.extend(hw.supported_cpu_tiers.iter().cloned());
+    out
+}
+
+/// How one of those choices is written in the select (`Auto (highest supported)` for `auto`).
+pub fn tier_label(tier: &str) -> String {
+    if tier == "auto" {
+        String::from("Auto (highest supported)")
+    } else {
+        tier.to_string()
     }
 }
 
@@ -232,12 +335,25 @@ pub struct Device {
     pub has_id: bool,
 }
 
-/// The hardware of `GET /api/studio/hardware`: only what the tour reads.
+/// The hardware of `GET /api/studio/hardware`: what the tour reads and what the hardware card of
+/// the settings draws from it (`refreshHardware` of `panels.js`).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Hardware {
     pub devices: Vec<Device>,
     /// The device the automatic choice picks (`auto_choice`) — the target of `deviceRole`.
     pub auto_choice: String,
+    /// How much of the host's memory is free (`host_free_memory_bytes`); zero falls back to the
+    /// first device the way the `||` of the Studio does.
+    pub host_free_memory_bytes: u64,
+    /// The bandwidth of the last measurement in GB/s (`measured_cpu_bandwidth_gbs`) — `None` as
+    /// long as no measurement was made.
+    pub measured_cpu_bandwidth_gbs: Option<f64>,
+    /// The instruction set the engine runs with right now (`active_cpu_tier`).
+    pub active_cpu_tier: String,
+    /// Every instruction set this processor supports (`supported_cpu_tiers`), best first.
+    pub supported_cpu_tiers: Vec<String>,
+    /// How many threads the engine uses (`threads`).
+    pub threads: u64,
 }
 
 /// The name of a device without the marks it may carry (`deviceKey` of `npu.js`: `(R)` and `(TM)`

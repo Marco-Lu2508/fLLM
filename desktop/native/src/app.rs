@@ -319,10 +319,9 @@ pub struct App {
     pub inbox: Vec<models::Note>,
     /// Whether the panel of the mailbox is open over the top bar.
     pub inbox_open: bool,
-    /// The devices this machine has (`GET /api/studio/hardware`), for the settings card.
-    pub hardware_devices: Vec<tour::Device>,
-    /// The device the automatic choice picks (`auto_choice` of the report).
-    pub hardware_auto_choice: String,
+    /// What this machine has (`GET /api/studio/hardware`): the devices, the automatic choice and
+    /// the lines of the hardware card; `None` until the report came back.
+    pub hardware: Option<tour::Hardware>,
     /// The devices whose check is running right now (`gpuCheckBusy` of `gpucheck.js`).
     pub gpu_busy: Vec<String>,
     /// The result lines of every card that was tested, in the order they came back.
@@ -333,6 +332,22 @@ pub struct App {
     pub npu_state: Option<serde_json::Value>,
     /// What the prompt offload of the NPU is doing (the status line of the card).
     pub npu_runtime: bool,
+    /// The dialog before the OpenVINO runtime goes away (the `confirmDialog` the Studio puts in
+    /// front of *Remove the runtime*).
+    pub npu_remove: bool,
+    /// The answer under *Run speed test* (`speedTestResult` of `models.js`).
+    pub speed_test: Option<String>,
+    /// Whether the speed test is running (the button is off while it does).
+    pub speed_test_busy: bool,
+    /// The report of *Check the processor* (`btnRunSimdSelftest` of `listeners-panels.js`).
+    pub selftest: Option<crate::gpucheck::Selftest>,
+    /// The state of the AMD NPU card (`GET /api/studio/npu/amd`).
+    pub amd_npu: Option<serde_json::Value>,
+    /// The model the list of the AMD NPU card holds (`amdNpuChosen` of `amdnpu.js`).
+    pub amd_npu_chosen: String,
+    /// The slots of the running server (`GET /slots`) — the table of *Chats answered at the same
+    /// time*.
+    pub slots: Vec<crate::models::Slot>,
     /// What the tour has to say (the line about this computer, a model's memory, the loaded model
     /// and the suggestions of the hub).
     pub tour_data: tour::TourData,
@@ -686,6 +701,43 @@ pub enum Message {
     GpuCheck(String),
     /// The check of one card answered with its result lines.
     GpuChecked { id: String, results: Result<Vec<crate::gpucheck::GpuResult>, String> },
+    /// The speed test of the hardware card was started (`btnSpeedTest` of `models.js`).
+    SpeedTest,
+    /// The answer of the speed test: the timings of the request, or why it failed.
+    SpeedTestDone(Result<serde_json::Value, String>),
+    /// The *Processor feature limit* was changed (`selSimdTierCap` of `listeners-panels.js`).
+    TierCap(String),
+    /// The *Faster reading of long prompts* switch (`chkCpuRepack`).
+    CpuRepack(bool),
+    /// One of the two engine settings was written; the flag says whether the hardware report is
+    /// asked again too (the instruction set changes it, the repack switch does not).
+    ConfigSaved { result: Result<serde_json::Value, String>, toast: &'static str, hardware: bool },
+    /// The *Measure memory speed* button (`refreshHardware(true)` of `panels.js`).
+    MeasureBandwidth,
+    /// The *Check the processor* button (`btnRunSimdSelftest`).
+    SelftestCpu,
+    /// The answer of the processor check.
+    SelftestDone(Result<crate::gpucheck::Selftest, String>),
+    /// An action of the NPU setup: `install`, `cancel`, or the empty one for the DELETE behind
+    /// *Remove the runtime* (`npuSetupAction` of `npu.js`).
+    NpuSetup(&'static str),
+    /// The NPU setup answered with its new state.
+    NpuSetupDone(Result<serde_json::Value, String>),
+    /// The *Remove the runtime* button was pressed (the Studio asks first).
+    NpuRemove,
+    /// The dialog was answered: take the runtime away, or leave it.
+    NpuRemoveOk,
+    NpuRemoveCancel,
+    /// The state of the AMD NPU card came back (`refreshAmdNpu` of `amdnpu.js`).
+    AmdNpuState(Result<serde_json::Value, String>),
+    /// One action of the AMD NPU card (`amdNpuAction` of `amdnpu.js`).
+    AmdNpuAction(&'static str),
+    /// The answer of an AMD NPU action: its new state, or why it failed.
+    AmdNpuActionDone(Result<serde_json::Value, String>),
+    /// The model chosen in the list of the AMD NPU card.
+    AmdNpuChosen(String),
+    /// The slots of the scheduler came back (`hwSlotsTableWrap` of `panels.js`).
+    SlotsLoaded(Result<Vec<crate::models::Slot>, String>),
     LookTheme(String),
     /// The accent colour (`accentPickerRow` of the Studio).
     LookAccent(String),
@@ -858,13 +910,19 @@ impl App {
             usage_status: None,
             inbox: Vec::new(),
             inbox_open: false,
-            hardware_devices: Vec::new(),
-            hardware_auto_choice: String::from("cpu"),
+            hardware: None,
             gpu_busy: Vec::new(),
             gpu_results: Vec::new(),
             gpu_fallback: None,
             npu_state: None,
             npu_runtime: false,
+            npu_remove: false,
+            speed_test: None,
+            speed_test_busy: false,
+            selftest: None,
+            amd_npu: None,
+            amd_npu_chosen: String::new(),
+            slots: Vec::new(),
             tour_data: tour::TourData::default(),
             shortcuts_open: false,
             sc_capture: None,
@@ -2472,7 +2530,40 @@ impl App {
             }
             Message::HeroPoll => {
                 let base = self.base.clone();
-                Task::perform(async move { models::fetch_status(base).await }, Message::HeroStatus)
+                let mut tasks = vec![Task::perform(
+                    async move { models::fetch_status(base).await },
+                    Message::HeroStatus,
+                )];
+                // while a setup runs or the prompt offload works, and while the AMD card starts
+                // or downloads a model, the Studio asks those two again every two seconds
+                // (`refreshNpu`, `refreshAmdNpu` — theirs only while the hardware pane is shown)
+                if self.page == View::Settings {
+                    let npu_busy = self.npu_state.as_ref().is_some_and(|n| {
+                        n.pointer("/setup/progress/busy").and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                            || n.pointer("/offload/active").and_then(serde_json::Value::as_bool)
+                                == Some(true)
+                    });
+                    if npu_busy {
+                        let base = self.base.clone();
+                        tasks.push(Task::perform(
+                            async move { models::fetch_npu(base).await },
+                            Message::NpuState,
+                        ));
+                    }
+                    let amd = crate::amdnpu::amd_npu_model(
+                        self.amd_npu.as_ref(),
+                        &self.amd_npu_chosen,
+                    );
+                    if amd.busy {
+                        let base = self.base.clone();
+                        tasks.push(Task::perform(
+                            async move { models::fetch_amd_npu(base).await },
+                            Message::AmdNpuState,
+                        ));
+                    }
+                }
+                Task::batch(tasks)
             }
             Message::HeroStatus(Ok(status)) => {
                 // the rate between two moments of the server's own clock (a slow poll does not
@@ -2593,12 +2684,20 @@ impl App {
                 Task::none()
             }
             Message::HardwareLoaded(Ok(hardware)) => {
-                self.hardware_devices = hardware.devices;
-                self.hardware_auto_choice = hardware.auto_choice;
+                self.hardware = Some(hardware);
                 Task::none()
             }
             Message::HardwareLoaded(Err(_)) => {
-                self.hardware_devices = Vec::new();
+                // without a report the card says it is still reading the devices
+                self.hardware = None;
+                Task::none()
+            }
+            Message::SlotsLoaded(Ok(slots)) => {
+                self.slots = slots;
+                Task::none()
+            }
+            Message::SlotsLoaded(Err(_)) => {
+                // the Studio keeps what it had when the route does not answer
                 Task::none()
             }
             Message::GpuCheck(id) => {
@@ -2611,8 +2710,13 @@ impl App {
                 self.gpu_results.retain(|(key, _)| key != &id);
                 let base = self.base.clone();
                 let device = id.clone();
+                let no_report = crate::tour::Hardware::default();
+                let report = self.hardware.as_ref().unwrap_or(&no_report);
+                // every interface of the physical device behind the button is tested in turn
+                // (`mergeDevices(...).find(g => g.id === id)?.members || [{id}]` of runGpuCheck)
+                let members = crate::gpucheck::check_members(&report.devices, &id);
                 Task::perform(
-                    async move { models::gpu_check(base, device).await },
+                    async move { Ok(models::gpu_check_members(base, device, members).await) },
                     move |results| Message::GpuChecked { id: id.clone(), results },
                 )
             }
@@ -2632,6 +2736,177 @@ impl App {
                         ));
                     }
                 }
+                // the Studio asks the report and the slots again after every check
+                let base = self.base.clone();
+                Task::perform(models::fetch_slots(base), Message::SlotsLoaded)
+            }
+            Message::SpeedTest => {
+                // the Studio refuses a test without a model and says so (`btnSpeedTest`)
+                if self.hero.as_ref().is_some_and(|s| s.setup) {
+                    self.toast = Some(String::from("Load a model first."));
+                    return Task::none();
+                }
+                if self.speed_test_busy {
+                    return Task::none();
+                }
+                self.speed_test_busy = true;
+                self.speed_test = Some(String::from("Testing, this takes a few seconds ..."));
+                let model = self
+                    .hero
+                    .as_ref()
+                    .map(|s| s.model_name.clone())
+                    .unwrap_or_default();
+                let base = self.base.clone();
+                Task::perform(
+                    async move { models::speed_test(base, model).await },
+                    Message::SpeedTestDone,
+                )
+            }
+            Message::SpeedTestDone(answer) => {
+                self.speed_test_busy = false;
+                self.speed_test = Some(match answer {
+                    Ok(timings) => {
+                        let load = self
+                            .hero
+                            .as_ref()
+                            .map(|s| s.load_device.as_str())
+                            .unwrap_or("auto");
+                        let empty = crate::tour::Hardware::default();
+                        let report = self.hardware.as_ref().unwrap_or(&empty);
+                        crate::models::speed_test_line(
+                            &timings,
+                            load,
+                            &report.devices,
+                            report.auto_choice.as_str(),
+                        )
+                    }
+                    Err(e) => format!("The speed test failed: {e}"),
+                });
+                Task::none()
+            }
+            Message::TierCap(value) => {
+                let base = self.base.clone();
+                Task::perform(
+                    models::post_config(base, serde_json::json!({ "cpu_tier_cap": value })),
+                    move |result| Message::ConfigSaved {
+                        result,
+                        toast: "CPU instruction set changed",
+                        hardware: true,
+                    },
+                )
+            }
+            Message::CpuRepack(on) => {
+                let base = self.base.clone();
+                Task::perform(
+                    models::post_config(base, serde_json::json!({ "cpu_repack": on })),
+                    move |result| Message::ConfigSaved {
+                        result,
+                        toast: "Weight repacking changed",
+                        hardware: false,
+                    },
+                )
+            }
+            Message::ConfigSaved { result, toast, hardware } => {
+                if result.is_err() {
+                    // the Studio says nothing when the setting could not be written
+                    return Task::none();
+                }
+                self.toast = Some(toast.to_string());
+                let status =
+                    Task::perform(models::fetch_status(self.base.clone()), Message::HeroStatus);
+                if hardware {
+                    // the instruction set decides what the report of the machine says
+                    let report =
+                        Task::perform(models::fetch_hardware(self.base.clone()), Message::HardwareLoaded);
+                    let slots =
+                        Task::perform(models::fetch_slots(self.base.clone()), Message::SlotsLoaded);
+                    return Task::batch(vec![status, report, slots]);
+                }
+                status
+            }
+            Message::MeasureBandwidth => {
+                self.toast = Some(String::from("Measuring memory bandwidth ..."));
+                let base = self.base.clone();
+                let report = Task::perform(
+                    models::fetch_hardware_measured(base.clone()),
+                    Message::HardwareLoaded,
+                );
+                let slots = Task::perform(models::fetch_slots(base), Message::SlotsLoaded);
+                Task::batch(vec![report, slots])
+            }
+            Message::SelftestCpu => {
+                self.toast = Some(String::from("Self test running, about 5 seconds ..."));
+                let base = self.base.clone();
+                Task::perform(models::selftest_cpu(base), Message::SelftestDone)
+            }
+            Message::SelftestDone(report) => {
+                // the Studio draws the card only when an answer came
+                if let Ok(report) = report {
+                    self.selftest = Some(report);
+                }
+                Task::none()
+            }
+            Message::NpuSetup(action) => {
+                let base = self.base.clone();
+                Task::perform(models::npu_setup(base, action), Message::NpuSetupDone)
+            }
+            Message::NpuSetupDone(answer) => match answer {
+                Ok(state) => {
+                    self.npu_state = Some(state);
+                    Task::none()
+                }
+                Err(e) => {
+                    self.toast = Some(e);
+                    Task::none()
+                }
+            },
+            Message::NpuRemove => {
+                // the `confirmDialog` of `npuSetupAction`, in front of the DELETE
+                self.npu_remove = true;
+                Task::none()
+            }
+            Message::NpuRemoveOk => {
+                self.npu_remove = false;
+                let base = self.base.clone();
+                Task::perform(models::npu_setup(base, ""), Message::NpuSetupDone)
+            }
+            Message::NpuRemoveCancel => {
+                self.npu_remove = false;
+                Task::none()
+            }
+            Message::AmdNpuState(answer) => {
+                if let Ok(state) = answer {
+                    self.amd_npu = Some(state);
+                }
+                Task::none()
+            }
+            Message::AmdNpuAction(action) => {
+                let base = self.base.clone();
+                let model = self.amd_npu_chosen.clone();
+                Task::perform(
+                    models::amd_npu_action(base, action, model),
+                    Message::AmdNpuActionDone,
+                )
+            }
+            Message::AmdNpuActionDone(answer) => {
+                let quiet = match &answer {
+                    Ok(state) => {
+                        self.amd_npu = Some(state.clone());
+                        Task::none()
+                    }
+                    Err(e) => {
+                        self.toast = Some(e.clone());
+                        Task::none()
+                    }
+                };
+                // the Studio asks again straight after an action (`refreshAmdNpu`)
+                let base = self.base.clone();
+                let again = Task::perform(models::fetch_amd_npu(base), Message::AmdNpuState);
+                Task::batch(vec![quiet, again])
+            }
+            Message::AmdNpuChosen(tag) => {
+                // the list decides which model the buttons work on (`amdNpuChosen`)
+                self.amd_npu_chosen = tag;
                 Task::none()
             }
             Message::LookTheme(mode) => {
@@ -3313,19 +3588,25 @@ impl App {
                         Message::HardwareLoaded,
                     );
                     let npu = Task::perform(models::fetch_npu(self.base.clone()), Message::NpuState);
+                    // the AMD NPU card fills itself the same way (`refreshAmdNpu`)
+                    let amd = Task::perform(models::fetch_amd_npu(self.base.clone()), Message::AmdNpuState);
+                    // and the table of the slots comes with the report (`refreshHardware`)
+                    let slots = Task::perform(models::fetch_slots(self.base.clone()), Message::SlotsLoaded);
                     if !matches!(self.server, Server::Down(_)) {
                         return Task::batch(vec![
                             voices,
                             prices,
                             devices,
                             npu,
+                            amd,
+                            slots,
                             Task::perform(
                                 engine_settings::fetch(self.base.clone()),
                                 Message::EngineLoaded,
                             ),
                         ]);
                     }
-                    return Task::batch(vec![voices, prices, devices, npu]);
+                    return Task::batch(vec![voices, prices, devices, npu, amd, slots]);
                 }
                 Task::none()
             }
@@ -4096,7 +4377,7 @@ impl App {
                     speed: self.store.show_speed,
                 },
                 settings::HardwareView {
-                    devices: &self.hardware_devices,
+                    report: self.hardware.as_ref(),
                     notice: self.gpu_fallback.as_ref(),
                     busy: &self.gpu_busy,
                     results: &self.gpu_results,
@@ -4106,10 +4387,21 @@ impl App {
                         .as_ref()
                         .map(|s| s.load_device.as_str())
                         .unwrap_or("auto"),
-                    auto_choice: &self.hardware_auto_choice,
                     // the Studio's roles speak of a loaded model when the server is not the
                     // one without one (`!state.setup` of `deviceRole`)
                     model_loaded: self.hero.as_ref().is_some_and(|s| !s.setup),
+                    speed_test: self.speed_test.as_ref(),
+                    speed_test_busy: self.speed_test_busy,
+                    tier_cap: self
+                        .hero
+                        .as_ref()
+                        .map(|s| s.config.cpu_tier_cap.as_str())
+                        .unwrap_or("auto"),
+                    cpu_repack: self.hero.as_ref().is_some_and(|s| s.config.cpu_repack),
+                    selftest: self.selftest.as_ref(),
+                    amd_npu: self.amd_npu.as_ref(),
+                    amd_chosen: &self.amd_npu_chosen,
+                    slots: &self.slots,
                 },
             )
         } else if self.page == View::Project {
@@ -4144,6 +4436,7 @@ impl App {
             && self.remember.is_none()
             && !self.mem_clear
             && !self.temp_close
+            && !self.npu_remove
             && self.tour.is_none()
             && !self.shortcuts_open
             && !self.palette_open
@@ -4226,6 +4519,11 @@ impl App {
             layers = layers
                 .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::TempCloseCancel))
                 .push(self.temp_close_window(t));
+        }
+        if self.npu_remove {
+            layers = layers
+                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::NpuRemoveCancel))
+                .push(self.npu_remove_window(t));
         }
         if self.tour.is_some() {
             // the backdrop of `.modal-backdrop`: a click beside the window closes the tour
@@ -5154,6 +5452,35 @@ impl App {
                     Space::new().width(Length::Fill),
                     button(text("Cancel").size(13)).on_press(Message::TempCloseCancel).padding([6, 12]).style(theme::ghost_button(t)),
                     button(text("Close it").size(13)).on_press(Message::TempCloseOk).padding([6, 12]).style(move |_, status| {
+                        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                        button::Style {
+                            background: Some(iced::Background::Color(if hovered { t.fill_hover } else { t.fill })),
+                            text_color: t.danger,
+                            border: iced::border::rounded(8),
+                            ..Default::default()
+                        }
+                    }),
+                ],
+            ]
+            .spacing(10),
+        )
+        .padding(16)
+        .width(420)
+        .style(theme::card(t, theme::R_LG, false));
+        container(window).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
+    }
+
+    /// The dialog in front of *Remove the runtime* (the `confirmDialog` of `npu.js`: the sentence
+    /// of the Studio split over its two lines, Cancel and OK).
+    fn npu_remove_window(&self, t: Tokens) -> Element<'_, Message> {
+        let window = container(
+            column![
+                text("Remove the OpenVINO runtime?").size(16).font(bold()),
+                text("The NPU cannot be used until it is installed again.").size(13).color(t.fg_soft),
+                row![
+                    Space::new().width(Length::Fill),
+                    button(text("Cancel").size(13)).on_press(Message::NpuRemoveCancel).padding([6, 12]).style(theme::ghost_button(t)),
+                    button(text("OK").size(13)).on_press(Message::NpuRemoveOk).padding([6, 12]).style(move |_, status| {
                         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
                         button::Style {
                             background: Some(iced::Background::Color(if hovered { t.fill_hover } else { t.fill })),

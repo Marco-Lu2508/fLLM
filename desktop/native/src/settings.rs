@@ -239,9 +239,10 @@ fn value_slider<'a>(t: Tokens, range: std::ops::RangeInclusive<f32>, value: f32,
 }
 
 /// What the hardware card shows: the devices of this machine, the notice of what runs on the CPU,
-/// and what every card's check answered (`Settings > Hardware` of the Studio).
+/// the rows over them and what every card's check answered (`Settings > Hardware` of the Studio).
 pub struct HardwareView<'a> {
-    pub devices: &'a [crate::tour::Device],
+    /// The whole report of `GET /api/studio/hardware`; `None` while it is still being read.
+    pub report: Option<&'a crate::tour::Hardware>,
     pub notice: Option<&'a crate::gpucheck::FallbackNotice>,
     pub busy: &'a [String],
     pub results: &'a [(String, Vec<crate::gpucheck::GpuResult>)],
@@ -249,10 +250,24 @@ pub struct HardwareView<'a> {
     pub npu: Option<&'a serde_json::Value>,
     /// The `--device` value of the loaded model (`auto` when the server chose).
     pub load_device: &'a str,
-    /// The device the automatic choice picks (`auto_choice` of the report).
-    pub auto_choice: &'a str,
     /// Whether a model is loaded (the roles of `deviceRole` say *running* then).
     pub model_loaded: bool,
+    /// The answer under *Run speed test*, and whether it is running right now.
+    pub speed_test: Option<&'a String>,
+    pub speed_test_busy: bool,
+    /// The instruction set cap of the server (`config.cpu_tier_cap` of the status).
+    pub tier_cap: &'a str,
+    /// Whether the weights are repacked for long prompts (`config.cpu_repack`).
+    pub cpu_repack: bool,
+    /// The report of *Check the processor* (`btnRunSimdSelftest`); `None` until it answered.
+    pub selftest: Option<&'a crate::gpucheck::Selftest>,
+    /// The state of the AMD NPU card (`GET /api/studio/npu/amd`).
+    pub amd_npu: Option<&'a serde_json::Value>,
+    /// The model the list of that card holds.
+    pub amd_chosen: &'a str,
+    /// The slots of the running server (`GET /slots`) for the table of *Chats answered at the
+    /// same time*.
+    pub slots: &'a [crate::models::Slot],
 }
 
 /// What the appearance card shows: the four choices of the Studio's `selThemeMode`,
@@ -309,14 +324,154 @@ impl std::fmt::Display for VoiceChoice {
 
 // the page of the settings carries every block of it (the Studio reads its rows from the page)
 #[allow(clippy::too_many_arguments)]
-/// The hardware card of the Studio (`spane-hardware` of `shell.html`): what this machine has, the
-/// notice of what runs on the CPU, and a check button on every card that can be tested.
+/// The hardware card of the Studio (`spane-hardware` of `shell.html`): what this machine has —
+/// the two buttons of the header, the speed test, the instruction set, the repack switch and the
+/// system memory over the devices, the notice of what runs on the CPU, and a check button on every
+/// card that can be tested.
 fn hardware_card<'a>(t: Tokens, view: HardwareView<'a>) -> Element<'a, Message> {
+    let empty = crate::tour::Hardware::default();
+    let report = view.report.unwrap_or(&empty);
+    // one cell of the two tables of this card: the width is the column of the Studio
+    let cell = |value: String, width: f32, colour: iced::Color| {
+        text(value).size(13).color(colour).width(Length::Fixed(width))
+    };
     let mut body = column![].spacing(14);
     body = body.push(
         text("The processor and graphics cards fLLM can use, and a few ways to check that they work.")
             .size(13)
             .color(t.muted),
+    );
+
+    // the buttons of the card header (`btnMeasureBandwidth` and `btnRunSimdSelftest`)
+    body = body.push(
+        row![
+            button(text("Measure memory speed").size(12).color(t.fg_soft))
+                .on_press(Message::MeasureBandwidth)
+                .padding([5, 10])
+                .style(crate::app::starter_style(t)),
+            button(text("Check the processor").size(12).color(t.fg_soft))
+                .on_press(Message::SelftestCpu)
+                .padding([5, 10])
+                .style(crate::app::starter_style(t)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    );
+
+    // Speed test: the line is what `speedTestResult` holds — the help of the Studio until the
+    // first run, then what the answer said
+    let speed_line = view
+        .speed_test
+        .map(String::as_str)
+        .unwrap_or("Runs a short answer with the loaded model and measures how fast it reads and writes.");
+    let speed_button = {
+        let b = button(text("Run speed test").size(12).color(t.fg_soft))
+            .padding([5, 10])
+            .style(crate::app::starter_style(t));
+        if view.speed_test_busy {
+            // the button is off while the test runs (`button.disabled = true`)
+            b
+        } else {
+            b.on_press(Message::SpeedTest)
+        }
+    };
+    body = body.push(setting(t, "Speed test", speed_line, speed_button.into()));
+
+    // Processor feature limit: `auto` and every instruction set the report names, with the value
+    // the server runs with (`selSimdTierCap` of `refreshHardware`)
+    let tiers = crate::tour::tier_options(report);
+    let labels: Vec<String> = tiers.iter().map(|tier| crate::tour::tier_label(tier)).collect();
+    let wanted = if tiers.iter().any(|tier| tier == view.tier_cap) {
+        view.tier_cap
+    } else {
+        "auto"
+    };
+    let current = crate::tour::tier_label(wanted);
+    let tier_picker = pick_list(labels, Some(current), |label: String| {
+        Message::TierCap(if label.starts_with("Auto (highest") {
+            String::from("auto")
+        } else {
+            label
+        })
+    })
+    .padding([6, 10])
+    .style(move |_, status| pick_list::Style {
+        background: iced::Background::Color(t.surface_2),
+        border: iced::Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: if matches!(status, pick_list::Status::Hovered) { t.fg_soft } else { t.separator },
+        },
+        text_color: t.fg,
+        placeholder_color: t.muted,
+        handle_color: t.muted,
+    });
+    body = body.push(setting(
+        t,
+        "Processor feature limit",
+        "Stops the processor from using its newest features. Only useful when something misbehaves; leave it on Auto.",
+        tier_picker.into(),
+    ));
+
+    // Faster reading of long prompts (`chkCpuRepack`)
+    body = body.push(setting(
+        t,
+        "Faster reading of long prompts",
+        "Prepares the model so that long texts are read faster. Uses some extra memory.",
+        segmented(
+            t,
+            vec![
+                ("On", view.cpu_repack, Message::CpuRepack(true)),
+                ("Off", !view.cpu_repack, Message::CpuRepack(false)),
+            ],
+        ),
+    ));
+
+    // System memory: the line of the Studio under the title, the bar and the numbers beside it —
+    // before the report arrives the row holds what `shell.html` writes into it
+    let (memory_line, memory_free, memory_pct) = match view.report {
+        None => (String::from("Measuring ..."), String::from("—"), 35),
+        Some(_) => {
+            let memory = crate::tour::system_memory(report);
+            (memory.desc, memory.free_text, memory.pct)
+        }
+    };
+    let used = memory_pct.clamp(2, 100) as u16;
+    let rest = 100 - used;
+    let bar = row![
+        container(Space::new())
+            .width(Length::FillPortion(used))
+            .height(6.0)
+            .style(move |_| iced::widget::container::Style {
+                background: Some(iced::Background::Color(t.primary)),
+                border: iced::border::rounded(3),
+                ..Default::default()
+            }),
+        container(Space::new())
+            .width(Length::FillPortion(rest.max(1)))
+            .height(6.0)
+            .style(move |_| iced::widget::container::Style {
+                background: Some(iced::Background::Color(t.separator)),
+                border: iced::border::rounded(3),
+                ..Default::default()
+            }),
+        text(memory_free).size(12).color(t.muted),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    // the row of `setting`, with the line owned: it is built from the report, not a literal
+    body = body.push(
+        row![
+            column![
+                text("System memory").size(14),
+                text(memory_line).size(12).color(t.muted)
+            ]
+            .spacing(3)
+            .width(Length::Fill),
+            container(bar).width(280).align_x(iced::alignment::Horizontal::Right),
+        ]
+        .spacing(20)
+        .align_y(Alignment::Center),
     );
 
     // the amber notice of what runs on the CPU (`hwFallbackNotice` of the Studio)
@@ -358,17 +513,17 @@ fn hardware_card<'a>(t: Tokens, view: HardwareView<'a>) -> Element<'a, Message> 
     // the devices: one card per physical device, grouped the way `mergeDevices` of the Studio
     // groups them, with the role of each one and the sentence of where the model runs
     let target = if view.load_device == "auto" {
-        view.auto_choice
+        report.auto_choice.as_str()
     } else {
         view.load_device
     };
-    let groups = crate::npu::merge_devices(view.devices, target);
+    let groups = crate::npu::merge_devices(&report.devices, target);
     let mut devices = column![].spacing(10);
     if !groups.is_empty() {
         // what the Studio writes above the list (`hwChoiceText`)
         let chosen = groups
             .iter()
-            .find(|g| g.members.iter().any(|m| m.id.eq_ignore_ascii_case(view.auto_choice)));
+            .find(|g| g.members.iter().any(|m| m.id.eq_ignore_ascii_case(report.auto_choice.as_str())));
         let choice = match chosen {
             Some(g) => format!(
                 "With the automatic choice fLLM runs models on: {} ({}). The processor is the fallback.",
@@ -394,7 +549,13 @@ fn hardware_card<'a>(t: Tokens, view: HardwareView<'a>) -> Element<'a, Message> 
             .unwrap_or(&[]);
         let check = crate::gpucheck::gpu_check_view(&device.backend, busy, results);
         let member_ids: Vec<String> = group.members.iter().map(|m| m.id.clone()).collect();
-        let role = crate::npu::device_role(&member_ids, &device.id, view.load_device, view.auto_choice, view.model_loaded);
+        let role = crate::npu::device_role(
+            &member_ids,
+            &device.id,
+            view.load_device,
+            report.auto_choice.as_str(),
+            view.model_loaded,
+        );
         let mut card_row = column![].spacing(4);
         let mut head = row![].spacing(8).align_y(Alignment::Center);
         head = head.push(text(device.name.clone()).size(14).font(bold()));
@@ -475,7 +636,7 @@ fn hardware_card<'a>(t: Tokens, view: HardwareView<'a>) -> Element<'a, Message> 
                 .style(theme::card(t, theme::R_MD, false)),
         );
     }
-    if view.devices.is_empty() {
+    if report.devices.is_empty() {
         body = body.push(text("Reading the devices of this machine …").size(13).color(t.muted));
     } else {
         body = body.push(text("Compute devices").size(15).font(bold()));
@@ -514,18 +675,31 @@ fn hardware_card<'a>(t: Tokens, view: HardwareView<'a>) -> Element<'a, Message> 
     }
     let mut npu_actions = row![].spacing(8).align_y(Alignment::Center);
     if let Some(button_data) = &npu.button {
+        // `npuSetupBtn`: the button of the card always installs (`canInstall` gives action install)
+        let action: &'static str = if button_data.action == "cancel" { "cancel" } else { "install" };
         npu_actions = npu_actions.push(
             button(text(button_data.label.clone()).size(13).color(t.fg_soft))
-                .on_press(Message::UsageStatus(format!("{}: not wired in this build", button_data.action)))
+                .on_press(Message::NpuSetup(action))
                 .padding([8, 14])
                 .style(crate::app::starter_style(t)),
         );
     }
     if npu.cancel {
-        npu_actions = npu_actions.push(button(text("Cancel").size(13).color(t.fg_soft)).on_press(Message::UsageStatus(String::from("Cancelled."))).padding([8, 14]).style(crate::app::starter_style(t)));
+        npu_actions = npu_actions.push(
+            button(text("Cancel").size(13).color(t.fg_soft))
+                .on_press(Message::NpuSetup("cancel"))
+                .padding([8, 14])
+                .style(crate::app::starter_style(t)),
+        );
     }
     if npu.remove {
-        npu_actions = npu_actions.push(button(text("Remove the runtime").size(13).color(t.fg_soft)).on_press(Message::UsageStatus(String::from("Removed."))).padding([8, 14]).style(crate::app::starter_style(t)));
+        // the Studio asks first (`confirmDialog` in front of the DELETE)
+        npu_actions = npu_actions.push(
+            button(text("Remove the runtime").size(13).color(t.fg_soft))
+                .on_press(Message::NpuRemove)
+                .padding([8, 14])
+                .style(crate::app::starter_style(t)),
+        );
     }
     if npu.button.is_some() || npu.cancel || npu.remove {
         npu_body = npu_body.push(npu_actions);
@@ -543,6 +717,167 @@ fn hardware_card<'a>(t: Tokens, view: HardwareView<'a>) -> Element<'a, Message> 
     body = body.push(
         container(npu_body).width(Length::Fill).padding(14).style(theme::card(t, theme::R_LG, false)),
     );
+
+    // The AMD NPU card (`amdNpuCard` of `amdnpu.js`): away when this machine has no AMD NPU and
+    // no FastFlowLM — the card only shows itself (`visible`).
+    let amd = crate::amdnpu::amd_npu_model(view.amd_npu, view.amd_chosen);
+    if amd.visible {
+        let mut amd_body = column![].spacing(8);
+        amd_body = amd_body.push(text("AMD NPU (Ryzen AI): native kernels and FastFlowLM").size(15).font(bold()));
+        let amd_tone = if amd.tone == "good" {
+            t.ok
+        } else if amd.tone == "warn" {
+            t.primary
+        } else {
+            t.muted
+        };
+        amd_body = amd_body.push(text(amd.summary.clone()).size(13).color(amd_tone));
+        if !amd.native_text.is_empty() {
+            let colour = if amd.native_ready { t.ok } else { t.muted };
+            amd_body = amd_body.push(text(amd.native_text.clone()).size(13).color(colour));
+        }
+        for h in &amd.hardware {
+            amd_body = amd_body.push(match &h.problem {
+                Some(problem) => text(format!("{} - {problem}", h.label)).size(13).color(t.fg_soft),
+                None => text(h.label.clone()).size(13).color(t.fg_soft),
+            });
+        }
+        if let Some(install) = &amd.install {
+            amd_body = amd_body.push(text(install.text.clone()).size(13).color(t.fg_soft));
+            amd_body = amd_body.push(
+                button(text(install.url.clone()).size(12).color(t.primary))
+                    .on_press(Message::OpenUrl(install.url.clone()))
+                    .padding([0, 0])
+                    .style(theme::ghost_button(t)),
+            );
+        }
+        for problem in &amd.problems {
+            amd_body = amd_body.push(text(problem.clone()).size(13).color(t.danger));
+        }
+
+        // the list of models and the buttons of what to do with the chosen one
+        let mut amd_actions = row![].spacing(8).align_y(Alignment::Center);
+        if !amd.models.is_empty() {
+            let options: Vec<String> = amd.models.iter().map(|m| m.label.clone()).collect();
+            let selected = amd
+                .models
+                .iter()
+                .find(|m| m.tag == amd.selected)
+                .map(|m| m.label.clone());
+            let picker = pick_list(options, selected, |label: String| {
+                // the option reads `tag` or `tag (not downloaded)`, the action wants the tag
+                Message::AmdNpuChosen(
+                    label
+                        .strip_suffix(" (not downloaded)")
+                        .unwrap_or(&label)
+                        .to_string(),
+                )
+            })
+            .padding([6, 10])
+            .style(move |_, status| pick_list::Style {
+                background: iced::Background::Color(t.surface_2),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    width: 1.0,
+                    color: if matches!(status, pick_list::Status::Hovered) { t.fg_soft } else { t.separator },
+                },
+                text_color: t.fg,
+                placeholder_color: t.muted,
+                handle_color: t.muted,
+            });
+            amd_actions = amd_actions.push(picker);
+        }
+        let amd_button = |label: &'static str, action: &'static str| {
+            button(text(label).size(13).color(t.fg_soft))
+                .on_press(Message::AmdNpuAction(action))
+                .padding([8, 14])
+                .style(crate::app::starter_style(t))
+        };
+        if amd.start.unwrap_or(false) {
+            amd_actions = amd_actions.push(amd_button("Run on the NPU", "start"));
+        }
+        if amd.stop {
+            amd_actions = amd_actions.push(amd_button("Stop", "stop"));
+        }
+        if amd.pull {
+            amd_actions = amd_actions.push(amd_button("Download", "pull"));
+        }
+        if amd.cancel_pull {
+            amd_actions = amd_actions.push(amd_button("Cancel the download", "cancel_pull"));
+        }
+        if !amd.models.is_empty() || amd.start.unwrap_or(false) || amd.stop || amd.pull || amd.cancel_pull {
+            amd_body = amd_body.push(amd_actions);
+        }
+        if !amd.pull_text.is_empty() {
+            amd_body = amd_body.push(text(amd.pull_text.clone()).size(13).color(t.fg_soft));
+        }
+        if let Some(error) = &amd.error {
+            amd_body = amd_body.push(text(error.clone()).size(13).color(t.danger));
+        }
+        amd_body = amd_body.push(text(String::from(crate::amdnpu::AMD_NPU_NOTE)).size(12).color(t.muted));
+        body = body.push(
+            container(amd_body).width(Length::Fill).padding(14).style(theme::card(t, theme::R_LG, false)),
+        );
+    }
+
+    // The table of the scheduler (`hwSlotsTableWrap` of `panels.js`): which of the slots is
+    // working on an answer right now.
+    let mut slots_card = column![].spacing(8);
+    slots_card = slots_card.push(text("Chats answered at the same time").size(15).font(bold()));
+    if !view.slots.is_empty() {
+        let mut head = row![].spacing(12);
+        head = head.push(cell(String::from("Slot"), 80.0, t.muted));
+        head = head.push(cell(String::from("State"), 200.0, t.muted));
+        head = head.push(cell(String::from("Max Context"), 140.0, t.muted));
+        head = head.push(cell(String::from("Task"), 140.0, t.muted));
+        slots_card = slots_card.push(head);
+        for slot in view.slots {
+            let mut line = row![].spacing(12);
+            line = line.push(cell(format!("#{}", slot.id), 80.0, t.fg));
+            line = line.push(cell(slot.state.clone(), 200.0, t.fg));
+            line = line.push(cell(format!("{} tok", slot.n_ctx), 140.0, t.fg));
+            line = line.push(cell(
+                if slot.running { String::from("Running") } else { String::from("Idle") },
+                140.0,
+                if slot.running { t.ok } else { t.muted },
+            ));
+            slots_card = slots_card.push(line);
+        }
+    }
+    body = body.push(
+        container(slots_card).width(Length::Fill).padding(14).style(theme::card(t, theme::R_LG, false)),
+    );
+
+    // The report of *Check the processor* (`simdSelftestCard` of `listeners-panels.js`)
+    if let Some(report) = view.selftest {
+        let mut check = column![].spacing(8);
+        check = check.push(text("Processor check").size(15).font(bold()));
+        check = check.push(text(report.title.clone()).size(13).color(t.fg_soft));
+        let mut head = row![].spacing(12);
+        head = head.push(cell(String::from("Feature level"), 170.0, t.muted));
+        head = head.push(cell(String::from("Checks"), 70.0, t.muted));
+        head = head.push(cell(String::from("Passed"), 70.0, t.muted));
+        head = head.push(cell(String::from("Failed"), 70.0, t.muted));
+        head = head.push(cell(String::from("Result"), 70.0, t.muted));
+        check = check.push(head);
+        for row_data in &report.rows {
+            let mut line = row![].spacing(12);
+            line = line.push(cell(row_data.tier.clone(), 170.0, t.fg));
+            line = line.push(cell(row_data.checks.to_string(), 70.0, t.fg));
+            line = line.push(cell(row_data.passed.to_string(), 70.0, t.fg));
+            line = line.push(cell(row_data.failed.to_string(), 70.0, t.fg));
+            line = line.push(cell(
+                if row_data.ok { String::from("PASS") } else { String::from("FAIL") },
+                70.0,
+                if row_data.ok { t.ok } else { t.danger },
+            ));
+            check = check.push(line);
+        }
+        check = check.push(text(report.note.clone()).size(12).color(t.muted));
+        body = body.push(
+            container(check).width(Length::Fill).padding(14).style(theme::card(t, theme::R_LG, false)),
+        );
+    }
 
     body.into()
 }
