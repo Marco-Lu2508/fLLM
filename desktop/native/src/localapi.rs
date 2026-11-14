@@ -241,6 +241,88 @@ pub fn route_value(label: &str) -> &'static str {
     ROUTES.iter().find(|(_, l)| *l == label).map(|(v, _)| *v).unwrap_or(ROUTES[0].0)
 }
 
+/// One token of `POST /tokenize` as the card shows it: its id and the piece of text it is
+/// (the answer holds an id alone when the window did not ask for pieces).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(untagged)]
+pub enum Token {
+    Id(u64),
+    Piece { id: u64, piece: String },
+}
+
+impl Token {
+    pub fn id(&self) -> u64 {
+        match self {
+            Token::Id(id) => *id,
+            Token::Piece { id, .. } => *id,
+        }
+    }
+
+    /// The text of the piece: what the model sees for this token. An answer without pieces is
+    /// its id as text (`String(tok)` of `runTokenize`).
+    pub fn piece(&self) -> String {
+        match self {
+            Token::Id(id) => id.to_string(),
+            Token::Piece { piece, .. } => piece.clone(),
+        }
+    }
+}
+
+/// The answer of `POST /tokenize`.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+pub struct Tokenized {
+    #[serde(default)]
+    pub tokens: Vec<Token>,
+}
+
+/// The line over the wall (`runTokenize` of `panels.js`): how many tokens, and how many bytes of
+/// text they are (a byte in Rust is a byte in the browser's `Blob`).
+pub fn token_stats(tokens: usize, bytes: usize) -> String {
+    format!("{tokens} tokens · {bytes} bytes")
+}
+
+/// The hues the wall cycles through (`hues` of `runTokenize`), and the colour of a pill:
+/// `hsla(H, 65%, 45%, 0.18)`.
+pub const TOKEN_HUES: [u16; 6] = [145, 200, 265, 25, 330, 175];
+
+/// One of those hues as a colour with the alpha of a pill (`hsl` of the Studio's `hsla`).
+pub fn token_colour(hue: u16) -> iced::Color {
+    let h = (hue as f32 % 360.0) / 60.0;
+    let s = 0.65f32;
+    let l = 0.45f32;
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    iced::Color { r: r + m, g: g + m, b: b + m, a: 0.18 }
+}
+
+/// `POST /tokenize` with the body of `runTokenize`.
+pub async fn tokenize(base: String, content: String, add_special: bool) -> Result<Tokenized, String> {
+    let body = serde_json::json!({ "content": content, "add_special": add_special, "with_pieces": true });
+    crate::models::post_fallback(&base, "/tokenize", body, "The text could not be tokenized.")
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /apply-template` with the messages of the box (`runJinjaTemplate` of `panels.js`).
+pub async fn apply_template(base: String, messages: serde_json::Value) -> Result<String, String> {
+    let body = serde_json::json!({ "messages": messages });
+    let answer: serde_json::Value = crate::models::post_fallback(&base, "/apply-template", body, "The text could not be rendered.")
+        .await?;
+    Ok(match answer.get("prompt").and_then(serde_json::Value::as_str) {
+        Some(prompt) => prompt.to_string(),
+        None => serde_json::to_string_pretty(&answer).unwrap_or_default(),
+    })
+}
+
 /// What the settings page needs for the two cards of `spane-local-api-server`.
 #[derive(Clone, Copy)]
 pub struct ServerView<'a> {
@@ -638,6 +720,138 @@ fn editor_style<'a>(t: Tokens) -> impl Fn(&iced::Theme, text_editor::Status) -> 
     }
 }
 
+/// What the settings page needs for the two cards of `spane-tokenizer`.
+#[derive(Clone, Copy)]
+pub struct TokenizerView<'a> {
+    /// What is typed into the first box (`tokTextInput`, prefilled the way the page prefills it).
+    pub text: &'a text_editor::Content,
+    /// The line over the wall (`tokStatsLabel`), and the tokens behind it.
+    pub stats: &'a str,
+    pub tokens: &'a [Token],
+    pub special: bool,
+    /// The messages of the second box (`jinjaMessagesInput`) and what *Show the text* answered.
+    pub messages: &'a text_editor::Content,
+    pub output: &'a str,
+}
+
+/// The sentence the first box starts with (`shell.html`).
+pub const TOKEN_TEXT: &str = "Hello! How does the fLLM Rust engine tokenize this sentence?";
+
+/// The messages the second box starts with (`shell.html`).
+pub const JINJA_MESSAGES: &str = "[\n  {\"role\": \"system\", \"content\": \"You are a helpful assistant.\"},\n  {\"role\": \"user\", \"content\": \"Explain SIMD in one sentence.\"}\n]";
+
+/// The first card of `spane-tokenizer`: how the model splits text into tokens, and the wall of
+/// the pieces with their ids (`runTokenize` of `panels.js`).
+pub fn token_card<'a>(t: Tokens, v: TokenizerView<'a>) -> Element<'a, Message> {
+    let mut body = column![].spacing(10);
+    body = body.push(
+        text_editor(v.text)
+            .on_action(Message::TokReq)
+            .padding(10)
+            .size(13)
+            .height(Length::Fixed(74.0))
+            .style(editor_style(t)),
+    );
+    body = body.push(
+        row![
+            row![
+                crate::settings::segmented(
+                    t,
+                    vec![
+                        ("On", v.special, Message::TokSpecial(true)),
+                        ("Off", !v.special, Message::TokSpecial(false)),
+                    ],
+                ),
+                text("Include the special start token").size(12).color(t.fg_soft),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
+            text(v.stats.to_string()).size(12).font(Font::MONOSPACE).color(t.muted),
+        ]
+        .align_y(Alignment::Center),
+    );
+
+    // the wall of the pieces (`.token-wall`): wrapped pills of the hues the Studio cycles through
+    let mut wall = row![].spacing(4);
+    for (i, tok) in v.tokens.iter().enumerate() {
+        wall = wall.push(token_pill(t, tok, &TOKEN_HUES[i % TOKEN_HUES.len()]));
+    }
+    if v.tokens.is_empty() {
+        // an empty wall keeps the height the Studio gives it (`.token-wall { min-height: 80px }`)
+        body = body.push(container(Space::new()).width(Length::Fill).height(Length::Fixed(80.0)));
+    } else {
+        // the wall grows with its pills; the Studio clamps it at 80px from below, which this
+        // renderer has no length for — a wall with one row is its own height plus its padding
+        body = body.push(
+            container(wall.wrap())
+                .width(Length::Fill)
+                .padding(12)
+                .style(move |_| container::Style {
+                    background: Some(iced::Background::Color(t.bg)),
+                    border: iced::Border { radius: 8.0.into(), width: 1.0, color: t.separator },
+                    ..Default::default()
+                }),
+        );
+    }
+    card(t, "See how the model splits text into tokens", body.into())
+}
+
+/// One piece with its id (`.tok-pill` of `style.css`).
+fn token_pill<'a>(t: Tokens, tok: &Token, hue: &u16) -> Element<'a, Message> {
+    let colour = token_colour(*hue);
+    let piece = tok.piece();
+    container(
+        column![
+            text(piece).size(12).font(Font::MONOSPACE).color(t.fg),
+            text(format!("#{}", tok.id())).size(9).color(iced::Color { a: 0.65, ..t.fg }),
+        ]
+        .spacing(0),
+    )
+    .padding([2, 6])
+    .style(move |_| container::Style {
+        background: Some(iced::Background::Color(colour)),
+        border: iced::Border { radius: 5.0.into(), width: 1.0, color: iced::Color { a: 0.08, ..iced::Color::WHITE } },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// The second card of `spane-tokenizer`: the messages of a chat and the text the model receives
+/// for them (`runJinjaTemplate` of `panels.js`).
+pub fn jinja_card<'a>(t: Tokens, v: TokenizerView<'a>) -> Element<'a, Message> {
+    let mut body = column![].spacing(10);
+    body = body.push(
+        row![
+            text_editor(v.messages)
+                .on_action(Message::JinjaReq)
+                .padding(10)
+                .size(12)
+                .font(Font::MONOSPACE)
+                .height(Length::Fixed(150.0))
+                .style(editor_style(t)),
+            scrollable(
+                container(text(v.output.to_string()).size(12).font(Font::MONOSPACE).color(t.fg_soft))
+                    .width(Length::Fill)
+                    .padding(10)
+                    .style(theme::inset(t)),
+            )
+            .height(Length::Fixed(150.0)),
+        ]
+        .spacing(10),
+    );
+    body = body.push(
+        row![
+            Space::new().width(Length::Fill),
+            button(text("Show the text").size(13))
+                .on_press(Message::JinjaRender)
+                .padding([6, 14])
+                .style(theme::primary_button(t)),
+        ],
+    );
+    card(t, "See the text the model receives for a chat", body.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,6 +916,51 @@ mod tests {
         assert_eq!(route_sample("GET:/v1/models", "m"), "");
         assert_eq!(route_sample("GET:/props", "m"), "");
         assert!(route_sample("POST:/v1/embeddings", "m").contains("SIMD Kernels"), "the two inputs of the Studio");
+    }
+
+    /// An answer carries an id with its piece, or an id alone (`runTokenize` reads both).
+    #[test]
+    fn a_token_is_read_with_its_piece_or_as_an_id() {
+        let with_piece: Token = serde_json::from_value(serde_json::json!({"id": 7, "piece": " a"}))
+            .expect("a token with its piece");
+        assert_eq!(with_piece.id(), 7);
+        assert_eq!(with_piece.piece(), " a");
+        let only: Token = serde_json::from_value(serde_json::json!(9)).expect("an id alone");
+        assert_eq!(only.id(), 9);
+        // `String(tok)` of the Studio: an id alone is its own text
+        assert_eq!(only.piece(), "9");
+    }
+
+    /// The line over the wall: how many tokens and how many bytes of text they are.
+    #[test]
+    fn the_line_counts_the_tokens_and_the_bytes() {
+        assert_eq!(token_stats(0, 52), "0 tokens · 52 bytes");
+        // `runTokenize` writes `tokens` for one too — the line is not declined anywhere
+        assert_eq!(token_stats(1, 1), "1 tokens · 1 bytes");
+        assert_eq!(token_stats(12, 4243), "12 tokens · 4243 bytes");
+    }
+
+    /// The hue of a pill: `hsla(H, 65%, 45%, 0.18)` for that hue, and every hue of the wall is a
+    /// colour of its own.
+    #[test]
+    fn a_pill_takes_the_hue_of_the_studio() {
+        let red = token_colour(0);
+        assert!((red.r - 0.7425).abs() < 0.001, "{}", red.r);
+        assert!((red.g - 0.1575).abs() < 0.001, "{}", red.g);
+        assert!((red.b - 0.1575).abs() < 0.001, "{}", red.b);
+        assert!((red.a - 0.18).abs() < 0.001, "the alpha of the pill");
+        let all: Vec<[u32; 3]> = TOKEN_HUES
+            .iter()
+            .map(|h| {
+                let c = token_colour(*h);
+                [(c.r * 255.0) as u32, (c.g * 255.0) as u32, (c.b * 255.0) as u32]
+            })
+            .collect();
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert!(a != b, "two hues of the wall give the same colour: {a:?} {b:?}");
+            }
+        }
     }
 
     /// An answer of the tester is pretty when it is JSON, and the text as it came when not

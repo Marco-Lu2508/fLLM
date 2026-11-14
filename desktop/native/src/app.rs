@@ -386,6 +386,14 @@ pub struct App {
     /// (`prePrometheusMetrics`).
     metrics: String,
     metrics_open: bool,
+    /// Settings > Tokenizer: the two boxes and what the server answered for them
+    /// (`tokTextInput`, `chkTokSpecial`, `jinjaMessagesInput`).
+    pub tok_text: iced::widget::text_editor::Content,
+    pub tok_special: bool,
+    tok_stats: String,
+    pub tok_tokens: Vec<crate::localapi::Token>,
+    pub jinja_messages: iced::widget::text_editor::Content,
+    pub jinja_out: String,
     /// The answer under *Run speed test* (`speedTestResult` of `models.js`).
     pub speed_test: Option<String>,
     /// Whether the speed test is running (the button is off while it does).
@@ -855,6 +863,15 @@ pub enum Message {
     RouteReq(iced::widget::text_editor::Action),
     RouteSend,
     RouteAnswer(Result<String, String>),
+    /// Settings > Tokenizer: the box of the text and the switch under it
+    /// (`tokTextInput`, `chkTokSpecial`).
+    TokReq(iced::widget::text_editor::Action),
+    TokSpecial(bool),
+    TokLoaded(Result<crate::localapi::Tokenized, String>),
+    /// The messages box and the button of the second card (`jinjaMessagesInput`, `btnRenderJinja`).
+    JinjaReq(iced::widget::text_editor::Action),
+    JinjaRender,
+    JinjaRendered(Result<String, String>),
     /// The line of the statistics and its Refresh button (`detailsPrometheusLog`).
     MetricsOpen,
     MetricsRefresh,
@@ -1085,6 +1102,12 @@ impl App {
             route_res: "// Click \"Send Request\" to inspect response".into(),
             metrics: "Loading /metrics...".into(),
             metrics_open: false,
+            tok_text: iced::widget::text_editor::Content::with_text(crate::localapi::TOKEN_TEXT),
+            tok_special: true,
+            tok_stats: "0 tokens".into(),
+            tok_tokens: Vec::new(),
+            jinja_messages: iced::widget::text_editor::Content::with_text(crate::localapi::JINJA_MESSAGES),
+            jinja_out: String::new(),
             speed_test: None,
             speed_test_busy: false,
             selftest: None,
@@ -3153,6 +3176,56 @@ impl App {
                 Task::none()
             }
             Message::RouteAnswer(Err(_)) => Task::none(),
+            Message::TokReq(action) => {
+                // `tokTextInput` runs the tokenizer on every keystroke, and only on one: a
+                // cursor that moves does not change the text and asks nothing
+                let before = self.tok_text.text().to_string();
+                self.tok_text.perform(action);
+                if before == self.tok_text.text() {
+                    return Task::none();
+                }
+                self.tokenize_now()
+            }
+            Message::TokSpecial(on) => {
+                self.tok_special = on;
+                // the switch runs it too (`chkTokSpecial` of `listeners-panels.js`)
+                self.tokenize_now()
+            }
+            Message::TokLoaded(Ok(answer)) => {
+                self.tok_stats =
+                    crate::localapi::token_stats(answer.tokens.len(), self.tok_text.text().len());
+                self.tok_tokens = answer.tokens;
+                Task::none()
+            }
+            // an answer that does not come leaves the line as it was (`if (!res.ok) return;`)
+            Message::TokLoaded(Err(_)) => Task::none(),
+            Message::JinjaReq(action) => {
+                self.jinja_messages.perform(action);
+                Task::none()
+            }
+            Message::JinjaRender => {
+                // the Studio parses the box inside its `try` and shows the message of whatever
+                // went wrong — a box that is no JSON and a server that does not answer both land
+                // in the same line
+                match serde_json::from_str::<serde_json::Value>(&self.jinja_messages.text()) {
+                    Ok(messages) => Task::perform(
+                        crate::localapi::apply_template(self.base.clone(), messages),
+                        Message::JinjaRendered,
+                    ),
+                    Err(e) => {
+                        self.jinja_out = format!("Invalid JSON: {e}");
+                        Task::none()
+                    }
+                }
+            }
+            Message::JinjaRendered(Ok(prompt)) => {
+                self.jinja_out = prompt;
+                Task::none()
+            }
+            Message::JinjaRendered(Err(e)) => {
+                self.jinja_out = format!("Invalid JSON: {e}");
+                Task::none()
+            }
             Message::MetricsOpen => {
                 self.metrics_open = !self.metrics_open;
                 Task::none()
@@ -5204,6 +5277,14 @@ impl App {
                     metrics: &self.metrics,
                 },
                 &self.logs_text,
+                crate::localapi::TokenizerView {
+                    text: &self.tok_text,
+                    stats: &self.tok_stats,
+                    tokens: &self.tok_tokens,
+                    special: self.tok_special,
+                    messages: &self.jinja_messages,
+                    output: &self.jinja_out,
+                },
             )
         } else if self.page == View::Project {
             // the page of a project sits where the conversation sits, so the dialogs can open over it
@@ -7774,6 +7855,18 @@ impl App {
             .unwrap_or_default();
         self.runtime = status;
         self.runtime_loaded = true;
+    }
+
+    /// Asks the server how the text of the box splits into tokens (`runTokenize` of `panels.js`).
+    fn tokenize_now(&mut self) -> Task<Message> {
+        Task::perform(
+            crate::localapi::tokenize(
+                self.base.clone(),
+                self.tok_text.text().to_string(),
+                self.tok_special,
+            ),
+            Message::TokLoaded,
+        )
     }
 
     pub fn switching(&self) -> bool {

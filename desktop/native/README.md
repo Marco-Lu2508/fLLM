@@ -222,6 +222,13 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   nothing for a box that is no JSON, the answer pretty when it is JSON), and *Server statistics
   (`/metrics`)* with the line of `detailsPrometheusLog` and its box behind it, filled when Refresh
   is pressed. Three unit tests, one window test, three mutations.
+- Tokenizer: the two cards of `spane-tokenizer` — the box and the switch that ask `/tokenize`
+  (`with_pieces`, on every keystroke that changes the text and on the switch), the line
+  `{n} tokens · {bytes} bytes` and the wall with a pill per piece in the six hues of
+  `hsla(H, 65%, 45%, 0.18)`, the piece in mono and its id under it; and the messages box with
+  *Show the text*, whose answer comes from `/apply-template` and whose line reads
+  *Invalid JSON: …* when the box is no JSON or the server does not answer. Nine unit tests, three
+  window tests, three mutations.
 - Logs: what the server wrote lately — the card of `spane-logs` with its line, *Refresh* and
   *Copy*, and the box of `preLogs` at the height the Studio gives it (480px of scrolling
   monospace). The lines of `GET /api/studio/logs?lines=300` joined, *Nothing has been logged yet.*

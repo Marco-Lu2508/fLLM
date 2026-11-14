@@ -7,6 +7,17 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **The tokenizer cards in the native app: how the model splits text, and what it receives for a
+  chat.** The two cards of `spane-tokenizer` — *See how the model splits text into tokens* with the
+  box and the switch that ask `/tokenize` (`with_pieces`, every keystroke that changes the text and
+  the switch itself, a cursor that only moves asks nothing), the line `{n} tokens · {bytes} bytes`
+  (`runTokenize` writes `tokens` for one too) and the wall of `.token-wall`: one pill per piece in
+  the six hues of `hsla(H, 65%, 45%, 0.18)` the Studio cycles through, the piece in the mono font
+  and its id under it at 65 percent — an answer without pieces shows its id as text, `String(tok)`
+  of the Studio; and *See the text the model receives for a chat* with the messages box, the
+  *Show the text* button and the answer beside it, `Invalid JSON: …` for a box that is no JSON and
+  for a server that does not answer (one `catch` of `runJinjaTemplate` wraps both). Nine unit
+  tests, three window tests, three mutations.
 - **The tester of the routes and the statistics of the server in the native app.** The last two
   cards of `spane-local-api-server`: *Try the API* carries the select of `selRouteTest` with its
   eight routes, *Send Request*, the request box and the answer beside it — the sample of

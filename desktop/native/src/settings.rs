@@ -1148,6 +1148,7 @@ pub fn page<'a>(
     providers: crate::providers::ProvidersView<'a>,
     server: crate::localapi::ServerView<'a>,
     logs_text: &'a str,
+    tokenizer: crate::localapi::TokenizerView<'a>,
 ) -> Element<'a, Message> {
     let mut answers = column![].spacing(14);
     answers = answers.push(setting(
@@ -1666,6 +1667,10 @@ pub fn page<'a>(
         // Settings > Logs: the card of `spane-logs`, where the Studio's menu has it (after the
         // server pages, before the panes the menu appends)
         crate::localapi::logs_card(t, logs_text),
+        // Settings > Tokenizer: the two cards of `spane-tokenizer`, where the Studio's menu has
+        // them (after the logs, before the panes the menu appends)
+        crate::localapi::token_card(t, tokenizer),
+        crate::localapi::jinja_card(t, tokenizer),
         card(t, "Usage and cost", usage_card(t, usage)),
         // Settings > Runtime: the three cards of `runtime.js` (the sandbox, computer use and
         // turbo), in the order the Studio's pane draws them
