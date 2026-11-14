@@ -279,7 +279,7 @@ pub(crate) async fn get_text(base: &str, path: &str) -> Result<String, String> {
 }
 
 /// A POST that the server answers with a JSON error body on failure: that message is what the user should read.
-async fn post(base: &str, path: &str, body: Value) -> Result<Value, String> {
+pub(crate) async fn post(base: &str, path: &str, body: Value) -> Result<Value, String> {
     let resp = reqwest::Client::new().post(format!("{base}{path}")).json(&body).send().await.map_err(|e| format!("no server at {base}: {e}"))?;
     let status = resp.status();
     let data: Value = resp.json().await.unwrap_or(Value::Null);
@@ -537,6 +537,75 @@ pub async fn fetch_connect(base: String, tool: String) -> Result<crate::connect:
     get_json(&base, &format!("/api/studio/connect?tool={tool}"))
         .await
         .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `GET /api/studio/embeddings`: the address of the embeddings server and whether the document
+/// search reaches it with it (`route_status`).
+pub async fn fetch_embed(base: String) -> Result<crate::search::EmbedConfig, String> {
+    get_json(&base, "/api/studio/embeddings")
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /api/studio/embeddings` with what the box holds; the answer is the status again. The
+/// fallback is the one `save()` of `rag.js` writes when the server sent nothing.
+pub async fn save_embed(base: String, url: String) -> Result<crate::search::EmbedConfig, String> {
+    post_fallback(
+        &base,
+        "/api/studio/embeddings",
+        serde_json::json!({ "url": url }),
+        "Could not save it.",
+    )
+    .await
+    .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /api/studio/embed` with the two sentences of the *Test* button of the embeddings card.
+pub async fn test_embed(base: String) -> Result<crate::search::Vectors, String> {
+    post_fallback(
+        &base,
+        "/api/studio/embed",
+        serde_json::json!({ "input": ["the quick brown fox", "a fast brown fox"] }),
+        "The server did not answer.",
+    )
+    .await
+    .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `GET /api/studio/search/engines`: the engines as they are stored and where they are kept.
+pub async fn fetch_engines(base: String) -> Result<crate::search::EngineAnswer, String> {
+    get_json(&base, "/api/studio/search/engines")
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /api/studio/search/engines` with the list as the buttons leave it; the answer carries
+/// the engines again (`saveEngines` of `searchengines.js`).
+pub async fn save_engines(
+    base: String,
+    engines: Vec<crate::search::Engine>,
+) -> Result<crate::search::EngineAnswer, String> {
+    post_fallback(
+        &base,
+        "/api/studio/search/engines",
+        serde_json::json!({ "engines": engines }),
+        "Could not save the engines.",
+    )
+    .await
+    .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /api/studio/search` with the one query the *Test a search* button always sends. The page
+/// writes two different lines: what the server said when it answered with an error, and
+/// `The search failed: ...` when it could not be reached — which is the one `post` words with the
+/// prefix it matches here.
+pub async fn test_search(base: String) -> Result<crate::search::TestAnswer, String> {
+    let body = serde_json::json!({ "query": "rust axum middleware", "limit": 3 });
+    match post(&base, "/api/studio/search", body).await {
+        Ok(v) => serde_json::from_value(v).map_err(|e| e.to_string()),
+        Err(e) if e.starts_with("no server at") => Err(format!("The search failed: {e}")),
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn fetch_runtime(base: String) -> Result<crate::runtime::Status, String> {

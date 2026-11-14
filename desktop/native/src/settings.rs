@@ -1151,6 +1151,7 @@ pub fn page<'a>(
     tokenizer: crate::localapi::TokenizerView<'a>,
     connect: crate::connect::ConnectView<'a>,
     copied: &'a Option<String>,
+    search: crate::search::SearchView<'a>,
 ) -> Element<'a, Message> {
     let mut answers = column![].spacing(14);
     answers = answers.push(setting(
@@ -1676,6 +1677,10 @@ pub fn page<'a>(
         // Settings > Connect other apps, where the Studio's menu has it: after the tokenizer and
         // before the panes the menu appends
         crate::connect::section(t, connect, copied),
+        // Settings > Search: the pane `rag.js` builds and `searchengines.js` adds its card to —
+        // the table keeps this row where it stands, between the two neighbours the Studio's menu
+        // has around it
+        crate::search::section(t, search),
         card(t, "Usage and cost", usage_card(t, usage)),
         // Settings > Runtime: the three cards of `runtime.js` (the sandbox, computer use and
         // turbo), in the order the Studio's pane draws them

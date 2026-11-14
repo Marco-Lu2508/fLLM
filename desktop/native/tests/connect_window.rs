@@ -2,7 +2,7 @@
 //! the server writes for a coding tool (`spane-claude-code`).
 
 use fllm_app::app::{App, Message, View};
-use fllm_app::connect::{snippet, Plan, SHELLS};
+use fllm_app::connect::{snippet, Plan, CONNECT_HELP, SDK_HELP, SHELLS};
 use fllm_app::store::Store;
 use iced::Size;
 use iced_test::Simulator;
@@ -38,6 +38,10 @@ fn the_pane_starts_the_way_the_page_starts_it() {
 
     let mut ui = sim(&app);
     ui.find("Connect other apps").expect("the title of the first card");
+    // both descriptions are one paragraph, the way `app-item-desc` of the page is drawn — the
+    // sentence is found whole, so it is not put together out of pieces beside each other
+    ui.find(SDK_HELP).expect("the description of the first card as one sentence");
+    ui.find(CONNECT_HELP).expect("the description of the second card as one sentence");
     ui.find("Connect a coding tool").expect("the title of the second card");
     for tab in ["Claude Code CLI", "OpenAI Python", "OpenAI TypeScript", "cURL"] {
         ui.find(tab).expect("one of the four tabs");

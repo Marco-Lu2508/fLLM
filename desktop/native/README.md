@@ -222,6 +222,12 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   nothing for a box that is no JSON, the answer pretty when it is JSON), and *Server statistics
   (`/metrics`)* with the line of `detailsPrometheusLog` and its box behind it, filled when Refresh
   is pressed. Three unit tests, one window test, three mutations.
+- Search: *Document search* — the embeddings box with Save and Test, the lines of `load()` and
+  `save()` and the similarity of two vectors figured the way `ragCosine` figures it; and *Web
+  search engines* — the list with its Remove buttons, the four fields over Add with the checks of
+  `#seAdd`, Save engines, and *Test a search* with the engine lines (including the *Treffer* the
+  Studio writes), the blank line and the first three titles. Six unit tests, three window tests,
+  five mutations.
 - Connect other apps: the four examples of `sdkSnippetTabs` (Claude Code CLI, OpenAI Python,
   OpenAI TypeScript, cURL) with the text of `updateCliAndSdkSnippets` and its Copy button — the
   header says *bash* for all four, as the page does —; and *Connect a coding tool* with the tool

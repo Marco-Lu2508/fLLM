@@ -21,6 +21,7 @@ pub mod prompts;
 pub mod providers;
 pub mod connect;
 pub mod runtime;
+pub mod search;
 pub mod localapi;
 pub mod memory;
 pub mod promptlib;

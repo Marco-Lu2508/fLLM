@@ -406,6 +406,18 @@ pub struct App {
     connect_loaded: bool,
     /// Which block was copied last: its button reads *Copied* until the Studio's 1500 ms pass.
     copied: Option<String>,
+    /// Settings > Search: what both cards of the pane hold (`searchSettings` of `rag.js`, which
+    /// builds the pane, and `searchengines.js`, which appends its card to it).
+    pub embed_url: String,
+    pub embed_status: String,
+    pub    engines: Vec<crate::search::Engine>,
+    pub eng_kind: String,
+    pub eng_name: String,
+    pub eng_url: String,
+    pub eng_key: String,
+    pub eng_status: String,
+    /// Read once the first time the page is opened — the pane is built once in the Studio, too.
+    search_loaded: bool,
     /// The answer under *Run speed test* (`speedTestResult` of `models.js`).
     pub speed_test: Option<String>,
     /// Whether the speed test is running (the button is off while it does).
@@ -887,6 +899,27 @@ pub enum Message {
     ConnectLoaded(Result<crate::connect::Plan, String>),
     ConnectTool(String),
     ConnectShell(&'static str),
+    /// Settings > Search: the box of the embeddings server and its two buttons (`embedUrl`,
+    /// `btnEmbedSave`, `btnEmbedTest`).
+    EmbedUrl(String),
+    EmbedLoaded(Result<crate::search::EmbedConfig, String>),
+    EmbedSave,
+    EmbedSaved(Result<crate::search::EmbedConfig, String>),
+    EmbedTest,
+    EmbedTested(Result<crate::search::Vectors, String>),
+    /// The engines: their list, the four fields over Add, and the two buttons (`seKind`, `seName`,
+    /// `seUrl`, `seKey`, `seAdd`, `seSave`, `seTest`, and the Remove of every row).
+    EngLoaded(Result<crate::search::EngineAnswer, String>),
+    EngKind(String),
+    EngName(String),
+    EngUrl(String),
+    EngKey(String),
+    EngAdd,
+    EngRemove(usize),
+    EngSave,
+    EngSaved(Result<crate::search::EngineAnswer, String>),
+    EngTest,
+    EngTested(Result<crate::search::TestAnswer, String>),
     /// One of the Copy buttons of the plan: the text goes to the clipboard and the button reads
     /// *Copied* until the Studio's 1500 ms pass (`render()` of `connect.js`).
     CopyBlock(String),
@@ -1138,6 +1171,15 @@ impl App {
             connect_say: String::new(),
             connect_loaded: false,
             copied: None,
+            embed_url: String::new(),
+            embed_status: String::new(),
+            engines: Vec::new(),
+            eng_kind: "ddg".into(),
+            eng_name: String::new(),
+            eng_url: String::new(),
+            eng_key: String::new(),
+            eng_status: String::new(),
+            search_loaded: false,
             speed_test: None,
             speed_test_busy: false,
             selftest: None,
@@ -3317,6 +3359,137 @@ impl App {
                 self.copied = None;
                 Task::none()
             }
+            Message::EmbedUrl(value) => {
+                self.embed_url = value;
+                Task::none()
+            }
+            Message::EmbedLoaded(Ok(status)) => {
+                // `load()` of `searchSettings`: the box holds what is saved, and the line says
+                // which search runs with it
+                self.embed_url = status.url;
+                self.embed_status = if status.configured {
+                    "Hybrid search is on.".into()
+                } else {
+                    "Keyword search only.".into()
+                };
+                Task::none()
+            }
+            // a setting that could not be read says so the way the page says it
+            Message::EmbedLoaded(Err(e)) => {
+                self.embed_status = format!("Could not read the setting: {e}");
+                Task::none()
+            }
+            Message::EmbedSave => Task::perform(
+                models::save_embed(self.base.clone(), self.embed_url.trim().to_string()),
+                Message::EmbedSaved,
+            ),
+            Message::EmbedSaved(Ok(status)) => {
+                // the box holds what the server kept, and the line says which search is on now
+                self.embed_url = status.url;
+                self.embed_status = if status.configured {
+                    "Saved. The next question searches hybrid.".into()
+                } else {
+                    "Saved. Keyword search only.".into()
+                };
+                Task::none()
+            }
+            // an answer that is not an answer leaves the line as the page writes it
+            Message::EmbedSaved(Err(e)) => {
+                self.embed_status = e;
+                Task::none()
+            }
+            Message::EmbedTest => {
+                // the line comes before the request, the way the button writes it
+                self.embed_status = "Asking the server ...".into();
+                Task::perform(models::test_embed(self.base.clone()), Message::EmbedTested)
+            }
+            Message::EmbedTested(Ok(vectors)) => {
+                self.embed_status = crate::search::embed_line(&vectors);
+                Task::none()
+            }
+            Message::EmbedTested(Err(e)) => {
+                self.embed_status = e;
+                Task::none()
+            }
+            Message::EngLoaded(Ok(answer)) => {
+                let line = crate::search::engines_line(&answer);
+                self.engines = answer.engines;
+                self.eng_status = line;
+                Task::none()
+            }
+            Message::EngLoaded(Err(e)) => {
+                self.eng_status = format!("Could not read the engines: {e}");
+                Task::none()
+            }
+            Message::EngKind(kind) => {
+                self.eng_kind = kind;
+                Task::none()
+            }
+            Message::EngName(name) => {
+                self.eng_name = name;
+                Task::none()
+            }
+            Message::EngUrl(url) => {
+                self.eng_url = url;
+                Task::none()
+            }
+            Message::EngKey(key) => {
+                self.eng_key = key;
+                Task::none()
+            }
+            Message::EngAdd => {
+                match crate::search::add_engine(
+                    &self.eng_kind,
+                    self.eng_name.trim(),
+                    self.eng_url.trim(),
+                    self.eng_key.trim(),
+                ) {
+                    Ok(engine) => {
+                        self.engines.push(engine);
+                        // the three boxes are cleared and the kind stays where it was
+                        self.eng_name.clear();
+                        self.eng_url.clear();
+                        self.eng_key.clear();
+                        // the line over the buttons is not touched: `#seAdd` writes only the
+                        // boxes, so a sentence of an earlier check stays standing
+                    }
+                    Err(say) => self.eng_status = say,
+                }
+                Task::none()
+            }
+            Message::EngRemove(index) => {
+                // `splice(index, 1)`: an index that is not there takes nothing out
+                if index < self.engines.len() {
+                    self.engines.remove(index);
+                }
+                Task::none()
+            }
+            Message::EngSave => {
+                let engines = self.engines.clone();
+                Task::perform(models::save_engines(self.base.clone(), engines), Message::EngSaved)
+            }
+            Message::EngSaved(Ok(answer)) => {
+                self.engines = answer.engines;
+                self.eng_status = "Saved. The next search uses these engines.".into();
+                Task::none()
+            }
+            Message::EngSaved(Err(e)) => {
+                self.eng_status = e;
+                Task::none()
+            }
+            Message::EngTest => {
+                // the line comes before the request, the query is always the same one
+                self.eng_status = "Searching \"rust axum middleware\" ...".into();
+                Task::perform(models::test_search(self.base.clone()), Message::EngTested)
+            }
+            Message::EngTested(Ok(answer)) => {
+                self.eng_status = crate::search::test_text(&answer);
+                Task::none()
+            }
+            Message::EngTested(Err(e)) => {
+                self.eng_status = e;
+                Task::none()
+            }
             Message::MetricsOpen => {
                 self.metrics_open = !self.metrics_open;
                 Task::none()
@@ -4403,6 +4576,18 @@ impl App {
                             Message::ConnectLoaded,
                         )
                     };
+                    // both cards of the Search pane read what the server has for them; the Studio
+                    // builds that pane when the settings are laid out and both cards load then,
+                    // which is the first time this page is opened here
+                    let search = if self.search_loaded {
+                        Task::none()
+                    } else {
+                        self.search_loaded = true;
+                        Task::batch([
+                            Task::perform(models::fetch_embed(self.base.clone()), Message::EmbedLoaded),
+                            Task::perform(models::fetch_engines(self.base.clone()), Message::EngLoaded),
+                        ])
+                    };
                     if !matches!(self.server, Server::Down(_)) {
                         return Task::batch(vec![
                             voices,
@@ -4414,6 +4599,7 @@ impl App {
                             runtime,
                             prov,
                             connect,
+                            search,
                             logs,
                             keys,
                             Task::perform(
@@ -5404,6 +5590,16 @@ impl App {
                     auth_required: self.key_list.auth_required,
                 },
                 &self.copied,
+                crate::search::SearchView {
+                    embed_url: &self.embed_url,
+                    embed_status: &self.embed_status,
+                    engines: &self.engines,
+                    kind: &self.eng_kind,
+                    name: &self.eng_name,
+                    url: &self.eng_url,
+                    key: &self.eng_key,
+                    status: &self.eng_status,
+                },
             )
         } else if self.page == View::Project {
             // the page of a project sits where the conversation sits, so the dialogs can open over it

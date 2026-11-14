@@ -7,6 +7,19 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **The two cards of *Search* in the native app: the embeddings server and the engines of the web
+  search.** *Document search* with the box, **Save** and **Test** and the lines of `load()` /
+  `save()` — `Hybrid search is on.`, `Keyword search only.`, `Saved. The next question searches
+  hybrid.`, the message of the server or `Could not save it.` — and *Test* with the sentence of
+  `btnEmbedTest`, whose similarity is figured the way `ragCosine` of `rag.js` figures it (`0` for
+  vectors of different lengths and for a vector with nothing in it). *Web search engines* with the
+  list (`No engine yet.`, `name || kind` over `kind · url · key set`, Remove), the four fields over
+  **Add** with the two checks of `#seAdd` (a successful add clears the three boxes, leaves the kind
+  and does not touch the line), **Save engines** and **Test a search** — one line per engine with
+  the German *Treffer* the Studio writes, the blank line that goes between them in every case, the
+  first three titles, `data.error.message` or `No answer.` for an answer that holds nothing, and
+  `The search failed: …` when the server could not be reached. Both cards are read once when the
+  page is opened. Six unit tests, three window tests, five mutations.
 - **The two cards of *Connect other apps* in the native app: the examples and the settings of a
   coding tool.** *Connect other apps* with the four tabs of `sdkSnippetTabs`, the example of
   `updateCliAndSdkSnippets` (origin, `fllm-sk-local`, the loaded model or `fllm-studio-demo`, the
@@ -543,6 +556,10 @@ behaviour between versions).
 - **The composer is calm: neutral at rest, one neutral hairline on focus, and a chip that is on (Thinking, Web access) has a neutral fill with the accent only on its icon.** The frame and the chip were copper and orange at the same time as the send button.
 
 ### Fixed
+- **The description of *Connect other apps* is drawn as one sentence.** It was put together out of
+  pieces beside each other; `app-item-desc` of the Studio is one paragraph, and both descriptions
+  of that card are now a single text — with a test that finds each of them whole, so a split
+  paragraph cannot come back unnoticed.
 - **The dialogs and the palette are layers of the window, not of the chat page.** The Models and
   Code pages build their own page and returned before the stack of layers existed, so `Mod+K`
   there set the flag and drew nothing — the window swallowed the keys of a palette nobody saw —

@@ -23,6 +23,13 @@ pub const SDKS: [(&str, &str); 4] = [
 /// The header of the code card of the first card.
 pub const SDK_LANG: &str = "bash";
 
+/// The description of the first card (its `<p class="app-item-desc">`).
+pub const SDK_HELP: &str = "fLLM speaks the same languages as the big AI services, so coding tools such as Claude Code, Cursor or Continue, and the official libraries, can use your model. Copy one of these examples.";
+
+/// The description of the second card (the `<p class="app-item-desc">` of `spane-claude-code`,
+/// with its `<span class="mono">` words set like the rest of the sentence).
+pub const CONNECT_HELP: &str = "Pick your tool: you get the exact settings for this server and the model that is loaded now. The same text comes from fllm-rs connect TOOL in a terminal, which can also write the files for you (--write).";
+
 /// What the header of the second card says about the key (`statusLine` of `connect.js`): a
 /// placeholder is always fine here, and a server that wants a real key is said so.
 pub fn status_line(auth_required: bool) -> String {
@@ -265,7 +272,13 @@ mod tests {
         assert_eq!(shell_id("cmd"), "cmd");
         assert_eq!(shell_label("sh"), Some("bash / zsh"));
         assert_eq!(shell_label("fish"), None);
-        assert_eq!(default_shell(), "sh", "the page asks for sh away from Windows");
+        // the page starts at PowerShell on Windows and at a shell of the family everywhere
+        // else — which one is checked here for the machine this test runs on
+        if cfg!(windows) {
+            assert_eq!(default_shell(), "powershell", "the page asks for PowerShell on Windows");
+        } else {
+            assert_eq!(default_shell(), "sh", "the page asks for sh away from Windows");
+        }
     }
 
     /// The blocks of the plan, in the order `render()` of `connect.js` builds them: notes first,
@@ -421,9 +434,7 @@ pub fn section<'a>(t: Tokens, v: ConnectView<'a>, copied: &Option<String>) -> El
         );
     }
     let first = column![
-        text("fLLM speaks the same languages as the big AI services, so coding tools such as Claude Code, Cursor or Continue, and the official libraries, can use your model. Copy one of these examples.")
-            .size(13)
-            .color(t.fg_soft),
+        text(SDK_HELP).size(13).color(t.fg_soft),
         tabs,
         code_card(t, SDK_LANG, &example, Message::SdkCopy),
     ]
@@ -431,18 +442,9 @@ pub fn section<'a>(t: Tokens, v: ConnectView<'a>, copied: &Option<String>) -> El
 
     // ---- Connect a coding tool ----------------------------------------------------------
     let mut second = column![].spacing(10);
-    second = second.push(
-        row![
-            text("Pick your tool: you get the exact settings for this server and the model that is loaded now. The same text comes from ")
-                .size(13)
-                .color(t.fg_soft),
-            text("fllm-rs connect TOOL").size(13).font(Font::MONOSPACE).color(t.fg),
-            text(" in a terminal, which can also write the files for you ").size(13).color(t.fg_soft),
-            text("--write").size(13).font(Font::MONOSPACE).color(t.fg),
-            text(".").size(13).color(t.fg_soft),
-        ]
-        .spacing(0),
-    );
+    // one sentence, as every description of these cards is drawn (`app-item-desc` is one
+    // paragraph: its `mono` words are set like the rest of it, not put beside it)
+    second = second.push(text(CONNECT_HELP).size(13).color(t.fg_soft));
 
     // the two selects: the tool comes from the answer of the server, and the select shows what
     // it is called there — the id comes back out of the label, the way `AmdNpuChosen` reads it
