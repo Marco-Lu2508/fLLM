@@ -222,6 +222,9 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   nothing for a box that is no JSON, the answer pretty when it is JSON), and *Server statistics
   (`/metrics`)* with the line of `detailsPrometheusLog` and its box behind it, filled when Refresh
   is pressed. Three unit tests, one window test, three mutations.
+- Settings search: the box over the column of settings pages that keeps what every word of the
+  question is in, marks the best card after Enter and asks the same box from the command palette.
+  Seven unit tests, three window tests, seven mutations.
 - Plugins, hooks and sub-agents: *Plugins* with its list and its two install rows, *Hooks* with
   the eleven events of the loop and the rows of their hooks, and *Sub-agents* with its list, the
   form behind its buttons and the sample that tries the instructions. Thirteen unit tests, four

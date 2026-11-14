@@ -498,8 +498,10 @@ fn plugin_hooks<'a>(t: Tokens, items: &'a [PluginHook]) -> Element<'a, Message> 
 /// The card of `spane-hooks`.
 pub fn section<'a>(t: Tokens, v: HooksView<'a>) -> Element<'a, Message> {
     let mut body = column![text(DESC1).size(13).color(t.fg_soft), text(DESC2).size(13).color(t.fg_soft)].spacing(10);
-    for event_index in 0..EVENTS.len() {
-        body = body.push(event_block(t, event_index, &v.rows[event_index]));
+    // the pages in their order, each with the rows it holds — the loop CI's clippy (1.100)
+    // wants written this way, and the window reads the same eleven either way
+    for (event_index, rows) in v.rows.iter().enumerate().take(EVENTS.len()) {
+        body = body.push(event_block(t, event_index, rows));
     }
     if !v.from_plugins.is_empty() {
         body = body.push(plugin_hooks(t, v.from_plugins));

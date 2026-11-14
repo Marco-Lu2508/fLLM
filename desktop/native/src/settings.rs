@@ -1157,6 +1157,9 @@ pub fn page<'a>(
     plugins: crate::plugins::PluginsView<'a>,
     hooks: crate::hooks::HooksView<'a>,
     agents: crate::agents::AgentsView<'a>,
+    query: &'a str,
+    showing_empty: bool,
+    hit: Option<&'static str>,
 ) -> Element<'a, Message> {
     let mut answers = column![].spacing(14);
     answers = answers.push(setting(
@@ -1655,59 +1658,191 @@ pub fn page<'a>(
         alerts = alerts.push(text(notify_status).size(12).color(t.muted));
     }
 
-    let content = column![
-        container(text("Settings").size(26).font(bold())).padding(Padding { top: 14.0, right: 0.0, bottom: 4.0, left: 2.0 }),
-        card(t, "General", general.into()),
-        card(t, "Answers", answers.into()),
-        card(t, "Personalization", pers.into()),
-        engine,
+    let mut content = column![].spacing(14);
+    content = content.push(container(text("Settings").size(26).font(bold())).padding(Padding { top: 14.0, right: 0.0, bottom: 4.0, left: 2.0 }));
+
+    // the box over the pages (`settings-search` of `settingssearch.js`, which
+    // the page puts at the head of its navigation)
+    content = content.push(crate::settingssearch::search_box(t, query, showing_empty));
+    if crate::settingssearch::keep("general", query) {
+        if hit == Some("general") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(card(t, "General", general.into()));
+    }
+    if crate::settingssearch::keep("answers", query) {
+        if hit == Some("answers") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(card(t, "Answers", answers.into()));
+    }
+    if crate::settingssearch::keep("personalization", query) {
+        if hit == Some("personalization") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(card(t, "Personalization", pers.into()));
+    }
+    if crate::settingssearch::keep("engine", query) {
+        if hit == Some("engine") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(engine);
+    }
         // the Voice and alerts pane sits last so the cards before it keep their place (the pane
         // of voice.js has its own place in the Studio's menu; the drawing of the settings takes
         // its own height for these)
-        card(t, "Appearance", appearance_card(t, look)),
-        hardware_card(t, hardware),
+    if crate::settingssearch::keep("appearance", query) {
+        if hit == Some("appearance") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(card(t, "Appearance", appearance_card(t, look)));
+    }
+    if crate::settingssearch::keep("hardware", query) {
+        if hit == Some("hardware") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(hardware_card(t, hardware));
+    }
         // Settings > Server and API: the two cards of `spane-local-api-server`, where the
         // Studio's settings menu has them (right after the hardware page)
-        crate::localapi::server_card(t, server),
-        crate::localapi::keys_card(t, server),
-        crate::localapi::tester_card(t, server),
-        crate::localapi::metrics_card(t, server),
+    if crate::settingssearch::keep("local-api", query) {
+        if hit == Some("local-api") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::localapi::server_card(t, server));
+    }
+    if crate::settingssearch::keep("local-api", query) {
+        if hit == Some("local-api") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::localapi::keys_card(t, server));
+    }
+    if crate::settingssearch::keep("local-api", query) {
+        if hit == Some("local-api") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::localapi::tester_card(t, server));
+    }
+    if crate::settingssearch::keep("local-api", query) {
+        if hit == Some("local-api") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::localapi::metrics_card(t, server));
+    }
         // Settings > Logs: the card of `spane-logs`, where the Studio's menu has it (after the
         // server pages, before the panes the menu appends)
-        crate::localapi::logs_card(t, logs_text),
+    if crate::settingssearch::keep("logs", query) {
+        if hit == Some("logs") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::localapi::logs_card(t, logs_text));
+    }
         // Settings > Tokenizer: the two cards of `spane-tokenizer`, where the Studio's menu has
         // them (after the logs, before the panes the menu appends)
-        crate::localapi::token_card(t, tokenizer),
-        crate::localapi::jinja_card(t, tokenizer),
+    if crate::settingssearch::keep("tokenizer", query) {
+        if hit == Some("tokenizer") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::localapi::token_card(t, tokenizer));
+    }
+    if crate::settingssearch::keep("tokenizer", query) {
+        if hit == Some("tokenizer") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::localapi::jinja_card(t, tokenizer));
+    }
         // Settings > Connect other apps, where the Studio's menu has it: after the tokenizer and
         // before the panes the menu appends
-        crate::connect::section(t, connect, copied),
+    if crate::settingssearch::keep("connect", query) {
+        if hit == Some("connect") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::connect::section(t, connect, copied));
+    }
         // Settings > Search: the pane `rag.js` builds and `searchengines.js` adds its card to —
         // the table keeps this row where it stands, between the two neighbours the Studio's menu
         // has around it
-        crate::search::section(t, search),
+    if crate::settingssearch::keep("search", query) {
+        if hit == Some("search") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::search::section(t, search));
+    }
         // Settings > MCP servers: the three cards of `spane-mcp`, where the table has this row
-        crate::mcp::section(t, mcp),
+    if crate::settingssearch::keep("mcp", query) {
+        if hit == Some("mcp") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::mcp::section(t, mcp));
+    }
         // Settings > Skills: the cards of `spane-skills`, where the table has this row
-        crate::skills::section(t, skills),
+    if crate::settingssearch::keep("skills", query) {
+        if hit == Some("skills") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::skills::section(t, skills));
+    }
         // Settings > Plugins, where the table has this row
-        crate::plugins::section(t, plugins),
+    if crate::settingssearch::keep("plugins", query) {
+        if hit == Some("plugins") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::plugins::section(t, plugins));
+    }
         // Settings > Hooks, where the table has this row
-        crate::hooks::section(t, hooks),
+    if crate::settingssearch::keep("hooks", query) {
+        if hit == Some("hooks") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::hooks::section(t, hooks));
+    }
         // Settings > Sub-agents, where the table has this row
-        crate::agents::section(t, agents),
-        card(t, "Usage and cost", usage_card(t, usage)),
+    if crate::settingssearch::keep("agents", query) {
+        if hit == Some("agents") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::agents::section(t, agents));
+    }
+    if crate::settingssearch::keep("usage", query) {
+        if hit == Some("usage") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(card(t, "Usage and cost", usage_card(t, usage)));
+    }
         // Settings > Runtime: the three cards of `runtime.js` (the sandbox, computer use and
         // turbo), in the order the Studio's pane draws them
-        crate::runtime::section(t, runtime),
+    if crate::settingssearch::keep("runtime", query) {
+        if hit == Some("runtime") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::runtime::section(t, runtime));
+    }
         // Settings > Providers: the two cards of `spane-providers`, in the order the Studio's
         // settings menu has them
-        crate::providers::section(t, providers),
-        card(t, "Dictation", dictation.into()),
-        card(t, "Reading aloud", reading.into()),
-        card(t, "Alerts", alerts.into()),
-    ]
-    .spacing(14);
+    if crate::settingssearch::keep("providers", query) {
+        if hit == Some("providers") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::providers::section(t, providers));
+    }
+    if crate::settingssearch::keep("dictation", query) {
+        if hit == Some("dictation") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(card(t, "Dictation", dictation.into()));
+    }
+    if crate::settingssearch::keep("reading", query) {
+        if hit == Some("reading") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(card(t, "Reading aloud", reading.into()));
+    }
+    if crate::settingssearch::keep("alerts", query) {
+        if hit == Some("alerts") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(card(t, "Alerts", alerts.into()));
+    }
     let inner = container(content).max_width(780).width(Length::Fill).padding(Padding { top: 8.0, right: 24.0, bottom: 32.0, left: 24.0 });
     scrollable(container(inner).center_x(Length::Fill).width(Length::Fill)).height(Length::Fill).into()
 }

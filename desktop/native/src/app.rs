@@ -166,6 +166,9 @@ pub enum PaletteAction {
     ExportMarkdown(u64),
     ExportJson(u64),
     OpenChat(u64),
+    /// The weak row of the palette: the question it was asked with (`find-setting` of
+    /// `palette.js`, which calls `window.fllmSettingsSearch`).
+    FindSetting(String),
 }
 
 impl PaletteAction {
@@ -177,6 +180,7 @@ impl PaletteAction {
             PaletteAction::GoCode => Message::Go(View::Code),
             PaletteAction::GoModels => Message::Go(View::Models),
             PaletteAction::GoSettings => Message::Go(View::Settings),
+            PaletteAction::FindSetting(text) => Message::SettingsSearch(text.clone()),
             PaletteAction::ToggleTheme => Message::ToggleTheme,
             PaletteAction::Shortcuts => Message::ShortcutsOpen,
             PaletteAction::Tour => Message::TourShow,
@@ -495,6 +499,10 @@ pub struct App {
     /// The edit that waits for the tools the form names (`startEdit` awaits `loadTools()`).
     pub agent_pending: Option<(crate::agents::Agent, bool)>,
     pub agent_delete: Option<(String, String)>,
+    // Settings search (`settingssearch.js`): the question in the box over the column, and the
+    // card Enter marked — the page leaves its class for 3200 ms, so does this window
+    pub settings_query: String,
+    pub settings_hit: Option<&'static str>,
     /// What *Find skills on GitHub* holds.
     pub repo: String,
     pub repo_say: String,
@@ -1068,6 +1076,10 @@ pub enum Message {
     AgentDeleteCancel,
     AgentDeleted(String, Result<serde_json::Value, String>),
     AgentPathCopy,
+    SettingsQuery(String),
+    SettingsEnter,
+    SettingsHitClear(&'static str),
+    SettingsSearch(String),
     EngKind(String),
     EngName(String),
     EngUrl(String),
@@ -1369,6 +1381,8 @@ impl App {
             agent_editing: None,
             agent_pending: None,
             agent_delete: None,
+            settings_query: String::new(),
+            settings_hit: None,
             base: base.clone(),
             data_file,
             store,
@@ -4271,6 +4285,46 @@ impl App {
                 self.agents_notice = "Path copied.".into();
                 iced::clipboard::write(self.agents_folder.clone())
             }
+            Message::SettingsQuery(value) => {
+                self.settings_query = value;
+                Task::none()
+            }
+            Message::SettingsEnter => {
+                // the box is already on the page it would open, so Enter only marks what the
+                // page marks (`switchSettingsPane` then `highlight`)
+                let Some(id) = crate::settingssearch::best_match(&self.settings_query) else {
+                    return Task::none();
+                };
+                self.settings_hit = Some(id);
+                Task::perform(
+                    async {
+                        tokio::time::sleep(std::time::Duration::from_millis(3200)).await;
+                    },
+                    move |_| Message::SettingsHitClear(id),
+                )
+            }
+            Message::SettingsHitClear(id) => {
+                // a mark of another question stands on its own
+                if self.settings_hit == Some(id) {
+                    self.settings_hit = None;
+                }
+                Task::none()
+            }
+            Message::SettingsSearch(text) => {
+                // `window.fllmSettingsSearch` of the page: the box is asked, the best page is
+                // marked, and the surface of the settings shows it
+                self.settings_query = text;
+                self.settings_hit = crate::settingssearch::best_match(&self.settings_query);
+                let hit = self.settings_hit;
+                let go = self.update(Message::Go(View::Settings));
+                let mark = Task::perform(
+                    async {
+                        tokio::time::sleep(std::time::Duration::from_millis(3200)).await;
+                    },
+                    move |_| Message::SettingsHitClear(hit.unwrap_or("")),
+                );
+                Task::batch([go, mark])
+            }
             Message::EngKind(kind) => {
                 self.eng_kind = kind;
                 Task::none()
@@ -6066,6 +6120,14 @@ impl App {
                     // nothing else runs while the window is open
                     return Task::none();
                 }
+                // the box of the settings search empties on Escape (`keydown` of
+                // `settingssearch.js`); the box has no focus of its own here, so the line is
+                // drawn only while this page is open and holds a word
+                if combo == "Escape" && self.page == View::Settings && !self.settings_query.is_empty() {
+                    self.settings_query.clear();
+                    self.settings_hit = None;
+                    return Task::none();
+                }
                 let combos = shortcuts::effective_combos(&self.store.prefs.shortcut_overrides);
                 let Some(id) = shortcuts::shortcut_for(&combos, &combo) else {
                     return Task::none();
@@ -7625,6 +7687,9 @@ impl App {
                     editing: self.agent_editing.as_ref(),
                     workspace: &self.sk_workspace,
                 },
+                &self.settings_query,
+                crate::settingssearch::shows_empty(&self.settings_query),
+                self.settings_hit,
             )
         } else if self.page == View::Project {
             // the page of a project sits where the conversation sits, so the dialogs can open over it
@@ -10086,6 +10151,21 @@ impl App {
                     rows.push((item.clone(), action.clone()));
                 }
             }
+            // the weak row that asks the settings search (`find-setting` of `palette.js`, which
+            // hands the ranking one more pass with it — 41 rows there, too)
+            let raw = self.palette_query.trim();
+            rows.push((
+                palette::PaletteItem::new(
+                    "find-setting",
+                    palette::Kind::Setting,
+                    format!("Search the settings for \"{raw}\""),
+                )
+                .weak(),
+                PaletteAction::FindSetting(raw.to_string()),
+            ));
+            let settings_items: Vec<palette::PaletteItem> = rows.iter().map(|(i, _)| i.clone()).collect();
+            let reranked = palette::rank_palette(&self.palette_query, &settings_items, 41);
+            rows = reranked.into_iter().map(|i| rows[i].clone()).collect();
         }
         rows
     }

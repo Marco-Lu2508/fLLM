@@ -161,10 +161,14 @@ fn a_query_keeps_what_matches_and_nothing_says_so() {
     let (mut app, _dir) = app_with(store_with_chats());
     let _ = app.update(Message::PaletteOpen);
 
-    // the title matches: the row is kept with its keys
+    // the title matches: the row is kept with its keys — and the weak row the palette offers
+    // for a setting stands with it, as the Studio offers that row for every question
+    // (`find-setting` of `palette.js`, the part the Settings row of the table kept for it)
     let _ = app.update(Message::PaletteQuery("models".into()));
-    assert_eq!(app.palette_rows.len(), 1, "only the command about models");
+    assert_eq!(app.palette_rows.len(), 2, "the command and the row for a setting");
     assert_eq!(app.palette_rows[0].0.title, "Open Models");
+    assert_eq!(app.palette_rows[1].0.id, "find-setting", "the row behind the command");
+    assert!(app.palette_rows[1].0.weak, "and it is the weak one");
     assert_eq!(app.palette_active, 0, "the first row is active after every query");
 
     // only the text of a chat matches: it is appended with the text around the hit
@@ -184,15 +188,22 @@ fn a_query_keeps_what_matches_and_nothing_says_so() {
         row.0.sub
     );
 
-    // nothing at all
+    // nothing at all — which still offers a search of the settings, as the page does: the weak
+    // row carries the question in its own title, so one row stands for every question and the
+    // empty line of the Studio stays what it is for a palette without the settings hook
     let _ = app.update(Message::PaletteQuery("qqqzzz".into()));
-    assert!(app.palette_rows.is_empty(), "nothing matched");
-    assert_eq!(app.palette_active, -1, "no row is active");
+    assert_eq!(app.palette_rows.len(), 1, "only the row for a setting stands");
+    assert_eq!(app.palette_rows[0].0.id, "find-setting");
+    assert_eq!(app.palette_active, 0, "the first row is active after every query");
     {
         let mut ui = sim(&app);
-        ui.find("Nothing found for \"qqqzzz\".")
-            .expect("the empty line of the Studio");
-        ui.find("No results").expect("the count of the Studio");
+        assert!(
+            ui.find("Nothing found for \"qqqzzz\".").is_err(),
+            "no empty line while a row stands"
+        );
+        ui.find("Search the settings for \"qqqzzz\"")
+            .expect("the weak row the palette offers");
+        ui.find("1 result").expect("the count of the Studio");
         save_png(&app, "palette-empty");
     }
     let _ = app.update(Message::PaletteClose);

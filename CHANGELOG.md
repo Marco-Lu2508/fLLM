@@ -33,6 +33,16 @@ behaviour between versions).
   of tools, the two sides of *Available in*, the words of `agentPayload` in its order, and *Try
   the instructions* behind its two guards. Delete asks with the dialog of `confirmDialog`
   (**Cancel** left, **OK** right). Thirteen unit tests, four window tests, ten mutations.
+- **The search box over the settings in the native app.** The box of `settingssearch.js` above
+  the column of settings pages, with its two functions kept word for word: `searchWords` and
+  `rankSettingsPages` with the four places a word can have and the page that a word takes out of
+  the answer; the question hides the cards that do not have every word and keeps the rest where
+  the column puts them, *No setting matches.* stands when nothing has them, Enter marks the best
+  card for the 3200 ms the page keeps its mark for, Escape empties the box while this page is
+  open, and the weak row of the command palette — *Search the settings for "…"*, the part row 41
+  kept for this round — asks the same box and opens the settings. The window keeps its own list
+  of the settings and their words (it has no document to read back), said in PARITY.md.
+  Seven unit tests, three window tests, seven mutations.
 - **The three cards of *MCP servers* in the native app: what runs, where to find one and the form
   that writes one.** *Tools (MCP)* with the list of `mcpRender` — the state in the colour of the
   page with ` - {n} tool{s}` behind a ready one, the line of the address or of the command, a red

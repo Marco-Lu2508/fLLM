@@ -25,6 +25,7 @@ pub mod runtime;
 pub mod agents;
 pub mod hooks;
 pub mod plugins;
+pub mod settingssearch;
 pub mod skills;
 pub mod search;
 pub mod localapi;
