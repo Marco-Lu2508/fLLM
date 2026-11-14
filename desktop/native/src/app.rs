@@ -360,6 +360,9 @@ pub struct App {
     /// The provider waiting for the answer of *Remove this provider and its saved key?*
     pub prov_remove: Option<String>,
     prov_loaded: bool,
+    /// Settings > Logs: what the `<pre id="preLogs">` holds — `Loading ...` until the server
+    /// answered, the lines after that, and the sentence of `refreshLogs` when it could not.
+    pub logs_text: String,
     /// The answer under *Run speed test* (`speedTestResult` of `models.js`).
     pub speed_test: Option<String>,
     /// Whether the speed test is running (the button is off while it does).
@@ -806,6 +809,9 @@ pub enum Message {
     ProvToggle(String, bool),
     ProvEnabled(Result<serde_json::Value, String>),
     ProvRefreshAll,
+    /// Settings > Logs: read the last lines of the server (`btnRefreshLogs`).
+    LogsRefresh,
+    LogsLoaded(Result<crate::localapi::Logs, String>),
     /// *Remove* was pressed; the window asks first.
     ProvRemove(String),
     ProvRemoveOk,
@@ -1014,6 +1020,7 @@ impl App {
             prov_net_open: false,
             prov_remove: None,
             prov_loaded: false,
+            logs_text: "Loading ...".into(),
             speed_test: None,
             speed_test_busy: false,
             selftest: None,
@@ -3043,6 +3050,16 @@ impl App {
                 self.runtime_say = e;
                 Task::none()
             }
+            Message::LogsRefresh => Task::perform(crate::localapi::fetch_logs(self.base.clone()), Message::LogsLoaded),
+            Message::LogsLoaded(Ok(logs)) => {
+                self.logs_text = crate::localapi::logs_text(&logs.lines);
+                Task::none()
+            }
+            // `refreshLogs` of `models.js` writes its own sentence when the lines could not be read
+            Message::LogsLoaded(Err(_)) => {
+                self.logs_text = "The logs could not be read.".into();
+                Task::none()
+            }
             Message::ProvLoad => Task::perform(crate::providers::fetch_providers(self.base.clone()), Message::ProvLoaded),
             Message::ProvLoaded(Ok(list)) => {
                 self.prov_file_info = format!("Saved in {}", list.config_file);
@@ -3977,6 +3994,9 @@ impl App {
                     } else {
                         Task::perform(models::fetch_runtime(self.base.clone()), Message::RuntimeLoaded)
                     };
+                    // the logs are read again every time the page opens (`if (pane === 'logs')
+                    // refreshLogs()` of `models.js` runs on every click of the menu entry)
+                    let logs = Task::perform(crate::localapi::fetch_logs(self.base.clone()), Message::LogsLoaded);
                     // the list of the providers comes with the pane (`provRefresh` runs when the
                     // menu entry of the Studio is clicked)
                     let prov = if self.prov_loaded {
@@ -3994,13 +4014,14 @@ impl App {
                             slots,
                             runtime,
                             prov,
+                            logs,
                             Task::perform(
                                 engine_settings::fetch(self.base.clone()),
                                 Message::EngineLoaded,
                             ),
                         ]);
                     }
-                    return Task::batch(vec![voices, prices, devices, npu, amd, slots, runtime, prov]);
+                    return Task::batch(vec![voices, prices, devices, npu, amd, slots, runtime, prov, logs]);
                 }
                 Task::none()
             }
@@ -4935,6 +4956,7 @@ impl App {
                     file_info: &self.prov_file_info,
                     network_open: self.prov_net_open,
                 },
+                &self.logs_text,
             )
         } else if self.page == View::Project {
             // the page of a project sits where the conversation sits, so the dialogs can open over it

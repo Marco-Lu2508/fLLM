@@ -7,6 +7,13 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **Settings > Logs in the native app: what the server wrote lately.** The card of `spane-logs` —
+  its line, the *Refresh* and *Copy* buttons of its header, and the box of `preLogs` at the height
+  the Studio gives it (480px of scrolling monospace): the lines of
+  `GET /api/studio/logs?lines=300` joined, *Nothing has been logged yet.* for an empty log, *The
+  logs could not be read.* when the read failed, and *Copy* takes exactly what the box holds. The
+  page reads them every time it opens, the way the Studio refreshes the pane on every click of its
+  menu entry. One unit test, two window tests with one drawing.
 - **Settings > Providers in the native app: other servers and cloud services next to the local
   one.** The two cards of `providers.js`: *Model providers* with its two paragraphs (the privacy
   note set like the rest of the sentence), one row per provider with the line of `provRender` —

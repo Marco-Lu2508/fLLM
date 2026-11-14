@@ -206,6 +206,12 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   server on this computer, and Save / Test connection / Clear with the toast *Saved <name>* and the
   test that follows it. The whole `@pure` block of `providers.js` with the fixtures it produced:
   nine unit tests, four window tests with two drawings, nine mutations.
+- Logs: what the server wrote lately — the card of `spane-logs` with its line, *Refresh* and
+  *Copy*, and the box of `preLogs` at the height the Studio gives it (480px of scrolling
+  monospace). The lines of `GET /api/studio/logs?lines=300` joined, *Nothing has been logged yet.*
+  for an empty log, *The logs could not be read.* when the read failed; *Copy* takes exactly what
+  the box holds, and the page reads them every time it opens, the way the Studio refreshes the pane
+  on every click of its menu entry. One unit test, two window tests with one drawing.
 - Appearance: the settings card of the Studio — theme (system/dark/light), the eight accent
   colors with the chosen one ringed, the base size of the text (14–18px), *Tint your messages* and
   *Show generation speed*. The accent colours the whole page exactly as the Studio computes it

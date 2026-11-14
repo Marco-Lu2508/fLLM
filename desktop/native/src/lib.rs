@@ -20,6 +20,7 @@ pub mod palette;
 pub mod prompts;
 pub mod providers;
 pub mod runtime;
+pub mod localapi;
 pub mod memory;
 pub mod promptlib;
 pub mod speech;
