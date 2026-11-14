@@ -222,6 +222,10 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   nothing for a box that is no JSON, the answer pretty when it is JSON), and *Server statistics
   (`/metrics`)* with the line of `detailsPrometheusLog` and its box behind it, filled when Refresh
   is pressed. Three unit tests, one window test, three mutations.
+- Plugins, hooks and sub-agents: *Plugins* with its list and its two install rows, *Hooks* with
+  the eleven events of the loop and the rows of their hooks, and *Sub-agents* with its list, the
+  form behind its buttons and the sample that tries the instructions. Thirteen unit tests, four
+  window tests, ten mutations.
 - Skills: *Skills* with the list and its editor, *Skill improvements* with the feed of changes,
   the drafts of the model behind their dialogs and *Consolidate now*, *Write a skill* with the
   template, *Scheduled tasks* with its rows and *New task* with its schedule preview, and the two

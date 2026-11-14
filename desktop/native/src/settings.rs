@@ -1154,6 +1154,9 @@ pub fn page<'a>(
     search: crate::search::SearchView<'a>,
     mcp: crate::mcp::McpView<'a>,
     skills: crate::skills::SkillsView<'a>,
+    plugins: crate::plugins::PluginsView<'a>,
+    hooks: crate::hooks::HooksView<'a>,
+    agents: crate::agents::AgentsView<'a>,
 ) -> Element<'a, Message> {
     let mut answers = column![].spacing(14);
     answers = answers.push(setting(
@@ -1687,6 +1690,12 @@ pub fn page<'a>(
         crate::mcp::section(t, mcp),
         // Settings > Skills: the cards of `spane-skills`, where the table has this row
         crate::skills::section(t, skills),
+        // Settings > Plugins, where the table has this row
+        crate::plugins::section(t, plugins),
+        // Settings > Hooks, where the table has this row
+        crate::hooks::section(t, hooks),
+        // Settings > Sub-agents, where the table has this row
+        crate::agents::section(t, agents),
         card(t, "Usage and cost", usage_card(t, usage)),
         // Settings > Runtime: the three cards of `runtime.js` (the sandbox, computer use and
         // turbo), in the order the Studio's pane draws them

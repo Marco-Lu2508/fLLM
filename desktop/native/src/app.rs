@@ -466,6 +466,35 @@ pub struct App {
     pub lib_status: String,
     pub lib_url: String,
     pub lib_loaded: bool,
+    // Settings > Plugins (`pluginsSettings` of `plugins.js`): the list, the two install rows and
+    // the two status lines; the page reads the list once when its pane is built
+    pub plugins: Vec<crate::plugins::Plugin>,
+    pub plugins_folder: String,
+    pub plugins_status: String,
+    pub plugin_path: String,
+    pub plugin_url: String,
+    pub plugin_ref: String,
+    pub plugins_loaded: bool,
+    pub plugin_remove: Option<String>,
+    // Settings > Hooks (`hooksSettings` of `hooks.js`): one vector of rows per event of the
+    // loop, the file they live in, the status line and the hooks the plugins bring; the page
+    // reads the list when its pane is built and again on **Reload**
+    pub hooks_rows: Vec<Vec<crate::hooks::HookRow>>,
+    pub hooks_file: String,
+    pub hooks_status: String,
+    pub hooks_plugins: Vec<crate::hooks::PluginHook>,
+    pub hooks_loaded: bool,
+    // Settings > Sub-agents (`agentsSettings` of `agents.js`): the list, the folder it writes
+    // to, the note over it, the two tool groups of the form, the form while it is open and the
+    // question before a delete
+    pub agents: Vec<crate::agents::Agent>,
+    pub agents_folder: String,
+    pub agents_notice: String,
+    pub agent_groups: (Vec<crate::agents::Tool>, Vec<crate::agents::Tool>),
+    pub agent_editing: Option<crate::agents::AgentEdit>,
+    /// The edit that waits for the tools the form names (`startEdit` awaits `loadTools()`).
+    pub agent_pending: Option<(crate::agents::Agent, bool)>,
+    pub agent_delete: Option<(String, String)>,
     /// What *Find skills on GitHub* holds.
     pub repo: String,
     pub repo_say: String,
@@ -994,6 +1023,51 @@ pub enum Message {
     /// The engines: their list, the four fields over Add, and the two buttons (`seKind`, `seName`,
     /// `seUrl`, `seKey`, `seAdd`, `seSave`, `seTest`, and the Remove of every row).
     EngLoaded(Result<crate::search::EngineAnswer, String>),
+    PluginsLoaded(Result<crate::plugins::PluginsAnswer, String>),
+    PluginPath(String),
+    PluginUrl(String),
+    PluginRef(String),
+    PluginInstall,
+    PluginInstalled(Result<serde_json::Value, String>),
+    PluginClone,
+    PluginCloned(Result<serde_json::Value, String>),
+    PluginRemoveAsk(String),
+    PluginRemoveOk,
+    PluginRemoveCancel,
+    PluginRemoved(String, Result<serde_json::Value, String>),
+    HooksLoaded(Result<crate::hooks::HooksAnswer, String>),
+    HookField(usize, usize, crate::hooks::HookField, String),
+    HookEnabled(usize, usize, bool),
+    HookAdd(usize),
+    HookRemove(usize, usize),
+    HookTest(usize, usize),
+    HookTested(Result<serde_json::Value, String>),
+    HooksSave,
+    HooksSaved(Result<serde_json::Value, String>),
+    HooksReload,
+    AgentsLoaded(Result<crate::agents::AgentsAnswer, String>),
+    AgentNew,
+    AgentEdit(String, String),
+    AgentToolsLoaded(Result<Vec<crate::agents::Tool>, String>),
+    AgentName(String),
+    AgentDescription(String),
+    AgentBody(Action),
+    AgentModel(String),
+    AgentSteps(String),
+    AgentToolToggle(String, bool),
+    AgentScope(bool),
+    AgentTryOpen,
+    AgentTryJob(Action),
+    AgentTryRun,
+    AgentTried(Result<String, String>),
+    AgentCancel,
+    AgentSave,
+    AgentSaved(String, bool, Result<serde_json::Value, String>),
+    AgentDeleteAsk(String, String),
+    AgentDeleteOk,
+    AgentDeleteCancel,
+    AgentDeleted(String, Result<serde_json::Value, String>),
+    AgentPathCopy,
     EngKind(String),
     EngName(String),
     EngUrl(String),
@@ -1275,6 +1349,26 @@ impl App {
         let store = Store::load(&data_file);
         let system_dark = std::env::var("FLLM_THEME").map(|v| v == "dark").unwrap_or(false);
         let mut app = App {
+            plugins: Vec::new(),
+            plugins_folder: String::new(),
+            plugins_status: String::new(),
+            plugin_path: String::new(),
+            plugin_url: String::new(),
+            plugin_ref: String::new(),
+            plugins_loaded: false,
+            plugin_remove: None,
+            hooks_rows: vec![Vec::new(); crate::hooks::EVENTS.len()],
+            hooks_file: String::new(),
+            hooks_status: String::new(),
+            hooks_plugins: Vec::new(),
+            hooks_loaded: false,
+            agents: Vec::new(),
+            agents_folder: String::new(),
+            agents_notice: String::new(),
+            agent_groups: (Vec::new(), Vec::new()),
+            agent_editing: None,
+            agent_pending: None,
+            agent_delete: None,
             base: base.clone(),
             data_file,
             store,
@@ -3690,8 +3784,492 @@ impl App {
                 Task::none()
             }
             Message::EngLoaded(Err(e)) => {
-                self.eng_status = format!("Could not read the engines: {e}");
+                self.engine.error = Some(e);
                 Task::none()
+            }
+            Message::PluginsLoaded(Ok(answer)) => {
+                // the page leaves the status line as it stands when the list arrives —
+                // `refresh()` says nothing on success
+                self.plugins = answer.plugins;
+                self.plugins_folder = answer.folder;
+                Task::none()
+            }
+            Message::PluginsLoaded(Err(e)) => {
+                // the catch of `refresh()`
+                self.plugins_status = format!("Could not read the plugins: {e}");
+                Task::none()
+            }
+            Message::PluginPath(v) => {
+                self.plugin_path = v;
+                Task::none()
+            }
+            Message::PluginUrl(v) => {
+                self.plugin_url = v;
+                Task::none()
+            }
+            Message::PluginRef(v) => {
+                self.plugin_ref = v;
+                Task::none()
+            }
+            Message::PluginInstall => {
+                let path = self.plugin_path.trim().to_string();
+                if path.is_empty() {
+                    self.plugins_status = "Give the absolute path of the plugin folder.".into();
+                    return Task::none();
+                }
+                self.plugins_status = "Installing ...".into();
+                Task::perform(
+                    models::post_plugins(self.base.clone(), serde_json::json!({ "path": path }), "Could not install it."),
+                    Message::PluginInstalled,
+                )
+            }
+            Message::PluginInstalled(Ok(_)) => {
+                self.plugin_path.clear();
+                self.plugins_status =
+                    "Installed. Its skills, agents, commands and hooks are available now.".into();
+                Task::perform(models::fetch_plugins(self.base.clone()), Message::PluginsLoaded)
+            }
+            Message::PluginInstalled(Err(e)) => {
+                self.plugins_status = e;
+                Task::none()
+            }
+            Message::PluginClone => {
+                let url = self.plugin_url.trim().to_string();
+                if url.is_empty() {
+                    self.plugins_status = "Give the address of a repository with a plugin.json.".into();
+                    return Task::none();
+                }
+                self.plugins_status = "Cloning ...".into();
+                Task::perform(
+                    models::post_plugins(
+                        self.base.clone(),
+                        serde_json::json!({ "url": url, "ref": self.plugin_ref.trim() }),
+                        "Could not install it.",
+                    ),
+                    Message::PluginCloned,
+                )
+            }
+            Message::PluginCloned(Ok(_)) => {
+                self.plugin_url.clear();
+                self.plugin_ref.clear();
+                self.plugins_status =
+                    "Installed from the repository. Its skills, agents, commands and hooks are available now."
+                        .into();
+                Task::perform(models::fetch_plugins(self.base.clone()), Message::PluginsLoaded)
+            }
+            Message::PluginCloned(Err(e)) => {
+                self.plugins_status = e;
+                Task::none()
+            }
+            Message::PluginRemoveAsk(name) => {
+                self.plugin_remove = Some(name);
+                Task::none()
+            }
+            Message::PluginRemoveCancel => {
+                self.plugin_remove = None;
+                Task::none()
+            }
+            Message::PluginRemoveOk => {
+                let Some(name) = self.plugin_remove.take() else { return Task::none() };
+                Task::perform(models::delete_plugins(self.base.clone(), name.clone()), move |answer| {
+                    Message::PluginRemoved(name, answer)
+                })
+            }
+            Message::PluginRemoved(name, Ok(_)) => {
+                self.plugins_status = format!("Removed {name}.");
+                Task::perform(models::fetch_plugins(self.base.clone()), Message::PluginsLoaded)
+            }
+            Message::PluginRemoved(_, Err(e)) => {
+                self.plugins_status = e;
+                Task::none()
+            }
+            Message::HooksLoaded(Ok(answer)) => {
+                self.hooks_rows = crate::hooks::rows_of(&answer.hooks);
+                self.hooks_file = answer.file;
+                self.hooks_plugins = answer.from_plugins;
+                // `say('')` of `load()`: the status line is empty after a load that worked
+                self.hooks_status.clear();
+                Task::none()
+            }
+            Message::HooksLoaded(Err(e)) => {
+                self.hooks_status = format!("Could not load the hooks: {e}");
+                Task::none()
+            }
+            Message::HookField(event, index, field, value) => {
+                if let Some(row) = self.hooks_rows.get_mut(event).and_then(|rows| rows.get_mut(index)) {
+                    match field {
+                        crate::hooks::HookField::Matcher => row.matcher = value,
+                        crate::hooks::HookField::Command => row.command = value,
+                        crate::hooks::HookField::Prompt => row.prompt = value,
+                        crate::hooks::HookField::On => row.on = value,
+                        crate::hooks::HookField::Timeout => row.timeout = value,
+                    }
+                }
+                Task::none()
+            }
+            Message::HookEnabled(event, index, on) => {
+                if let Some(row) = self.hooks_rows.get_mut(event).and_then(|rows| rows.get_mut(index)) {
+                    row.enabled = on;
+                }
+                Task::none()
+            }
+            Message::HookAdd(event) => {
+                // the page gathers the rows before it appends one (`collect()` first)
+                self.collect_hooks();
+                if let Some(rows) = self.hooks_rows.get_mut(event) {
+                    rows.push(crate::hooks::HookRow::new());
+                }
+                Task::none()
+            }
+            Message::HookRemove(event, index) => {
+                self.collect_hooks();
+                if let Some(rows) = self.hooks_rows.get_mut(event) {
+                    // the page splices at the index the rows stand at after `collect()`: a
+                    // splice past the end of the list does nothing there, and does not throw
+                    if index < rows.len() {
+                        rows.remove(index);
+                    }
+                }
+                self.hooks_status = "Removed. Press Save to write it.".into();
+                Task::none()
+            }
+            Message::HookTest(event, index) => {
+                self.collect_hooks();
+                let (name, arguments) = crate::hooks::sample_for(crate::hooks::EVENTS[event].0);
+                let Some(hook) = self
+                    .hooks_rows
+                    .get(event)
+                    .and_then(|rows| rows.get(index))
+                    .cloned()
+                else {
+                    // `if (!hook) return;`
+                    return Task::none();
+                };
+                let typed = if hook.command.trim().is_empty() {
+                    hook.prompt.trim().to_string()
+                } else {
+                    hook.command.trim().to_string()
+                };
+                self.hooks_status = format!("Running {typed} ...");
+                Task::perform(
+                    models::hooks_test(
+                        self.base.clone(),
+                        crate::hooks::payload(&self.hooks_rows),
+                        serde_json::json!({
+                            "event": crate::hooks::EVENTS[event].0,
+                            "tool": name,
+                            "arguments": arguments,
+                        }),
+                    ),
+                    Message::HookTested,
+                )
+            }
+            Message::HookTested(Ok(answer)) => {
+                self.hooks_status = crate::hooks::test_line(&answer);
+                Task::none()
+            }
+            Message::HookTested(Err(e)) => {
+                self.hooks_status = format!("The test failed: {e}");
+                Task::none()
+            }
+            Message::HooksSave => {
+                self.collect_hooks();
+                Task::perform(
+                    models::save_hooks(self.base.clone(), crate::hooks::payload(&self.hooks_rows)),
+                    Message::HooksSaved,
+                )
+            }
+            Message::HooksSaved(Ok(answer)) => {
+                // the page takes the list the server wrote (`draft = data.hooks || {}`) and says
+                // what it says
+                let map = answer
+                    .get("hooks")
+                    .filter(|value| value.is_object())
+                    .and_then(|value| serde_json::from_value::<std::collections::HashMap<String, Vec<crate::hooks::Hook>>>(value.clone()).ok())
+                    .unwrap_or_default();
+                self.hooks_rows = crate::hooks::rows_of(&map);
+                self.hooks_status = "Saved. The next tool call runs them.".into();
+                Task::none()
+            }
+            Message::HooksSaved(Err(e)) => {
+                self.hooks_status = e;
+                Task::none()
+            }
+            Message::HooksReload => Task::perform(models::fetch_hooks(self.base.clone()), Message::HooksLoaded),
+            Message::AgentsLoaded(Ok(answer)) => {
+                self.agents = answer.agents;
+                self.agents_folder = answer.folders.user;
+                Task::none()
+            }
+            Message::AgentsLoaded(Err(e)) => {
+                // the catch of `load()`
+                self.agents_notice = format!("The sub-agents could not be loaded: {e}");
+                Task::none()
+            }
+            Message::AgentNew => {
+                // `startEdit({}, true)`: the note over the list goes away, the form waits for
+                // the tools, then opens
+                self.agents_notice.clear();
+                self.agent_pending = Some((crate::agents::Agent::default(), true));
+                self.agent_tools_task()
+            }
+            Message::AgentEdit(name, scope) => {
+                self.agents_notice.clear();
+                // the list is read by name and scope, the two the buttons carry
+                let Some(agent) = self
+                    .agents
+                    .iter()
+                    .find(|agent| agent.name == name && agent.scope == scope)
+                    .cloned()
+                else {
+                    return Task::none();
+                };
+                self.agent_pending = Some((agent, false));
+                self.agent_tools_task()
+            }
+            Message::AgentToolsLoaded(Ok(tools)) => {
+                self.agent_groups = crate::agents::tool_groups(&tools);
+                if let Some((agent, is_new)) = self.agent_pending.take() {
+                    let edit = if is_new {
+                        let mut edit = crate::agents::AgentEdit::new();
+                        edit.checked = crate::agents::checked_tools(None, &self.agent_groups.0);
+                        edit
+                    } else {
+                        crate::agents::AgentEdit::open(&agent, &self.agent_groups)
+                    };
+                    self.agent_editing = Some(edit);
+                }
+                Task::none()
+            }
+            Message::AgentToolsLoaded(Err(_)) => {
+                // `loadTools` says nothing when its route could not be read — the form then
+                // lists no tools, and the agent keeps its saved list
+                if let Some((agent, is_new)) = self.agent_pending.take() {
+                    let edit = if is_new {
+                        let mut edit = crate::agents::AgentEdit::new();
+                        edit.checked = crate::agents::checked_tools(None, &self.agent_groups.0);
+                        edit
+                    } else {
+                        crate::agents::AgentEdit::open(&agent, &self.agent_groups)
+                    };
+                    self.agent_editing = Some(edit);
+                }
+                Task::none()
+            }
+            Message::AgentName(value) => {
+                if let Some(edit) = self.agent_editing.as_mut() {
+                    edit.name = value;
+                }
+                Task::none()
+            }
+            Message::AgentDescription(value) => {
+                if let Some(edit) = self.agent_editing.as_mut() {
+                    edit.description = value;
+                }
+                Task::none()
+            }
+            Message::AgentBody(action) => {
+                if let Some(edit) = self.agent_editing.as_mut() {
+                    edit.body.perform(action);
+                }
+                Task::none()
+            }
+            Message::AgentModel(value) => {
+                if let Some(edit) = self.agent_editing.as_mut() {
+                    edit.model = value;
+                }
+                Task::none()
+            }
+            Message::AgentSteps(value) => {
+                if let Some(edit) = self.agent_editing.as_mut() {
+                    edit.max_steps = value;
+                }
+                Task::none()
+            }
+            Message::AgentToolToggle(name, on) => {
+                if let Some(edit) = self.agent_editing.as_mut() {
+                    edit.toggle(&name, on);
+                }
+                Task::none()
+            }
+            Message::AgentScope(workspace) => {
+                // the radio of the page is disabled without a folder, so its click does nothing
+                if workspace && self.sk_workspace.is_empty() {
+                    return Task::none();
+                }
+                if let Some(edit) = self.agent_editing.as_mut() {
+                    edit.workspace_scope = workspace;
+                }
+                Task::none()
+            }
+            Message::AgentTryOpen => {
+                if let Some(edit) = self.agent_editing.as_mut() {
+                    edit.try_open = !edit.try_open;
+                }
+                Task::none()
+            }
+            Message::AgentTryJob(action) => {
+                if let Some(edit) = self.agent_editing.as_mut() {
+                    edit.try_job.perform(action);
+                }
+                Task::none()
+            }
+            Message::AgentTryRun => {
+                let Some(edit) = self.agent_editing.as_mut() else { return Task::none() };
+                let system = edit.body.text();
+                let job = edit.try_job.text().trim().to_string();
+                if system.trim().is_empty() {
+                    edit.status = "Write the instructions first.".into();
+                    return Task::none();
+                }
+                if job.is_empty() {
+                    edit.status = "Describe a sample job to try.".into();
+                    return Task::none();
+                }
+                // the page asks whether a model is loaded first (`state.setup`); this window has
+                // no setup — without a model the request goes out and the answer says what the
+                // server said, as the page says it then too
+                let named = edit.model.trim().to_string();
+                let model = if named.is_empty() {
+                    match &self.server {
+                        Server::Ready(model) => model.detail.name.clone(),
+                        _ => String::new(),
+                    }
+                } else {
+                    named
+                };
+                let system = system.to_string();
+                edit.try_out = Some("Working ...".into());
+                Task::perform(
+                    models::agent_try(self.base.clone(), model, system, job),
+                    Message::AgentTried,
+                )
+            }
+            Message::AgentTried(Ok(answer)) => {
+                if let Some(edit) = self.agent_editing.as_mut() {
+                    edit.try_out = Some(answer);
+                }
+                Task::none()
+            }
+            Message::AgentTried(Err(e)) => {
+                if let Some(edit) = self.agent_editing.as_mut() {
+                    edit.try_out = Some(format!("The sample could not run: {e}"));
+                }
+                Task::none()
+            }
+            Message::AgentCancel => {
+                self.agent_editing = None;
+                Task::none()
+            }
+            Message::AgentSave => {
+                let Some(edit) = self.agent_editing.as_ref() else { return Task::none() };
+                // the box of the name is disabled for an agent that exists, so its name stands
+                let (name, is_new) = if edit.is_new {
+                    (edit.name.clone(), true)
+                } else {
+                    (edit.original.clone(), false)
+                };
+                let description = edit.description.clone();
+                let system = edit.body.text().to_string();
+                let model = edit.model.clone();
+                let max_steps = edit.max_steps.clone();
+                let workspace_scope = edit.workspace_scope;
+                // the tools are the boxes in the order they stand: what only reads, what
+                // changes things, then the ones this build does not list
+                let mut tools: Vec<String> = Vec::new();
+                for tool in self.agent_groups.0.iter().chain(self.agent_groups.1.iter()) {
+                    if edit.is_checked(&tool.name) {
+                        tools.push(tool.name.clone());
+                    }
+                }
+                let known: Vec<&str> = self
+                    .agent_groups
+                    .0
+                    .iter()
+                    .chain(self.agent_groups.1.iter())
+                    .map(|tool| tool.name.as_str())
+                    .collect();
+                for checked in &edit.checked {
+                    if !known.contains(&checked.as_str()) {
+                        tools.push(checked.clone());
+                    }
+                }
+                let existing: Vec<String> = self.agents.iter().map(|agent| agent.name.clone()).collect();
+                let workspace = if self.sk_workspace.is_empty() {
+                    None
+                } else {
+                    Some(self.sk_workspace.as_str())
+                };
+                match crate::agents::payload(
+                    &name,
+                    &description,
+                    &system,
+                    &tools,
+                    &model,
+                    &max_steps,
+                    workspace_scope,
+                    workspace,
+                    is_new,
+                    &existing,
+                ) {
+                    Ok(body) => Task::perform(
+                        models::post_agent(self.base.clone(), body),
+                        move |answer| Message::AgentSaved(name, is_new, answer),
+                    ),
+                    Err(message) => {
+                        if let Some(edit) = self.agent_editing.as_mut() {
+                            edit.status = message;
+                        }
+                        Task::none()
+                    }
+                }
+            }
+            Message::AgentSaved(name, is_new, Ok(_)) => {
+                self.agents_notice = if is_new {
+                    format!("Created \"{name}\". The coding agent can use it from its next run.")
+                } else {
+                    format!("Saved \"{name}\".")
+                };
+                self.agent_editing = None;
+                self.agents_refresh()
+            }
+            Message::AgentSaved(_, _, Err(e)) => {
+                if let Some(edit) = self.agent_editing.as_mut() {
+                    edit.status = e;
+                }
+                Task::none()
+            }
+            Message::AgentDeleteAsk(name, scope) => {
+                self.agent_delete = Some((name, scope));
+                Task::none()
+            }
+            Message::AgentDeleteCancel => {
+                self.agent_delete = None;
+                Task::none()
+            }
+            Message::AgentDeleteOk => {
+                let Some((name, scope)) = self.agent_delete.take() else { return Task::none() };
+                // an agent whose file does not name a scope is a `user` one in the question
+                let scope = if scope.is_empty() { "user".to_string() } else { scope };
+                Task::perform(
+                    models::delete_agent(self.base.clone(), name.clone(), scope, self.sk_workspace.clone()),
+                    move |answer| Message::AgentDeleted(name, answer),
+                )
+            }
+            Message::AgentDeleted(name, Ok(_)) => {
+                self.agents_notice = format!("Deleted \"{name}\".");
+                if self.agent_editing.as_ref().is_some_and(|edit| edit.original == name) {
+                    self.agent_editing = None;
+                }
+                self.agents_refresh()
+            }
+            Message::AgentDeleted(_, Err(e)) => {
+                self.agents_notice = e;
+                Task::none()
+            }
+            Message::AgentPathCopy => {
+                self.agents_notice = "Path copied.".into();
+                iced::clipboard::write(self.agents_folder.clone())
             }
             Message::EngKind(kind) => {
                 self.eng_kind = kind;
@@ -5878,6 +6456,25 @@ impl App {
                             Task::perform(models::fetch_engines(self.base.clone()), Message::EngLoaded),
                         ])
                     };
+                    // the plugins are read once, when their pane is built (`refresh()` at the
+                    // end of `plugins.js`)
+                    let plugins = if self.plugins_loaded {
+                        Task::none()
+                    } else {
+                        self.plugins_loaded = true;
+                        Task::perform(models::fetch_plugins(self.base.clone()), Message::PluginsLoaded)
+                    };
+                    // the sub-agents are read on every click of the menu entry — the page
+                    // reads its list again whenever its pane becomes the one that is shown
+                    let agents = self.agents_refresh();
+                    // the hooks are read once as well (`load()` at the end of `hooks.js`); the
+                    // card has its own Reload button for the times after that
+                    let hooks = if self.hooks_loaded {
+                        Task::none()
+                    } else {
+                        self.hooks_loaded = true;
+                        Task::perform(models::fetch_hooks(self.base.clone()), Message::HooksLoaded)
+                    };
                     if !matches!(self.server, Server::Down(_)) {
                         return Task::batch(vec![
                             voices,
@@ -5890,6 +6487,9 @@ impl App {
                             prov,
                             connect,
                             search,
+                            plugins,
+                            hooks,
+                            agents,
                             mcp,
                             sk,
                             ln,
@@ -6677,6 +7277,24 @@ impl App {
                 Message::SkDeleteCancel,
             ));
         }
+        if let Some((name, _)) = self.agent_delete.as_ref() {
+            // `confirmDialog` of `agents.js`: Cancel left, OK right
+            layers = layers.push(backdrop(Message::AgentDeleteCancel)).push(models::confirm_window(
+                t,
+                format!("Delete the sub-agent \"{name}\"? Its file is removed."),
+                Message::AgentDeleteOk,
+                Message::AgentDeleteCancel,
+            ));
+        }
+        if let Some(name) = self.plugin_remove.as_ref() {
+            // `confirmDialog` of `plugins.js`: Cancel left, OK right
+            layers = layers.push(backdrop(Message::PluginRemoveCancel)).push(models::confirm_window(
+                t,
+                format!("Remove the plugin \"{name}\" and everything it contributes?"),
+                Message::PluginRemoveOk,
+                Message::PluginRemoveCancel,
+            ));
+        }
         if let Some((_, name)) = self.sc_remove.as_ref() {
             // the `askDialog` of `skills.js` before a task is deleted
             layers = layers.push(backdrop(Message::ScDeleteCancel)).push(crate::skills::delete_window(
@@ -6984,6 +7602,28 @@ impl App {
                     directory_q: &self.dir_q,
                     dir_view: &self.dir_view,
                     dir_token: &self.dir_token,
+                },
+                crate::plugins::PluginsView {
+                    plugins: &self.plugins,
+                    folder: &self.plugins_folder,
+                    status: &self.plugins_status,
+                    path: &self.plugin_path,
+                    url: &self.plugin_url,
+                    ref_: &self.plugin_ref,
+                },
+                crate::hooks::HooksView {
+                    rows: &self.hooks_rows,
+                    file: &self.hooks_file,
+                    status: &self.hooks_status,
+                    from_plugins: &self.hooks_plugins,
+                },
+                crate::agents::AgentsView {
+                    agents: &self.agents,
+                    folders_user: &self.agents_folder,
+                    notice: &self.agents_notice,
+                    groups: (&self.agent_groups.0, &self.agent_groups.1),
+                    editing: self.agent_editing.as_ref(),
+                    workspace: &self.sk_workspace,
                 },
             )
         } else if self.page == View::Project {
@@ -9578,6 +10218,33 @@ impl App {
     }
 
     /// The list of tasks again (`scRefreshPane` of `skills.js`).
+    /// The rows as the page gathers them before it changes or sends them (`collect()` of
+    /// `hooks.js`): a row that holds neither a command nor a prompt is not part of the list.
+    fn collect_hooks(&mut self) {
+        for rows in &mut self.hooks_rows {
+            rows.retain(crate::hooks::HookRow::is_kept);
+        }
+    }
+
+    /// The tools the form may name: the server names them when it has answered a status
+    /// (`agentRoutesUp` of `core.js` is a status and not the setup; without one the page uses
+    /// the list it keeps itself, which is `TOOL_DEFS` of `code.js` here).
+    fn agent_tools_task(&self) -> Task<Message> {
+        if matches!(self.server, Server::Down(_) | Server::Connecting) {
+            let tools = crate::agents::builtin_tools();
+            return Task::perform(async move { Ok(tools) }, Message::AgentToolsLoaded);
+        }
+        Task::perform(models::fetch_agent_tools(self.base.clone()), Message::AgentToolsLoaded)
+    }
+
+    /// The list read again, as the page reads it when its pane becomes the one that is shown.
+    fn agents_refresh(&self) -> Task<Message> {
+        Task::perform(
+            models::fetch_agents(self.base.clone(), self.sk_workspace.clone()),
+            Message::AgentsLoaded,
+        )
+    }
+
     fn sc_refresh(&self) -> Task<Message> {
         Task::perform(models::fetch_schedule(self.base.clone()), Message::ScLoaded)
     }

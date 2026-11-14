@@ -897,6 +897,222 @@ pub async fn fetch_embed(base: String) -> Result<crate::search::EmbedConfig, Str
         .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
 }
 
+/// A GET whose answer must be JSON but whose status the page does not look at: `refresh()` of
+/// `plugins.js` and `load()` of `hooks.js` read whatever came and only fail when the answer was
+/// not an answer at all.
+pub(crate) async fn get_json_any(base: &str, path: &str) -> Result<Value, String> {
+    let resp = match reqwest::get(format!("{base}{path}")).await {
+        Ok(resp) => resp,
+        Err(e) => return Err(format!("no server at {base}: {e}")),
+    };
+    resp.json::<Value>().await.map_err(|e| e.to_string())
+}
+
+/// `GET /api/studio/plugins` — the list and the folder the pane reads once when it is built
+/// (`refresh()` of `plugins.js`).
+pub async fn fetch_plugins(base: String) -> Result<crate::plugins::PluginsAnswer, String> {
+    get_json_any(&base, "/api/studio/plugins")
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /api/studio/plugins` — the absolute path of a folder, or the address of a repository
+/// with its branch. The page reads the answer only for its errors and asks for the list again
+/// when it worked (`refresh()` after the install of `plugins.js`).
+pub async fn post_plugins(base: String, body: Value, fallback: &'static str) -> Result<Value, String> {
+    post_fallback(&base, "/api/studio/plugins", body, fallback).await
+}
+
+/// `GET /api/studio/hooks` — the list the pane reads when it is built and on **Reload**
+/// (`load()` of `hooks.js`).
+pub async fn fetch_hooks(base: String) -> Result<crate::hooks::HooksAnswer, String> {
+    get_json_any(&base, "/api/studio/hooks")
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /api/studio/hooks` — writing the draft of the card.
+pub async fn save_hooks(base: String, hooks: Value) -> Result<Value, String> {
+    post_fallback(&base, "/api/studio/hooks", serde_json::json!({ "hooks": hooks }), "Could not save.").await
+}
+
+/// The two requests of the **Test** button (`test()` of `hooks.js`): the draft is written first,
+/// so the server runs exactly what is on screen, then the sample is run against the event. The
+/// answer is read whatever status came — the page checks none (`apiFetch` does not throw on one).
+pub async fn hooks_test(base: String, hooks: Value, body: Value) -> Result<Value, String> {
+    let client = reqwest::Client::new();
+    match client
+        .post(format!("{base}/api/studio/hooks"))
+        .json(&serde_json::json!({ "hooks": hooks }))
+        .send()
+        .await
+    {
+        Ok(_) => {}
+        // the page stops at a request that could not be made at all
+        Err(e) => return Err(e.to_string()),
+    }
+    let resp = client
+        .post(format!("{base}/api/studio/hooks/test"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json::<Value>().await.map_err(|e| e.to_string())
+}
+
+/// `GET /api/studio/agents[?workspace=]` — the list, read when the pane is built and every time
+/// it is shown again (`load()` of `agents.js`).
+pub async fn fetch_agents(base: String, workspace: String) -> Result<crate::agents::AgentsAnswer, String> {
+    let path = if workspace.is_empty() {
+        "/api/studio/agents".to_string()
+    } else {
+        format!("/api/studio/agents?{}", sk_query(&[("workspace", &workspace)]))
+    };
+    // a status the page does not like is thrown as `the server answered with error {status}`,
+    // which is the first thing the catch of `load()` puts in front of its own words
+    let resp = match reqwest::get(format!("{base}{path}")).await {
+        Ok(resp) => resp,
+        Err(e) => return Err(format!("no server at {base}: {e}")),
+    };
+    let status = resp.status();
+    let data: Value = resp.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        return Err(format!("the server answered with error {}", status.as_u16()));
+    }
+    serde_json::from_value(data).map_err(|e| e.to_string())
+}
+
+/// `GET /api/studio/agent/tools` — the tools a sub-agent may be given. The answer is an array or
+/// `{"tools": [...]}`, and each entry keeps its name and its permission (what the form needs of
+/// it); anything the server does not name is left to the list, which skips it.
+pub async fn fetch_agent_tools(base: String) -> Result<Vec<crate::agents::Tool>, String> {
+    let value = get_json(&base, "/api/studio/agent/tools").await?;
+    let list = match &value {
+        Value::Array(_) => value.clone(),
+        other => other.get("tools").cloned().unwrap_or(Value::Array(Vec::new())),
+    };
+    let mut tools = Vec::new();
+    if let Some(items) = list.as_array() {
+        for item in items {
+            // the page reads `t.function || t`, so both shapes of an answer are one
+            let source = item.get("function").unwrap_or(item);
+            let name = source
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let permission = item
+                .get("permission")
+                .and_then(Value::as_str)
+                .or_else(|| source.get("permission").and_then(Value::as_str))
+                .unwrap_or("command")
+                .to_string();
+            tools.push(crate::agents::Tool { name, permission });
+        }
+    }
+    Ok(tools)
+}
+
+/// `POST /api/studio/agents` — writing one sub-agent.
+pub async fn post_agent(base: String, body: Value) -> Result<Value, String> {
+    post_fallback(&base, "/api/studio/agents", body, "The sub-agent could not be saved.").await
+}
+
+/// `DELETE /api/studio/agents?name=&scope=&workspace=` — the workspace is only part of the
+/// question when a folder is open (`remove` of `agents.js`).
+pub async fn delete_agent(base: String, name: String, scope: String, workspace: String) -> Result<Value, String> {
+    let path = format!(
+        "/api/studio/agents?{}",
+        sk_query(&[
+            ("name", &name),
+            ("scope", &scope),
+            ("workspace", &workspace),
+        ])
+    );
+    delete_json(&base, &path, serde_json::json!({}), "The sub-agent could not be deleted.").await
+}
+
+/// The chat answer of the **Run the sample** button (`tryIt` of `agents.js`): the words to show,
+/// whatever status came — and the error of a request that could not be made at all, which the
+/// page's catch puts in front of with *The sample could not run: *.
+pub async fn agent_try(base: String, model: String, system: String, job: String) -> Result<String, String> {
+    let resp = match reqwest::Client::new()
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&serde_json::json!({
+            "model": model,
+            "stream": false,
+            "temperature": 0.3,
+            "max_tokens": 400,
+            "x_fllm_clamp_max_tokens": true,
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user", "content": job },
+            ],
+        }))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => return Err(e.to_string()),
+    };
+    let status = resp.status();
+    let data: Value = resp.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        // `data.error.message || The server answered with error {status}.`
+        let fallback = format!("The server answered with error {}.", status.as_u16());
+        return Ok(fail_words(&data, &fallback));
+    }
+    let content = data
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if content.is_empty() {
+        Ok("(no answer)".to_string())
+    } else {
+        Ok(content.to_string())
+    }
+}
+
+/// `DELETE /api/studio/plugins` — taking one plugin and everything it contributes away.
+pub async fn delete_plugins(base: String, name: String) -> Result<Value, String> {
+    delete_json(&base, "/api/studio/plugins", serde_json::json!({ "name": name }), "Could not remove it.").await
+}
+
+/// The dialog of `confirmDialog` in `core.js`: the question, then **Cancel** on the left and
+/// **OK** on the right (`btn btn-primary`).
+pub fn confirm_window<'a>(t: Tokens, message: String, ok: Message, cancel: Message) -> Element<'a, Message> {
+    let window = container(
+        column![
+            text(message).size(14),
+            row![
+                Space::new().width(Length::Fill),
+                button(text("Cancel").size(13))
+                    .on_press(cancel)
+                    .padding([6, 12])
+                    .style(theme::ghost_button(t)),
+                button(text("OK").size(13))
+                    .on_press(ok)
+                    .padding([6, 12])
+                    .style(theme::primary_button(t)),
+            ]
+            .spacing(8),
+        ]
+        .spacing(16),
+    )
+    .padding(20)
+    .width(Length::Fixed(460.0))
+    .style(move |theme: &iced::Theme| {
+        let palette = theme.extended_palette();
+        container::Style {
+            background: Some(iced::Background::Color(palette.background.base.color)),
+            border: iced::border::rounded(12),
+            ..Default::default()
+        }
+    });
+    window.into()
+}
+
 /// `POST /api/studio/embeddings` with what the box holds; the answer is the status again. The
 /// fallback is the one `save()` of `rag.js` writes when the server sent nothing.
 pub async fn save_embed(base: String, url: String) -> Result<crate::search::EmbedConfig, String> {

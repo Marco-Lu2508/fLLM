@@ -23,6 +23,16 @@ behaviour between versions).
   audits of an install. Eleven unit tests, four window tests, six mutations. The *Search of past
   chats* card of that pane is not ported: its counts and its copy come out of the browser's
   localStorage, which this window does not have (see PARITY.md).
+- **The three cards *Plugins*, *Hooks* and *Sub-agents* in the native app.** *Plugins* with its
+  list, its two install rows and the question before a plugin is taken away; *Hooks* with the
+  eleven events of the loop, one editable row per hook, the hooks an installed plugin brings,
+  **Save**/**Reload** and the lines a **Test** writes (the draft is written first, as the page
+  writes it first); *Sub-agents* with its three sections, the two built-ins, the reach line of a
+  row, the form that waits for the tools the way `startEdit` waits for `loadTools()` — the
+  built-in list of `code.js` when the server has no status — with all its fields, the two groups
+  of tools, the two sides of *Available in*, the words of `agentPayload` in its order, and *Try
+  the instructions* behind its two guards. Delete asks with the dialog of `confirmDialog`
+  (**Cancel** left, **OK** right). Thirteen unit tests, four window tests, ten mutations.
 - **The three cards of *MCP servers* in the native app: what runs, where to find one and the form
   that writes one.** *Tools (MCP)* with the list of `mcpRender` — the state in the colour of the
   page with ` - {n} tool{s}` behind a ready one, the line of the address or of the command, a red
