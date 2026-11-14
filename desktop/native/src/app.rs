@@ -723,6 +723,9 @@ pub enum Message {
     NpuSetup(&'static str),
     /// The NPU setup answered with its new state.
     NpuSetupDone(Result<serde_json::Value, String>),
+    /// A click on an overlay that does not close on click (`data-modal-static` of the Studio):
+    /// it is captured and does nothing.
+    OverlayClick,
     /// The *Remove the runtime* button was pressed (the Studio asks first).
     NpuRemove,
     /// The dialog was answered: take the runtime away, or leave it.
@@ -2860,6 +2863,10 @@ impl App {
                     Task::none()
                 }
             },
+            Message::OverlayClick => {
+                // `data-modal-static`: the click belongs to the overlay and runs nothing
+                Task::none()
+            }
             Message::NpuRemove => {
                 // the `confirmDialog` of `npuSetupAction`, in front of the DELETE
                 self.npu_remove = true;
@@ -4255,7 +4262,117 @@ impl App {
             );
         }
         let body = row![self.sidebar(t), main.width(Length::Fill)];
-        container(body).width(Length::Fill).height(Length::Fill).style(theme::page(t)).into()
+        // The dialogs are layers of the window, not of the page. The Studio's overlays are
+        // fixed layers over everything, so the palette, the picker and the dim behind a dialog
+        // work on every page — the Models and Code pages returned before the stack was
+        // built — and cover the sidebar too.
+        let base = container(body).width(Length::Fill).height(Length::Fill).style(theme::page(t));
+        let mut layers = stack![base];
+        if self.art.as_ref().is_some_and(|p| p.large) {
+            // the large view of the panel: dimmed over the chat, the panel itself in the middle
+            // (the fixed inset of `.art-panel.is-large`, whose `box-shadow` is this colour)
+            layers = layers
+                .push(backdrop(Message::ArtAction(artifacts::ArtAction::Larger)))
+                .push(
+                    container(self.art_panel(t))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .max_width(1100.0)
+                        .padding(24)
+                        .style(move |_| iced::widget::container::Style {
+                            background: Some(iced::Background::Color(t.surface)),
+                            border: iced::Border { radius: 12.0.into(), width: 1.0, color: t.separator },
+                            ..Default::default()
+                        }),
+                );
+        }
+        if self.picker_open {
+            layers = layers
+                .push(backdrop(Message::ClosePicker))
+                .push(self.picker(t));
+        }
+        if self.inbox_open && !self.inbox.is_empty() {
+            // a click beside the panel only takes the click (it closes, as in the Studio)
+            layers = layers
+                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::InboxClose))
+                .push(
+                    container(self.inbox_panel(t))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(Alignment::End)
+                        .align_y(Alignment::Start)
+                        .padding(iced::Padding { top: 64.0, right: 16.0, bottom: 0.0, left: 0.0 }),
+                );
+        }
+        if self.asst_menu {
+            layers = layers
+                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::AsstMenuClose))
+                .push(self.asst_menu_panel(t));
+        }
+        if self.asst_edit.is_some() {
+            // the editor is `assistantModal` of the Studio: dimmed, and a click beside it only
+            // takes the click (the menu is closed then)
+            layers = layers
+                .push(backdrop(Message::AsstMenuClose))
+                .push(self.asst_editor(t));
+        }
+        if self.prj_pick.is_some() {
+            layers = layers
+                .push(backdrop(Message::PrjPick(None)))
+                .push(self.prj_pick_window(t));
+        }
+        if self.prj_delete.is_some() {
+            // the dialog of the Studio's askDialog: a click beside it only takes the click
+            layers = layers
+                .push(backdrop(Message::PrjDeleteCancel))
+                .push(self.prj_delete_window(t));
+        }
+        if self.mem_clear {
+            layers = layers
+                .push(backdrop(Message::MemClearCancel))
+                .push(self.mem_clear_window(t));
+        }
+        if self.remember.is_some() {
+            layers = layers
+                .push(backdrop(Message::RememberCancel))
+                .push(self.remember_window(t));
+        }
+        if self.temp_close {
+            layers = layers
+                .push(backdrop(Message::TempCloseCancel))
+                .push(self.temp_close_window(t));
+        }
+        if self.npu_remove {
+            layers = layers
+                .push(backdrop(Message::NpuRemoveCancel))
+                .push(self.npu_remove_window(t));
+        }
+        if self.tour.is_some() {
+            // the backdrop of `.modal-backdrop`: a click beside the window closes the tour
+            layers = layers
+                .push(backdrop(Message::TourSkip))
+                .push(self.tour_window(t));
+        }
+        if self.shortcuts_open {
+            // the backdrop of `.modal-backdrop`: a click beside the window closes the overview
+            layers = layers
+                .push(backdrop(Message::ShortcutsClose))
+                .push(self.shortcuts_window(t));
+        }
+        if self.palette_open {
+            // the backdrop of `.modal-backdrop`: a click beside the window closes the palette
+            layers = layers
+                .push(backdrop(Message::PaletteClose))
+                .push(self.palette_window(t));
+        }
+        if self.switching {
+            // `switchOverlay` of the Studio: `data-modal-static`, so a click on the dim is
+            // captured and does nothing — the page waits behind the glass until the engine is back
+            layers = layers
+                .push(backdrop(Message::OverlayClick))
+                .push(self.switching_card(t));
+        }
+        layers.into()
     }
 
     fn sidebar(&self, t: Tokens) -> Element<'_, Message> {
@@ -4409,7 +4526,12 @@ impl App {
             self.project_page(t)
         } else {
             let content: Element<'_, Message> = match &self.server {
-                Server::Down(_) | Server::Connecting if self.switching => self.switching_card(t),
+                // `switchOverlay` keeps the page of the Studio behind it: the box over the dim says
+                // what the window waits for, and the offline card would claim *no server* while the
+                // engine is merely restarting
+                Server::Down(_) | Server::Connecting if self.switching => {
+                    if self.messages.is_empty() { self.welcome(t) } else { self.conversation(t) }
+                }
                 Server::Down(reason) => self.offline(t, reason),
                 Server::NoModel => self.no_model(t),
                 _ if self.messages.is_empty() => self.welcome(t),
@@ -4428,123 +4550,7 @@ impl App {
                 chat.into()
             }
         };
-        if !self.picker_open
-            && !self.asst_menu
-            && self.asst_edit.is_none()
-            && self.prj_pick.is_none()
-            && self.prj_delete.is_none()
-            && self.remember.is_none()
-            && !self.mem_clear
-            && !self.temp_close
-            && !self.npu_remove
-            && self.tour.is_none()
-            && !self.shortcuts_open
-            && !self.palette_open
-            && !self.inbox_open
-            // the large view of the artifact panel is a layer of its own
-            && !self.art.as_ref().is_some_and(|p| p.large)
-        {
-            return page;
-        }
-        let mut layers = stack![page];
-        if self.art.as_ref().is_some_and(|p| p.large) {
-            // the large view of the panel: dimmed over the chat, the panel itself in the middle
-            // (the fixed inset of `.art-panel.is-large`, whose `box-shadow` is this colour)
-            layers = layers
-                .push(backdrop(Message::ArtAction(artifacts::ArtAction::Larger)))
-                .push(
-                    container(self.art_panel(t))
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .max_width(1100.0)
-                        .padding(24)
-                        .style(move |_| iced::widget::container::Style {
-                            background: Some(iced::Background::Color(t.surface)),
-                            border: iced::Border { radius: 12.0.into(), width: 1.0, color: t.separator },
-                            ..Default::default()
-                        }),
-                );
-        }
-        if self.picker_open {
-            layers = layers
-                .push(backdrop(Message::ClosePicker))
-                .push(self.picker(t));
-        }
-        if self.inbox_open && !self.inbox.is_empty() {
-            // a click beside the panel only takes the click (it closes, as in the Studio)
-            layers = layers
-                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::InboxClose))
-                .push(
-                    container(self.inbox_panel(t))
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .align_x(Alignment::End)
-                        .align_y(Alignment::Start)
-                        .padding(iced::Padding { top: 64.0, right: 16.0, bottom: 0.0, left: 0.0 }),
-                );
-        }
-        if self.asst_menu {
-            layers = layers
-                .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(Message::AsstMenuClose))
-                .push(self.asst_menu_panel(t));
-        }
-        if self.asst_edit.is_some() {
-            // the editor is `assistantModal` of the Studio: dimmed, and a click beside it only
-            // takes the click (the menu is closed then)
-            layers = layers
-                .push(backdrop(Message::AsstMenuClose))
-                .push(self.asst_editor(t));
-        }
-        if self.prj_pick.is_some() {
-            layers = layers
-                .push(backdrop(Message::PrjPick(None)))
-                .push(self.prj_pick_window(t));
-        }
-        if self.prj_delete.is_some() {
-            // the dialog of the Studio's askDialog: a click beside it only takes the click
-            layers = layers
-                .push(backdrop(Message::PrjDeleteCancel))
-                .push(self.prj_delete_window(t));
-        }
-        if self.mem_clear {
-            layers = layers
-                .push(backdrop(Message::MemClearCancel))
-                .push(self.mem_clear_window(t));
-        }
-        if self.remember.is_some() {
-            layers = layers
-                .push(backdrop(Message::RememberCancel))
-                .push(self.remember_window(t));
-        }
-        if self.temp_close {
-            layers = layers
-                .push(backdrop(Message::TempCloseCancel))
-                .push(self.temp_close_window(t));
-        }
-        if self.npu_remove {
-            layers = layers
-                .push(backdrop(Message::NpuRemoveCancel))
-                .push(self.npu_remove_window(t));
-        }
-        if self.tour.is_some() {
-            // the backdrop of `.modal-backdrop`: a click beside the window closes the tour
-            layers = layers
-                .push(backdrop(Message::TourSkip))
-                .push(self.tour_window(t));
-        }
-        if self.shortcuts_open {
-            // the backdrop of `.modal-backdrop`: a click beside the window closes the overview
-            layers = layers
-                .push(backdrop(Message::ShortcutsClose))
-                .push(self.shortcuts_window(t));
-        }
-        if self.palette_open {
-            // the backdrop of `.modal-backdrop`: a click beside the window closes the palette
-            layers = layers
-                .push(backdrop(Message::PaletteClose))
-                .push(self.palette_window(t));
-        }
-        layers.into()
+        page
     }
 
     /// The artifact panel: header with the versions, the tabs and tools of the Studio, and the
@@ -4654,7 +4660,17 @@ impl App {
             Some(r) => format!("Loading {}…", r.rsplit(['/', '\\']).next().unwrap_or(r)),
             None => "The server is starting…".to_string(),
         };
-        let card = column![text(what).size(22).font(bold()), text("The server restarts its engine for this. It takes a few seconds, larger models longer.").size(14).color(t.fg_soft)].spacing(10).max_width(520);
+        // the `.dialog` of the Studio's `switchOverlay`: a box of its own over the dim
+        let card = container(
+            column![
+                text(what).size(16).font(bold()),
+                text("The server restarts its engine for this. It takes a few seconds, larger models longer.").size(13).color(t.fg_soft)
+            ]
+            .spacing(8)
+            .max_width(440),
+        )
+        .padding(16)
+        .style(theme::card(t, theme::R_LG, false));
         container(card).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill).padding(24).into()
     }
 

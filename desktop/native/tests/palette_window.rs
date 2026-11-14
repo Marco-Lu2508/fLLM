@@ -266,3 +266,24 @@ fn the_search_shortcut_opens_the_palette_with_the_keys_in_force() {
     let _ = app.update(Message::Esc);
     assert!(!app.palette_open, "Esc closes it");
 }
+
+/// The palette is a layer of the window, not of the chat page. The Models and Code pages build
+/// their own page and used to return before the stack existed, so `Mod+K` there set the flag and
+/// drew nothing.
+#[test]
+fn the_palette_is_a_layer_of_the_window_and_not_of_the_chat_page() {
+    let (mut app, _dir) = app_with(store_with_chats());
+    let _ = app.update(Message::Go(View::Models));
+    let _ = app.update(Message::PaletteOpen);
+    assert!(app.palette_open, "the flag is set on the Models page too");
+
+    let mut ui = sim(&app);
+    ui.find("Commands").expect("the palette opens over the Models page too");
+    ui.find("Open Models").expect("its commands are there");
+    save_png(&app, "palette-over-models");
+    drop(ui);
+
+    let _ = app.update(Message::PaletteClose);
+    let mut ui = sim(&app);
+    assert!(ui.find("Commands").is_err(), "and it closes again");
+}

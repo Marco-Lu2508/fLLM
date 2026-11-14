@@ -198,7 +198,12 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   has no blur, so only the colour comes across), and a test reads that rule out of the Studio's
   stylesheet instead of typing it. A click beside a dialog still closes it; the two dropdowns of
   the top bar (the assistant menu, the session mailbox) are no modals and stay undimmed. One unit
-  test.
+  test. They are layers of the *window*, not of the chat page: the palette, the picker, every
+  dialog and the overlay of a switching server open on every page (the Models and Code pages build
+  their own page and used to return before the stack existed, so `Mod+K` there drew nothing), and
+  the dim covers the window, sidebar included, the way the Studio's fixed `.modal-backdrop` does.
+  The switching overlay is one of them — a dialog box over the dim whose click does nothing
+  (`data-modal-static`). Two window tests.
 - Session mailbox: notes one session leaves for another wait in the workspace and show up as a badge
   *Inbox (n)* on the top bar. The panel lists them with what they say about themselves; one click puts
   a note into the message (a blank line between what was written and what comes from another session),

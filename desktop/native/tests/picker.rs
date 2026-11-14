@@ -110,3 +110,26 @@ fn a_failed_switch_and_an_unload_end_the_waiting() {
     let _ = app.update(Message::Connected(Err(NO_MODEL.into())));
     assert!(!app.switching() && matches!(app.server_state(), Server::NoModel));
 }
+
+/// The overlay of a switching server is a layer of the window: it covers every page with the dim
+/// of `.modal-backdrop` behind its box, and a click on the dim runs nothing
+/// (`data-modal-static` of the Studio's `switchOverlay`).
+#[test]
+fn the_switching_overlay_is_a_layer_of_the_window_and_not_of_the_chat_page() {
+    let (mut app, _dir) = app("light");
+    let _ = app.update(Message::Go(View::Models));
+    let _ = app.update(Message::LoadModel("/models/my-model.gguf".into()));
+    assert!(app.switching(), "the server is away for a moment");
+
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 800.0), app.view());
+    ui.find("Loading my-model.gguf…").expect("the card is over the Models page too");
+    ui.find("The server restarts its engine for this. It takes a few seconds, larger models longer.")
+        .expect("the box carries the sentence of the Studio's switchOverlay");
+    drop(ui);
+
+    // the click on the dim belongs to the overlay and does nothing
+    let _ = app.update(Message::OverlayClick);
+    assert!(app.switching(), "a static overlay does not close on a click");
+    let _ = app.update(Message::Connected(Ok(ModelInfo::new("my-model", 4096))));
+    assert!(!app.switching(), "the engine is back, the overlay goes");
+}

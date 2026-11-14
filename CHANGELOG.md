@@ -440,6 +440,13 @@ behaviour between versions).
 - **Assistants in the native desktop app: the presets of the Studio as one feature, and the engine's `pick-file` route learns `kind: "file"`.** The name under the model in the top bar opens the menu: six built-ins (Standard, Precise and brief, Creative, Programmer, Translator, Editor) with their icon, colour and four starter suggestions, your own ones below them, and *New* / *Import* / *Save current*. Choosing one stores it on the open chat and for new chats, sends its sampling values (temperature, top-p and top-k; the sampler switches to manual, because an assistant brings its own), loads its model when it is on this computer (a missing one keeps the current model and says so) and shows its suggestions on the empty chat. The editor window has the name, eight icons, twelve colours, the instructions, the three sampling values, the model as a select of this computer's models, up to four starters, and how the assistant treats the default system prompt (use the global setting, add to it or replace it with the assistant's own text, `{{date}}` / `{{time}}` / `{{language}}` filled in); *Export* writes `<name>.assistant.json` to the Downloads folder, *Import* reads one back through `POST /api/studio/pick-file`, whose new `kind: "file"` opens the dialog of this machine and answers the UTF-8 text of the file it chose (4 MiB limit; a closed dialog answers nothing and shows no line). A built-in is edited as a copy ("Copy of …"), deleting clears the choice, and an old chat file without the new fields loads unchanged. 10 window tests (the menu and the editor drawn to PNG, the assistant of a chat after a restart, the import messages) and 10 unit tests; removing the appended instructions, the manual sampler flag or the assistant of a new chat turns a test red.
 
 ### Changed
+- **The switching overlay of the native app is a dialog over the dim, like the Studio's
+  `switchOverlay`.** While the engine loads or restarts the window drew bare centred text over the
+  page — and on the Models and Code pages no overlay at all. It now paints the dim of
+  `.modal-backdrop` over the whole window with the box of the Studio's `.dialog` on it, and a
+  click on the dim does nothing (`data-modal-static`: the page waits behind the glass until the
+  engine is back). The page behind stays the page of the Studio: the offline card, which would
+  claim *no server* while the engine is merely restarting, is not drawn while the window waits.
 - **The dialogs of the native app dim the window behind them, as the Studio's do.** Every modal —
   the model picker, the assistant editor, the project picker and its delete, *Forget everything*,
   *Remember*, the temporary-chat and *Remove the runtime* questions, the welcome tour, the shortcut
@@ -453,6 +460,13 @@ behaviour between versions).
 - **The composer is calm: neutral at rest, one neutral hairline on focus, and a chip that is on (Thinking, Web access) has a neutral fill with the accent only on its icon.** The frame and the chip were copper and orange at the same time as the send button.
 
 ### Fixed
+- **The dialogs and the palette are layers of the window, not of the chat page.** The Models and
+  Code pages build their own page and returned before the stack of layers existed, so `Mod+K`
+  there set the flag and drew nothing — the window swallowed the keys of a palette nobody saw —
+  and the dim behind a dialog covered only the part right of the sidebar. The stack now wraps the
+  whole window, so the palette, the model picker, every dialog and the overlay of a switching
+  server open on every page, and the dim covers the window the way the Studio's fixed
+  `.modal-backdrop` does. Two window tests, one of them on the Models page.
 - **On macOS the native app now shows the keys it actually answers.** The window read `Mod` as the
   command key there but drew it as `Ctrl` everywhere — in the palette, in the shortcut list and in
   the tour — so *Cmd+N* was the key while the row said *Ctrl+N*; the labels follow the platform now,
