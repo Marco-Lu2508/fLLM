@@ -7,6 +7,24 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **Settings > Providers in the native app: other servers and cloud services next to the local
+  one.** The two cards of `providers.js`: *Model providers* with its two paragraphs (the privacy
+  note set like the rest of the sentence), one row per provider with the line of `provRender` —
+  the kind, *this computer or network*, *key saved* or *no key*, the count of its models and the
+  address under it — and its actions: the On box posts `{id, enabled}`, *Test and refresh models*
+  runs the test route and shows `providerTestSummary`, *Edit* fills the form with the row and
+  changes the title to *Edit <name>*, *Remove* asks *Remove this provider and its saved key?* first.
+  Under the list: the empty line when there is none, *Refresh all model lists* with the count line
+  or the errors joined, and the line of `provResult` in the primary or the destructive colour. The
+  second card, *Add a provider*, carries the templates in their two groups (the network one behind
+  its own line, as the `<details>` of the Studio), Name, Type (OpenAI-compatible, Anthropic,
+  Ollama), Address, the key box with *Get a key at <host>* under it when the template hands out
+  keys over https and *Remove the saved key* when one is saved, the switch for a server on this
+  computer, and Save / Test connection / Clear — the body of `provFormBody` (the key only when one
+  was pasted, an empty one to remove a saved one, `id` only when editing) with the toast *Saved
+  <name>* and the test that follows it. The models of the picker come from
+  `GET /api/studio/providers/models`. The whole `@pure` block of `providers.js` is ported with the
+  fixtures it produced: nine unit tests, four window tests with two drawings, nine mutations.
 - **Settings > Runtime in the native app: how freely the app works.** The three cards of
   `runtime.js` — *Sandbox for agent commands* (its description, the modes `off`/`workspace`/`strict`
   of `rtSandbox`, dead while turbo is on or `FLLM_SANDBOX` chose for this server, the line of

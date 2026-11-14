@@ -1,0 +1,745 @@
+{
+ "remote_id": [
+  [
+   "openai",
+   "gpt-4o",
+   "remote:openai/gpt-4o"
+  ],
+  [
+   "ollama",
+   "llama3:8b",
+   "remote:ollama/llama3:8b"
+  ],
+  [
+   "my-server",
+   "a/model/with/slashes",
+   "remote:my-server/a/model/with/slashes"
+  ]
+ ],
+ "parse_remote_id": [
+  [
+   "openai/gpt-4o",
+   null
+  ],
+  [
+   "remote:",
+   null
+  ],
+  [
+   "remote:openai",
+   null
+  ],
+  [
+   "remote:openai/",
+   null
+  ],
+  [
+   "remote:/gpt-4o",
+   null
+  ],
+  [
+   "remote:my-server/a/b",
+   {
+    "provider": "my-server",
+    "model": "a/b"
+   }
+  ],
+  [
+   "local-model",
+   null
+  ],
+  [
+   "",
+   null
+  ],
+  [
+   null,
+   null
+  ],
+  [
+   42,
+   null
+  ]
+ ],
+ "merge_entries": [
+  [
+   [
+    "local-a",
+    "local-b"
+   ],
+   [
+    {
+     "provider": "openai",
+     "provider_name": "OpenAI",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "ollama",
+     "id": "llama3:8b"
+    },
+    {
+     "provider": "openai",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "",
+     "id": "orphan"
+    },
+    {
+     "provider": "lonely",
+     "id": ""
+    },
+    null
+   ],
+   "local-a",
+   [
+    {
+     "id": "local-a",
+     "label": "local-a",
+     "remote": false,
+     "active": true
+    },
+    {
+     "id": "local-b",
+     "label": "local-b",
+     "remote": false,
+     "active": false
+    },
+    {
+     "id": "remote:openai/gpt-4o",
+     "label": "OpenAI · gpt-4o",
+     "remote": true,
+     "provider": "openai",
+     "model": "gpt-4o",
+     "active": false
+    },
+    {
+     "id": "remote:ollama/llama3:8b",
+     "label": "ollama · llama3:8b",
+     "remote": true,
+     "provider": "ollama",
+     "model": "llama3:8b",
+     "active": false
+    }
+   ]
+  ],
+  [
+   [
+    "local-a"
+   ],
+   [
+    {
+     "provider": "openai",
+     "provider_name": "OpenAI",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "ollama",
+     "id": "llama3:8b"
+    },
+    {
+     "provider": "openai",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "",
+     "id": "orphan"
+    },
+    {
+     "provider": "lonely",
+     "id": ""
+    },
+    null
+   ],
+   "remote:openai/gpt-4o",
+   [
+    {
+     "id": "local-a",
+     "label": "local-a",
+     "remote": false,
+     "active": false
+    },
+    {
+     "id": "remote:openai/gpt-4o",
+     "label": "OpenAI · gpt-4o",
+     "remote": true,
+     "provider": "openai",
+     "model": "gpt-4o",
+     "active": true
+    },
+    {
+     "id": "remote:ollama/llama3:8b",
+     "label": "ollama · llama3:8b",
+     "remote": true,
+     "provider": "ollama",
+     "model": "llama3:8b",
+     "active": false
+    }
+   ]
+  ],
+  [
+   [],
+   [],
+   "",
+   []
+  ],
+  [
+   [
+    "same",
+    "same"
+   ],
+   [
+    {
+     "provider": "openai",
+     "provider_name": "OpenAI",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "ollama",
+     "id": "llama3:8b"
+    },
+    {
+     "provider": "openai",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "",
+     "id": "orphan"
+    },
+    {
+     "provider": "lonely",
+     "id": ""
+    },
+    null
+   ],
+   "same",
+   [
+    {
+     "id": "same",
+     "label": "same",
+     "remote": false,
+     "active": true
+    },
+    {
+     "id": "remote:openai/gpt-4o",
+     "label": "OpenAI · gpt-4o",
+     "remote": true,
+     "provider": "openai",
+     "model": "gpt-4o",
+     "active": false
+    },
+    {
+     "id": "remote:ollama/llama3:8b",
+     "label": "ollama · llama3:8b",
+     "remote": true,
+     "provider": "ollama",
+     "model": "llama3:8b",
+     "active": false
+    }
+   ]
+  ],
+  [
+   null,
+   null,
+   "x",
+   []
+  ]
+ ],
+ "resolve_selection": [
+  [
+   "local-a",
+   "fallback",
+   "local-a"
+  ],
+  [
+   "remote:openai/gpt-4o",
+   "fallback",
+   "remote:openai/gpt-4o"
+  ],
+  [
+   "remote:openai/gone",
+   "fallback",
+   "fallback"
+  ],
+  [
+   "",
+   "fallback",
+   ""
+  ],
+  [
+   "remote:openai/gone",
+   "local-a",
+   "local-a"
+  ]
+ ],
+ "preset_input": [
+  {
+   "id": "openai",
+   "name": "OpenAI",
+   "group": "cloud"
+  },
+  {
+   "id": "anthropic",
+   "name": "Anthropic",
+   "group": "cloud"
+  },
+  {
+   "id": "ollama",
+   "name": "Ollama",
+   "local": true
+  },
+  {
+   "id": "lmstudio",
+   "name": "LM Studio",
+   "group": "network"
+  },
+  {
+   "id": "custom",
+   "name": "A server I run"
+  }
+ ],
+ "preset_groups": [
+  {
+   "id": "cloud",
+   "title": "Cloud APIs",
+   "items": [
+    {
+     "id": "openai",
+     "name": "OpenAI",
+     "group": "cloud"
+    },
+    {
+     "id": "anthropic",
+     "name": "Anthropic",
+     "group": "cloud"
+    },
+    {
+     "id": "custom",
+     "name": "A server I run"
+    }
+   ]
+  },
+  {
+   "id": "network",
+   "title": "Other servers on your network",
+   "items": [
+    {
+     "id": "ollama",
+     "name": "Ollama",
+     "local": true
+    },
+    {
+     "id": "lmstudio",
+     "name": "LM Studio",
+     "group": "network"
+    }
+   ]
+  }
+ ],
+ "preset_groups_empty": [
+  {
+   "id": "cloud",
+   "title": "Cloud APIs",
+   "items": []
+  },
+  {
+   "id": "network",
+   "title": "Other servers on your network",
+   "items": []
+  }
+ ],
+ "preset_groups_not_a_list": [
+  {
+   "id": "cloud",
+   "title": "Cloud APIs",
+   "items": []
+  },
+  {
+   "id": "network",
+   "title": "Other servers on your network",
+   "items": []
+  }
+ ],
+ "key_link": [
+  [
+   "https://platform.openai.com/keys",
+   {
+    "url": "https://platform.openai.com/keys",
+    "host": "platform.openai.com"
+   }
+  ],
+  [
+   "https://console.anthropic.com/",
+   {
+    "url": "https://console.anthropic.com/",
+    "host": "console.anthropic.com"
+   }
+  ],
+  [
+   "http://insecure.example.com/key",
+   null
+  ],
+  [
+   "not a url",
+   null
+  ],
+  [
+   "no key_url",
+   null
+  ],
+  [
+   "null preset",
+   null
+  ]
+ ],
+ "test_summary": [
+  [
+   "failed",
+   {
+    "ok": false,
+    "error": "the key was refused"
+   },
+   "the key was refused"
+  ],
+  [
+   "failed without a message",
+   {
+    "ok": false
+   },
+   "The test failed."
+  ],
+  [
+   "nothing",
+   {
+    "ok": true,
+    "models": [],
+    "count": 0
+   },
+   "Connected, but the service lists no models for this key."
+  ],
+  [
+   "one",
+   {
+    "ok": true,
+    "models": [
+     "gpt-4o"
+    ],
+    "count": 1
+   },
+   "Connected. 1 model found: gpt-4o."
+  ],
+  [
+   "three",
+   {
+    "ok": true,
+    "models": [
+     "a",
+     "b",
+     "c"
+    ],
+    "count": 3
+   },
+   "Connected. 3 models found: a, b, c."
+  ],
+  [
+   "more than eight",
+   {
+    "ok": true,
+    "models": [
+     "1",
+     "2",
+     "3",
+     "4",
+     "5",
+     "6",
+     "7",
+     "8",
+     "9",
+     "10"
+    ],
+    "count": 10
+   },
+   "Connected. 10 models found: 1, 2, 3, 4, 5, 6, 7, 8 and 2 more."
+  ],
+  [
+   "count without models",
+   {
+    "ok": true,
+    "count": 4
+   },
+   "Connected. 4 models found."
+  ],
+  [
+   "models without count",
+   {
+    "ok": true,
+    "models": [
+     "a",
+     "b"
+    ]
+   },
+   "Connected. 2 models found: a, b."
+  ],
+  [
+   "no answer",
+   null,
+   "The test failed."
+  ]
+ ],
+ "model_label": [
+  [
+   "nothing",
+   "",
+   [
+    {
+     "provider": "openai",
+     "provider_name": "OpenAI",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "ollama",
+     "id": "llama3:8b"
+    },
+    {
+     "provider": "openai",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "",
+     "id": "orphan"
+    },
+    {
+     "provider": "lonely",
+     "id": ""
+    }
+   ],
+   "Choose a model"
+  ],
+  [
+   "local",
+   "local-a",
+   [
+    {
+     "provider": "openai",
+     "provider_name": "OpenAI",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "ollama",
+     "id": "llama3:8b"
+    },
+    {
+     "provider": "openai",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "",
+     "id": "orphan"
+    },
+    {
+     "provider": "lonely",
+     "id": ""
+    }
+   ],
+   "local-a"
+  ],
+  [
+   "remote with a name",
+   "remote:openai/gpt-4o",
+   [
+    {
+     "provider": "openai",
+     "provider_name": "OpenAI",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "ollama",
+     "id": "llama3:8b"
+    },
+    {
+     "provider": "openai",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "",
+     "id": "orphan"
+    },
+    {
+     "provider": "lonely",
+     "id": ""
+    }
+   ],
+   "OpenAI · gpt-4o"
+  ],
+  [
+   "remote without a name",
+   "remote:ollama/llama3:8b",
+   [
+    {
+     "provider": "openai",
+     "provider_name": "OpenAI",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "ollama",
+     "id": "llama3:8b"
+    },
+    {
+     "provider": "openai",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "",
+     "id": "orphan"
+    },
+    {
+     "provider": "lonely",
+     "id": ""
+    }
+   ],
+   "ollama · llama3:8b"
+  ],
+  [
+   "remote the list does not know",
+   "remote:gone/model",
+   [
+    {
+     "provider": "openai",
+     "provider_name": "OpenAI",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "ollama",
+     "id": "llama3:8b"
+    },
+    {
+     "provider": "openai",
+     "id": "gpt-4o"
+    },
+    {
+     "provider": "",
+     "id": "orphan"
+    },
+    {
+     "provider": "lonely",
+     "id": ""
+    }
+   ],
+   "gone · model"
+  ],
+  [
+   "no list",
+   "remote:openai/gpt-4o",
+   null,
+   "openai · gpt-4o"
+  ],
+  [
+   "an empty list",
+   "remote:openai/gpt-4o",
+   [],
+   "openai · gpt-4o"
+  ]
+ ],
+ "local_only_fields": [
+  "top_k",
+  "min_p",
+  "repetition_penalty",
+  "speculative",
+  "thinking_budget",
+  "chat_template_kwargs",
+  "dry_multiplier",
+  "dry_base",
+  "dry_allowed_length",
+  "dry_penalty_last_n",
+  "mirostat",
+  "mirostat_tau",
+  "mirostat_eta",
+  "grammar",
+  "grammar_type",
+  "regex",
+  "tool_call_grammar",
+  "tfs_z",
+  "typical_p",
+  "ignore_eos",
+  "cache_prompt",
+  "logit_bias_tokens"
+ ],
+ "clean_request": [
+  [
+   "gpt-4o",
+   {
+    "model": "gpt-4o",
+    "messages": [
+     {
+      "role": "user",
+      "content": "hi"
+     }
+    ],
+    "temperature": 0.7,
+    "stream": true
+   }
+  ],
+  [
+   "keeps what is not local",
+   {
+    "temperature": 0.2,
+    "messages": [],
+    "model": "m"
+   }
+  ]
+ ],
+ "chat_endpoint": [
+  [
+   "local-model",
+   {
+    "url": "/v1/chat/completions",
+    "remote": false,
+    "provider": null,
+    "model": null,
+    "transform": {
+     "model": "x",
+     "messages": [],
+     "temperature": 0.5,
+     "top_k": 40,
+     "stream": true
+    }
+   }
+  ],
+  [
+   "remote:openai/gpt-4o",
+   {
+    "url": "/api/studio/providers/chat",
+    "remote": true,
+    "provider": "openai",
+    "model": "gpt-4o",
+    "transform": {
+     "provider": "openai",
+     "request": {
+      "model": "gpt-4o",
+      "messages": [],
+      "temperature": 0.5,
+      "stream": true
+     }
+    }
+   }
+  ],
+  [
+   "remote:ollama/llama3:8b",
+   {
+    "url": "/api/studio/providers/chat",
+    "remote": true,
+    "provider": "ollama",
+    "model": "llama3:8b",
+    "transform": {
+     "provider": "ollama",
+     "request": {
+      "model": "llama3:8b",
+      "messages": [],
+      "temperature": 0.5,
+      "stream": true
+     }
+    }
+   }
+  ]
+ ]
+}

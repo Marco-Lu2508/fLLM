@@ -1145,6 +1145,7 @@ pub fn page<'a>(
     look: LookView<'a>,
     hardware: HardwareView<'a>,
     runtime: crate::runtime::RuntimeView<'a>,
+    providers: crate::providers::ProvidersView<'a>,
 ) -> Element<'a, Message> {
     let mut answers = column![].spacing(14);
     answers = answers.push(setting(
@@ -1658,6 +1659,9 @@ pub fn page<'a>(
         // Settings > Runtime: the three cards of `runtime.js` (the sandbox, computer use and
         // turbo), in the order the Studio's pane draws them
         crate::runtime::section(t, runtime),
+        // Settings > Providers: the two cards of `spane-providers`, in the order the Studio's
+        // settings menu has them
+        crate::providers::section(t, providers),
         card(t, "Dictation", dictation.into()),
         card(t, "Reading aloud", reading.into()),
         card(t, "Alerts", alerts.into()),

@@ -195,6 +195,17 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   says `Saved.`, the message of the server, or `Could not read the setting: …`. `GET`/`POST
   /api/studio/runtime`, and nothing of a card is drawn before an answer came. Five unit tests, four
   window tests with two drawings, eight mutations.
+- Providers: the other servers and cloud services next to the local one, in the two cards of
+  `providers.js`. *Model providers* lists every provider with its line (`kind`, *this computer or
+  network*, *key saved*/*no key*, *N models*), its address and its actions — the On box, *Test and
+  refresh models*, *Edit*, *Remove* (which asks first) — with the empty line when there is none,
+  *Refresh all model lists* under it and the line of `provResult` in the primary or the destructive
+  colour. *Add a provider* carries the templates in their two groups (the network one behind its
+  own line, as the `<details>` of the Studio), Name, Type, Address, the key box with *Get a key at
+  <host>* for an https template and *Remove the saved key* when one is saved, the switch for a
+  server on this computer, and Save / Test connection / Clear with the toast *Saved <name>* and the
+  test that follows it. The whole `@pure` block of `providers.js` with the fixtures it produced:
+  nine unit tests, four window tests with two drawings, nine mutations.
 - Appearance: the settings card of the Studio — theme (system/dark/light), the eight accent
   colors with the chosen one ringed, the base size of the text (14–18px), *Tint your messages* and
   *Show generation speed*. The accent colours the whole page exactly as the Studio computes it

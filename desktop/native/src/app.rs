@@ -51,14 +51,14 @@ pub const CHAT_WINDOW: usize = 60;
 pub(crate) const ICON_MORE: &[u8] = include_bytes!("../icons/more.svg");
 pub(crate) const ICON_PIN: &[u8] = include_bytes!("../icons/pin.svg");
 const ICON_CODE: &[u8] = include_bytes!("../icons/code.svg");
-const ICON_CHEVRON: &[u8] = include_bytes!("../icons/chevron-down.svg");
+pub(crate) const ICON_CHEVRON: &[u8] = include_bytes!("../icons/chevron-down.svg");
 const ICON_LINES: &[u8] = include_bytes!("../icons/lines.svg");
 const ICON_GHOST: &[u8] = include_bytes!("../icons/ghost.svg");
 const ICON_GLOBE: &[u8] = include_bytes!("../icons/globe.svg");
 const ICON_SEARCH: &[u8] = include_bytes!("../icons/search.svg");
 const ICON_CHECK: &[u8] = include_bytes!("../icons/check.svg");
 const ICON_FOLDER: &[u8] = include_bytes!("../icons/folder.svg");
-const ICON_CHEVRON_RIGHT: &[u8] = include_bytes!("../icons/chevron-right.svg");
+pub(crate) const ICON_CHEVRON_RIGHT: &[u8] = include_bytes!("../icons/chevron-right.svg");
 const ICON_X: &[u8] = include_bytes!("../icons/x.svg");
 const ICON_FILE: &[u8] = include_bytes!("../icons/file.svg");
 
@@ -346,6 +346,20 @@ pub struct App {
     runtime_steps: String,
     /// The question before computer use or turbo goes on.
     pub runtime_confirm: Option<crate::runtime::Confirm>,
+    /// Settings > Providers: the list of the server, the templates and the form of the second
+    /// card (`provState` of `providers.js`).
+    pub providers: crate::providers::ProviderList,
+    prov_models: crate::providers::ModelList,
+    pub prov_form: crate::providers::Form,
+    /// The line under the list (`provResult`): what a test or a refresh said, and whether it was
+    /// good.
+    prov_result: Option<(String, bool)>,
+    prov_file_info: String,
+    /// The group of *Other servers on your network* is open.
+    prov_net_open: bool,
+    /// The provider waiting for the answer of *Remove this provider and its saved key?*
+    pub prov_remove: Option<String>,
+    prov_loaded: bool,
     /// The answer under *Run speed test* (`speedTestResult` of `models.js`).
     pub speed_test: Option<String>,
     /// Whether the speed test is running (the button is off while it does).
@@ -763,6 +777,40 @@ pub enum Message {
     RuntimeConfirmCancel,
     /// The save answered (`POST /api/studio/runtime`).
     RuntimeSaved(Result<crate::runtime::Status, String>),
+    /// Settings > Providers: read the list (`provRefresh` of `providers.js`).
+    ProvLoad,
+    ProvLoaded(Result<crate::providers::ProviderList, String>),
+    /// Read the model lists of the enabled providers (`provLoadModels`).
+    ProvModelsLoaded(Result<crate::providers::ModelList, String>),
+    /// *Refresh all model lists* ran (`btnProvRefreshModels`).
+    ProvModelsRefreshed(Result<crate::providers::ModelList, String>),
+    /// The boxes of the form (`provName`, `provUrl`, `provKey`).
+    ProvFormName(String),
+    ProvFormUrl(String),
+    ProvFormKey(String),
+    ProvKind(&'static str),
+    ProvLocal(bool),
+    ProvClearKey(bool),
+    /// A template of *Choose a service* was chosen (`provPresetBox`).
+    ProvPreset(String),
+    ProvNetOpen,
+    ProvSave,
+    ProvSaved(Result<serde_json::Value, String>),
+    ProvTestForm,
+    /// Test a saved provider (`data-prov-act="test"`).
+    ProvTest(String),
+    ProvTested(Result<crate::providers::TestAnswer, String>),
+    ProvClear,
+    ProvEdit(String),
+    /// The On box of a row (`data-prov-act="toggle"`).
+    ProvToggle(String, bool),
+    ProvEnabled(Result<serde_json::Value, String>),
+    ProvRefreshAll,
+    /// *Remove* was pressed; the window asks first.
+    ProvRemove(String),
+    ProvRemoveOk,
+    ProvRemoveCancel,
+    ProvRemoved(Result<serde_json::Value, String>),
     /// The state of the AMD NPU card came back (`refreshAmdNpu` of `amdnpu.js`).
     AmdNpuState(Result<serde_json::Value, String>),
     /// One action of the AMD NPU card (`amdNpuAction` of `amdnpu.js`).
@@ -958,6 +1006,14 @@ impl App {
             runtime_rate: String::new(),
             runtime_steps: String::new(),
             runtime_confirm: None,
+            providers: crate::providers::ProviderList::default(),
+            prov_models: crate::providers::ModelList::default(),
+            prov_form: crate::providers::Form::default(),
+            prov_result: None,
+            prov_file_info: String::new(),
+            prov_net_open: false,
+            prov_remove: None,
+            prov_loaded: false,
             speed_test: None,
             speed_test_busy: false,
             selftest: None,
@@ -2987,6 +3043,197 @@ impl App {
                 self.runtime_say = e;
                 Task::none()
             }
+            Message::ProvLoad => Task::perform(crate::providers::fetch_providers(self.base.clone()), Message::ProvLoaded),
+            Message::ProvLoaded(Ok(list)) => {
+                self.prov_file_info = format!("Saved in {}", list.config_file);
+                self.providers = list;
+                self.prov_loaded = true;
+                // the models of the enabled providers come with them (`provLoadModels(false)`)
+                Task::perform(
+                    crate::providers::fetch_provider_models(self.base.clone(), false),
+                    Message::ProvModelsLoaded,
+                )
+            }
+            Message::ProvLoaded(Err(e)) => {
+                // `provRefresh` writes the message of the server into the list
+                self.prov_result = Some((e, false));
+                Task::none()
+            }
+            Message::ProvModelsLoaded(Ok(list)) => {
+                self.prov_models = list;
+                Task::none()
+            }
+            // a list that cannot be read leaves the picker with the local models (`catch {}`)
+            Message::ProvModelsLoaded(Err(_)) => Task::none(),
+            Message::ProvModelsRefreshed(Ok(list)) => {
+                let ok = list.errors.is_empty();
+                let line = if ok {
+                    format!(
+                        "{} models from {} provider(s).",
+                        list.models.len(),
+                        self.providers.providers.iter().filter(|p| p.enabled).count()
+                    )
+                } else {
+                    list.errors
+                        .iter()
+                        .map(|e| format!("{}: {}", e.provider_name, e.error))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                self.prov_models = list;
+                self.prov_result = Some((line, ok));
+                Task::perform(crate::providers::fetch_providers(self.base.clone()), Message::ProvLoaded)
+            }
+            Message::ProvModelsRefreshed(Err(e)) => {
+                self.prov_result = Some((e, false));
+                Task::none()
+            }
+            Message::ProvFormName(v) => {
+                self.prov_form.name = v;
+                Task::none()
+            }
+            Message::ProvFormUrl(v) => {
+                self.prov_form.url = v;
+                Task::none()
+            }
+            Message::ProvFormKey(v) => {
+                self.prov_form.key = v;
+                Task::none()
+            }
+            Message::ProvKind(kind) => {
+                self.prov_form.kind = kind.to_string();
+                Task::none()
+            }
+            Message::ProvLocal(on) => {
+                self.prov_form.local = on;
+                Task::none()
+            }
+            Message::ProvClearKey(on) => {
+                self.prov_form.clear_key = on;
+                Task::none()
+            }
+            Message::ProvPreset(id) => {
+                // the click on a template fills the form and clears the key (`provPresetBox`)
+                if let Some(t) = self.providers.presets.iter().find(|p| p.id == id) {
+                    self.prov_form = crate::providers::Form {
+                        name: t.name.clone(),
+                        kind: t.kind.clone(),
+                        url: t.base_url.clone(),
+                        local: t.local,
+                        preset: Some(t.id.clone()),
+                        ..Default::default()
+                    };
+                }
+                Task::none()
+            }
+            Message::ProvNetOpen => {
+                self.prov_net_open = !self.prov_net_open;
+                Task::none()
+            }
+            Message::ProvClear => {
+                self.prov_form = crate::providers::Form::default();
+                Task::none()
+            }
+            Message::ProvEdit(id) => {
+                if let Some(p) = self.providers.providers.iter().find(|x| x.id == id) {
+                    self.prov_form = crate::providers::Form {
+                        name: p.name.clone(),
+                        kind: p.kind.clone(),
+                        url: p.base_url.clone(),
+                        local: p.local,
+                        editing: Some(p.id.clone()),
+                        ..Default::default()
+                    };
+                }
+                Task::none()
+            }
+            Message::ProvSave => {
+                let body = self.prov_form.body();
+                Task::perform(crate::providers::post_provider(self.base.clone(), body), Message::ProvSaved)
+            }
+            Message::ProvSaved(Ok(answer)) => {
+                // `provSave`: the toast, the form cleared, and the test of what was saved
+                let name = self.prov_form.name.trim().to_string();
+                self.toast = Some(format!("Saved {name}"));
+                let id = answer.pointer("/provider/id").and_then(|v| v.as_str()).map(str::to_string);
+                self.prov_form = crate::providers::Form::default();
+                match id {
+                    Some(id) => Task::batch(vec![
+                        Task::perform(crate::providers::test_provider(self.base.clone(), serde_json::json!({ "id": id })), Message::ProvTested),
+                        Task::perform(crate::providers::fetch_provider_models(self.base.clone(), false), Message::ProvModelsLoaded),
+                    ]),
+                    None => Task::perform(crate::providers::fetch_providers(self.base.clone()), Message::ProvLoaded),
+                }
+            }
+            Message::ProvSaved(Err(e)) => {
+                self.prov_result = Some((e, false));
+                Task::none()
+            }
+            Message::ProvTestForm => {
+                let body = self.prov_form.body();
+                self.prov_result = Some(("Testing...".into(), true));
+                Task::perform(crate::providers::test_provider(self.base.clone(), body), Message::ProvTested)
+            }
+            Message::ProvTest(id) => {
+                self.prov_result = Some(("Testing...".into(), true));
+                Task::perform(
+                    crate::providers::test_provider(self.base.clone(), serde_json::json!({ "id": id })),
+                    Message::ProvTested,
+                )
+            }
+            Message::ProvTested(Ok(answer)) => {
+                let line = crate::providers::provider_test_summary(Some(&answer));
+                let ok = answer.ok;
+                self.prov_result = Some((line, ok));
+                // the row's test refreshes the list and the model lists (`btn` of `provRender`)
+                Task::batch(vec![
+                    Task::perform(crate::providers::fetch_providers(self.base.clone()), Message::ProvLoaded),
+                    Task::perform(crate::providers::fetch_provider_models(self.base.clone(), false), Message::ProvModelsLoaded),
+                ])
+            }
+            Message::ProvTested(Err(e)) => {
+                self.prov_result = Some((e, false));
+                Task::none()
+            }
+            Message::ProvToggle(id, on) => Task::perform(
+                crate::providers::post_provider(self.base.clone(), serde_json::json!({ "id": id, "enabled": on })),
+                Message::ProvEnabled,
+            ),
+            Message::ProvEnabled(Ok(_)) => Task::perform(
+                crate::providers::fetch_provider_models(self.base.clone(), false),
+                Message::ProvModelsLoaded,
+            ),
+            Message::ProvEnabled(Err(e)) => {
+                self.prov_result = Some((e, false));
+                Task::perform(crate::providers::fetch_providers(self.base.clone()), Message::ProvLoaded)
+            }
+            Message::ProvRefreshAll => {
+                self.prov_result = Some(("Refreshing the model lists...".into(), true));
+                Task::perform(
+                    crate::providers::fetch_provider_models(self.base.clone(), true),
+                    Message::ProvModelsRefreshed,
+                )
+            }
+            Message::ProvRemove(id) => {
+                self.prov_remove = Some(id);
+                Task::none()
+            }
+            Message::ProvRemoveCancel => {
+                self.prov_remove = None;
+                Task::none()
+            }
+            Message::ProvRemoveOk => match self.prov_remove.take() {
+                Some(id) => Task::batch(vec![
+                    Task::perform(crate::providers::delete_provider(self.base.clone(), id), Message::ProvRemoved),
+                    Task::perform(crate::providers::fetch_provider_models(self.base.clone(), false), Message::ProvModelsLoaded),
+                ]),
+                None => Task::none(),
+            },
+            Message::ProvRemoved(Ok(_)) => Task::perform(crate::providers::fetch_providers(self.base.clone()), Message::ProvLoaded),
+            Message::ProvRemoved(Err(e)) => {
+                self.prov_result = Some((e, false));
+                Task::none()
+            }
             Message::OverlayClick => {
                 // `data-modal-static`: the click belongs to the overlay and runs nothing
                 Task::none()
@@ -3730,6 +3977,13 @@ impl App {
                     } else {
                         Task::perform(models::fetch_runtime(self.base.clone()), Message::RuntimeLoaded)
                     };
+                    // the list of the providers comes with the pane (`provRefresh` runs when the
+                    // menu entry of the Studio is clicked)
+                    let prov = if self.prov_loaded {
+                        Task::none()
+                    } else {
+                        Task::perform(crate::providers::fetch_providers(self.base.clone()), Message::ProvLoaded)
+                    };
                     if !matches!(self.server, Server::Down(_)) {
                         return Task::batch(vec![
                             voices,
@@ -3739,13 +3993,14 @@ impl App {
                             amd,
                             slots,
                             runtime,
+                            prov,
                             Task::perform(
                                 engine_settings::fetch(self.base.clone()),
                                 Message::EngineLoaded,
                             ),
                         ]);
                     }
-                    return Task::batch(vec![voices, prices, devices, npu, amd, slots, runtime]);
+                    return Task::batch(vec![voices, prices, devices, npu, amd, slots, runtime, prov]);
                 }
                 Task::none()
             }
@@ -4497,6 +4752,12 @@ impl App {
                 .push(backdrop(Message::PaletteClose))
                 .push(self.palette_window(t));
         }
+        if self.prov_remove.is_some() {
+            // the `confirmDialog` of `providers.js` before a provider is removed
+            layers = layers
+                .push(backdrop(Message::ProvRemoveCancel))
+                .push(crate::providers::remove_window(t));
+        }
         if let Some(kind) = self.runtime_confirm {
             // the `confirmDialog` of `runtime.js` before computer use or turbo goes on
             layers = layers
@@ -4665,6 +4926,14 @@ impl App {
                     say: &self.runtime_say,
                     rate: &self.runtime_rate,
                     steps: &self.runtime_steps,
+                },
+                crate::providers::ProvidersView {
+                    list: &self.providers,
+                    models: &self.prov_models,
+                    form: &self.prov_form,
+                    result: self.prov_result.as_ref().map(|(line, ok)| (line.as_str(), *ok)),
+                    file_info: &self.prov_file_info,
+                    network_open: self.prov_net_open,
                 },
             )
         } else if self.page == View::Project {

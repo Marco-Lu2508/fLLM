@@ -20,6 +20,9 @@ serde_json = "1"
 dirs = "6"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case", "perf"] }
+# parses the key links of the provider templates (`providerKeyLink` of `providers.js`: https only,
+# with the host); the server parses addresses with the same crate
+url = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
 rquickjs = "0.14.0"

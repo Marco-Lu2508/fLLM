@@ -255,7 +255,7 @@ pub fn duration(seconds: u64) -> String {
 
 // ---- asking the server -----------------------------------------------------------------------------------------------------------
 
-async fn get_json(base: &str, path: &str) -> Result<Value, String> {
+pub(crate) async fn get_json(base: &str, path: &str) -> Result<Value, String> {
     reqwest::get(format!("{base}{path}"))
         .await
         .map_err(|e| format!("no server at {base}: {e}"))?
@@ -536,7 +536,7 @@ pub async fn post_runtime(base: String, body: Value) -> Result<crate::runtime::S
 
 /// The error words of a request whose failures must read the way the Studio writes them: what the
 /// server sent in `error.message` (or `error`), and `fallback` when it sent nothing at all.
-fn fail_words(data: &Value, fallback: &str) -> String {
+pub(crate) fn fail_words(data: &Value, fallback: &str) -> String {
     data.pointer("/error/message")
         .and_then(Value::as_str)
         .or_else(|| data.get("error").and_then(Value::as_str))
@@ -547,7 +547,7 @@ fn fail_words(data: &Value, fallback: &str) -> String {
 /// A POST whose failures read like the Studio's own: the message of the server when it sent one,
 /// `fallback` when it sent none — and when the server could not be reached at all
 /// (`npuSetupAction` of `npu.js` shows `The NPU action failed.` for every failure but a message).
-async fn post_fallback(base: &str, path: &str, body: Value, fallback: &str) -> Result<Value, String> {
+pub(crate) async fn post_fallback(base: &str, path: &str, body: Value, fallback: &str) -> Result<Value, String> {
     let resp = match reqwest::Client::new()
         .post(format!("{base}{path}"))
         .json(&body)
