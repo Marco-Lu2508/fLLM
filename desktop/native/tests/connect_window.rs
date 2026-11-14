@@ -76,6 +76,9 @@ fn a_plan_is_drawn_in_the_order_of_the_page_and_by_the_shell() {
     }))
     .expect("a plan of the server");
     let _ = app.update(Message::ConnectLoaded(Ok(plan)));
+    // which shell the page starts with belongs to the machine (the unit test of the module asks
+    // for what this machine asks for); this one is about which of them is drawn, so it is chosen
+    let _ = app.update(Message::ConnectShell("sh"));
 
     let mut ui = sim(&app);
     ui.find("Read the notes of the plan.").expect("the notes come first");

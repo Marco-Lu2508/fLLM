@@ -7,6 +7,20 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **The three cards of *MCP servers* in the native app: what runs, where to find one and the form
+  that writes one.** *Tools (MCP)* with the list of `mcpRender` — the state in the colour of the
+  page with ` - {n} tool{s}` behind a ready one, the line of the address or of the command, a red
+  message, the tools and the error output drawn open, and the box the Resources button fills
+  (*Reading the resources ...*, `{n} resource(s)` with a **Read** per item, *This server publishes
+  no resources.*) —, *Find servers* with its two links opened through the server, the select of its
+  sources, *Show more* while the answer has a cursor, the lines of its search and the rows with
+  their *verified* chip and one **Use: …** per candidate, which clears the form and fills it with
+  what that candidate runs and with the line *Filled in the form below with “…”*. *Add a server*
+  with its six fields, the hint that keeps the saved values of a server behind its names, *Save and
+  start* with the two toasts of a line that is no `NAME=value`, the title *Edit {name}* while a
+  name is locked, `Saved in {file}` with the problem of that file, the 1500 ms wait of the page
+  while one of them is *starting*, and the question *Remove the MCP server “…”?* before it goes.
+  Nine unit tests, four window tests, six mutations.
 - **The two cards of *Search* in the native app: the embeddings server and the engines of the web
   search.** *Document search* with the box, **Save** and **Test** and the lines of `load()` /
   `save()` — `Hybrid search is on.`, `Keyword search only.`, `Saved. The next question searches

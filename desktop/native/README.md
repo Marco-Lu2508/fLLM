@@ -222,6 +222,11 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
   nothing for a box that is no JSON, the answer pretty when it is JSON), and *Server statistics
   (`/metrics`)* with the line of `detailsPrometheusLog` and its box behind it, filled when Refresh
   is pressed. Three unit tests, one window test, three mutations.
+- MCP servers: *Tools (MCP)* with the list of what runs and the Resources box of every row
+  (list, Read, *This server publishes no resources.*), *Find servers* with its two sources, its
+  rows and the *Use* buttons that fill the form, and *Add a server* with its six fields, *Save and
+  start*, *Clear*, the line `Saved in {file}` and the question before a server is removed. Nine
+  unit tests, four window tests, six mutations.
 - Search: *Document search* — the embeddings box with Save and Test, the lines of `load()` and
   `save()` and the similarity of two vectors figured the way `ragCosine` figures it; and *Web
   search engines* — the list with its Remove buttons, the four fields over Add with the checks of

@@ -1152,6 +1152,7 @@ pub fn page<'a>(
     connect: crate::connect::ConnectView<'a>,
     copied: &'a Option<String>,
     search: crate::search::SearchView<'a>,
+    mcp: crate::mcp::McpView<'a>,
 ) -> Element<'a, Message> {
     let mut answers = column![].spacing(14);
     answers = answers.push(setting(
@@ -1681,6 +1682,8 @@ pub fn page<'a>(
         // the table keeps this row where it stands, between the two neighbours the Studio's menu
         // has around it
         crate::search::section(t, search),
+        // Settings > MCP servers: the three cards of `spane-mcp`, where the table has this row
+        crate::mcp::section(t, mcp),
         card(t, "Usage and cost", usage_card(t, usage)),
         // Settings > Runtime: the three cards of `runtime.js` (the sandbox, computer use and
         // turbo), in the order the Studio's pane draws them

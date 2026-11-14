@@ -418,6 +418,34 @@ pub struct App {
     pub eng_status: String,
     /// Read once the first time the page is opened — the pane is built once in the Studio, too.
     search_loaded: bool,
+    /// Settings > MCP servers: what `GET /api/studio/mcp/servers` answered, the line under the
+    /// form, and the sentence that replaces the list when the read failed.
+    pub mcp: Vec<crate::mcp::Server>,
+    pub mcp_file_info: String,
+    pub mcp_list_say: String,
+    /// The six fields of *Add a server*, the server they are editing and the hint under the
+    /// environment box (`mcpName` … `mcpEnvHint`).
+    pub mcp_name: String,
+    pub mcp_url: String,
+    pub mcp_command: String,
+    /// The three boxes over the buttons are written line by line, so they hold what the page's
+    /// `textarea`s hold.
+    pub mcp_args: iced::widget::text_editor::Content,
+    pub mcp_env: iced::widget::text_editor::Content,
+    pub mcp_headers: iced::widget::text_editor::Content,
+    pub mcp_env_hint: String,
+    mcp_editing: Option<crate::mcp::Server>,
+    /// The server waiting for the answer of *Remove the MCP server "…"?*
+    pub mcp_remove: Option<String>,
+    /// What the Resources button read for every server (`data-mcp-resources` of the row).
+    pub mcp_resources: std::collections::HashMap<String, crate::mcp::ResourcesState>,
+    /// Settings > MCP servers: *Find servers* — the source of the search, what it found and what
+    /// the line under it says (`mcpRegSource`, `mcpRegQ`, `mcpRegList`, `mcpRegStatus`).
+    pub reg_source: String,
+    pub reg_query: String,
+    pub reg_status: String,
+    pub reg_found: Vec<crate::mcp::RegServer>,
+    reg_next: Option<String>,
     /// The answer under *Run speed test* (`speedTestResult` of `models.js`).
     pub speed_test: Option<String>,
     /// Whether the speed test is running (the button is off while it does).
@@ -918,6 +946,45 @@ pub enum Message {
     EngRemove(usize),
     EngSave,
     EngSaved(Result<crate::search::EngineAnswer, String>),
+    /// Settings > MCP servers: the list, the six fields of the form and its buttons (`mcpName` …
+    /// `btnMcpSave`, `btnMcpCancel`, and the four buttons of every row).
+    McpLoaded(Result<crate::mcp::ServersAnswer, String>),
+    McpName(String),
+    McpUrl(String),
+    McpCommand(String),
+    McpArgs(iced::widget::text_editor::Action),
+    McpEnv(iced::widget::text_editor::Action),
+    McpHeaders(iced::widget::text_editor::Action),
+    McpClear,
+    McpSave,
+    /// The name of the server that was just saved, and what the server answered for it.
+    McpSaved(String, Result<serde_json::Value, String>),
+    McpRestarted(Result<serde_json::Value, String>),
+    McpEdit(String),
+    McpRestart(String),
+    McpResources(String),
+    McpResourcesLoaded(String, Result<crate::mcp::ResourcesAnswer, String>),
+    McpRead(String, String),
+    McpReadLoaded(String, String, Result<String, String>),
+    /// The list again after 1500 ms, while a server is starting (`mcpTimer` of `mcp.js`).
+    McpTick,
+    /// The question before a server is removed (`confirmDialog`).
+    McpRemove(String),
+    McpRemoveOk,
+    McpRemoveCancel,
+    McpRemoved(Result<serde_json::Value, String>),
+    /// *Find servers*: its two sources, its box, *Search*, *Show more* and *Use*.
+    RegSource(String),
+    RegQuery(String),
+    RegSearch,
+    RegFound(Result<crate::mcp::RegistryAnswer, String>),
+    RegMore,
+    RegMoreLoaded(Result<crate::mcp::RegistryAnswer, String>),
+    RegUse(usize, usize),
+    /// The two links of the card open through the server (`data-mcp-site`); what it answers is
+    /// not read, the way the page ignores it.
+    McpOpenUrl(String),
+    McpOpened(Result<serde_json::Value, String>),
     EngTest,
     EngTested(Result<crate::search::TestAnswer, String>),
     /// One of the Copy buttons of the plan: the text goes to the clipboard and the button reads
@@ -1180,6 +1247,24 @@ impl App {
             eng_key: String::new(),
             eng_status: String::new(),
             search_loaded: false,
+            mcp: Vec::new(),
+            mcp_file_info: String::new(),
+            mcp_list_say: String::new(),
+            mcp_name: String::new(),
+            mcp_url: String::new(),
+            mcp_command: String::new(),
+            mcp_args: iced::widget::text_editor::Content::default(),
+            mcp_env: iced::widget::text_editor::Content::default(),
+            mcp_headers: iced::widget::text_editor::Content::default(),
+            mcp_env_hint: String::new(),
+            mcp_editing: None,
+            mcp_remove: None,
+            mcp_resources: std::collections::HashMap::new(),
+            reg_source: "official".into(),
+            reg_query: String::new(),
+            reg_status: String::new(),
+            reg_found: Vec::new(),
+            reg_next: None,
             speed_test: None,
             speed_test_busy: false,
             selftest: None,
@@ -3490,6 +3575,287 @@ impl App {
                 self.eng_status = e;
                 Task::none()
             }
+            Message::McpLoaded(Ok(answer)) => {
+                let file_info = crate::mcp::file_info(&answer);
+                self.mcp = answer.servers;
+                self.mcp_file_info = file_info;
+                self.mcp_list_say.clear();
+                // `mcpTimer`: while one of them is still starting and this page is open, the list
+                // is read again after 1500 ms
+                if self.mcp.iter().any(|s| s.state == "starting") && self.page == View::Settings {
+                    Task::perform(
+                        async {
+                            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                        },
+                        |_| Message::McpTick,
+                    )
+                } else {
+                    Task::none()
+                }
+            }
+            // a read that failed puts the sentence where the list was (`mcpServerList.textContent`)
+            Message::McpLoaded(Err(e)) => {
+                self.mcp_list_say = e;
+                Task::none()
+            }
+            Message::McpTick => {
+                if self.page == View::Settings {
+                    self.mcp_refresh()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::McpName(v) => {
+                self.mcp_name = v;
+                Task::none()
+            }
+            Message::McpUrl(v) => {
+                self.mcp_url = v;
+                Task::none()
+            }
+            Message::McpCommand(v) => {
+                self.mcp_command = v;
+                Task::none()
+            }
+            // the boxes are only written into; what comes out of them is read when the button is
+            // pressed, the way the page reads its `textarea`s there
+            Message::McpArgs(action) => {
+                self.mcp_args.perform(action);
+                Task::none()
+            }
+            Message::McpEnv(action) => {
+                self.mcp_env.perform(action);
+                Task::none()
+            }
+            Message::McpHeaders(action) => {
+                self.mcp_headers.perform(action);
+                Task::none()
+            }
+            Message::McpClear => {
+                // `mcpClearForm`: the boxes, the name of the server that was edited and the hint
+                self.clear_mcp_form();
+                Task::none()
+            }
+            Message::McpSave => {
+                match crate::mcp::save_body(
+                    &self.mcp_name,
+                    &self.mcp_url,
+                    &self.mcp_command,
+                    self.mcp_args.text().as_str(),
+                    self.mcp_env.text().as_str(),
+                    self.mcp_headers.text().as_str(),
+                    self.mcp_editing.as_ref(),
+                ) {
+                    Ok((body, name)) => Task::perform(
+                        models::save_mcp(self.base.clone(), body),
+                        move |result| Message::McpSaved(name, result),
+                    ),
+                    // a line that is not `NAME=value` stops the save with the toast of the page
+                    Err(toast) => {
+                        self.toast = Some(toast);
+                        Task::none()
+                    }
+                }
+            }
+            Message::McpSaved(name, Ok(_)) => {
+                self.toast = Some(format!("Saved {name}"));
+                self.clear_mcp_form();
+                self.mcp_refresh()
+            }
+            // a save that was refused says so and keeps the boxes, the way `mcpSave` does
+            Message::McpSaved(_, Err(e)) => {
+                self.toast = Some(e);
+                Task::none()
+            }
+            Message::McpEdit(name) => {
+                if let Some(server) = self.mcp.iter().find(|s| s.name == name) {
+                    self.mcp_name = server.name.clone();
+                    self.mcp_url = server.url.clone();
+                    self.mcp_command = server.command.clone();
+                    self.mcp_args =
+                        iced::widget::text_editor::Content::with_text(&server.args.join("\n"));
+                    self.mcp_env = iced::widget::text_editor::Content::with_text(
+                        &crate::mcp::env_lines_for_edit(server),
+                    );
+                    self.mcp_env_hint = crate::mcp::env_hint(Some(server));
+                    self.mcp_headers = iced::widget::text_editor::Content::with_text(
+                        &crate::mcp::headers_lines(server),
+                    );
+                    self.mcp_editing = Some(server.clone());
+                }
+                Task::none()
+            }
+            Message::McpRestart(name) => Task::perform(
+                models::restart_mcp(self.base.clone(), name),
+                Message::McpRestarted,
+            ),
+            Message::McpRestarted(Ok(_)) => self.mcp_refresh(),
+            // the page restarts and then reads the list again in both cases
+            Message::McpRestarted(Err(e)) => {
+                self.toast = Some(e);
+                self.mcp_refresh()
+            }
+            Message::McpResources(server) => {
+                // the box is rewritten before the answer comes (*Reading the resources ...*)
+                self.mcp_resources
+                    .entry(server.clone())
+                    .or_default()
+                    .list = crate::mcp::Filled::Busy;
+                Task::perform(models::mcp_resources(self.base.clone(), server.clone()), move |r| {
+                    Message::McpResourcesLoaded(server, r)
+                })
+            }
+            Message::McpResourcesLoaded(server, Ok(answer)) => {
+                self.mcp_resources.entry(server).or_default().list =
+                    crate::mcp::Filled::Done(answer.resources);
+                Task::none()
+            }
+            Message::McpResourcesLoaded(server, Err(e)) => {
+                self.mcp_resources.entry(server).or_default().list = crate::mcp::Filled::Failed(e);
+                Task::none()
+            }
+            Message::McpRead(server, uri) => {
+                let state = self.mcp_resources.entry(server.clone()).or_default();
+                state.read = crate::mcp::Filled::Busy;
+                state.read_uri = uri.clone();
+                Task::perform(
+                    models::mcp_resource(self.base.clone(), server.clone(), uri.clone()),
+                    move |r| Message::McpReadLoaded(server, uri, r),
+                )
+            }
+            Message::McpReadLoaded(server, uri, Ok(text)) => {
+                let state = self.mcp_resources.entry(server).or_default();
+                state.read = crate::mcp::Filled::Done(text);
+                state.read_uri = uri;
+                Task::none()
+            }
+            Message::McpReadLoaded(server, uri, Err(e)) => {
+                let state = self.mcp_resources.entry(server).or_default();
+                state.read = crate::mcp::Filled::Failed(e);
+                state.read_uri = uri;
+                Task::none()
+            }
+            Message::McpRemove(name) => {
+                self.mcp_remove = Some(name);
+                Task::none()
+            }
+            Message::McpRemoveCancel => {
+                self.mcp_remove = None;
+                Task::none()
+            }
+            Message::McpRemoveOk => match self.mcp_remove.take() {
+                Some(name) => {
+                    Task::perform(models::delete_mcp(self.base.clone(), name), Message::McpRemoved)
+                }
+                None => Task::none(),
+            },
+            Message::McpRemoved(Ok(_)) => self.mcp_refresh(),
+            // the page says what went wrong and reads the list again
+            Message::McpRemoved(Err(e)) => {
+                self.toast = Some(e);
+                self.mcp_refresh()
+            }
+            Message::RegSource(source) => {
+                self.reg_source = source;
+                Task::none()
+            }
+            Message::RegQuery(query) => {
+                self.reg_query = query;
+                Task::none()
+            }
+            Message::RegSearch => {
+                // the list and the cursor are given up before the answer comes (`if (!append)`)
+                self.reg_status = "Searching ...".into();
+                self.reg_found.clear();
+                self.reg_next = None;
+                Task::perform(
+                    models::search_registry(
+                        self.base.clone(),
+                        self.reg_source.clone(),
+                        self.reg_query.trim().to_string(),
+                        None,
+                    ),
+                    Message::RegFound,
+                )
+            }
+            Message::RegFound(Ok(answer)) => {
+                self.reg_found = answer.servers;
+                self.reg_next = answer.next;
+                self.reg_status = if self.reg_found.is_empty() {
+                    "Nothing found.".into()
+                } else {
+                    format!("{} servers.", self.reg_found.len())
+                };
+                Task::none()
+            }
+            // what the registry refused to say (`mcpRequest`: its message, or the line of the page
+            // when it sent none)
+            Message::RegFound(Err(e)) => {
+                self.reg_status = if e.starts_with("Request failed (") {
+                    "The registry did not answer.".into()
+                } else {
+                    e
+                };
+                Task::none()
+            }
+            Message::RegMore => {
+                self.reg_status = "Searching ...".into();
+                Task::perform(
+                    models::search_registry(
+                        self.base.clone(),
+                        self.reg_source.clone(),
+                        self.reg_query.trim().to_string(),
+                        self.reg_next.clone(),
+                    ),
+                    Message::RegMoreLoaded,
+                )
+            }
+            Message::RegMoreLoaded(Ok(answer)) => {
+                // the page adds what came to what it had, and counts all of it
+                self.reg_found.extend(answer.servers);
+                self.reg_next = answer.next;
+                self.reg_status = if self.reg_found.is_empty() {
+                    "Nothing found.".into()
+                } else {
+                    format!("{} servers.", self.reg_found.len())
+                };
+                Task::none()
+            }
+            Message::RegMoreLoaded(Err(e)) => {
+                self.reg_status = if e.starts_with("Request failed (") {
+                    "The registry did not answer.".into()
+                } else {
+                    e
+                };
+                Task::none()
+            }
+            Message::RegUse(index, candidate) => match self.reg_found.get(index) {
+                Some(entry) => match crate::mcp::use_fill(entry, candidate) {
+                    Some(fill) => {
+                        // the form is cleared first, then the candidate fills it
+                        self.clear_mcp_form();
+                        self.mcp_name = fill.name;
+                        self.mcp_url = fill.url;
+                        self.mcp_command = fill.command;
+                        self.mcp_args =
+                            iced::widget::text_editor::Content::with_text(&fill.args);
+                        self.mcp_env =
+                            iced::widget::text_editor::Content::with_text(&fill.env);
+                        self.mcp_headers =
+                            iced::widget::text_editor::Content::with_text(&fill.headers);
+                        self.reg_status = fill.status;
+                        Task::none()
+                    }
+                    None => Task::none(),
+                },
+                None => Task::none(),
+            },
+            Message::McpOpenUrl(url) => Task::perform(
+                models::open_url(self.base.clone(), url),
+                Message::McpOpened,
+            ),
+            // the page never reads what the server answered for a link
+            Message::McpOpened(_) => Task::none(),
             Message::MetricsOpen => {
                 self.metrics_open = !self.metrics_open;
                 Task::none()
@@ -4579,6 +4945,9 @@ impl App {
                     // both cards of the Search pane read what the server has for them; the Studio
                     // builds that pane when the settings are laid out and both cards load then,
                     // which is the first time this page is opened here
+                    // the list of the MCP servers is read again on every click of the menu
+                    // entry, which is every time this page opens
+                    let mcp = self.mcp_refresh();
                     let search = if self.search_loaded {
                         Task::none()
                     } else {
@@ -4600,6 +4969,7 @@ impl App {
                             prov,
                             connect,
                             search,
+                            mcp,
                             logs,
                             keys,
                             Task::perform(
@@ -5366,6 +5736,12 @@ impl App {
                 .push(backdrop(Message::ProvRemoveCancel))
                 .push(crate::providers::remove_window(t));
         }
+        if let Some(name) = self.mcp_remove.as_deref() {
+            // the `confirmDialog` of `mcp.js` before a server is removed
+            layers = layers
+                .push(backdrop(Message::McpRemoveCancel))
+                .push(crate::mcp::remove_window(t, name));
+        }
         if let Some(kind) = self.runtime_confirm {
             // the `confirmDialog` of `runtime.js` before computer use or turbo goes on
             layers = layers
@@ -5599,6 +5975,25 @@ impl App {
                     url: &self.eng_url,
                     key: &self.eng_key,
                     status: &self.eng_status,
+                },
+                crate::mcp::McpView {
+                    servers: &self.mcp,
+                    file_info: &self.mcp_file_info,
+                    list_say: &self.mcp_list_say,
+                    name: &self.mcp_name,
+                    url: &self.mcp_url,
+                    command: &self.mcp_command,
+                    args: &self.mcp_args,
+                    env: &self.mcp_env,
+                    headers: &self.mcp_headers,
+                    env_hint: &self.mcp_env_hint,
+                    editing: self.mcp_editing.is_some(),
+                    resources: &self.mcp_resources,
+                    reg_source: &self.reg_source,
+                    reg_query: &self.reg_query,
+                    reg_status: &self.reg_status,
+                    reg_found: &self.reg_found,
+                    reg_has_next: self.reg_next.is_some(),
                 },
             )
         } else if self.page == View::Project {
@@ -8170,6 +8565,24 @@ impl App {
             .unwrap_or_default();
         self.runtime = status;
         self.runtime_loaded = true;
+    }
+
+    /// The six fields of *Add a server* back to what they start with (`mcpClearForm` of `mcp.js`).
+    fn clear_mcp_form(&mut self) {
+        self.mcp_name.clear();
+        self.mcp_url.clear();
+        self.mcp_command.clear();
+        self.mcp_args = iced::widget::text_editor::Content::default();
+        self.mcp_env = iced::widget::text_editor::Content::default();
+        self.mcp_headers = iced::widget::text_editor::Content::default();
+        self.mcp_env_hint.clear();
+        self.mcp_editing = None;
+    }
+
+    /// The list of the servers again (`mcpRefresh` of `mcp.js`, which runs on every click of the
+    /// menu entry and after every change of the list).
+    fn mcp_refresh(&self) -> Task<Message> {
+        Task::perform(models::fetch_mcp(self.base.clone()), Message::McpLoaded)
     }
 
     /// Asks the server how the text of the box splits into tokens (`runTokenize` of `panels.js`).

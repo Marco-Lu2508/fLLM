@@ -539,6 +539,131 @@ pub async fn fetch_connect(base: String, tool: String) -> Result<crate::connect:
         .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
 }
 
+/// One request of the MCP page: `mcpRequest` of `mcp.js`, which reads the message of the server
+/// when it sent one and its own line when it sent none — `Request failed ({status})` — and lets a
+/// server that could not be reached speak through the error of the request itself.
+pub(crate) async fn mcp_request(
+    base: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let request = match body {
+        Some(body) => reqwest::Client::new()
+            .request(method, format!("{base}{path}"))
+            .json(&body),
+        None => reqwest::Client::new().request(method, format!("{base}{path}")),
+    };
+    let resp = request.send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let data: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if status.is_success() {
+        return Ok(data);
+    }
+    let message = data
+        .pointer("/error/message")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| data.get("error").and_then(serde_json::Value::as_str));
+    Err(message.map(str::to_string).unwrap_or_else(|| format!("Request failed ({})", status.as_u16())))
+}
+
+/// `GET /api/studio/mcp/servers`: the servers, where they are kept and the problem of that file.
+pub async fn fetch_mcp(base: String) -> Result<crate::mcp::ServersAnswer, String> {
+    mcp_request(&base, reqwest::Method::GET, "/api/studio/mcp/servers", None)
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /api/studio/mcp/servers` with what the form holds (the answer is ignored by the page).
+pub async fn save_mcp(base: String, body: serde_json::Value) -> Result<serde_json::Value, String> {
+    mcp_request(&base, reqwest::Method::POST, "/api/studio/mcp/servers", Some(body)).await
+}
+
+/// `DELETE /api/studio/mcp/servers` with the name of the server.
+pub async fn delete_mcp(base: String, name: String) -> Result<serde_json::Value, String> {
+    mcp_request(
+        &base,
+        reqwest::Method::DELETE,
+        "/api/studio/mcp/servers",
+        Some(serde_json::json!({ "name": name })),
+    )
+    .await
+}
+
+/// `POST /api/studio/mcp/restart` with the name of the server.
+pub async fn restart_mcp(base: String, name: String) -> Result<serde_json::Value, String> {
+    mcp_request(
+        &base,
+        reqwest::Method::POST,
+        "/api/studio/mcp/restart",
+        Some(serde_json::json!({ "name": name })),
+    )
+    .await
+}
+
+/// `POST /api/studio/mcp/resources` for one server: what it publishes.
+pub async fn mcp_resources(base: String, server: String) -> Result<crate::mcp::ResourcesAnswer, String> {
+    mcp_request(
+        &base,
+        reqwest::Method::POST,
+        "/api/studio/mcp/resources",
+        Some(serde_json::json!({ "server": server })),
+    )
+    .await
+    .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /api/studio/mcp/resource` for one resource of one server: what it holds.
+pub async fn mcp_resource(base: String, server: String, uri: String) -> Result<String, String> {
+    let answer = mcp_request(
+        &base,
+        reqwest::Method::POST,
+        "/api/studio/mcp/resource",
+        Some(serde_json::json!({ "server": server, "uri": uri })),
+    )
+    .await?;
+    Ok(match answer.get("content").and_then(serde_json::Value::as_str) {
+        Some(content) => content.to_string(),
+        None => serde_json::to_string_pretty(&answer).unwrap_or_default(),
+    })
+}
+
+/// `GET /api/studio/mcp/registry?source=&q=[&cursor=]`: what the two registries offer.
+pub async fn search_registry(
+    base: String,
+    source: String,
+    query: String,
+    cursor: Option<String>,
+) -> Result<crate::mcp::RegistryAnswer, String> {
+    let mut path = format!("/api/studio/mcp/registry?source={source}&q={}", urlencoding_lite(&query));
+    if let Some(cursor) = cursor {
+        path.push_str(&format!("&cursor={}", urlencoding_lite(&cursor)));
+    }
+    mcp_request(&base, reqwest::Method::GET, &path, None)
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+}
+
+/// `POST /api/studio/open-url`: the two links of *Find servers* ask the server to open them.
+pub async fn open_url(base: String, url: String) -> Result<serde_json::Value, String> {
+    mcp_request(&base, reqwest::Method::POST, "/api/studio/open-url", Some(serde_json::json!({ "url": url })))
+        .await
+}
+
+/// Percent-encoding for a query, the way `URLSearchParams` of the page encodes it.
+fn urlencoding_lite(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// `GET /api/studio/embeddings`: the address of the embeddings server and whether the document
 /// search reaches it with it (`route_status`).
 pub async fn fetch_embed(base: String) -> Result<crate::search::EmbedConfig, String> {
