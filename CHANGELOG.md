@@ -444,6 +444,14 @@ behaviour between versions).
 - **The composer is calm: neutral at rest, one neutral hairline on focus, and a chip that is on (Thinking, Web access) has a neutral fill with the accent only on its icon.** The frame and the chip were copper and orange at the same time as the send button.
 
 ### Fixed
+- **The window pictures of the native app's tests land where the workflow uploads them, on all
+  three systems.** Twenty-one test files fell back to `/opt/data/cache/scratch/fLLM/...` — the
+  path of the machine they were written on — when `FLLM_SNAPSHOT_DIR` is not set, which it never
+  is on CI: on the macOS runner that directory cannot be created (*Permission denied* in
+  `tests/actions.rs`, exit code 101), so `Native app (macOS)` went red on 9d27a70 while Linux
+  wrote the pictures outside the artifact and Windows turned the path into `C:\opt\...`. The
+  fallback is `CARGO_TARGET_TMPDIR` now (`target/tmp/ui-snapshots`, exactly the path the workflow
+  reads), and `FLLM_SNAPSHOT_DIR` still wins when it is set.
 - **The CUDA and ROCm Docker images build again.** Their dependency layer copied only `Cargo.toml` and `build.rs` into the stub
   tree, but `build.rs` reads `rust/engine/hip/default_archs.txt` with `include_str!` at every feature set (the arch list moved into
   that file with the "HIP backend for every AMD GPU family" change), so `docker build -f docker/Dockerfile.cuda` and `.rocm` stopped

@@ -176,7 +176,7 @@ fn save_png(app: &App, name: &str) {
     let settings = iced::Settings { fonts: vec![fllm_app::app::FONT_REGULAR.into(), fllm_app::app::FONT_SEMIBOLD.into()], default_font: fllm_app::app::UI_FONT, ..Default::default() };
     let mut ui = Simulator::with_size(settings, iced::Size::new(1280.0, 900.0), app.view());
     let shot = ui.snapshot(&theme).expect("the software renderer draws the view");
-    let dir = std::path::PathBuf::from(std::env::var("FLLM_SNAPSHOT_DIR").unwrap_or_else(|_| "/opt/data/cache/scratch/fLLM/desktop/native/ui-snapshots".into()));
+    let dir = std::path::PathBuf::from(std::env::var("FLLM_SNAPSHOT_DIR").unwrap_or_else(|_| format!("{}/ui-snapshots", env!("CARGO_TARGET_TMPDIR"))));
     std::fs::create_dir_all(&dir).unwrap();
     let prefix = format!("{name}-");
     for old in std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&prefix)) {

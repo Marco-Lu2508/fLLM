@@ -30,7 +30,7 @@ fn save_png(app: &App, name: &str) {
     let theme = app.theme();
     let dir = std::path::PathBuf::from(
         std::env::var("FLLM_SNAPSHOT_DIR")
-            .unwrap_or_else(|_| "/opt/data/cache/scratch/fLLM/desktop/native/ui-snapshots".into()),
+            .unwrap_or_else(|_| format!("{}/ui-snapshots", env!("CARGO_TARGET_TMPDIR"))),
     );
     std::fs::create_dir_all(&dir).unwrap();
     let prefix = format!("{name}-");
