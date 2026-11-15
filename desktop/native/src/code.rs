@@ -361,6 +361,14 @@ pub enum CodeMsg {
     StopHookDone(HookFire),
     /// A `notification` hook was fired for a waiting card; nothing comes of it.
     HookFired,
+    /// What `/worktree` and `/batch` asked the server: what the answer does (switch the
+    /// folder, notice the rows) happens here, as the page does it after its fetch.
+    WorktreeDone {
+        action: &'static str,
+        name: Option<String>,
+        batch: Option<String>,
+        result: Result<Value, String>,
+    },
     /// The custom commands of the folder are known (`loadCustomCommands` of `code.js`).
     CustomLoaded(Vec<crate::commands::CustomCommand>),
     /// One custom command file (or the plugin's) was read: run what it holds.
@@ -447,6 +455,12 @@ pub struct CodeState {
     pub hook_events: Vec<String>,
     /// Where the tail of the current turn stands (see `TailPhase`).
     pub(crate) tail: TailPhase,
+    /// A notice that waits for the folder of a worktree to be open (the page awaits
+    /// `setWorkspace` before it writes it).
+    pub(crate) pending_notice: Option<String>,
+    /// The task of `/batch`, waiting for the tools of the new folder (the page awaits
+    /// `setWorkspace`, which loads them, before it runs `agentRun`).
+    pub(crate) pending_batch: Option<String>,
     /// The allow/deny rules of `/allow` and `/deny`, kept per folder like the page keeps them per
     /// workspace in its own storage.
     pub rules: crate::commands::Rules,
@@ -505,6 +519,8 @@ impl Default for CodeState {
             check_hold: None,
             hook_events: Vec::new(),
             tail: TailPhase::Done,
+            pending_notice: None,
+            pending_batch: None,
             rules: crate::commands::Rules::default(),
             personality: "default".into(),
             custom: Vec::new(),
@@ -675,6 +691,42 @@ async fn call(base: &str, method: reqwest::Method, path: &str, body: Option<Valu
     } else {
         Err(data.pointer("/error/message").and_then(Value::as_str).or_else(|| data.get("error").and_then(Value::as_str)).map(str::to_string).unwrap_or_else(|| format!("the server answered {status}")))
     }
+}
+
+/// One worktree action (`POST /api/studio/agent/worktree`, `case 'worktree'`). The page reads
+/// its failures in two places — the answer of the server and the request itself — and this
+/// keeps them apart as `Server` (with the message the page's `data.error.message` would give,
+/// or its fallback) and `Transport` (no server at all).
+pub async fn worktree_fetch(base: String, action: &str, name: Option<String>) -> Result<Value, String> {
+    let mut body = json!({ "action": action });
+    // the page's `{ action, name }` drops an undefined name; `null` would not
+    if let Some(n) = name {
+        body["name"] = json!(n);
+    }
+    match call(&base, reqwest::Method::POST, "/api/studio/agent/worktree", Some(body)).await {
+        Ok(v) => Ok(v),
+        Err(e) => Err(if e.starts_with("no server at") {
+            format!("transport:{e}")
+        } else if e.starts_with("the server answered") {
+            // no message in the body: the fallback of the page
+            "server:".to_string()
+        } else {
+            format!("server:{e}")
+        }),
+    }
+}
+
+/// The message the page shows for a failed worktree action: `data.error.message` when the body
+/// has one, its own fallback when it has not, and the caught error of the request itself.
+pub fn worktree_error(base: &str, e: &str) -> String {
+    if let Some(rest) = e.strip_prefix("server:") {
+        if rest.is_empty() {
+            // no message in the body: the fallback of the page, with its full stop
+            return format!("{base}.");
+        }
+        return rest.to_string();
+    }
+    format!("{base}: {}", e.strip_prefix("transport:").unwrap_or(e))
 }
 
 pub async fn open_workspace(base: String, path: String) -> Result<Workspace, String> {
@@ -1363,6 +1415,20 @@ impl CodeState {
                     }
                 }
                 Step::UserTool { name, args } => tasks.push(self.user_tool(name, args, env)),
+                Step::Worktree { action, name } => {
+                    let base = env.base.to_string();
+                    tasks.push(Task::perform(
+                        worktree_fetch(base, action, name.clone()),
+                        move |result| Message::Code(CodeMsg::WorktreeDone { action, name, batch: None, result }),
+                    ));
+                }
+                Step::Batch { name, task } => {
+                    let base = env.base.to_string();
+                    tasks.push(Task::perform(
+                        worktree_fetch(base, "new", Some(name.clone())),
+                        move |result| Message::Code(CodeMsg::WorktreeDone { action: "new", name: Some(name), batch: Some(task), result }),
+                    ));
+                }
                 Step::Search(query) => tasks.push(self.search_words(query, env)),
                 Step::Insights => {
                     let input = vec![Self::insight_messages(&self.wire(None))];
@@ -1823,6 +1889,18 @@ impl CodeState {
         self.tools.iter().any(|t| t.name == name)
     }
 
+    /// `/batch` runs its task once the tools of the new folder are read (`agentRun(task,
+    /// '/batch')` after `await setWorkspace`): a run of its own, not a turn of the
+    /// conversation — no review, no hooks, as every `agentRun` of the page.
+    fn batch_when_ready(&mut self, env: &Env) -> Task<Message> {
+        let Some(task) = self.pending_batch.take() else {
+            return Task::none();
+        };
+        self.main_run = false;
+        self.tail = TailPhase::Done;
+        self.run_prompt(&task, "/batch", env)
+    }
+
     /// The files the automatic check would ask diagnostics for after one finished edit — the
     /// gates of `autoCheckEdit` (code.js 1941): the switch, a server with the tool, no `deny`
     /// of `modeFor` (plan mode only — `ctx.readOnly` is a sub-agent the window does not have),
@@ -1876,10 +1954,92 @@ impl CodeState {
                 self.handle = None;
                 Task::none()
             }
+            CodeMsg::WorktreeDone { action, name, batch, result } => match result {
+                Ok(data) => match action {
+                    "new" => {
+                        let path = data.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
+                        let branch = data.get("branch").and_then(Value::as_str).unwrap_or_default().to_string();
+                        let name = name.unwrap_or_default();
+                        let notice = match &batch {
+                            Some(_) => format!("Batch {name}: working on branch {branch} in {path}."),
+                            None => format!(
+                                "Worktree {branch} at {path}. The agent works there now; /worktree leave brings you back, /worktree remove {name} deletes it."
+                            ),
+                        };
+                        // the page awaits `setWorkspace` before it writes this, so the notice
+                        // waits for the folder to be open
+                        self.pending_notice = Some(notice);
+                        self.pending_batch = batch;
+                        self.update(CodeMsg::OpenPath(path), env)
+                    }
+                    "leave" => {
+                        let path = data.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
+                        let branch_part = match data.get("branch").and_then(Value::as_str) {
+                            Some(b) if !b.is_empty() => format!(", branch {b}"),
+                            _ => String::new(),
+                        };
+                        self.pending_notice = Some(format!("Back in the main worktree ({path}{branch_part})."));
+                        self.update(CodeMsg::OpenPath(path), env)
+                    }
+                    "remove" => {
+                        let removed = data.get("removed").and_then(Value::as_str).unwrap_or_default();
+                        self.items.push(Item::Note(format!(
+                            "Removed the worktree {removed}. Its branch stays until you delete it."
+                        )));
+                        Task::none()
+                    }
+                    _ => {
+                        // the rows of the list, exactly as the page joins them
+                        let rows: Vec<String> = data
+                            .get("worktrees")
+                            .and_then(Value::as_array)
+                            .map(|list| {
+                                list.iter()
+                                    .map(|w| {
+                                        format!(
+                                            "{} {}  {}  {}",
+                                            if w.get("current").and_then(Value::as_bool).unwrap_or(false) { "*" } else { " " },
+                                            w.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or("(main)"),
+                                            w.get("branch").and_then(Value::as_str).unwrap_or(""),
+                                            w.get("path").and_then(Value::as_str).unwrap_or("")
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let text = if rows.is_empty() {
+                            "No worktrees. /worktree new <name> creates one.".to_string()
+                        } else {
+                            rows.join("\n")
+                        };
+                        self.items.push(Item::Note(text));
+                        Task::none()
+                    }
+                },
+                Err(e) => {
+                    let text = if batch.is_some() {
+                        // the page reads no message of the server here: only its own two texts
+                        if e.starts_with("transport:") {
+                            format!("The batch could not start: {}", e.trim_start_matches("transport:"))
+                        } else {
+                            "The worktree could not be created.".to_string()
+                        }
+                    } else {
+                        worktree_error("The worktree action failed", &e)
+                    };
+                    self.items.push(Item::Note(text));
+                    Task::none()
+                }
+            },
             CodeMsg::Opened(Ok(w)) => {
                 self.path_input = w.root.clone();
                 self.workspace = Some(w);
                 self.error = None;
+                // the notice of `/worktree new` and `/worktree leave` waits for this moment
+                // (the page awaits `setWorkspace` before it writes it)
+                if let Some(note) = self.pending_notice.take() {
+                    self.items.push(Item::Note(note));
+                }
                 let base = env.base.to_string();
                 Task::batch([
                     Task::perform(fetch_tools(base.clone()), |r| Message::Code(CodeMsg::ToolsLoaded(r))),
@@ -1902,17 +2062,23 @@ impl CodeState {
                 self.continue_if_done(env)
             }
             CodeMsg::Opened(Err(e)) => {
+                // the worktree exists even when its folder could not be opened: its notice is
+                // still true (the page's `setWorkspace` failure has its own text)
+                if let Some(note) = self.pending_notice.take() {
+                    self.items.push(Item::Note(note));
+                }
                 self.error = Some(e);
                 Task::none()
             }
             CodeMsg::ToolsLoaded(Ok((tools, for_model))) => {
                 self.tools = tools;
                 self.tools_json = for_model;
-                Task::none()
+                self.batch_when_ready(env)
             }
             CodeMsg::ToolsLoaded(Err(e)) => {
                 self.error = Some(e);
-                Task::none()
+                // the page runs its batch even when a load of the folder had a problem
+                self.batch_when_ready(env)
             }
             CodeMsg::ChangesLoaded(Ok(c)) => {
                 self.changes = c;

@@ -345,6 +345,37 @@ const DECISIONS = [
 // the scopes of `/review` the page reads out of its argument (row 81)
 const REVIEW_TEXTS = ['/review', '/review branch', '/review branch v2', '/security', '/check'];
 
+// the worktree commands with the answers of the server canned (row 82): every row brings the
+// data of its own fetch, the rest of the apiFetch stays the recorder of the harness
+const WORKTREE_CASES = [
+  {
+    text: '/worktree',
+    canned: {
+      worktree: {
+        data: {
+          worktrees: [
+            { current: true, branch: 'main', path: '/home/marco/p' },
+            { current: false, name: 'feat', branch: 'feat', path: '/home/marco/p/.fllm/worktrees/feat' },
+          ],
+        },
+      },
+    },
+  },
+  { text: '/worktree new feat', canned: { worktree: { data: { path: '/home/marco/p/.fllm/worktrees/feat', branch: 'feat' } } } },
+  { text: '/worktree leave', canned: { worktree: { data: { path: '/home/marco/p', branch: 'main' } } } },
+  { text: '/worktree remove feat', canned: { worktree: { data: { removed: 'feat' } } } },
+  { text: '/worktree remove', canned: null },
+  { text: '/wt new x', canned: { worktree: { data: { path: '/home/marco/p/.fllm/worktrees/x', branch: 'x' } } } },
+  { text: '/batch', canned: null },
+  { text: '/batch feat', canned: null },
+  { text: '/batch feat do it', canned: { worktree: { data: { path: '/home/marco/p/.fllm/worktrees/feat', branch: 'feat' } } } },
+  {
+    // the server refuses: the page shows the message of its body
+    text: '/worktree leave',
+    canned: { worktree: { ok: false, data: { error: { message: 'not a git repository' } } } },
+  },
+];
+
 // ---- row 81: the self-review pair of codeprompts.js, called as the page calls it ----------
 const REVIEW_CASES = [
   // isCleanDiagnostic: the four shapes the page counts as clean, and two that are not
@@ -454,7 +485,11 @@ async function main() {
 
   const out = [];
   let gaps = 0;
-  const allCases = [...CASES, ...REVIEW_TEXTS.map((text) => [text, null, null])];
+  const allCases = [
+    ...CASES,
+    ...REVIEW_TEXTS.map((text) => [text, null, null]),
+    ...WORKTREE_CASES.map((row) => [row.text, null, row.canned]),
+  ];
   for (const [text, setupScript, canned] of allCases) {
     vm.runInContext('__reset();', context);
     if (setupScript) vm.runInContext(setupScript, context, { filename: 'setup.js' });
@@ -469,6 +504,19 @@ async function main() {
     if (canned && canned.runtime) {
       vm.runInContext(
         `apiFetch = async (...a) => { __log.push(['api', ...a]); return { ok: true, json: async () => (${JSON.stringify(canned.runtime)}) }; };`,
+        context,
+      );
+    }
+    if (canned && canned.worktree) {
+      const wt = canned.worktree;
+      vm.runInContext(
+        `apiFetch = async (url, opts) => {
+           __log.push(['api', url, opts]);
+           if (String(url).includes('/agent/worktree')) {
+             return { ok: ${wt.ok !== false}, json: async () => (${JSON.stringify(wt.data || {})}) };
+           }
+           return { ok: true, json: async () => ({}) };
+         };`,
         context,
       );
     }

@@ -34,8 +34,6 @@ const NOT_BUILT: &[&str] = &[
     "/model",
     "/sessions",
     "/memory",
-    "/worktree",
-    "/batch",
     "/learn",
     "/good",
     "/bad",
@@ -80,13 +78,25 @@ fn base_state(case: &Value) -> CmdState {
 }
 
 /// The events of the page's record, without the ones this window has no step for: drawing and
-/// the writes into the browser's own storage.
+/// the writes into the browser's own storage. For the worktree commands everything that is the
+/// ANSWER's doing (the folder switch, the agent run and the notice that follows the request)
+/// drops out here — the fixtures pin the request those steps plan, and `tests/worktree_window.rs`
+/// pins what the answer then does, with the same canned data.
 fn page_events(case: &Value) -> Vec<Value> {
+    let text = case["text"].as_str().unwrap_or_default();
+    let worktree_family = text.starts_with("/worktree") || text.starts_with("/wt") || text.starts_with("/batch");
     let mut out = Vec::new();
+    let mut asked = false;
     for event in case["record"].as_array().expect("a record") {
         let name = event[0].as_str().unwrap_or_default();
         if matches!(name, "render" | "renderSide" | "saveSession" | "saveSettings" | "busy" | "pickMention" | "hook") {
             continue;
+        }
+        if worktree_family && (name == "setWorkspace" || name == "agentRun" || (asked && name == "notice")) {
+            continue;
+        }
+        if name == "api" {
+            asked = true;
         }
         out.push(event.clone());
     }
@@ -142,6 +152,18 @@ fn native_events(steps: &[Step], case: &Value) -> Vec<Value> {
             Step::AutoApprove(_want, notice) => out.push(json!(["notice", notice])),
             Step::AutoReview(_want, notice) => out.push(json!(["notice", notice])),
             Step::UserTool { name, args } => out.push(json!(["userTool", name, args])),
+            Step::Worktree { action, name } => {
+                // only the request is planned here; what its answer does is the window's own
+                // machinery, pinned by `tests/worktree_window.rs`
+                let mut body = json!({ "action": action });
+                if let Some(n) = name {
+                    body["name"] = json!(n);
+                }
+                out.push(json!(["api", "/api/studio/agent/worktree", { "method": "POST", "body": body }]));
+            }
+            Step::Batch { name, task: _ } => {
+                out.push(json!(["api", "/api/studio/agent/worktree", { "method": "POST", "body": { "action": "new", "name": name } }]));
+            }
             Step::Search(query) => {
                 // `encodeURIComponent` of the page: this window's own queries are plain words
                 out.push(json!(["api", format!("/api/studio/sessions/search?q={query}&limit=8")]));

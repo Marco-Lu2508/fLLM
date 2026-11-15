@@ -7,6 +7,17 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **Worktrees in the native app.** `/worktree` (and `wt`) with the page's four actions — the
+  usage line when a name is missing, the request with `{ action, name }` (the name left out
+  when there is none), and its answer doing what it does there: `new` opens the folder first
+  and notices after, `leave` comes back with its branch behind the path, `remove` notices at
+  once, the list joins its rows with the page's own spacing or says how to make one. The
+  failures keep the page's two families: the message of the server's body, its own fallback
+  without one, and the caught request. `/batch <name> <task>` is a new worktree with the task
+  behind it: the folder's notice stands, and the task runs as a run of its own (`display
+  `/batch``, no turn of the conversation) once the tools of the new folder are in, the way the
+  page awaits `setWorkspace` before its `agentRun`. Ten fixtures over the commands with the
+  server's answers canned, six window tests, fifteen mutations.
 - **The hooks of the agent loop fire in the native app** (`fireHook` of `code.js`, the three
   places the page asks one): `user_prompt_submit` before a turn starts — its `context` goes to
   the model with the message in `[hooks]` while the words of the box stay as they were typed;

@@ -377,7 +377,11 @@ runs a diagnostics check after every finished edit and gives the model its first
 under *Automatic check*), and *Review my work before it counts as done* (`/autoreview on` or `off`) makes the agent read its own
 diff and the diagnostics again before a run counts as done — two rounds at most, their feedback going to the model unseen while
 the notice *Reviewing my own changes…* stands in the list. `/check`, `/review staged` and `/security-review` ask the server for a
-review over a card of their own. The hooks of the agent loop fire from the same places the page
+review over a card of their own. `/worktree new <name>` (also `wt`) creates a git worktree and
+moves the agent into it, `/worktree leave` comes back to the main folder, `/worktree remove
+<name>` deletes one and a bare `/worktree` lists them with the branch and path; `/batch <name>
+<task>` does the same and then runs the task there as a run of its own, so the main folder stays
+untouched. The hooks of the agent loop fire from the same places the page
 fires them: what `user_prompt_submit` answers rides along with the message in `[hooks]`, a blocked
 stop hook notices in the list, sends the model its words unseen and runs it once more, and a card
 that starts waiting tells the server about it — the window asks only when the list read for the

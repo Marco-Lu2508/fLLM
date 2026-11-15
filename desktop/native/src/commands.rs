@@ -856,6 +856,12 @@ pub enum Step {
     /// `userTool(name, args)`: a card of a tool the user ran (`/check`, `/review`,
     /// `/security-review`) — nothing of it is shared with the model, unlike `userRun(…, true)`.
     UserTool { name: String, args: serde_json::Value },
+    /// `/worktree [new|leave|remove|list] [name]`: the request of the page, its answer coming
+    /// back through `WorktreeDone`.
+    Worktree { action: &'static str, name: Option<String> },
+    /// `/batch <name> <task>`: a new worktree, the notice of it, and then the task as a run of
+    /// its own (`agentRun(task, '/batch')` there).
+    Batch { name: String, task: String },
     /// `/search words`: the search over the stored sessions of this window.
     Search(String),
     /// The counts of `/insights` over this folder's session(s).
@@ -936,6 +942,11 @@ pub fn help_text(custom: &[CustomCommand]) -> String {
     text.push_str(" @file attaches a file (fuzzy search), !command runs a shell command and shows the model its output, Enter while the agent works queues a message, Alt+B switches between the build and plan agent.");
     text
 }
+
+/// The usage of `/worktree` when the action needs a name (`case 'worktree'`).
+pub const WORKTREE_USAGE: &str = "Usage: /worktree new <name> · /worktree leave · /worktree remove <name> · /worktree (list)";
+/// The usage of `/batch` (`case 'batch'`).
+pub const BATCH_USAGE: &str = "Usage: /batch <name> <task> — the task runs in a new worktree on branch <name>.";
 
 /// The three notices of `/plan`, `/ask` and `/edit` (`case 'plan': case 'ask': case 'edit':`).
 pub fn perm_notice(perm: &str) -> &'static str {
@@ -1164,6 +1175,37 @@ pub fn dispatch(text: &str, state: &CmdState) -> Option<Vec<Step>> {
         }],
         "review" => vec![Step::UserTool { name: "review".into(), args: crate::review::review_args(&arg_text) }],
         "security-review" | "security" => vec![Step::UserTool { name: "review".into(), args: crate::review::security_review_args() }],
+        "worktree" | "wt" => {
+            // `const [sub, name] = argText.split(/\s+/).filter(Boolean)`: the words of the
+            // argument, the second one the name
+            let mut words = arg_text.split_whitespace();
+            let sub = words.next().unwrap_or("");
+            let name = words.next().map(str::to_string);
+            let action: &'static str = match sub {
+                "new" => "new",
+                "leave" => "leave",
+                "remove" => "remove",
+                _ => "list",
+            };
+            if matches!(action, "new" | "remove") && name.is_none() {
+                vec![Step::Notice(WORKTREE_USAGE.to_string())]
+            } else {
+                vec![Step::Worktree { action, name }]
+            }
+        }
+        "batch" => {
+            // the first word is the branch, everything behind it the task (`argText.slice(name
+            // .length).trim()`)
+            let (name, rest) = match arg_text.split_once(char::is_whitespace) {
+                Some((n, r)) => (n, r.trim()),
+                None => (arg_text.as_str(), ""),
+            };
+            if name.is_empty() || rest.is_empty() {
+                vec![Step::Notice(BATCH_USAGE.to_string())]
+            } else {
+                vec![Step::Batch { name: name.to_string(), task: rest.to_string() }]
+            }
+        }
         "diff" => vec![Step::UserRun("git diff --stat && git diff".to_string(), true)],
         "status" => vec![Step::UserRun("git status -sb".to_string(), true)],
         "turbo" => {

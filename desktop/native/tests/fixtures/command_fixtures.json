@@ -3848,6 +3848,632 @@
     "view": 0
    },
    "canned": null
+  },
+  {
+   "text": "/worktree",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/worktree",
+     {
+      "method": "POST",
+      "body": {
+       "action": "list"
+      }
+     }
+    ],
+    [
+     "notice",
+     "* (main)  main  /home/marco/p\n  feat  feat  /home/marco/p/.fllm/worktrees/feat"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "worktree": {
+     "data": {
+      "worktrees": [
+       {
+        "current": true,
+        "branch": "main",
+        "path": "/home/marco/p"
+       },
+       {
+        "current": false,
+        "name": "feat",
+        "branch": "feat",
+        "path": "/home/marco/p/.fllm/worktrees/feat"
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "text": "/worktree new feat",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/worktree",
+     {
+      "method": "POST",
+      "body": {
+       "action": "new",
+       "name": "feat"
+      }
+     }
+    ],
+    [
+     "setWorkspace",
+     "/home/marco/p/.fllm/worktrees/feat"
+    ],
+    [
+     "notice",
+     "Worktree feat at /home/marco/p/.fllm/worktrees/feat. The agent works there now; /worktree leave brings you back, /worktree remove feat deletes it."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "worktree": {
+     "data": {
+      "path": "/home/marco/p/.fllm/worktrees/feat",
+      "branch": "feat"
+     }
+    }
+   }
+  },
+  {
+   "text": "/worktree leave",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/worktree",
+     {
+      "method": "POST",
+      "body": {
+       "action": "leave"
+      }
+     }
+    ],
+    [
+     "setWorkspace",
+     "/home/marco/p"
+    ],
+    [
+     "notice",
+     "Back in the main worktree (/home/marco/p, branch main)."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "worktree": {
+     "data": {
+      "path": "/home/marco/p",
+      "branch": "main"
+     }
+    }
+   }
+  },
+  {
+   "text": "/worktree remove feat",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/worktree",
+     {
+      "method": "POST",
+      "body": {
+       "action": "remove",
+       "name": "feat"
+      }
+     }
+    ],
+    [
+     "notice",
+     "Removed the worktree feat. Its branch stays until you delete it."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "worktree": {
+     "data": {
+      "removed": "feat"
+     }
+    }
+   }
+  },
+  {
+   "text": "/worktree remove",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Usage: /worktree new <name> · /worktree leave · /worktree remove <name> · /worktree (list)"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/wt new x",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/worktree",
+     {
+      "method": "POST",
+      "body": {
+       "action": "new",
+       "name": "x"
+      }
+     }
+    ],
+    [
+     "setWorkspace",
+     "/home/marco/p/.fllm/worktrees/x"
+    ],
+    [
+     "notice",
+     "Worktree x at /home/marco/p/.fllm/worktrees/x. The agent works there now; /worktree leave brings you back, /worktree remove x deletes it."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "worktree": {
+     "data": {
+      "path": "/home/marco/p/.fllm/worktrees/x",
+      "branch": "x"
+     }
+    }
+   }
+  },
+  {
+   "text": "/batch",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Usage: /batch <name> <task> — the task runs in a new worktree on branch <name>."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/batch feat",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Usage: /batch <name> <task> — the task runs in a new worktree on branch <name>."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/batch feat do it",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/worktree",
+     {
+      "method": "POST",
+      "body": {
+       "action": "new",
+       "name": "feat"
+      }
+     }
+    ],
+    [
+     "setWorkspace",
+     "/home/marco/p/.fllm/worktrees/feat"
+    ],
+    [
+     "notice",
+     "Batch feat: working on branch feat in /home/marco/p/.fllm/worktrees/feat."
+    ],
+    [
+     "agentRun",
+     "do it",
+     "/batch"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "worktree": {
+     "data": {
+      "path": "/home/marco/p/.fllm/worktrees/feat",
+      "branch": "feat"
+     }
+    }
+   }
+  },
+  {
+   "text": "/worktree leave",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/worktree",
+     {
+      "method": "POST",
+      "body": {
+       "action": "leave"
+      }
+     }
+    ],
+    [
+     "notice",
+     "not a git repository"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "worktree": {
+     "ok": false,
+     "data": {
+      "error": {
+       "message": "not a git repository"
+      }
+     }
+    }
+   }
   }
  ],
  "decisions": [
