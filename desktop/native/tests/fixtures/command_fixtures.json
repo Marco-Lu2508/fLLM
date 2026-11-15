@@ -1,0 +1,3461 @@
+{
+ "cases": [
+  {
+   "text": "/clear",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "newSession"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/new",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "newSession"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/autoapprove off",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Automatic approval is off: every command asks again.\n/autoapprove on · /autoapprove off"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/autoapprove",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Automatic approval is on: harmless commands (reading, building, testing) run without a question; everything else still asks.\n/autoapprove on · /autoapprove off"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/AutoApprove on",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Automatic approval is on: harmless commands (reading, building, testing) run without a question; everything else still asks.\n/autoapprove on · /autoapprove off"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/plan",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "setPerm",
+     "plan"
+    ],
+    [
+     "notice",
+     "Plan agent: it only reads and writes a plan."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "plan",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/ask",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "setPerm",
+     "ask"
+    ],
+    [
+     "notice",
+     "Build agent: it asks before every change and every command."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/edit",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "setPerm",
+     "edit"
+    ],
+    [
+     "notice",
+     "Build agent, auto-edit: it changes files itself and asks before commands."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "edit",
+    "lastBuildPerm": "edit",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/build",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "setPerm",
+     "ask"
+    ],
+    [
+     "notice",
+     "Build agent."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/agent",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "setPerm",
+     "plan"
+    ],
+    [
+     "notice",
+     "Plan agent: it only reads and writes a plan."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "plan",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/stop",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "The agent is not running."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/status",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "userRun",
+     "git status -sb",
+     true
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/diff",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "userRun",
+     "git diff --stat && git diff",
+     true
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/cd /tmp/other",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "setWorkspace",
+     "/tmp/other"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/cd",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "pickWorkspace"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/help",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Commands: /clear, /compact, /init, /spec, /resume, /fork, /revert, /rename, /export, /rewind, /undo, /plan, /build, /ask, /edit, /agent, /model, /skill, /remember, /memory, /check, /diff, /status, /worktree, /batch, /cost, /sandbox, /autoapprove, /turbo, /sandbox, /review, /security-review, /cd, /allow, /deny, /rules, /search, /retry, /stop, /insights, /personality, /autoreview, /learn, /good, /bad, /help. @file attaches a file (fuzzy search), !command runs a shell command and shows the model its output, Enter while the agent works queues a message, Alt+B switches between the build and plan agent."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/help",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Commands: /clear, /compact, /init, /spec, /resume, /fork, /revert, /rename, /export, /rewind, /undo, /plan, /build, /ask, /edit, /agent, /model, /skill, /remember, /memory, /check, /diff, /status, /worktree, /batch, /cost, /sandbox, /autoapprove, /turbo, /sandbox, /review, /security-review, /cd, /allow, /deny, /rules, /search, /retry, /stop, /insights, /personality, /autoreview, /learn, /good, /bad, /help. Custom commands from .fllm/commands: /deploy (Ship it). @file attaches a file (fuzzy search), !command runs a shell command and shows the model its output, Enter while the agent works queues a message, Alt+B switches between the build and plan agent."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [
+     {
+      "name": "deploy",
+      "description": "Ship it"
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "custom": [
+     {
+      "name": "deploy",
+      "description": "Ship it"
+     }
+    ]
+   }
+  },
+  {
+   "text": "/rules",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Allow:\n(none)\n\nDeny:\n(none)"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/allow bash: npm test*",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "saveRules",
+     "bash: npm test*",
+     ""
+    ],
+    [
+     "renderSide"
+    ],
+    [
+     "notice",
+     "Rule saved: allow bash: npm test*"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/allow nope: x",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Usage: /allow category: pattern, for example /allow bash: npm test*"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/allow",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Usage: /allow category: pattern, for example /allow bash: npm test*"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/deny read: /tmp/*",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "saveRules",
+     "",
+     "read: /tmp/*"
+    ],
+    [
+     "renderSide"
+    ],
+    [
+     "notice",
+     "Rule saved: deny read: /tmp/*"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/personality",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Style: Default. Choose one of: default, concise, teacher, reviewer, pair."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/personality concise",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "saveSettings"
+    ],
+    [
+     "renderSide",
+     true
+    ],
+    [
+     "notice",
+     "Style: Concise. Use as few words as the job allows. No preamble and no recap of the request. Report what changed, what you checked and what is left."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "concise",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/personality nope",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "There is no style \"nope\". Choose one of: default, concise, teacher, reviewer, pair."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/remember a short fact",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "memory",
+     "a short fact",
+     "workspace"
+    ],
+    [
+     "notice",
+     "Remembered (for this workspace): a short fact"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/remember global everywhere",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "memory",
+     "everywhere",
+     "global"
+    ],
+    [
+     "notice",
+     "Remembered (for every workspace): everywhere"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/remember",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Usage: /remember a short fact, or /remember global a fact for every workspace."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/autoreview on",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "saveSettings"
+    ],
+    [
+     "renderSide",
+     true
+    ],
+    [
+     "notice",
+     "Review before done: on. When a run changes files the agent reads its own diff and the diagnostics once more and fixes what is wrong."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": true,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/autoreview",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Review before done: off."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/turbo on",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "confirm",
+     "Turbo removes every permission question and the sandbox. Continue?"
+    ],
+    [
+     "api",
+     "/api/studio/runtime",
+     {
+      "method": "POST",
+      "body": {
+       "turbo": true
+      }
+     }
+    ],
+    [
+     "notice",
+     "Turbo is on: every tool call runs, nothing asks, sandbox off."
+    ],
+    [
+     "render"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "off",
+    "turbo": true,
+    "view": 0
+   },
+   "canned": {
+    "turboConfirm": true,
+    "runtime": {
+     "turbo": true,
+     "sandbox": "off"
+    }
+   }
+  },
+  {
+   "text": "/turbo on",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "confirm",
+     "Turbo removes every permission question and the sandbox. Continue?"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "turboConfirm": false
+   }
+  },
+  {
+   "text": "/turbo",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "confirm",
+     "Turbo removes every permission question and the sandbox. Continue?"
+    ],
+    [
+     "api",
+     "/api/studio/runtime",
+     {
+      "method": "POST",
+      "body": {
+       "turbo": true
+      }
+     }
+    ],
+    [
+     "notice",
+     "Turbo is off: the usual permission questions are back."
+    ],
+    [
+     "render"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/sandbox off",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/runtime",
+     {
+      "method": "POST",
+      "body": {
+       "sandbox": "off"
+      }
+     }
+    ],
+    [
+     "notice",
+     "Sandbox: off."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "off",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "runtime": {
+     "sandbox": "off",
+     "sandbox_available": true
+    }
+   }
+  },
+  {
+   "text": "/sandbox weird",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Sandbox is workspace. /sandbox off | workspace | strict"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/sandbox",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Sandbox is workspace. /sandbox off | workspace | strict"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "runtime": {
+     "active": false,
+     "mode": "workspace",
+     "sandbox": {
+      "reason": "no"
+     }
+    }
+   }
+  },
+  {
+   "text": "/search",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Usage: /search words. It looks through the chats and code sessions this app has stored (Settings > Skills and schedules keeps the index)."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/search words",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/sessions/search?q=words&limit=8"
+    ],
+    [
+     "notice",
+     "1 stored session for \"words\":\n- T (chat, 1/20/1970)\n  snip"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "search": {
+     "hits": [
+      {
+       "id": "h1",
+       "title": "T",
+       "kind": "chat",
+       "updated": 1699990000,
+       "snippet": "snip"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "text": "/cost",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "42 in / 7 out in 3 answer(s). Prices and the full table: Settings > Usage and cost."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/insights",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "No agent work saved for this folder yet."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/insights",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "This folder, 3 saved sessions (the browser keeps the newest 30): 3 messages from you, 3 agent steps, 1 file edit.\nMost used tools: bash 3, write_file 1.\nTokens and cost: /cost. The terminal agent has the same overview over its own sessions: fllm-rs insights."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "savedSessions": [
+     {
+      "messages": [
+       {
+        "role": "user"
+       },
+       {
+        "role": "assistant",
+        "tool_calls": [
+         {
+          "function": {
+           "name": "bash"
+          }
+         },
+         {
+          "function": {
+           "name": "write_file"
+          }
+         }
+        ]
+       },
+       {
+        "role": "user"
+       },
+       {
+        "role": "assistant",
+        "tool_calls": [
+         {
+          "function": {
+           "name": "bash"
+          }
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "messages": [
+       {
+        "role": "user"
+       },
+       {
+        "role": "assistant",
+        "content": "x",
+        "tool_calls": [
+         {
+          "function": {
+           "name": "bash"
+          }
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "text": "/model",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "choices",
+     "Pick the model for the agent:",
+     "model",
+     [
+      {
+       "label": "qwen",
+       "data": "qwen"
+      },
+      {
+       "label": "llama",
+       "data": "llama"
+      }
+     ]
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/sessions",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "choices",
+     "Pick a session to continue:",
+     "resume",
+     [
+      {
+       "label": "Older  (1/20/1970, 4:13:10 PM)",
+       "data": "other"
+      }
+     ]
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/memory",
+   "ret": null,
+   "error": "$ is not a function",
+   "record": [
+    [
+     "renderSide",
+     true
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/init",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "agentRun",
+     "Explore this workspace and write a file named AGENTS.md in its root with instructions for future coding sessions. Cover: what the project is, how to build, test and run it (exact commands, checked against the build files), the layout of the important folders, code style and conventions you can see, and pitfalls. Keep it under 80 lines, concrete, with no filler. If AGENTS.md, FLLM.md or CLAUDE.md already exists, read it and improve that file instead of starting over.",
+     "/init"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/undo 3",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "undo",
+     3
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/rename New title",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "saveSession"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "New title",
+    "titleLocked": true,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/rename",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "rename",
+     "s1"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/export",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "export",
+     "s1"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/skill",
+   "ret": false,
+   "error": null,
+   "record": [],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/compact",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "busy",
+     true
+    ],
+    [
+     "compact",
+     {
+      "system": "sys",
+      "tools": [],
+      "signal": {}
+     },
+     {
+      "force": true,
+      "focus": ""
+     }
+    ],
+    [
+     "busy",
+     false
+    ],
+    [
+     "saveSession"
+    ],
+    [
+     "render"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/resume",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "choices",
+     "Pick a session to continue:",
+     "resume",
+     [
+      {
+       "label": "Older  (1/20/1970, 4:13:10 PM)",
+       "data": "other"
+      }
+     ]
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/fork",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "fork",
+     ""
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/revert",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "There is no message to revert to."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/retry",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "There is no message to retry."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/rewind",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "rewind"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/spec a b",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "spec",
+     "a b"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/review staged",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "userTool",
+     "review",
+     {
+      "scope": "staged"
+     }
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/security-review",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "userTool",
+     "review",
+     {
+      "scope": "diff",
+      "security": true
+     }
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/worktree",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/worktree",
+     {
+      "method": "POST",
+      "body": {
+       "action": "list"
+      }
+     }
+    ],
+    [
+     "notice",
+     "No worktrees. /worktree new <name> creates one."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/batch",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Usage: /batch <name> <task> — the task runs in a new worktree on branch <name>."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/check src",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "userTool",
+     "diagnostics",
+     {
+      "path": "src"
+     }
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/learn",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Learning from my sessions: off."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/good",
+   "ret": true,
+   "error": null,
+   "record": [],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/bad",
+   "ret": true,
+   "error": null,
+   "record": [],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/deploy something",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "readCustom",
+     "deploy"
+    ],
+    [
+     "agentRun",
+     "Do it\n\nARGUMENTS: x\n\nARGUMENTS: something",
+     "/deploy something"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [
+     {
+      "name": "deploy",
+      "description": "Ship it"
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "custom": [
+     {
+      "name": "deploy",
+      "description": "Ship it"
+     }
+    ]
+   }
+  },
+  {
+   "text": "/agent",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "toast",
+     "Wait until the agent has finished or stop it."
+    ]
+   ],
+   "pre": {
+    "running": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/stop",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "stopAgent"
+    ]
+   ],
+   "pre": {
+    "running": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/unknownthing",
+   "ret": false,
+   "error": null,
+   "record": [],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "not a command at all",
+   "ret": false,
+   "error": null,
+   "record": [],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/autoapprover off",
+   "ret": false,
+   "error": null,
+   "record": [],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  }
+ ]
+}
