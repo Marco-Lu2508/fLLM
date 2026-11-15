@@ -11,7 +11,7 @@ use crate::models::{bold, rule};
 use crate::settings::segmented;
 use crate::theme::{self, Tokens};
 use iced::widget::text_editor::{Action, Binding, Content, KeyPress, Status};
-use iced::widget::{button, column, container, markdown, row, scrollable, text, text_editor, text_input, Space};
+use iced::widget::{button, checkbox, column, container, markdown, row, scrollable, text, text_editor, text_input, Space};
 use iced::{keyboard, task, Alignment, Element, Font, Length, Padding, Task};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -157,6 +157,12 @@ pub struct Call {
     /// The words under a card that ran without a question (`autoNote` of the page: *Approved on
     /// its own: …*).
     pub auto_note: Option<String>,
+    /// The block of `item.check` on the card: the diagnostics an automatic check found after
+    /// this edit, under *Automatic check*.
+    pub check: Option<String>,
+    /// What the model gets back when it differs from the card (`reply = …` of the automatic
+    /// check: the clipped answer with the problems of the check between the two markers).
+    pub sent: Option<String>,
 }
 
 pub enum Item {
@@ -172,6 +178,9 @@ pub enum Item {
     Assistant { text: String, md: Box<markdown::Content> },
     Call(Call),
     Note(String),
+    /// The self-review's message to the model (`selfReview` pushes it into `ctx.messages` and
+    /// never shows it): the view skips it, the wire sends it.
+    ReviewFeedback(String),
 }
 
 /// An item of a session as it is kept on disk.
@@ -185,12 +194,50 @@ pub enum Saved {
         sent: Option<String>,
     },
     Assistant { text: String },
-    Call { id: String, name: String, args: String, permission: String, ok: bool, output: String },
+    Call { id: String, name: String, args: String, permission: String, ok: bool, output: String, #[serde(default)] sent: Option<String> },
     Note { text: String },
+    /// Kept with the session like the messages of the page are, so the review rounds survive it.
+    ReviewFeedback { text: String },
 }
 
 /// The most items kept per folder: the newest ones.
 pub const SAVED_ITEMS: usize = 200;
+
+/// One run's self-review between its last answer and its `done` (`selfReview` of code.js): two
+/// rounds at most, each reading the changes again, asking the review tool and the diagnostics
+/// of every file this run touched, and sending the model back to work with the feedback.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Review {
+    /// The round the page is in: 1 or 2, and never more.
+    pub round: u32,
+    /// Where the cycle stands.
+    pub stage: ReviewStage,
+    /// The files this run changed, unique and at most twelve (`files` of the page).
+    pub files: Vec<String>,
+    /// What came back: the review text and the diagnostics that are not clean.
+    pub report: crate::review::Report,
+}
+
+/// The three waits of one review round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewStage {
+    /// `refreshChanges()` is being asked for.
+    Changes,
+    /// The review tool and the diagnostics are being asked — silently, as the page asks them
+    /// (only the notice stands in the list).
+    Tools,
+    /// The feedback went out and the model is working on it again.
+    Run,
+}
+
+/// What the silent tools of one review round answered (`selfReview`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReviewAnswers {
+    /// The text of the review tool, when the server offers it.
+    pub review: Option<String>,
+    /// One entry per diagnostics call that worked: the path and its output.
+    pub diagnostics: Vec<(String, String)>,
+}
 
 fn permission_name(p: Permission) -> &'static str {
     match p {
@@ -266,6 +313,16 @@ pub enum CodeMsg {
     /// The *Always* button of a waiting call: what it remembers for this session, and the call
     /// runs like an *Allow* (`answerPermission('always')` of `code.js`).
     Always(String, String),
+    /// The checkbox of *Review my work before it counts as done* (`code.autoReview`; the page
+    /// writes `fllm.studio.codesettings.v1` when it changes).
+    ToggleAutoReview(bool),
+    /// The checkbox of *Check my edits automatically* (`code.autoCheck`).
+    ToggleAutoCheck(bool),
+    /// What the silent tools of one review round answered (`selfReview`).
+    ReviewTools(ReviewAnswers),
+    /// The diagnostics an automatic check asked for after an edit: the call, the reply the model
+    /// had, and the answers it kept (one per path that was checked).
+    CheckDone { id: String, reply: String, outputs: Vec<String> },
     /// The custom commands of the folder are known (`loadCustomCommands` of `code.js`).
     CustomLoaded(Vec<crate::commands::CustomCommand>),
     /// One custom command file (or the plugin's) was read: run what it holds.
@@ -295,6 +352,9 @@ pub struct Env<'a> {
     pub usage: Option<&'a str>,
     /// Where the session of this folder is kept, so `/clear` can save before it resets.
     pub session_file: &'a std::path::Path,
+    /// The context of the loaded model: `clipOutput` of the automatic check cuts its answer
+    /// against it (`ctxMax()` of the page).
+    pub ctx_max: usize,
 }
 
 /// What a command changed and the store has to keep (`saveCodeSettings` and the rules write of
@@ -317,9 +377,30 @@ pub struct CodeState {
     pub build_mode: Mode,
     /// Whether harmless commands run without a question (`code.autoApprove` of the page).
     pub auto_approve: bool,
+    /// `Review my work before it counts as done` (`code.autoReview`): when a run changed files,
+    /// the agent reads its own diff and the diagnostics once more before it counts as done.
+    pub auto_review: bool,
+    /// `Check my edits automatically` (`code.autoCheck`): after every edit the first problems
+    /// of a diagnostics run go back to the model with its result.
+    pub auto_check: bool,
     /// The switch as the command last set it, for the window to write into its store — the page
     /// writes its own copy at once, and this state has no store of its own.
     pub(crate) pending_auto_approve: Option<bool>,
+    /// The same hand-off for `/autoreview` and its checkbox (`saveCodeSettings` of the page).
+    pub(crate) pending_auto_review: Option<bool>,
+    /// The same hand-off for the checkbox of `code.autoCheck`.
+    pub(crate) pending_auto_check: Option<bool>,
+    /// The highest change id when this run started (`turn.changeMark`): the self-review looks at
+    /// the files this run changed and at nothing before them.
+    pub change_mark: u64,
+    /// The review between the run's end and its `done` (`selfReview` of the page), while it runs.
+    pub review: Option<Review>,
+    /// Whether the stream that is running belongs to the conversation itself (`submitText` of
+    /// the page, where `selfReview` is called): the runs of the agents pane do not review.
+    pub(crate) main_run: bool,
+    /// The call whose automatic check is running: the model waits for it (`autoCheckEdit` is
+    /// awaited inside `runToolCall` on the page, before the call is answered).
+    pub(crate) check_hold: Option<String>,
     /// The allow/deny rules of `/allow` and `/deny`, kept per folder like the page keeps them per
     /// workspace in its own storage.
     pub rules: crate::commands::Rules,
@@ -368,6 +449,14 @@ impl Default for CodeState {
             build_mode: Mode::Ask,
             auto_approve: true,
             pending_auto_approve: None,
+            auto_review: false,
+            pending_auto_review: None,
+            auto_check: false,
+            pending_auto_check: None,
+            change_mark: 0,
+            review: None,
+            main_run: false,
+            check_hold: None,
             rules: crate::commands::Rules::default(),
             personality: "default".into(),
             custom: Vec::new(),
@@ -588,6 +677,26 @@ pub async fn fetch_changes(base: String) -> Result<Vec<Change>, String> {
     call(&base, reqwest::Method::GET, "/api/studio/agent/changes", None).await.map(|v| parse_changes(&v))
 }
 
+/// The silent calls of one review round: the review tool first, then the diagnostics of every
+/// file, one after the other — the page awaits them the same way and draws no card for them
+/// (`selfReview`).
+pub async fn review_tools(base: String, with_review: bool, with_diagnostics: bool, files: Vec<String>) -> ReviewAnswers {
+    let mut answers = ReviewAnswers::default();
+    if with_review {
+        if let Ok(text) = run_tool(base.clone(), "review".into(), serde_json::json!({})).await {
+            answers.review = Some(text);
+        }
+    }
+    if with_diagnostics {
+        for path in files {
+            if let Ok(text) = run_tool(base.clone(), "diagnostics".into(), serde_json::json!({ "path": path.clone() })).await {
+                answers.diagnostics.push((path, text));
+            }
+        }
+    }
+    answers
+}
+
 pub async fn run_tool(base: String, name: String, args: Value) -> Result<String, String> {
     tool_result(&call(&base, reqwest::Method::POST, "/api/studio/agent/tool", Some(json!({ "name": name, "args": args }))).await?)
 }
@@ -779,12 +888,13 @@ impl CodeState {
                 }),
                 Item::Assistant { text, .. } => (!text.is_empty()).then(|| Saved::Assistant { text: text.clone() }),
                 Item::Note(t) => Some(Saved::Note { text: t.clone() }),
+                Item::ReviewFeedback(t) => Some(Saved::ReviewFeedback { text: t.clone() }),
                 Item::Call(c) => {
                     let (ok, output) = match &c.state {
                         CallState::Done { ok, output } => (*ok, output.clone()),
                         _ => (false, "Interrupted.".to_string()),
                     };
-                    Some(Saved::Call { id: c.id.clone(), name: c.name.clone(), args: c.args.clone(), permission: permission_name(c.permission).into(), ok, output })
+                    Some(Saved::Call { id: c.id.clone(), name: c.name.clone(), args: c.args.clone(), permission: permission_name(c.permission).into(), ok, output, sent: c.sent.clone() })
                 }
             })
             .collect();
@@ -809,8 +919,9 @@ impl CodeState {
                     md.push_str(&text);
                     Item::Assistant { text, md: Box::new(md) }
                 }
-                Saved::Call { id, name, args, permission, ok, output } => Item::Call(Call { id, name, args, permission: Permission::parse(&permission), kind: ToolKind::Server, state: CallState::Done { ok, output }, auto_note: None }),
+                Saved::Call { id, name, args, permission, ok, output, sent } => Item::Call(Call { id, name, args, permission: Permission::parse(&permission), kind: ToolKind::Server, state: CallState::Done { ok, output }, auto_note: None, check: None, sent }),
                 Saved::Note { text } => Item::Note(text),
+                Saved::ReviewFeedback { text } => Item::ReviewFeedback(text),
             })
             .collect();
     }
@@ -866,6 +977,10 @@ impl CodeState {
         let mut i = 0;
         while i < self.items.len() {
             match &self.items[i] {
+                Item::ReviewFeedback(text) => {
+                    // sent as it stands, and never drawn (the view skips this variant)
+                    wire.push(WireMessage::new("user", text.clone()));
+                }
                 Item::User { text, sent } => {
                     // what the model is sent: the prompt of a command, with the output of the
                     // commands the user ran in front of it (`takePending() + notes + userText`)
@@ -884,11 +999,15 @@ impl CodeState {
                         wire.push(m);
                     }
                     for c in &calls {
-                        let output = match &c.state {
+                        let output = if let Some(sent) = &c.sent {
+                            // the automatic check's reply: what the model gets, with the
+                            // problems between the two markers (`reply = …` of code.js)
+                            sent.clone()
+                        } else { match &c.state {
                             CallState::Done { ok: true, output } => output.clone(),
                             CallState::Done { ok: false, output } => format!("Error: {output}"),
                             _ => "The call did not finish.".to_string(),
-                        };
+                        } };
                         let mut t = WireMessage::new("tool", output);
                         t.tool_call_id = Some(c.id.clone());
                         wire.push(t);
@@ -909,6 +1028,7 @@ impl CodeState {
             perm: Self::perm_of(&self.mode),
             last_build_perm: Self::perm_of(&self.build_mode),
             auto_approve: self.auto_approve,
+            auto_review: self.auto_review,
             turbo: env.turbo,
             sandbox: env.sandbox.map(str::to_string),
             sandbox_available: env.sandbox_available,
@@ -978,6 +1098,8 @@ impl CodeState {
             kind: ToolKind::Server,
             state: CallState::Running,
             auto_note: None,
+            check: None,
+            sent: None,
         };
         self.items.push(Item::Call(call));
         let base = env.base.to_string();
@@ -986,6 +1108,34 @@ impl CodeState {
                 let args = serde_json::json!({ "command": command });
                 let result = run_tool(base, "bash".into(), args).await;
                 (id, result, share)
+            },
+            |(id, result, share)| Message::Code(CodeMsg::UserRunDone(id, result, share)),
+        )
+    }
+
+    /// `userTool(name, args)` of the page: a card for a tool the user ran (`/check`, `/review`,
+    /// `/security-review`). The page asks for no workspace and shares nothing of the output.
+    fn user_tool(&mut self, name: String, args: Value, env: &Env) -> Task<Message> {
+        let id = format!("call_{}_u{}", self.steps, self.items.len());
+        let tool = self.tool(&name).cloned();
+        let permission = tool.as_ref().map_or(Permission::Other, |t| t.permission);
+        let kind = tool.as_ref().map_or(ToolKind::Server, |t| t.kind.clone());
+        self.items.push(Item::Call(Call {
+            id: id.clone(),
+            name: name.clone(),
+            args: args.to_string(),
+            permission,
+            kind,
+            state: CallState::Running,
+            auto_note: None,
+            check: None,
+            sent: None,
+        }));
+        let base = env.base.to_string();
+        Task::perform(
+            async move {
+                let result = run_tool(base, name, args).await;
+                (id, result, false)
             },
             |(id, result, share)| Message::Code(CodeMsg::UserRunDone(id, result, share)),
         )
@@ -1087,7 +1237,12 @@ impl CodeState {
                     let n = if steps > 1.0 { Some(steps as u64) } else { None };
                     tasks.push(self.update(CodeMsg::Undo(n), env));
                 }
-                Step::AgentRun(prompt, display) => tasks.push(self.run_prompt(&prompt, &display, env)),
+                Step::AgentRun(prompt, display) => {
+                    // a run of the agents pane ends without a self-review (the page calls
+                    // `selfReview` from `submitText` only)
+                    self.main_run = false;
+                    tasks.push(self.run_prompt(&prompt, &display, env))
+                }
                 Step::SetPerm(perm, notice) => {
                     tasks.push(self.update(CodeMsg::SetMode(Self::mode_of(perm)), env));
                     self.items.push(Item::Note(notice));
@@ -1117,6 +1272,17 @@ impl CodeState {
                         self.pending_auto_approve = Some(self.auto_approve);
                     }
                 }
+                Step::AutoReview(want, note) => {
+                    let changed = want.is_some_and(|on| on != self.auto_review);
+                    if let Some(on) = want {
+                        self.auto_review = on;
+                    }
+                    self.items.push(Item::Note(note));
+                    if changed {
+                        self.pending_auto_review = Some(self.auto_review);
+                    }
+                }
+                Step::UserTool { name, args } => tasks.push(self.user_tool(name, args, env)),
                 Step::Search(query) => tasks.push(self.search_words(query, env)),
                 Step::Insights => {
                     let input = vec![Self::insight_messages(&self.wire(None))];
@@ -1388,9 +1554,34 @@ impl CodeState {
     fn finish_round(&mut self, env: &Env) -> Task<Message> {
         let partial: Vec<Partial> = std::mem::take(&mut self.acc).into_iter().filter(|p| !p.name.is_empty()).collect();
         if partial.is_empty() {
-            self.running = false;
-            self.handle = None;
-            return Task::none();
+            // between the last answer and the `done` sits the self-review (`selfReview` of the
+            // page, called right after its `runLoop`): the run stays open while it works
+            if let Some(rv) = self.review.as_ref() {
+                return match rv.stage {
+                    ReviewStage::Run if rv.round < 2 => {
+                        if let Some(rv) = self.review.as_mut() {
+                            rv.round += 1;
+                        }
+                        // every round reads the changes again (`await refreshChanges()`)
+                        self.begin_review(env)
+                    }
+                    _ => {
+                        // two rounds are done, or an answer arrived out of order: the run ends
+                        self.review = None;
+                        self.end_round()
+                    }
+                };
+            }
+            if self.main_run && self.auto_review && self.mode != Mode::Plan {
+                self.review = Some(Review {
+                    round: 1,
+                    stage: ReviewStage::Changes,
+                    files: Vec::new(),
+                    report: crate::review::Report::default(),
+                });
+                return self.begin_review(env);
+            }
+            return self.end_round();
         }
         let mut tasks = Vec::new();
         let mut ids = Vec::new();
@@ -1402,7 +1593,7 @@ impl CodeState {
             let (state, auto_note) =
                 self.starting_state(tool.is_some(), kind.clone(), permission, &p.name, &p.args, env.turbo);
             let run_now = state == CallState::Running;
-            self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note }));
+            self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note, check: None, sent: None }));
             if run_now {
                 ids.push(id);
             }
@@ -1416,10 +1607,101 @@ impl CodeState {
 
     /// When every call of the last round has an answer, the model gets them.
     fn continue_if_done(&mut self, env: &Env) -> Task<Message> {
+        if self.check_hold.is_some() {
+            // the answer of one call is still being checked (`await autoCheckEdit` there)
+            return Task::none();
+        }
         if !self.running || self.last_round().any(|c| matches!(c.state, CallState::Pending | CallState::Running)) {
             return Task::none();
         }
         self.start_stream(env)
+    }
+
+    /// The end of a round that is really over (the `finally` of the page's `submitText`).
+    fn end_round(&mut self) -> Task<Message> {
+        self.running = false;
+        self.handle = None;
+        Task::none()
+    }
+
+    /// `refreshChanges()` before a review round: the files are read from `self.changes` when the
+    /// answer lands, so a refresh that failed leaves the page's behaviour of working with the
+    /// changes it already has.
+    fn begin_review(&mut self, env: &Env) -> Task<Message> {
+        if let Some(rv) = self.review.as_mut() {
+            rv.stage = ReviewStage::Changes;
+        }
+        Task::perform(fetch_changes(env.base.to_string()), |r| Message::Code(CodeMsg::ChangesLoaded(r)))
+    }
+
+    /// The changes are in: the files this run changed decide whether it is reviewed at all
+    /// (`files` of `selfReview`: unique paths of the changes after `mark`, at most twelve).
+    fn review_files_ready(&mut self, env: &Env) -> Task<Message> {
+        let mark = self.change_mark;
+        let mut files: Vec<String> = Vec::new();
+        for c in &self.changes {
+            if c.id > mark && !files.contains(&c.path) {
+                files.push(c.path.clone());
+            }
+            if files.len() == 12 {
+                break;
+            }
+        }
+        if files.is_empty() {
+            // nothing this run changed: the review does not even start (`if (!files.length) return;`)
+            self.review = None;
+            return self.end_round();
+        }
+        if let Some(rv) = self.review.as_mut() {
+            rv.files = files;
+        }
+        self.ask_review_tools(env)
+    }
+
+    /// The review tool and the diagnostics are asked — silently, as the page asks them (only the
+    /// notice that follows the answers stands in the list).
+    fn ask_review_tools(&mut self, env: &Env) -> Task<Message> {
+        if self.review.is_none() {
+            return Task::none();
+        }
+        if let Some(rv) = self.review.as_mut() {
+            rv.stage = ReviewStage::Tools;
+        }
+        let with_review = self.server_has("review");
+        let with_diagnostics = self.server_has("diagnostics");
+        if !with_review && !with_diagnostics {
+            // nothing to ask — the page sends its feedback with an empty report anyway
+            return Task::done(Message::Code(CodeMsg::ReviewTools(ReviewAnswers::default())));
+        }
+        let files = self.review.as_ref().map(|rv| rv.files.clone()).unwrap_or_default();
+        Task::perform(
+            review_tools(env.base.to_string(), with_review, with_diagnostics, files),
+            |answers| Message::Code(CodeMsg::ReviewTools(answers)),
+        )
+    }
+
+    /// Whether the server's tool list carries a tool (`serverHas` of the page).
+    fn server_has(&self, name: &str) -> bool {
+        self.tools.iter().any(|t| t.name == name)
+    }
+
+    /// The files the automatic check would ask diagnostics for after one finished edit — the
+    /// gates of `autoCheckEdit` (code.js 1941): the switch, a server with the tool, no `deny`
+    /// of `modeFor` (plan mode only — `ctx.readOnly` is a sub-agent the window does not have),
+    /// and the rule of `bash: diagnostics <path>` for every file.
+    fn check_targets(&self, name: &str, args: &str) -> Vec<String> {
+        if !self.auto_check || self.mode == Mode::Plan || !self.server_has("diagnostics") {
+            return Vec::new();
+        }
+        if !crate::review::EDIT_TOOLS.contains(&name) {
+            return Vec::new();
+        }
+        let value: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+        let parsed = self.rules.parsed();
+        let agent = if self.mode == Mode::Plan { "plan" } else { "build" };
+        crate::review::auto_check_targets(name, &value, &|path| {
+            crate::commands::evaluate_rules(&parsed, "bash", &format!("diagnostics {path}"), agent) == Some("deny")
+        })
     }
 
     pub fn update(&mut self, msg: CodeMsg, env: &Env) -> Task<Message> {
@@ -1496,9 +1778,53 @@ impl CodeState {
             }
             CodeMsg::ChangesLoaded(Ok(c)) => {
                 self.changes = c;
+                if self.review.as_ref().is_some_and(|rv| rv.stage == ReviewStage::Changes) {
+                    return self.review_files_ready(env);
+                }
                 Task::none()
             }
-            CodeMsg::ChangesLoaded(Err(_)) => Task::none(),
+            CodeMsg::ChangesLoaded(Err(_)) => {
+                if self.review.as_ref().is_some_and(|rv| rv.stage == ReviewStage::Changes) {
+                    // the page works with the changes it has; a refresh that fails is swallowed
+                    return self.review_files_ready(env);
+                }
+                Task::none()
+            }
+            CodeMsg::ReviewTools(answers) => {
+                let Some(rv) = self.review.as_ref() else {
+                    return Task::none();
+                };
+                let round = rv.round;
+                let files_changed = rv.files.len();
+                let report = crate::review::Report {
+                    review: answers.review.unwrap_or_default(),
+                    problems: answers
+                        .diagnostics
+                        .into_iter()
+                        .filter(|(_, output)| !crate::review::is_clean_diagnostic(Some(output)))
+                        .map(|(path, output)| crate::review::Problem { path, output })
+                        .collect(),
+                };
+                let feedback = crate::review::review_feedback(&report, round);
+                let Some(feedback) = feedback else {
+                    // the second round with nothing a machine can state: the review is over
+                    self.review = None;
+                    return self.end_round();
+                };
+                let notice = if round == 1 {
+                    crate::review::reviewing_notice(files_changed)
+                } else {
+                    crate::review::another_round_notice(report.problems.len())
+                };
+                if let Some(rv) = self.review.as_mut() {
+                    rv.report = report;
+                    rv.stage = ReviewStage::Run;
+                }
+                // the notice stands in the list, the feedback goes to the model unseen
+                self.items.push(Item::Note(notice));
+                self.items.push(Item::ReviewFeedback(feedback));
+                self.start_stream(env)
+            }
             CodeMsg::Edit(action) => {
                 self.editor.perform(action);
                 Task::none()
@@ -1539,6 +1865,9 @@ impl CodeState {
                     return Task::none();
                 }
                 self.editor = Content::new();
+                // `turn.changeMark`: the self-review only looks at what this run changes
+                self.change_mark = self.changes.iter().map(|c| c.id).max().unwrap_or(0);
+                self.main_run = true;
                 self.run_prompt(&prompt, &prompt, env)
             }
             CodeMsg::Stop => self.stop_now(env),
@@ -1599,6 +1928,16 @@ impl CodeState {
                 let run = self.run(env.base, &id);
                 Task::batch([run, self.continue_if_done(env)])
             }
+            CodeMsg::ToggleAutoReview(on) => {
+                self.auto_review = on;
+                self.pending_auto_review = Some(on);
+                Task::none()
+            }
+            CodeMsg::ToggleAutoCheck(on) => {
+                self.auto_check = on;
+                self.pending_auto_check = Some(on);
+                Task::none()
+            }
             CodeMsg::Deny(id) => {
                 if let Some(c) = self.call_mut(&id).filter(|c| c.state == CallState::Pending) {
                     let output = if c.kind == ToolKind::Ask { "The user did not answer. Decide yourself or go on without it." } else { "The user declined this call. Do not repeat it; ask what to do instead or take another way." };
@@ -1607,24 +1946,68 @@ impl CodeState {
                 self.continue_if_done(env)
             }
             CodeMsg::ToolDone(id, result) => {
-                let changed = {
+                let (changed, name, args, reply, ok) = {
                     let Some(c) = self.call_mut(&id) else { return Task::none() };
                     if !matches!(c.state, CallState::Running) {
                         return Task::none();
                     }
                     let changes_files = matches!(c.permission, Permission::Edit | Permission::Command);
+                    let reply = match &result {
+                        Ok(output) => output.clone(),
+                        Err(output) => output.clone(),
+                    };
+                    let carried = (c.name.clone(), c.args.clone(), result.is_ok());
                     c.state = match result {
                         Ok(output) => CallState::Done { ok: true, output },
                         Err(output) => CallState::Done { ok: false, output },
                     };
-                    changes_files
+                    (changes_files, carried.0, carried.1, reply, carried.2)
                 };
-                let next = self.continue_if_done(env);
+                let mut tasks = Vec::new();
                 if changed {
-                    Task::batch([next, Task::perform(fetch_changes(env.base.to_string()), |r| Message::Code(CodeMsg::ChangesLoaded(r)))])
-                } else {
-                    next
+                    tasks.push(Task::perform(fetch_changes(env.base.to_string()), |r| Message::Code(CodeMsg::ChangesLoaded(r))));
                 }
+                // `autoCheckEdit`: after a successful edit the check runs first, and the model
+                // gets its answer with the problems between the two markers — the card is done
+                // while it runs, as on the page, and the round waits on `check_hold`
+                let targets = if ok { self.check_targets(&name, &args) } else { Vec::new() };
+                if targets.is_empty() {
+                    tasks.push(self.continue_if_done(env));
+                    return Task::batch(tasks);
+                }
+                self.check_hold = Some(id.clone());
+                let base = env.base.to_string();
+                let held = id.clone();
+                tasks.push(Task::perform(
+                    async move {
+                        let mut problems = Vec::new();
+                        for path in targets {
+                            // one diagnostics run per path, answered one after the other; an
+                            // error is thrown away, as the page's `.catch(() => null)` does
+                            if let Ok(text) = run_tool(base.clone(), "diagnostics".into(), crate::review::auto_check_args(&path)).await {
+                                if crate::review::auto_check_keep(&text) {
+                                    problems.push(text);
+                                }
+                            }
+                        }
+                        CodeMsg::CheckDone { id: held, reply, outputs: problems }
+                    },
+                    Message::Code,
+                ));
+                Task::batch(tasks)
+            }
+            CodeMsg::CheckDone { id, reply, outputs } => {
+                self.check_hold = None;
+                if !outputs.is_empty() {
+                    let problems = outputs.join("\n");
+                    if let Some(c) = self.call_mut(&id) {
+                        // the card carries the block of `item.check`, the model gets the reply
+                        // with the findings between the markers (`item.check` and `reply = …`)
+                        c.check = Some(problems.clone());
+                        c.sent = Some(crate::review::auto_check_reply(&reply, &problems, env.ctx_max));
+                    }
+                }
+                self.continue_if_done(env)
             }
             CodeMsg::SetMode(m) => {
                 if m != Mode::Plan {
@@ -1682,6 +2065,8 @@ impl CodeState {
             CodeMsg::CustomBody(result, arg_text, source) => match result {
                 Ok(body) => {
                     let prompt = crate::commands::expand_command(&body, &arg_text);
+                    self.change_mark = self.changes.iter().map(|c| c.id).max().unwrap_or(0);
+                    self.main_run = true;
                     self.run_prompt(&prompt, &source, env)
                 }
                 Err(e) => {
@@ -1804,6 +2189,19 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
             body = body.push(mono_box(t, text(shown).size(12).font(Font::MONOSPACE).color(if *ok { t.fg_soft } else { t.danger }).into()));
         }
     }
+    if let Some(problems) = &c.check {
+        // `tool-check` of the page: a block of its own — *Automatic check* over the findings
+        body = body.push(
+            column![
+                text("Automatic check")
+                    .size(11)
+                    .font(Font { weight: iced::font::Weight::Semibold, ..Font::MONOSPACE })
+                    .color(t.muted),
+                mono_box(t, text(problems.clone()).size(12).font(Font::MONOSPACE).color(t.fg_soft).into()),
+            ]
+            .spacing(4),
+        );
+    }
     if c.state == CallState::Pending && c.kind == ToolKind::Ask {
         let question = args.get("question").and_then(Value::as_str).unwrap_or("The agent has a question.").to_string();
         body = body.push(text(question).size(14));
@@ -1860,6 +2258,8 @@ fn timeline<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, tint: bool) ->
     }
     for (i, item) in s.items.iter().enumerate() {
         let element: Element<'a, Message> = match item {
+            // the feedback of the self-review is for the model only — it draws nothing
+            Item::ReviewFeedback(_) => Space::new().into(),
             Item::User { text: text_, .. } => row![Space::new().width(Length::Fill), container(text(text_.as_str()).size(15)).padding([9, 15]).max_width(560).style(theme::bubble(t, tint))].into(),
             Item::Assistant { text: body, md: content } => {
                 if body.is_empty() {
@@ -2012,7 +2412,46 @@ pub fn page<'a>(
     let composer = container(composer).width(Length::Fill).center_x(Length::Fill).padding(Padding { top: 8.0, right: 24.0, bottom: 20.0, left: 24.0 });
     let bar = container(container(bar).max_width(820).width(Length::Fill)).center_x(Length::Fill).padding(Padding { top: 0.0, right: 24.0, bottom: 0.0, left: 24.0 });
 
-    column![header, rule(t), timeline(s, t, theme, tint), bar, composer].width(Length::Fill).height(Length::Fill).into()
+    let main = column![header, rule(t), timeline(s, t, theme, tint), bar, composer].width(Length::Fill).height(Length::Fill);
+    row![main, side_settings(s, t)].align_y(Alignment::Start).width(Length::Fill).height(Length::Fill).into()
+}
+
+/// The side of the Code page — the part row 81 builds: the *Settings* block of `renderCodeSide`
+/// with the two switches of `code.autoCheck` and `code.autoReview`, with their words of the
+/// page. The other blocks it sits among (sessions, memory, permissions, the style and what the
+/// agent learns) are still open and come with their own rows.
+fn side_settings<'a>(s: &'a CodeState, t: Tokens) -> Element<'a, Message> {
+    let check_label = "Check my edits automatically".to_string();
+    let review_label = "Review my work before it counts as done".to_string();
+    let block = column![
+        text("Settings").size(14).font(Font { weight: iced::font::Weight::Semibold, ..Font::default() }),
+        checkbox(s.auto_check)
+            .label(check_label)
+            .size(16)
+            .text_size(13)
+            .on_toggle(|value| Message::Code(CodeMsg::ToggleAutoCheck(value))),
+        text("After every edit the agent runs a quick syntax or build check (python, node, cargo check, tsc, go vet, JSON) and gets the first errors with the result. Slower, but it catches mistakes at once.")
+            .size(12)
+            .color(t.muted),
+        checkbox(s.auto_review)
+            .label(review_label)
+            .size(16)
+            .text_size(13)
+            .on_toggle(|value| Message::Code(CodeMsg::ToggleAutoReview(value))),
+        text("When a run changed files, the agent reads its own diff once more together with the findings of a fixed rule set and the diagnostics, and fixes what is wrong (two rounds at most). It costs one extra step per run. Switch it on with /autoreview on.")
+            .size(12)
+            .color(t.muted),
+    ]
+    .spacing(10);
+    container(block)
+        .width(Length::Fixed(272.0))
+        .padding([18.0, 16.0])
+        .style(move |_| container::Style {
+            background: Some(iced::Background::Color(t.surface)),
+            border: iced::Border { width: 1.0, color: t.separator, ..Default::default() },
+            ..Default::default()
+        })
+        .into()
 }
 
 #[cfg(test)]
@@ -2140,6 +2579,7 @@ mod tests {
             usage: None,
             // nothing saves a session in the tests: the write fails and only says so
             session_file: std::path::Path::new(""),
+            ctx_max: 8192,
         }
     }
 

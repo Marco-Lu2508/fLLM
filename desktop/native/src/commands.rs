@@ -691,6 +691,8 @@ pub struct CmdState {
     /// The build mode to go back to from plan (`code.lastBuildPerm`), empty like an unset one.
     pub last_build_perm: String,
     pub auto_approve: bool,
+    /// `code.autoReview`: what the notice of `/autoreview` without an argument reads.
+    pub auto_review: bool,
     pub turbo: bool,
     pub sandbox: Option<String>,
     pub sandbox_available: bool,
@@ -848,6 +850,12 @@ pub enum Step {
     SetSandbox(String),
     /// `/autoapprove [on|off]`: `Some(want)` changes the switch, the notice always follows.
     AutoApprove(Option<bool>, String),
+    /// `/autoreview [on|off]`: the same shape — no argument changes nothing and the notice
+    /// reads the switch as it stands (`case 'autoreview'` of `runCodeCommand`).
+    AutoReview(Option<bool>, String),
+    /// `userTool(name, args)`: a card of a tool the user ran (`/check`, `/review`,
+    /// `/security-review`) — nothing of it is shared with the model, unlike `userRun(…, true)`.
+    UserTool { name: String, args: serde_json::Value },
     /// `/search words`: the search over the stored sessions of this window.
     Search(String),
     /// The counts of `/insights` over this folder's session(s).
@@ -1136,6 +1144,26 @@ pub fn dispatch(text: &str, state: &CmdState) -> Option<Vec<Step>> {
                 }]
             }
         }
+        "autoreview" => {
+            // only `on` and `off` change anything, and the notice follows either way
+            let want: Option<bool> = match arg_text.to_ascii_lowercase().as_str() {
+                "on" => Some(true),
+                "off" => Some(false),
+                _ => None,
+            };
+            let on = want.unwrap_or(state.auto_review);
+            vec![Step::AutoReview(want, crate::review::autoreview_notice(on).to_string())]
+        }
+        "check" => vec![Step::UserTool {
+            name: "diagnostics".into(),
+            args: if arg_text.is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::json!({ "path": arg_text })
+            },
+        }],
+        "review" => vec![Step::UserTool { name: "review".into(), args: crate::review::review_args(&arg_text) }],
+        "security-review" | "security" => vec![Step::UserTool { name: "review".into(), args: crate::review::security_review_args() }],
         "diff" => vec![Step::UserRun("git diff --stat && git diff".to_string(), true)],
         "status" => vec![Step::UserRun("git status -sb".to_string(), true)],
         "turbo" => {

@@ -410,6 +410,13 @@ pub struct Prefs {
     /// `/autoapprove`; the page keeps it in its localStorage under `fllm.studio.autoapprove`).
     #[serde(default = "auto_approve_on")]
     pub auto_approve: bool,
+    /// `Review my work before it counts as done` (`code.autoReview` of the page, saved in
+    /// `fllm.studio.codesettings.v1`, default off).
+    #[serde(default)]
+    pub auto_review: bool,
+    /// `Check my edits automatically` (`code.autoCheck` of the page, same file, default off).
+    #[serde(default)]
+    pub auto_check: bool,
     /// The allow/deny rules of the Code page, one block per folder — the page keys them the same
     /// way in `fllm.studio.coderules.v1`.
     #[serde(default)]
@@ -603,7 +610,7 @@ fn default_top_p() -> f32 {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { auto_approve: true, code_rules: std::collections::BTreeMap::new(), code_personality: default_personality(), personal: Personal::default(), personal_loaded: false, tour_seen: false, shortcut_overrides: std::collections::HashMap::new(), voice: VoicePrefs::default(), saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
+        Prefs { auto_approve: true, auto_review: false, auto_check: false, code_rules: std::collections::BTreeMap::new(), code_personality: default_personality(), personal: Personal::default(), personal_loaded: false, tour_seen: false, shortcut_overrides: std::collections::HashMap::new(), voice: VoicePrefs::default(), saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
     }
 }
 

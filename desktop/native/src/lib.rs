@@ -25,6 +25,7 @@ pub mod runtime;
 pub mod agents;
 pub mod autoapprove;
 pub mod commands;
+pub mod review;
 pub mod hooks;
 pub mod plugins;
 pub mod settingssearch;

@@ -7,6 +7,33 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **Review and self-review in the Code page of the native app.** *Review my work before it
+  counts as done* (`code.autoReview`, off by default, kept in the window's store where the page
+  keeps `fllm.studio.codesettings.v1`) with the checkbox of the page's side *Settings* block and
+  `/autoreview on` or `off` — only those words switch it, the notice reads it either way. The
+  machine is the page's `selfReview`: after the last answer of a conversation run (never in plan
+  mode) the run stays open, the changes are read again, the files this run changed are asked
+  about — the review tool and the diagnostics per file, silently, one after the other, without
+  cards — and the feedback goes to the model as a user message the window never draws, with
+  *Reviewing my own changes (n files) before finishing.* in front; a second round follows only
+  when the first found something a machine can state, and after it the run ends. *Check my edits
+  automatically* (`code.autoCheck`, same file) asks the diagnostics after every finished edit of
+  the four edit tools while the card is already done: the four paths the page looks at, one
+  report per extension (its `seen` set holds extensions and is filled after the rule check), a
+  rule of `bash: diagnostics <path>` skipping a file, the answers the page throws away dropped —
+  and when something is found the model gets the clipped reply with the findings between
+  `[automatic check found problems]` and `Fix them if your change caused them.`, the card
+  showing them under *Automatic check* while the wire sends what the page sends (`Call::sent`).
+  `/check`, `/review` (scope of its first word, `branch` with the second as its base) and
+  `/security-review` with its alias `/security` run their tool as a card of their own, sharing
+  nothing, as `userTool` does. `isCleanDiagnostic`, `reviewFeedback`, `patchPaths`, `clipOutput`
+  and the reply template are the page's own text run for the fixtures: seventeen rows over the
+  pair, twelve over the check (the extension set over two patches, a deleted file, a denied
+  first file whose extension a second one still claims, the dropped answers), four over the
+  reply, five more dispatcher rows for the scopes and the aliases. The side column the two
+  switches live in carries only that block of the page — its other blocks come with their own
+  rows. Three tests over the fixtures, seven window tests, one over the notices, twenty-four
+  mutations.
 - **The slash commands of the Code page in the native app, and the decision of one call.** Every
   command of `runCodeCommand` that the window has a place for is answered in the box — no
   workspace, no model, the box cleared first as the page clears it: the forty-six built-ins of

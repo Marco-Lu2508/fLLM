@@ -1624,6 +1624,8 @@ impl App {
         // the switch of `/autoapprove` comes from the saved preference, as the page reads it
         // from its localStorage when it builds the state
         app.code.auto_approve = app.store.prefs.auto_approve;
+        app.code.auto_review = app.store.prefs.auto_review;
+        app.code.auto_check = app.store.prefs.auto_check;
         app.code.personality = app.store.prefs.code_personality.clone();
         if let Some(first) = app.store.chats.first().map(|c| c.id) {
             app.open(first);
@@ -2036,6 +2038,7 @@ impl App {
                     sandbox_available: self.runtime.sandbox_available,
                     usage: Some(usage.as_str()),
                     session_file: &session_file,
+                    ctx_max: self.model_info().max_context as usize,
                 };
                 let was_running_before = was_running;
                 let task = self.code.update(msg, &env);
@@ -2045,6 +2048,19 @@ impl App {
                 if let Some(on) = self.code.pending_auto_approve.take() {
                     if self.store.prefs.auto_approve != on {
                         self.store.prefs.auto_approve = on;
+                        self.save();
+                    }
+                }
+                // the two checkboxes of the side keep their copy the same way
+                if let Some(on) = self.code.pending_auto_review.take() {
+                    if self.store.prefs.auto_review != on {
+                        self.store.prefs.auto_review = on;
+                        self.save();
+                    }
+                }
+                if let Some(on) = self.code.pending_auto_check.take() {
+                    if self.store.prefs.auto_check != on {
+                        self.store.prefs.auto_check = on;
                         self.save();
                     }
                 }

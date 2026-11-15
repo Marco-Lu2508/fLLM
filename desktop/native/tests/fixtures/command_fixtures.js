@@ -26,6 +26,10 @@ const DISPATCH = slice(code, 2510, 2769);          // runCodeCommand, whole swit
 const INIT = slice(code, 2476, 2476);              // the prompt /init sends
 // outside the markers, but free of the DOM: the decision reads the objects it is given
 const OUTSIDE = [slice(code, 1460, 1473), slice(code, 1475, 1487), slice(code, 1718, 1733)].join('\n');
+// row 81: the switch of `/autoreview` runs these — the pair of codeprompts.js is inside
+// PURE_PROMPTS already; the check after an edit and the clip of its reply sit outside it
+const AUTOCHECK = slice(code, 1937, 1954);         // CHECKED_EXTENSIONS + autoCheckEdit
+const CLIP = slice(code, 1884, 1887);              // clipOutput, over a ctxMax of the harness
 
 const log = [];
 const rec = (name) =>
@@ -35,7 +39,7 @@ const rec = (name) =>
 
 // identifiers the slices themselves declare: a recorder of the harness must not collide with them
 const pageNames = new Set(
-  [PURE_CODE, PURE_PROMPTS, BUILTIN, INIT, TOGGLE, MAX_SESSIONS, AGENT_NAME, READ_ONLY, PARSED_RULES, OUTSIDE, DISPATCH].join('\n').match(
+  [PURE_CODE, PURE_PROMPTS, BUILTIN, INIT, TOGGLE, MAX_SESSIONS, AGENT_NAME, READ_ONLY, PARSED_RULES, OUTSIDE, DISPATCH, AUTOCHECK, CLIP].join('\n').match(
     /(?:const|let|function|class)\s+([A-Za-z_$][\w$]*)/g,
   ).map((s) => s.split(/\s+/)[1]),
 );
@@ -45,7 +49,7 @@ const CODE_SEED =
   "{ messages: [], view: [], workspace: { root: '/home/marco/p' }, sessionId: 's1', title: 't'," +
   " titleLocked: false, running: false, perm: 'ask', modes: {}, autoApprove: true, turbo: false," +
   " sandbox: 'workspace', sandboxAvailable: true, rules: { allow: '', deny: '' }, custom: []," +
-  " personality: 'default', learn: false, autoReview: false, lastBuildPerm: 'ask', memory: ''," +
+  " personality: 'default', learn: false, autoCheck: false, autoReview: false, lastBuildPerm: 'ask', memory: ''," +
   " compactedAt: 0, reverted: null, alwaysAllow: new Set(), registry: new Map(), abort: null," +
   " sideOpen: {}, memDraft: null, todos: [], changed: new Map(), disabled: null }";
 
@@ -80,6 +84,8 @@ const stubs = [
   ['renameSession', "__rec('rename')"],
   ['exportSession', "__rec('export')"],
   ['modelNames', "() => ['qwen', 'llama']"],
+  ['ctxMax', '() => 8192'],
+  ['serverHas', "() => true"],
   ['pickModel', "__rec('pickModel')"],
   ['saveMemoryEntry', "async (...a) => { __log.push(['memory', ...a]); return true; }"],
   ['renderCodeSide', "__rec('renderSide')"],
@@ -139,7 +145,7 @@ function harness() {
   const __snapshot = () => ({
     running: code.running, perm: code.perm, lastBuildPerm: code.lastBuildPerm,
     autoApprove: code.autoApprove, turbo: code.turbo, sandbox: code.sandbox,
-    sandboxAvailable: code.sandboxAvailable, autoReview: code.autoReview,
+    sandboxAvailable: code.sandboxAvailable, autoCheck: code.autoCheck, autoReview: code.autoReview,
     personality: code.personality, rules: { allow: code.rules.allow, deny: code.rules.deny },
     custom: code.custom.map((c) => ({ name: c.name, description: c.description })),
   });
@@ -152,7 +158,7 @@ function harness() {
     confirmDialog = async (...a) => { __log.push(['confirm', ...a]); return true; };
     apiFetch = async (...a) => { __log.push(['api', ...a]); return { ok: true, json: async () => ({}) }; };
   }`;
-  const reassign = new Set(['confirmDialog', 'apiFetch']);
+  const reassign = new Set(['confirmDialog', 'apiFetch', 'toolCall', 'ctxMax']);
   const decls = stubs
     .filter(([name]) => !pageNames.has(name))
     .map(([name, body]) => `${reassign.has(name) ? 'let' : 'const'} ${name} = ${body};`)
@@ -171,7 +177,7 @@ const legacyHarness = `
     messages: [], view: [], workspace: { root: '/home/marco/p' }, sessionId: 's1', title: 't',
     titleLocked: false, running: false, perm: 'ask', modes: {}, autoApprove: true, turbo: false,
     sandbox: 'workspace', sandboxAvailable: true, rules: { allow: '', deny: '' }, custom: [],
-    personality: 'default', learn: false, autoReview: false, lastBuildPerm: 'ask', memory: '',
+    personality: 'default', learn: false, autoCheck: false, autoReview: false, lastBuildPerm: 'ask', memory: '',
     compactedAt: 0, reverted: null, alwaysAllow: new Set(), registry: new Map(), abort: null,
     sideOpen: {}, memDraft: null, todos: [], changed: new Map(), disabled: null,
   };
@@ -180,7 +186,7 @@ const legacyHarness = `
   const toast = __rec('toast');
   const confirmDialog = async (...a) => { __log.push(['confirm', ...a]); return true; };
   const apiFetch = async (...a) => { __log.push(['api', ...a]); return { ok: true, json: async () => ({}) }; };
-  const toolCall = async (...a) => { __log.push(['tool', ...a]); return { ok: true, output: 'out', error: '' }; };
+  let toolCall = async (...a) => { __log.push(['tool', ...a]); return { ok: true, output: 'out', error: '' }; };
   const userRun = __rec('userRun');
   const userTool = __rec('userTool');
   const agentRun = __rec('agentRun');
@@ -336,9 +342,108 @@ const DECISIONS = [
   { name: 'the command category is the one the rules judge', entry: { name: 'shell', permission: 'command', source: 'server' }, args: { words: 'ls -la' }, rules: { deny: 'command: *ls*' } },
 ];
 
+// the scopes of `/review` the page reads out of its argument (row 81)
+const REVIEW_TEXTS = ['/review', '/review branch', '/review branch v2', '/security', '/check'];
+
+// ---- row 81: the self-review pair of codeprompts.js, called as the page calls it ----------
+const REVIEW_CASES = [
+  // isCleanDiagnostic: the four shapes the page counts as clean, and two that are not
+  { fn: 'isCleanDiagnostic', args: ['No problems found.'] },
+  { fn: 'isCleanDiagnostic', args: ['src/lib.rs: is not available here'] },
+  { fn: 'isCleanDiagnostic', args: ['cargo check: no automatic check is known for .foo'] },
+  { fn: 'isCleanDiagnostic', args: ['No such file or directory'] },
+  { fn: 'isCleanDiagnostic', args: ['src/a.rs:10:5: expected `i32`, found `u8`'] },
+  { fn: 'isCleanDiagnostic', args: ['  No problems found'] },
+  { fn: 'isCleanDiagnostic', args: [''] },
+  { fn: 'isCleanDiagnostic', args: [null] },
+  // reviewFeedback: round 1 always sends, round 2 only for something a machine can state
+  { fn: 'reviewFeedback', args: [{ review: '', problems: [] }, 1] },
+  { fn: 'reviewFeedback', args: [{ review: 'all good', problems: [] }, 1] },
+  { fn: 'reviewFeedback', args: [{ review: '[high] unsafe unwrap at src/main.rs:20', problems: [] }, 1] },
+  { fn: 'reviewFeedback', args: [{ review: '', problems: [{ path: 'src/lib.rs', output: 'line 3: unused variable\n' }] }, 1] },
+  { fn: 'reviewFeedback', args: [{ review: 'note: something', problems: [] }, 2] },
+  { fn: 'reviewFeedback', args: [{ review: '', problems: [{ path: 'a', output: 'x' }] }, 2] },
+  { fn: 'reviewFeedback', args: [{ review: '[high] in review', problems: [{ path: 'b', output: 'y' }] }, 2] },
+  { fn: 'reviewFeedback', args: [{ review: '', problems: [{ path: 'big.rs', output: 'z'.repeat(4000) }] }, 1] },
+  { fn: 'reviewFeedback', args: [{ review: 'r'.repeat(20000), problems: [] }, 1] },
+];
+
+// ---- the check after an edit (autoCheckEdit), with canned answers per diagnostics call -----
+const AUTOCHECK_CASES = [
+  { name: 'edit_file', args: { path: 'src/lib.rs' }, tools: [{ ok: true, output: 'src/lib.rs:3: unused variable\n' }] },
+  { name: 'edit_file', args: { path: 'src/lib.rs' }, tools: [{ ok: true, output: 'No problems found' }] },
+  { name: 'edit_file', args: { path: 'notes.txt' }, tools: [] },
+  { name: 'edit_file', args: { path: 'a.json' }, tools: [{ ok: true, output: 'a.json:1: trailing comma' }] },
+  {
+    name: 'patch',
+    args: {
+      patch: '--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-1\n+2\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-1\n+2\n--- a/readme.md\n+++ b/readme.md\n@@ -1 +1 @@\n-a\n+b\n',
+    },
+    tools: [{ ok: true, output: 'src/main.rs:9: unused\n' }, { ok: true, output: 'src/lib.rs:2: dead code' }],
+  },
+  { name: 'edit_file', args: { path: 'src/denied.rs' }, tools: [], deny: 'bash: diagnostics src/denied.rs' },
+  {
+    // every extension of CHECKED_EXTENSIONS in one patch: one report per extension, and a
+    // `.md` file that is never checked
+    name: 'patch',
+    args: {
+      patch: ['a.py', 'b.js', 'c.mjs', 'd.cjs', 'e.ts', 'f.tsx', 'g.go', 'h.json', 'i.md']
+        .map((f) => `--- a/${f}\n+++ b/${f}\n@@ -1 +1 @@\n-1\n+2`)
+        .join('\n'),
+    },
+    tools: ['a.py', 'b.js', 'c.mjs', 'd.cjs', 'e.ts', 'f.tsx', 'g.go', 'h.json'].map((f) => ({ ok: true, output: f })),
+  },
+  {
+    // the four paths after them: ts, tsx, go and json are checked as well (the walk looks at
+    // `paths.slice(0, 4)` only, so the first four above never reach these extensions)
+    name: 'patch',
+    args: {
+      patch: ['e.ts', 'f.tsx', 'g.go', 'h.json', 'i.md']
+        .map((f) => `--- a/${f}\n+++ b/${f}\n@@ -1 +1 @@\n-1\n+2`)
+        .join('\n'),
+    },
+    tools: ['e.ts', 'f.tsx', 'g.go', 'h.json'].map((f) => ({ ok: true, output: f })),
+  },
+  {
+    name: 'edit_file',
+    args: { path: 'src/quiet.rs' },
+    tools: [{ ok: true, output: 'src/quiet.rs:1: is not available here' }, { ok: true, output: 'more' }],
+  },
+  {
+    // a deleted file: the diff names `b/` as /dev/null, so the `a/` side is the path
+    name: 'patch',
+    args: { patch: '--- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-1\n' },
+    tools: [{ ok: true, output: 'gone.py: went away' }],
+  },
+  {
+    // the first file is denied — the `seen` set is filled *after* the rule check, so the
+    // second file of the same extension is still asked about
+    name: 'patch',
+    args: {
+      patch: ['src/denied.rs', 'src/clean.rs'].map((f) => `--- a/${f}\n+++ b/${f}\n@@ -1 +1 @@\n-1\n+2`).join('\n'),
+    },
+    deny: 'bash: diagnostics src/denied.rs',
+    tools: [{ ok: true, output: 'src/clean.rs:2: unused' }],
+  },
+  {
+    name: 'edit_file',
+    args: { path: 'src/slow.rs' },
+    tools: [{ ok: true, output: 'cargo check did not finish within 60s' }],
+  },
+];
+
+// ---- the reply the model gets back when the check found something ---------------------------
+const REPLY_CASES = [
+  { reply: 'Edited one line.', problems: 'src/lib.rs:3: unused variable' },
+  { reply: 'x'.repeat(9000), problems: 'y'.repeat(8000) },
+  { reply: '', problems: '' },
+  // a small context: the cap of clipOutput never sinks below 3000
+  { reply: 'z'.repeat(4000), problems: '', ctx: 1024 },
+];
+
 async function main() {
   const context = { console, __log: [], __out: () => [] };
-  const setup = [harness(), PURE_CODE, PURE_PROMPTS, BUILTIN, INIT, TOGGLE, MAX_SESSIONS, AGENT_NAME, READ_ONLY, PARSED_RULES, OUTSIDE, DISPATCH].join('\n');
+  const setup = [harness(), PURE_CODE, PURE_PROMPTS, BUILTIN, INIT, TOGGLE, MAX_SESSIONS, AGENT_NAME, READ_ONLY, PARSED_RULES, OUTSIDE, DISPATCH, AUTOCHECK, CLIP].join('\n');
   vm.createContext(context);
   try {
     vm.runInContext(setup, context, { filename: 'page-slices.js' });
@@ -349,7 +454,8 @@ async function main() {
 
   const out = [];
   let gaps = 0;
-  for (const [text, setupScript, canned] of CASES) {
+  const allCases = [...CASES, ...REVIEW_TEXTS.map((text) => [text, null, null])];
+  for (const [text, setupScript, canned] of allCases) {
     vm.runInContext('__reset();', context);
     if (setupScript) vm.runInContext(setupScript, context, { filename: 'setup.js' });
     if (canned && canned.custom) vm.runInContext(`code.custom = ${JSON.stringify(canned.custom)};`, context);
@@ -383,7 +489,7 @@ async function main() {
     const record = vm.runInContext('__out()', context);
     const state = vm.runInContext(
       "(() => ({ title: code.title, titleLocked: code.titleLocked, rules: code.rules," +
-        " personality: code.personality, learn: code.learn, autoReview: code.autoReview," +
+        " personality: code.personality, learn: code.learn, autoCheck: code.autoCheck, autoReview: code.autoReview," +
         " autoApprove: code.autoApprove, perm: code.perm, lastBuildPerm: code.lastBuildPerm," +
         " sandbox: code.sandbox, turbo: code.turbo, view: code.view.length }))()",
       context,
@@ -406,11 +512,74 @@ async function main() {
     decisions.push({ ...d, result, error });
   }
 
+  // ---- row 81: the self-review pair, called the way the page calls it --------------------
+  const review = [];
+  let reviewGaps = 0;
+  for (const c of REVIEW_CASES) {
+    let result = null;
+    let error = null;
+    try {
+      result = vm.runInContext(`${c.fn}(${c.args.map((a) => JSON.stringify(a)).join(',')})`, context);
+    } catch (e) {
+      error = e.message;
+      if (/is not defined/.test(e.message)) reviewGaps++;
+    }
+    review.push({ fn: c.fn, args: c.args, result, error });
+  }
+
+  // ---- the check after an edit: autoCheckEdit with canned diagnostics answers -------------
+  const autocheck = [];
+  for (const c of AUTOCHECK_CASES) {
+    vm.runInContext('__reset();', context);
+    if (c.setup) vm.runInContext(c.setup, context, { filename: 'setup.js' });
+    if (c.deny) vm.runInContext(`code.rules = { allow: '', deny: ${JSON.stringify(c.deny)} };`, context);
+    vm.runInContext('__log.length = 0;', context);
+    vm.runInContext(
+      `code.autoCheck = true; __queue = ${JSON.stringify(c.tools)}; toolCall = async (...a) => { __log.push(['tool', ...a]); return __queue.shift() || { ok: false, error: 'none' }; };`,
+      context,
+    );
+    let result = null;
+    let error = null;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      result = await vm.runInContext(`autoCheckEdit(${JSON.stringify(c.name)}, ${JSON.stringify(c.args)}, { readOnly: false })`, context);
+    } catch (e) {
+      error = e.message;
+      if (/is not defined/.test(e.message)) reviewGaps++;
+    }
+    const calls = vm.runInContext('__log.slice()', context);
+    autocheck.push({ name: c.name, args: c.args, deny: c.deny || null, tools: c.tools, result, calls, error });
+  }
+
+  // ---- the reply the model gets back when the check found something ------------------------
+  const replyLine = code.find((l) => l.includes('[automatic check found problems]')) || '';
+  const replyRhs = replyLine.trim().replace(/^reply\s*=\s*/, '').replace(/;\s*$/, '');
+  const reply = [];
+  for (const c of REPLY_CASES) {
+    let result = null;
+    let error = null;
+    try {
+      // the cap of clipOutput reads the model's context — every row brings its own
+      vm.runInContext(`ctxMax = () => ${c.ctx ?? 8192};`, context);
+      result = vm.runInContext(
+        `(() => { ${CLIP} const build = (reply, problems) => ${replyRhs}; return build(${JSON.stringify(c.reply)}, ${JSON.stringify(c.problems)}); })()`,
+        context,
+      );
+    } catch (e) {
+      error = e.message;
+      if (/is not defined/.test(e.message)) reviewGaps++;
+    }
+    reply.push({ ...c, ctx: c.ctx ?? 8192, result, error });
+  }
+
   fs.writeFileSync(
     path.join(__dirname, 'command_fixtures.json'),
-    JSON.stringify({ cases: out, decisions }, null, 1),
+    JSON.stringify({ cases: out, decisions, review, autocheck, reply }, null, 1),
   );
-  console.log(`cases: ${out.length}, harness gaps: ${gaps}, decision gaps: ${decisionGaps}`);
+  console.log(`cases: ${out.length}, review: ${review.length}, autocheck: ${autocheck.length}, reply: ${reply.length}, harness gaps: ${gaps}, decision gaps: ${decisionGaps}, row81 gaps: ${reviewGaps}`);
+  if (reviewGaps) {
+    for (const r of [...review, ...autocheck, ...reply]) if (r.error) console.log('ROW81 GAP', r.fn || r.name || r.reply?.slice(0, 20), '->', r.error);
+  }
   if (decisionGaps) {
     for (const d of decisions) if (d.error) console.log('DECISION GAP', d.name, '->', d.error);
   }
@@ -418,7 +587,7 @@ async function main() {
     for (const c of out) if (c.error && /is not defined/.test(c.error)) console.log('GAP', c.text, '->', c.error);
     process.exit(1);
   }
-  if (decisionGaps) process.exit(1);
+  if (decisionGaps || reviewGaps) process.exit(1);
   console.log('FIXTURES WRITTEN');
 }
 

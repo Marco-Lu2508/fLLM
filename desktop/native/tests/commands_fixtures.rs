@@ -34,18 +34,12 @@ const NOT_BUILT: &[&str] = &[
     "/model",
     "/sessions",
     "/memory",
-    "/check src",
-    "/review staged",
-    "/security-review",
     "/worktree",
     "/batch",
     "/learn",
     "/good",
     "/bad",
     "/retry",
-    // the switch would claim the self-review run, which is row 81's work
-    "/autoreview on",
-    "/autoreview",
 ];
 
 /// The `code` state the page stood in **before** the command ran (`pre` of the record: every case
@@ -71,6 +65,7 @@ fn base_state(case: &Value) -> CmdState {
         perm: str("perm", "ask"),
         last_build_perm: str("lastBuildPerm", "ask"),
         auto_approve: pre["autoApprove"].as_bool().unwrap_or(true),
+        auto_review: pre["autoReview"].as_bool().unwrap_or(false),
         turbo: pre["turbo"].as_bool().unwrap_or(false),
         sandbox: pre["sandbox"].as_str().map(str::to_string),
         sandbox_available: pre["sandboxAvailable"].as_bool().unwrap_or(true),
@@ -145,6 +140,8 @@ fn native_events(steps: &[Step], case: &Value) -> Vec<Value> {
                 out.push(json!(["notice", sandbox_saved_notice(answered, available)]));
             }
             Step::AutoApprove(_want, notice) => out.push(json!(["notice", notice])),
+            Step::AutoReview(_want, notice) => out.push(json!(["notice", notice])),
+            Step::UserTool { name, args } => out.push(json!(["userTool", name, args])),
             Step::Search(query) => {
                 // `encodeURIComponent` of the page: this window's own queries are plain words
                 out.push(json!(["api", format!("/api/studio/sessions/search?q={query}&limit=8")]));

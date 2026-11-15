@@ -371,7 +371,13 @@ cd desktop/native && cargo run --release                    # FLLM_URL=http://ho
 - Code (sidebar > Code): a coding agent in a folder. Open a folder (type the path, *Choose…* for the folder dialog of the server's computer, or one of the last six), tell the agent what to do; the model
   gets the server's agent tools (read, search, edit, run commands, ...) and answers with tool calls, which the window runs through
   `/api/studio/agent/tool` and feeds back until the model answers without one (at most 30 model calls per message). Every call is a card:
-  an edit shows the lines it removes and adds on tinted bands before it runs, a command shows itself, the result follows. Reading and the
+  an edit shows the lines it removes and adds on tinted bands before it runs, a command shows itself, the result follows. Two
+switches of the page's side *Settings* block sit in the column to the right of the conversation: *Check my edits automatically*
+runs a diagnostics check after every finished edit and gives the model its first problems with the result (the card shows them
+under *Automatic check*), and *Review my work before it counts as done* (`/autoreview on` or `off`) makes the agent read its own
+diff and the diagnostics again before a run counts as done — two rounds at most, their feedback going to the model unseen while
+the notice *Reviewing my own changes…* stands in the list. `/check`, `/review staged` and `/security-review` ask the server for a
+review over a card of their own. Reading and the
   agent's own notes run alone; the rest asks (*Allow* / *Deny*; a denial goes back to the model) unless you pick *Edit freely* or *Everything*,
   and switching the mode releases the calls that wait. The switch of automatic approval (`/autoapprove on|off` in the box of the page, on by default and kept with the window's store) runs what the
   Studio's table calls harmless — reading, building and testing commands — without a question and says so under the card as *Approved on its own: …*; everything else still asks. *Stop* ends the stream and the running commands. The bar under the conversation counts
