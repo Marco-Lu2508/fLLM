@@ -6,8 +6,8 @@
 //! of PARITY.md lists those with their reason.
 
 use fllm_app::commands::{
-    autoreview_notice, dispatch, expand_command, help_text, insights_notice, sandbox_saved_notice, search_hits_text, session_insights, turbo_notice, CmdState,
-    CustomCommand, InsightMessage, SearchHit, Step, TURBO_CONFIRM,
+    dispatch, expand_command, help_text, insights_notice, sandbox_saved_notice, search_hits_text, session_insights, turbo_notice, CmdState, CustomCommand,
+    InsightMessage, SearchHit, Step, TURBO_CONFIRM,
 };
 use serde_json::{json, Value};
 
@@ -43,6 +43,9 @@ const NOT_BUILT: &[&str] = &[
     "/good",
     "/bad",
     "/retry",
+    // the switch would claim the self-review run, which is row 81's work
+    "/autoreview on",
+    "/autoreview",
 ];
 
 /// The `code` state the page stood in **before** the command ran (`pre` of the record: every case
@@ -71,7 +74,6 @@ fn base_state(case: &Value) -> CmdState {
         turbo: pre["turbo"].as_bool().unwrap_or(false),
         sandbox: pre["sandbox"].as_str().map(str::to_string),
         sandbox_available: pre["sandboxAvailable"].as_bool().unwrap_or(true),
-        auto_review: pre["autoReview"].as_bool().unwrap_or(false),
         personality: str("personality", "default"),
         rules: fllm_app::commands::Rules {
             allow: pre["rules"]["allow"].as_str().unwrap_or_default().to_string(),
@@ -160,7 +162,6 @@ fn native_events(steps: &[Step], case: &Value) -> Vec<Value> {
                 out.push(json!(["notice", insights_notice(&session_insights(&sessions))]));
             }
             Step::SetPersonality(_key, notice) => out.push(json!(["notice", notice])),
-            Step::SetAutoReview(_want, notice) => out.push(json!(["notice", notice])),
             Step::CustomCommand { name, arg_text, source } => {
                 out.push(json!(["readCustom", name]));
                 out.push(json!(["agentRun", expand_command(CUSTOM_BODY, arg_text), source]));
@@ -270,10 +271,5 @@ fn the_texts_behind_the_steps() {
         insights_notice(&ins),
         "This folder, 2 saved sessions (the browser keeps the newest 30): 2 messages from you, 1 agent step, 1 file edit.\n\
 Most used tools: bash 1, write_file 1.\nTokens and cost: /cost. The terminal agent has the same overview over its own sessions: fllm-rs insights."
-    );
-    assert_eq!(autoreview_notice(false), "Review before done: off.");
-    assert_eq!(
-        autoreview_notice(true),
-        "Review before done: on. When a run changes files the agent reads its own diff and the diagnostics once more and fixes what is wrong."
     );
 }

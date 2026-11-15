@@ -466,6 +466,24 @@ pub fn command_names_from_paths(paths: &[String]) -> Vec<(String, String)> {
     out
 }
 
+/// `clipMiddle` of `code.js`: a long output keeps its head (40 %) and its tail.
+pub fn clip_middle(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head = max * 4 / 10;
+    let tail = max - head;
+    let cut = text.chars().count() - max;
+    let head_text: String = text.chars().take(head).collect();
+    let tail_text: String = text.chars().skip(text.chars().count() - tail).collect();
+    format!("{head_text}\n... [{cut} characters cut from the middle] ...\n{tail_text}")
+}
+
+/// What `userRun(command, true)` puts in front of the next message (`pending.push` of `code.js`).
+pub fn share_text(command: &str, output: &str) -> String {
+    format!("I ran this command myself:\n$ {command}\n```\n{}\n```", clip_middle(output, 4000))
+}
+
 /// The text of `/cost` (`fllmUsageSummary` of `usage.js`, wrapped as the command wraps it).
 pub fn cost_notice(summary: &str) -> String {
     format!("{summary}. Prices and the full table: Settings > Usage and cost.")
@@ -676,7 +694,6 @@ pub struct CmdState {
     pub turbo: bool,
     pub sandbox: Option<String>,
     pub sandbox_available: bool,
-    pub auto_review: bool,
     pub personality: String,
     pub rules: Rules,
     pub custom: Vec<CustomCommand>,
@@ -720,8 +737,6 @@ pub enum Step {
     Insights,
     /// `/personality <key>`: the chosen style with its notice.
     SetPersonality(&'static str, String),
-    /// `/autoreview [on|off]`: `Some(want)` changes it; the notice uses the value in effect.
-    SetAutoReview(Option<bool>, String),
     /// Read a custom command file (or the plugin's) and run what it holds.
     CustomCommand { name: String, arg_text: String, source: String },
     /// `codeNotice(text)` — everything the cases only say.
@@ -931,16 +946,6 @@ pub fn personality_notice(key: &str) -> String {
     }
 }
 
-/// The notice of `/autoreview` for the value in effect.
-pub fn autoreview_notice(on: bool) -> String {
-    if on {
-        "Review before done: on. When a run changes files the agent reads its own diff and the diagnostics once more and fixes what is wrong."
-            .to_string()
-    } else {
-        "Review before done: off.".to_string()
-    }
-}
-
 /// One line of entered text as the page parses it for its switch (`runCodeCommand`, first lines).
 struct Parsed {
     cmd: String,
@@ -1063,15 +1068,6 @@ pub fn dispatch(text: &str, state: &CmdState) -> Option<Vec<Step>> {
             } else {
                 vec![Step::Notice(personality_unknown_notice(&arg_text))]
             }
-        }
-        "autoreview" => {
-            let want = match arg_text.to_lowercase().as_str() {
-                "on" => Some(true),
-                "off" => Some(false),
-                _ => None,
-            };
-            let effective = want.unwrap_or(state.auto_review);
-            vec![Step::SetAutoReview(want, autoreview_notice(effective))]
         }
         "cd" | "folder" => {
             if rest.is_empty() {

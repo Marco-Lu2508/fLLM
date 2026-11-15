@@ -22,6 +22,10 @@ pub struct Status {
     pub computer: Option<Computer>,
     #[serde(default)]
     pub sandbox_status: Option<SandboxStatus>,
+    /// `sandbox_available` of the runtime answer — the same value the page reads after `/sandbox`
+    /// set a mode (`studio_mode.rs` of the server sends it with both answers).
+    #[serde(default)]
+    pub sandbox_available: bool,
 }
 
 /// `sandbox_status` of that answer: what the sandbox really does on this machine.

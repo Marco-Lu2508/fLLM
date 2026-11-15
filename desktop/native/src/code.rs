@@ -160,7 +160,15 @@ pub struct Call {
 }
 
 pub enum Item {
-    User(String),
+    User {
+        /// What the view shows — the page's `display || userText`: `/init` stands in the list
+        /// while the model gets `INIT_PROMPT`.
+        text: String,
+        /// What the model is sent with this message: the prompt when it differs from the text
+        /// (the command's expansion, or the prompt with the shared output of `/status` and
+        /// `/diff` in front), `None` for an ordinary message.
+        sent: Option<String>,
+    },
     Assistant { text: String, md: Box<markdown::Content> },
     Call(Call),
     Note(String),
@@ -170,7 +178,12 @@ pub enum Item {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Saved {
-    User { text: String },
+    User {
+        text: String,
+        /// Kept with the session like the messages of the page are kept separately from its view.
+        #[serde(default)]
+        sent: Option<String>,
+    },
     Assistant { text: String },
     Call { id: String, name: String, args: String, permission: String, ok: bool, output: String },
     Note { text: String },
@@ -250,6 +263,16 @@ pub enum CodeMsg {
     NewSession,
     /// Leave plan mode and tell the agent to carry out the plan it wrote.
     ExecutePlan,
+    /// The custom commands of the folder are known (`loadCustomCommands` of `code.js`).
+    CustomLoaded(Vec<crate::commands::CustomCommand>),
+    /// One custom command file (or the plugin's) was read: run what it holds.
+    CustomBody(Result<String, String>, String, String),
+    /// The answer of `GET /api/studio/sessions/search` for `/search`, with the words.
+    SearchDone(Result<Vec<crate::commands::SearchHit>, String>, String),
+    /// A command the user ran itself finished (`userRun` of the page).
+    UserRunDone(String, Result<String, String>, bool),
+    /// `saveMemoryEntry` of the page: the notice when it saved, the toast when it did not.
+    MemorySaved(Result<(), String>, String),
 }
 
 /// What the agent needs from the window for a request.
@@ -259,6 +282,24 @@ pub struct Env<'a> {
     pub params: ChatParams,
     /// The custom system prompt of the Settings page, added to the agent's own instructions; `None` while that is automatic.
     pub extra: Option<&'a str>,
+    /// The runtime switches a command reads and writes (`/turbo`, `/sandbox`).
+    pub turbo: bool,
+    /// The sandbox mode as the server reports it, `None` when it says nothing (the page treats an
+    /// empty one the same: `code.sandbox || 'unknown'`).
+    pub sandbox: Option<&'a str>,
+    pub sandbox_available: bool,
+    /// The `/cost` summary of the window.
+    pub usage: Option<&'a str>,
+    /// Where the session of this folder is kept, so `/clear` can save before it resets.
+    pub session_file: &'a std::path::Path,
+}
+
+/// What a command changed and the store has to keep (`saveCodeSettings` and the rules write of
+/// the page, which go into its own storage at once).
+#[derive(Debug, Clone, Default)]
+pub struct PendingPrefs {
+    pub rules: Option<crate::commands::Rules>,
+    pub personality: Option<String>,
 }
 
 pub struct CodeState {
@@ -276,6 +317,23 @@ pub struct CodeState {
     /// The switch as the command last set it, for the window to write into its store — the page
     /// writes its own copy at once, and this state has no store of its own.
     pub(crate) pending_auto_approve: Option<bool>,
+    /// The allow/deny rules of `/allow` and `/deny`, kept per folder like the page keeps them per
+    /// workspace in its own storage.
+    pub rules: crate::commands::Rules,
+    /// How the agent talks (`/personality`): a key of `PERSONALITIES`, in the system prompt where
+    /// the page puts its `personalityNote`.
+    pub personality: String,
+    /// The custom commands of `.fllm/commands` and of the installed plugins, loaded with the
+    /// folder (`loadCustomCommands` of `code.js`).
+    pub custom: Vec<crate::commands::CustomCommand>,
+    /// What the window still writes into its store: the rules of this folder and the style.
+    pub(crate) pending_prefs: Option<PendingPrefs>,
+    /// A line for the toast of the window (`toast(...)` of the page) — `/agent` while the agent
+    /// runs, and a memory that could not be saved.
+    pub(crate) pending_toast: Option<String>,
+    /// What `/status` and `/diff` ran: the output goes with the next message (`pending` of the
+    /// page), never into the conversation itself.
+    pub pending: Vec<String>,
     pub running: bool,
     pub steps: usize,
     pub changes: Vec<Change>,
@@ -299,6 +357,12 @@ impl Default for CodeState {
             build_mode: Mode::Ask,
             auto_approve: true,
             pending_auto_approve: None,
+            rules: crate::commands::Rules::default(),
+            personality: "default".into(),
+            custom: Vec::new(),
+            pending_prefs: None,
+            pending_toast: None,
+            pending: Vec::new(),
             running: false,
             steps: 0,
             changes: Vec::new(),
@@ -514,6 +578,92 @@ pub async fn run_tool(base: String, name: String, args: Value) -> Result<String,
     tool_result(&call(&base, reqwest::Method::POST, "/api/studio/agent/tool", Some(json!({ "name": name, "args": args }))).await?)
 }
 
+/// `encodeURIComponent` of the page: a word in a path.
+pub fn encode_query(query: &str) -> String {
+    let mut out = String::new();
+    let mut buf = [0u8; 4];
+    for c in query.chars() {
+        if c.is_ascii_alphanumeric() || "-_.!~*'()".contains(c) {
+            out.push(c);
+        } else {
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+    }
+    out
+}
+
+/// The lines `read_file` writes in front of the text (`/^\s*\d+\t/gm` of the page).
+pub fn strip_line_numbers(text: &str) -> String {
+    static LINE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    LINE.get_or_init(|| regex::Regex::new(r"(?m)^\s*\d+\t").expect("a line number"))
+        .replace_all(text, "")
+        .into_owned()
+}
+
+/// The custom commands of an open folder (`loadCustomCommands` of `code.js`): the files under
+/// `.fllm/commands` with their descriptions, then the commands an installed plugin brings — your
+/// own command of the same name wins.
+pub async fn load_custom_commands(base: String) -> Vec<crate::commands::CustomCommand> {
+    let mut paths: Vec<String> = Vec::new();
+    for pattern in [".fllm/commands/*.md", ".fllm/commands/**/*.md"] {
+        let Ok(out) = run_tool(base.clone(), "glob".into(), serde_json::json!({ "pattern": pattern })).await else {
+            continue;
+        };
+        paths.extend(
+            out.split('\n')
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with("...") && *l != "no files match")
+                .map(str::to_string),
+        );
+    }
+    let mut list: Vec<crate::commands::CustomCommand> = crate::commands::command_names_from_paths(&paths)
+        .into_iter()
+        .map(|(name, path)| crate::commands::CustomCommand {
+            name,
+            description: String::new(),
+            path: Some(path),
+            plugin: None,
+        })
+        .collect();
+    // the description is the front matter's, else the first line of the file (`limit: 4` reads
+    // the head of it, the way the page does)
+    for command in &mut list {
+        let Some(path) = command.path.clone() else { continue };
+        let Ok(out) = run_tool(base.clone(), "read_file".into(), serde_json::json!({ "path": path, "limit": 4 })).await
+        else {
+            continue;
+        };
+        let stripped = strip_line_numbers(&out);
+        command.description = crate::commands::parse_command_file(&stripped).0;
+    }
+    if let Ok(v) = call(&base, reqwest::Method::GET, "/api/studio/plugins/commands", None).await {
+        for row in v.get("commands").and_then(Value::as_array).into_iter().flatten() {
+            let Some(name) = row.get("name").and_then(Value::as_str) else { continue };
+            if list.iter().any(|c| c.name == name) {
+                continue;
+            }
+            list.push(crate::commands::CustomCommand {
+                name: name.to_string(),
+                description: row.get("description").and_then(Value::as_str).unwrap_or_default().to_string(),
+                path: None,
+                plugin: row.get("plugin").and_then(Value::as_str).map(str::to_string),
+            });
+        }
+    }
+    list
+}
+
+/// `GET /api/studio/sessions/search` for `/search` (`case 'search'` of `code.js`).
+pub async fn fetch_search(base: String, query: String) -> Result<Vec<crate::commands::SearchHit>, String> {
+    let path = format!("/api/studio/sessions/search?q={}&limit=8", encode_query(&query));
+    let v = call(&base, reqwest::Method::GET, &path, None).await?;
+    // `data.hits || []`: anything that is no list counts as no hit
+    let hits = v.get("hits").cloned().unwrap_or(Value::Null);
+    Ok(serde_json::from_value(hits).unwrap_or_default())
+}
+
 pub async fn undo(base: String, body: Value) -> Result<String, String> {
     tool_result(&call(&base, reqwest::Method::POST, "/api/studio/agent/undo", Some(body)).await?)
 }
@@ -609,7 +759,10 @@ impl CodeState {
             .items
             .iter()
             .filter_map(|i| match i {
-                Item::User(t) => Some(Saved::User { text: t.clone() }),
+                Item::User { text, sent } => Some(Saved::User {
+                    text: text.clone(),
+                    sent: sent.clone(),
+                }),
                 Item::Assistant { text, .. } => (!text.is_empty()).then(|| Saved::Assistant { text: text.clone() }),
                 Item::Note(t) => Some(Saved::Note { text: t.clone() }),
                 Item::Call(c) => {
@@ -636,7 +789,7 @@ impl CodeState {
         self.items = saved
             .into_iter()
             .map(|s| match s {
-                Saved::User { text } => Item::User(text),
+                Saved::User { text, sent } => Item::User { text, sent },
                 Saved::Assistant { text } => {
                     let mut md = markdown::Content::new();
                     md.push_str(&text);
@@ -679,6 +832,13 @@ impl CodeState {
         if let Some(w) = &self.workspace {
             system.push_str(&format!("\n\nThe project folder is {} (tool paths are relative to it).", w.root));
         }
+        // the style of `/personality`, where the page puts it: after the family notes, before
+        // the instructions, the memory and the profile (`codeSystemPrompt` of codeprompts.js)
+        let style = crate::commands::personality_note(&self.personality);
+        if !style.is_empty() {
+            system.push_str("\n\n");
+            system.push_str(style);
+        }
         let context = self.context.prompt();
         if !context.is_empty() {
             system.push_str("\n\n");
@@ -692,7 +852,12 @@ impl CodeState {
         let mut i = 0;
         while i < self.items.len() {
             match &self.items[i] {
-                Item::User(t) => wire.push(WireMessage::new("user", t.clone())),
+                Item::User { text, sent } => {
+                    // what the model is sent: the prompt of a command, with the output of the
+                    // commands the user ran in front of it (`takePending() + notes + userText`)
+                    let content = sent.clone().unwrap_or_else(|| text.clone());
+                    wire.push(WireMessage::new("user", content));
+                }
                 Item::Note(_) => {}
                 Item::Assistant { text, .. } => {
                     // the calls that follow this answer belong to it
@@ -721,6 +886,296 @@ impl CodeState {
             i += 1;
         }
         wire
+    }
+
+    /// What a command reads of the page's `code` (`dispatch`).
+    fn cmd_state(&self, env: &Env) -> crate::commands::CmdState {
+        crate::commands::CmdState {
+            running: self.running,
+            perm: Self::perm_of(&self.mode),
+            last_build_perm: Self::perm_of(&self.build_mode),
+            auto_approve: self.auto_approve,
+            turbo: env.turbo,
+            sandbox: env.sandbox.map(str::to_string),
+            sandbox_available: env.sandbox_available,
+            personality: self.personality.clone(),
+            rules: self.rules.clone(),
+            custom: self.custom.clone(),
+            usage: env.usage.map(str::to_string),
+        }
+    }
+
+    /// The word the page uses for a mode (`code.perm`): its own table has three, this window has
+    /// a fourth one (*Everything*), which the commands pass through as `auto`.
+    fn perm_of(mode: &Mode) -> String {
+        match mode {
+            Mode::Plan => "plan".into(),
+            Mode::Ask => "ask".into(),
+            Mode::AutoEdit => "edit".into(),
+            Mode::Auto => "auto".into(),
+        }
+    }
+
+    /// The mode a command's word stands for (`setPerm` of the page).
+    fn mode_of(perm: &str) -> Mode {
+        match perm {
+            "plan" => Mode::Plan,
+            "edit" => Mode::AutoEdit,
+            "auto" => Mode::Auto,
+            _ => Mode::Ask,
+        }
+    }
+
+    /// The run of `/init` and of a custom command: the view shows the words that were typed, the
+    /// model gets the prompt, and what `/status` and `/diff` shared rides in front of it
+    /// (`agentRun(prompt, display)` and `takePending()` of `code.js`).
+    fn run_prompt(&mut self, prompt: &str, display: &str, env: &Env) -> Task<Message> {
+        if self.workspace.is_none() || env.model.is_none() || self.running {
+            return Task::none();
+        }
+        let mut sent_full = prompt.to_string();
+        if !self.pending.is_empty() {
+            let shared = std::mem::take(&mut self.pending);
+            sent_full = format!("{}\n\n{sent_full}", shared.join("\n\n"));
+        }
+        let sent = (sent_full != display).then_some(sent_full);
+        self.error = None;
+        self.steps = 0;
+        self.items.push(Item::User {
+            text: display.to_string(),
+            sent,
+        });
+        self.running = true;
+        self.start_stream(env)
+    }
+
+    /// `/status` and `/diff`: a card of the command the user ran itself, its output shared with
+    /// the model with the next message (`userRun` of `code.js`).
+    fn user_run(&mut self, command: String, share: bool, env: &Env) -> Task<Message> {
+        if self.workspace.is_none() {
+            return Task::none();
+        }
+        let id = format!("call_{}_u{}", self.steps, self.items.len());
+        let call = Call {
+            id: id.clone(),
+            name: "bash".into(),
+            args: serde_json::json!({ "command": command }).to_string(),
+            permission: Permission::Command,
+            kind: ToolKind::Server,
+            state: CallState::Running,
+            auto_note: None,
+        };
+        self.items.push(Item::Call(call));
+        let base = env.base.to_string();
+        Task::perform(
+            async move {
+                let args = serde_json::json!({ "command": command });
+                let result = run_tool(base, "bash".into(), args).await;
+                (id, result, share)
+            },
+            |(id, result, share)| Message::Code(CodeMsg::UserRunDone(id, result, share)),
+        )
+    }
+
+    /// `/remember`: `saveMemoryEntry` of the page, then the instructions are read again so the
+    /// fact is part of the next prompt (`loadInstructions` there).
+    fn remember(&mut self, scope: &'static str, entry: String, notice: String, env: &Env) -> Task<Message> {
+        let base = env.base.to_string();
+        Task::perform(
+            async move {
+                let body = serde_json::json!({ "scope": scope, "op": "append", "text": entry });
+                match call(&base, reqwest::Method::POST, "/api/studio/agent/memory", Some(body)).await {
+                    Ok(_) => Ok(()),
+                    // the message of the server, or the page's own words
+                    Err(e) => Err(if e.starts_with("the server answered") || e.starts_with("no server") {
+                        "The memory could not be saved.".to_string()
+                    } else {
+                        e
+                    }),
+                }
+            },
+            move |r| Message::Code(CodeMsg::MemorySaved(r, notice)),
+        )
+    }
+
+    /// `/search`: the stored sessions of this window (`sessions/search` of the page).
+    fn search_words(&mut self, query: String, env: &Env) -> Task<Message> {
+        let base = env.base.to_string();
+        Task::perform(
+            async move {
+                match fetch_search(base, query.clone()).await {
+                    Ok(hits) => Ok((hits, query)),
+                    Err(e) => Err((e, query)),
+                }
+            },
+            |r| match r {
+                Ok((hits, query)) => Message::Code(CodeMsg::SearchDone(Ok(hits), query)),
+                Err((e, query)) => Message::Code(CodeMsg::SearchDone(Err(e), query)),
+            },
+        )
+    }
+
+    /// A custom command: read its file (or ask the plugin for its body), then run what it holds
+    /// (`readCustomCommand` + `expandCommand` of the page happen in the answer below).
+    fn custom_command(&mut self, name: String, arg_text: String, source: String, env: &Env) -> Task<Message> {
+        let Some(cmd) = self.custom.iter().find(|c| c.name == name).cloned() else {
+            return Task::none();
+        };
+        let base = env.base.to_string();
+        let work: std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> = match (cmd.path, cmd.plugin) {
+            (_, Some(plugin)) => {
+                let name = cmd.name;
+                Box::pin(async move {
+                    let path = format!(
+                        "/api/studio/plugins/command?plugin={}&name={}",
+                        encode_query(&plugin),
+                        encode_query(&name)
+                    );
+                    let v = call(&base, reqwest::Method::GET, &path, None).await?;
+                    Ok::<String, String>(v.get("body").and_then(Value::as_str).unwrap_or_default().to_string())
+                })
+            }
+            (Some(path), None) => Box::pin(async move {
+                let out = run_tool(base, "read_file".into(), serde_json::json!({ "path": path, "limit": 2000 }))
+                    .await
+                    .map_err(|e| {
+                        if e.trim().is_empty() { "The command file could not be read.".to_string() } else { e }
+                    })?;
+                let stripped = strip_line_numbers(&out);
+                Ok(crate::commands::parse_command_file(&stripped).1)
+            }),
+            (None, None) => return Task::none(),
+        };
+        Task::perform(work, |r| Message::Code(CodeMsg::CustomBody(r, arg_text, source)))
+    }
+
+    /// Everything a command asked for, in the order the page performs it.
+    fn run_steps(&mut self, steps: Vec<crate::commands::Step>, env: &Env) -> Task<Message> {
+        use crate::commands::Step;
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        for step in steps {
+            match step {
+                Step::Notice(text) => self.items.push(Item::Note(text)),
+                Step::Toast(text) => self.pending_toast = Some(text),
+                Step::NewSession => {
+                    // `newCodeSession` of the page: stop, save, reset
+                    if self.running {
+                        tasks.push(self.stop_now(env));
+                    }
+                    self.persist(env.session_file);
+                    self.items.clear();
+                    self.todos.clear();
+                    self.steps = 0;
+                }
+                Step::Undo(steps) => {
+                    // the page sends `{ steps }` above one, and one is the plain call
+                    let n = if steps > 1.0 { Some(steps as u64) } else { None };
+                    tasks.push(self.update(CodeMsg::Undo(n), env));
+                }
+                Step::AgentRun(prompt, display) => tasks.push(self.run_prompt(&prompt, &display, env)),
+                Step::SetPerm(perm, notice) => {
+                    tasks.push(self.update(CodeMsg::SetMode(Self::mode_of(perm)), env));
+                    self.items.push(Item::Note(notice));
+                }
+                Step::OpenFolder(Some(path)) => tasks.push(self.update(CodeMsg::OpenPath(path), env)),
+                Step::OpenFolder(None) => tasks.push(self.update(CodeMsg::Pick, env)),
+                Step::Stop => tasks.push(self.update(CodeMsg::Stop, env)),
+                Step::UserRun(command, share) => tasks.push(self.user_run(command, share, env)),
+                Step::Remember { scope, entry, notice } => tasks.push(self.remember(scope, entry, notice, env)),
+                Step::SaveRules { allow, deny, notice } => {
+                    self.rules = crate::commands::Rules { allow, deny };
+                    self.pending_prefs.get_or_insert_with(Default::default).rules = Some(self.rules.clone());
+                    self.items.push(Item::Note(notice));
+                }
+                // the confirm and the answer of the runtime are the window's own (the same dialog
+                // the switches of Settings > Runtime ask), so those two steps name the message
+                Step::Turbo(next) => tasks.push(Task::done(Message::TurboFromCommand(next))),
+                Step::SetSandbox(mode) => tasks.push(Task::done(Message::SandboxFromCommand(mode))),
+                Step::AutoApprove(want, note) => {
+                    let changed = want.is_some_and(|on| on != self.auto_approve);
+                    if let Some(on) = want {
+                        self.auto_approve = on;
+                    }
+                    self.items.push(Item::Note(note));
+                    if changed {
+                        self.pending_auto_approve = Some(self.auto_approve);
+                    }
+                }
+                Step::Search(query) => tasks.push(self.search_words(query, env)),
+                Step::Insights => {
+                    let input = vec![Self::insight_messages(&self.wire(None))];
+                    let text = crate::commands::insights_notice(&crate::commands::session_insights(&input));
+                    self.items.push(Item::Note(text));
+                }
+                Step::SetPersonality(key, note) => {
+                    self.personality = key.to_string();
+                    self.pending_prefs.get_or_insert_with(Default::default).personality = Some(key.to_string());
+                    self.items.push(Item::Note(note));
+                }
+                Step::CustomCommand { name, arg_text, source } => {
+                    tasks.push(self.custom_command(name, arg_text, source, env))
+                }
+            }
+        }
+        Task::batch(tasks)
+    }
+
+    /// What `sessionInsights` counts over: the wire messages of this folder's conversation.
+    fn insight_messages(wire: &[WireMessage]) -> Vec<crate::commands::InsightMessage> {
+        wire.iter()
+            .map(|m| crate::commands::InsightMessage {
+                role: m.role.clone(),
+                tool_calls: m
+                    .tool_calls
+                    .as_ref()
+                    .map(|calls| {
+                        calls
+                            .as_array()
+                            .map(|list| {
+                                list.iter()
+                                    .filter_map(|c| c.pointer("/function/name").and_then(Value::as_str).map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    /// Stop what runs, as `CodeMsg::Stop` does — the command `/stop` and `newCodeSession` both.
+    fn stop_now(&mut self, env: &Env) -> Task<Message> {
+        self.handle = None;
+        self.running = false;
+        self.acc.clear();
+        for i in self.items.iter_mut() {
+            if let Item::Call(c) = i {
+                if matches!(c.state, CallState::Pending | CallState::Running) {
+                    c.state = CallState::Done { ok: false, output: "Stopped.".into() };
+                }
+            }
+        }
+        let base = env.base.to_string();
+        Task::perform(
+            async move { cancel(base.clone()).await; fetch_changes(base).await },
+            |r| Message::Code(CodeMsg::ChangesLoaded(r)),
+        )
+    }
+
+    /// The session of this folder onto disk (the write of `app.rs` after a run or a new session,
+    /// here so a command can save before it clears the conversation).
+    pub fn persist(&self, file: &std::path::Path) {
+        let Some(w) = &self.workspace else { return };
+        let mut all = Sessions::load(file);
+        let saved = self.saved();
+        if saved.is_empty() {
+            all.0.remove(&w.root);
+        } else {
+            all.0.insert(w.root.clone(), saved);
+        }
+        if let Err(e) = all.save(file) {
+            eprintln!("fllm-app: the code session could not be saved: {e}");
+        }
     }
 
     fn start_stream(&mut self, env: &Env) -> Task<Message> {
@@ -970,7 +1425,10 @@ impl CodeState {
                 Task::batch([
                     Task::perform(fetch_tools(base.clone()), |r| Message::Code(CodeMsg::ToolsLoaded(r))),
                     Task::perform(fetch_changes(base.clone()), |r| Message::Code(CodeMsg::ChangesLoaded(r))),
-                    Task::perform(fetch_context(base), |r| Message::Code(CodeMsg::ContextLoaded(r))),
+                    Task::perform(fetch_context(base.clone()), |r| Message::Code(CodeMsg::ContextLoaded(r))),
+                    // the custom commands of the folder come with it (`loadCustomCommands`
+                    // runs with the other loads when the page opens a workspace)
+                    Task::perform(load_custom_commands(base), |r| Message::Code(CodeMsg::CustomLoaded(r))),
                 ])
             }
             CodeMsg::ContextLoaded(Ok(c)) => {
@@ -1007,22 +1465,24 @@ impl CodeState {
                 Task::none()
             }
             CodeMsg::Send => {
-                // the command of the page (`case 'autoapprove'` of `code.js`): it is answered
-                // here, the box goes away before it runs as the page's `submitCode` clears it
-                // first, and neither a workspace nor a model is asked for
                 let typed = self.editor.text().trim().to_string();
-                if let Some(want) = crate::autoapprove::command(&typed) {
+                // while the agent works: `/stop` stops it, and an empty line does too (the page's
+                // `submitCode`); everything else waits in the box, where the page queues it —
+                // this window has no queue
+                if self.running {
+                    let stop = typed.is_empty() || typed.eq_ignore_ascii_case("/stop");
+                    if !stop {
+                        return Task::none();
+                    }
                     self.editor = Content::new();
-                    let changed = want.is_some_and(|on| on != self.auto_approve);
-                    if let Some(on) = want {
-                        self.auto_approve = on;
-                    }
-                    let note = crate::autoapprove::notice(self.auto_approve);
-                    self.items.push(Item::Note(note));
-                    if changed {
-                        self.pending_auto_approve = Some(self.auto_approve);
-                    }
-                    return Task::none();
+                    return self.update(CodeMsg::Stop, env);
+                }
+                // every command of the page is answered here — the switch of `/autoapprove`
+                // included, which is its case of `runCodeCommand` — before a waiting question can
+                // take the words as an answer, and without asking for a workspace or a model
+                if let Some(steps) = crate::commands::dispatch(&typed, &self.cmd_state(env)) {
+                    self.editor = Content::new();
+                    return self.run_steps(steps, env);
                 }
                 // a question of the agent is waiting: what you write is the answer
                 if let Some(id) = self.pending_ask().map(|c| c.id.clone()) {
@@ -1034,36 +1494,13 @@ impl CodeState {
                     return self.update(CodeMsg::Answer(id, answer), env);
                 }
                 let prompt = self.editor.text().trim().to_string();
-                if prompt.is_empty() || self.running || self.workspace.is_none() || env.model.is_none() {
+                if prompt.is_empty() || self.workspace.is_none() || env.model.is_none() {
                     return Task::none();
                 }
                 self.editor = Content::new();
-                self.error = None;
-                self.steps = 0;
-                self.items.push(Item::User(prompt));
-                self.running = true;
-                self.start_stream(env)
+                self.run_prompt(&prompt, &prompt, env)
             }
-            CodeMsg::Stop => {
-                self.handle = None;
-                self.running = false;
-                self.acc.clear();
-                for i in self.items.iter_mut() {
-                    if let Item::Call(c) = i {
-                        if matches!(c.state, CallState::Pending | CallState::Running) {
-                            c.state = CallState::Done { ok: false, output: "Stopped.".into() };
-                        }
-                    }
-                }
-                let base = env.base.to_string();
-                Task::perform(
-                    async move {
-                        cancel(base.clone()).await;
-                        fetch_changes(base).await
-                    },
-                    |r| Message::Code(CodeMsg::ChangesLoaded(r)),
-                )
-            }
+            CodeMsg::Stop => self.stop_now(env),
             CodeMsg::Stream(ev) => {
                 if !self.running {
                     return Task::none();
@@ -1169,7 +1606,8 @@ impl CodeState {
             }
             CodeMsg::Undone(result) => {
                 match result {
-                    Ok(text) => self.items.push(Item::Note(text)),
+                    // `Undone: {output}` of `undoChange`
+                    Ok(text) => self.items.push(Item::Note(format!("Undone: {text}"))),
                     Err(e) => self.error = Some(e),
                 }
                 Task::perform(fetch_changes(env.base.to_string()), |r| Message::Code(CodeMsg::ChangesLoaded(r)))
@@ -1182,6 +1620,62 @@ impl CodeState {
                 self.editor = Content::with_text("Carry out the plan above.");
                 self.update(CodeMsg::Send, env)
             }
+            CodeMsg::CustomLoaded(list) => {
+                self.custom = list;
+                Task::none()
+            }
+            CodeMsg::CustomBody(result, arg_text, source) => match result {
+                Ok(body) => {
+                    let prompt = crate::commands::expand_command(&body, &arg_text);
+                    self.run_prompt(&prompt, &source, env)
+                }
+                Err(e) => {
+                    self.items.push(Item::Note(e));
+                    Task::none()
+                }
+            },
+            CodeMsg::SearchDone(result, query) => {
+                let text = match result {
+                    Ok(hits) => crate::commands::search_hits_text(&hits, &query),
+                    Err(e) => format!("The search failed: {e}"),
+                };
+                self.items.push(Item::Note(text));
+                Task::none()
+            }
+            CodeMsg::UserRunDone(id, result, share) => {
+                let mut shared = None;
+                if let Some(Item::Call(c)) = self.items.iter_mut().find(|i| matches!(i, Item::Call(c) if c.id == id)) {
+                    let output = match &result {
+                        Ok(o) => o.clone(),
+                        Err(e) => e.clone(),
+                    };
+                    c.state = CallState::Done { ok: result.is_ok(), output: output.clone() };
+                    if share {
+                        let command = serde_json::from_str::<Value>(&c.args)
+                            .ok()
+                            .and_then(|v| v.get("command").and_then(Value::as_str).map(str::to_string))
+                            .unwrap_or_default();
+                        shared = Some(crate::commands::share_text(&command, &output));
+                    }
+                }
+                // the output goes with the next message, never into the conversation
+                if let Some(text) = shared {
+                    self.pending.push(text);
+                }
+                Task::none()
+            }
+            CodeMsg::MemorySaved(result, notice) => match result {
+                Ok(()) => {
+                    self.items.push(Item::Note(notice));
+                    // the instructions are read again, so the fact is part of the next prompt
+                    let base = env.base.to_string();
+                    Task::perform(fetch_context(base), |r| Message::Code(CodeMsg::ContextLoaded(r)))
+                }
+                Err(e) => {
+                    self.pending_toast = Some(e);
+                    Task::none()
+                }
+            },
             CodeMsg::NewSession => {
                 if self.running {
                     return Task::none();
@@ -1288,7 +1782,7 @@ fn timeline<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, tint: bool) ->
     }
     for (i, item) in s.items.iter().enumerate() {
         let element: Element<'a, Message> = match item {
-            Item::User(text_) => row![Space::new().width(Length::Fill), container(text(text_.as_str()).size(15)).padding([9, 15]).max_width(560).style(theme::bubble(t, tint))].into(),
+            Item::User { text: text_, .. } => row![Space::new().width(Length::Fill), container(text(text_.as_str()).size(15)).padding([9, 15]).max_width(560).style(theme::bubble(t, tint))].into(),
             Item::Assistant { text: body, md: content } => {
                 if body.is_empty() {
                     if s.running && i + 1 == s.items.len() { text("…").size(15).color(t.muted).into() } else { Space::new().height(0).into() }
@@ -1548,7 +2042,18 @@ mod tests {
     }
 
     fn env() -> Env<'static> {
-        Env { base: "http://127.0.0.1:9", model: Some("m"), params: ChatParams::default(), extra: None }
+        Env {
+            base: "http://127.0.0.1:9",
+            model: Some("m"),
+            params: ChatParams::default(),
+            extra: None,
+            turbo: false,
+            sandbox: None,
+            sandbox_available: true,
+            usage: None,
+            // nothing saves a session in the tests: the write fails and only says so
+            session_file: std::path::Path::new(""),
+        }
     }
 
     fn say(s: &mut CodeState, text: &str) {
@@ -1754,7 +2259,7 @@ mod tests {
         // a long session keeps the newest items, starting at a message of the user
         let mut long = state(Mode::Ask);
         for i in 0..150 {
-            long.items.push(Item::User(format!("q{i}")));
+            long.items.push(Item::User { text: format!("q{i}"), sent: None });
             long.items.push(Item::Note(format!("n{i}")));
         }
         let kept = long.saved();
@@ -1790,7 +2295,7 @@ mod tests {
         let _ = s.update(CodeMsg::ExecutePlan, &env());
         assert_eq!(s.mode, Mode::Ask);
         assert!(s.running);
-        assert!(matches!(s.items.iter().rev().find(|i| matches!(i, Item::User(_))), Some(Item::User(t)) if t == "Carry out the plan above."));
+        assert!(matches!(s.items.iter().rev().find(|i| matches!(i, Item::User { .. })), Some(Item::User { text, .. }) if text == "Carry out the plan above."));
         assert!(s.wire(None)[0].content.starts_with("You are a coding agent"));
         // outside plan mode the button does nothing
         let before = s.items.len();
@@ -1899,7 +2404,7 @@ mod tests {
             assert_eq!(call(&s, "q1").state, CallState::Done { ok: true, output: "a.rs please".into() });
             assert_eq!(assistants(&s), 2);
             assert!(s.pending_ask().is_none());
-            assert!(!s.items.iter().any(|i| matches!(i, Item::User(t) if t == "a.rs please")), "it is not a new request");
+            assert!(!s.items.iter().any(|i| matches!(i, Item::User { text, .. } if text == "a.rs please")), "it is not a new request");
         }
         // an option, and skipping
         let mut s = state(Mode::Ask);

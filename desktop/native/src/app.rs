@@ -350,6 +350,9 @@ pub struct App {
     runtime_steps: String,
     /// The question before computer use or turbo goes on.
     pub runtime_confirm: Option<crate::runtime::Confirm>,
+    /// That the runtime was asked by a command of the Code page, which wants the answer as a
+    /// note there (`codeNotice` after `POST /api/studio/runtime`).
+    runtime_notice: Option<RuntimeNotice>,
     /// Settings > Providers: the list of the server, the templates and the form of the second
     /// card (`provState` of `providers.js`).
     pub providers: crate::providers::ProviderList,
@@ -625,6 +628,13 @@ pub struct App {
     sidecar_note: Option<String>,
     /// A load, unload or restart is under way: the server is away for a moment and the window says so instead of "no server".
     switching: bool,
+}
+
+/// What the Code page asked of the runtime, so its answer can be noted there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeNotice {
+    Turbo,
+    Sandbox,
 }
 
 #[derive(Debug, Clone)]
@@ -952,6 +962,11 @@ pub enum Message {
     RuntimeStepsSave,
     /// The question before a switch goes on (`confirmDialog` of `runtime.js`).
     RuntimeConfirm(crate::runtime::Confirm),
+    /// `/turbo [on|off]`: the confirm of the runtime switches, then the answer noted on the Code
+    /// page (`case 'turbo'` of `code.js`).
+    TurboFromCommand(bool),
+    /// `/sandbox <mode>`: the mode goes to the runtime, the answer is noted on the Code page.
+    SandboxFromCommand(String),
     RuntimeConfirmOk,
     RuntimeConfirmCancel,
     /// The save answered (`POST /api/studio/runtime`).
@@ -1453,6 +1468,7 @@ impl App {
             runtime_rate: String::new(),
             runtime_steps: String::new(),
             runtime_confirm: None,
+            runtime_notice: None,
             providers: crate::providers::ProviderList::default(),
             prov_models: crate::providers::ModelList::default(),
             prov_form: crate::providers::Form::default(),
@@ -1613,6 +1629,7 @@ impl App {
         // the switch of `/autoapprove` comes from the saved preference, as the page reads it
         // from its localStorage when it builds the state
         app.code.auto_approve = app.store.prefs.auto_approve;
+        app.code.personality = app.store.prefs.code_personality.clone();
         if let Some(first) = app.store.chats.first().map(|c| c.id) {
             app.open(first);
         }
@@ -2011,7 +2028,20 @@ impl App {
                 let model = if let Server::Ready(m) = &self.server { Some(m.id.clone()) } else { None };
                 let extra = (self.store.prefs.custom_system && !self.store.prefs.system_prompt.trim().is_empty()).then(|| self.store.prefs.system_prompt.clone());
                 let base = self.base.clone();
-                let env = code::Env { base: &base, model: model.as_deref(), params: self.chat_params(), extra: extra.as_deref() };
+                let usage = crate::usage::summary_text(&self.store.usage, &self.prices);
+                let sandbox = (!self.runtime.sandbox.is_empty()).then(|| self.runtime.sandbox.clone());
+                let session_file = self.data_file.with_file_name("code-sessions.json");
+                let env = code::Env {
+                    base: &base,
+                    model: model.as_deref(),
+                    params: self.chat_params(),
+                    extra: extra.as_deref(),
+                    turbo: self.runtime.turbo,
+                    sandbox: sandbox.as_deref(),
+                    sandbox_available: self.runtime.sandbox_available,
+                    usage: Some(usage.as_str()),
+                    session_file: &session_file,
+                };
                 let was_running_before = was_running;
                 let task = self.code.update(msg, &env);
                 // the switch of `/autoapprove` goes with the store, as the page keeps its own
@@ -2022,6 +2052,33 @@ impl App {
                         self.store.prefs.auto_approve = on;
                         self.save();
                     }
+                }
+                // the same for the rules of the folder and the style (`saveCodeSettings` and the
+                // rules write of the page, which both go into its own storage at once)
+                if let Some(pending) = self.code.pending_prefs.take() {
+                    let mut wrote = false;
+                    if let Some(personality) = pending.personality {
+                        if self.store.prefs.code_personality != personality {
+                            self.store.prefs.code_personality = personality;
+                            wrote = true;
+                        }
+                    }
+                    if let Some(rules) = pending.rules {
+                        if let Some(w) = &self.code.workspace {
+                            if self.store.prefs.code_rules.get(&w.root) != Some(&rules) {
+                                self.store.prefs.code_rules.insert(w.root.clone(), rules);
+                                wrote = true;
+                            }
+                        }
+                    }
+                    if wrote {
+                        self.save();
+                    }
+                }
+                // `toast(...)` of the page: only `/agent` while it runs, and a memory that could
+                // not be saved
+                if let Some(text) = self.code.pending_toast.take() {
+                    self.toast = Some(text);
                 }
                 if !was_running_before && self.code.running {
                     // the run began (the `started` of watchRun in voice.js)
@@ -2041,6 +2098,9 @@ impl App {
                     if let Some(saved) = code::Sessions::load(&file).0.remove(&root) {
                         self.code.restore(saved);
                     }
+                    // the allow/deny rules of this folder (`loadRules` of `code.js` reads its own
+                    // storage per workspace root)
+                    self.code.rules = self.store.prefs.code_rules.get(&root).cloned().unwrap_or_default();
                 } else if ends_session || (was_running && !self.code.running) {
                     if let Some(w) = &self.code.workspace {
                         let mut all = code::Sessions::load(&file);
@@ -3588,17 +3648,56 @@ impl App {
             },
             Message::RuntimeConfirmCancel => {
                 self.runtime_confirm = None;
+                // nothing was asked of the runtime after all
+                self.runtime_notice = None;
                 Task::none()
+            }
+            Message::TurboFromCommand(next) => {
+                self.runtime_notice = Some(RuntimeNotice::Turbo);
+                if next {
+                    // the very question the switches of Settings > Runtime ask
+                    self.runtime_confirm = Some(crate::runtime::Confirm::Turbo);
+                    Task::none()
+                } else {
+                    Task::perform(
+                        models::post_runtime(self.base.clone(), serde_json::json!({ "turbo": false })),
+                        Message::RuntimeSaved,
+                    )
+                }
+            }
+            Message::SandboxFromCommand(mode) => {
+                self.runtime_notice = Some(RuntimeNotice::Sandbox);
+                Task::perform(
+                    models::post_runtime(self.base.clone(), serde_json::json!({ "sandbox": mode })),
+                    Message::RuntimeSaved,
+                )
             }
             Message::RuntimeSaved(Ok(status)) => {
                 self.fill_runtime(status);
                 // `save()` of `runtime.js` says `Saved.` after the answer was drawn
                 self.runtime_say = "Saved.".into();
+                // the note the command of the Code page waits for (`codeNotice` after the post)
+                if let Some(kind) = self.runtime_notice.take() {
+                    let note = match kind {
+                        RuntimeNotice::Turbo => crate::commands::turbo_notice(self.runtime.turbo).to_string(),
+                        RuntimeNotice::Sandbox => {
+                            crate::commands::sandbox_saved_notice(&self.runtime.sandbox, self.runtime.sandbox_available)
+                        }
+                    };
+                    self.code.items.push(crate::code::Item::Note(note));
+                }
                 Task::none()
             }
             Message::RuntimeSaved(Err(e)) => {
                 // the message of the server, or `Could not save it.` when it sent none
-                self.runtime_say = e;
+                self.runtime_say = e.clone();
+                if let Some(kind) = self.runtime_notice.take() {
+                    let note = match kind {
+                        RuntimeNotice::Turbo => format!("The runtime could not be changed: {e}"),
+                        RuntimeNotice::Sandbox => format!("The sandbox mode could not be changed: {e}"),
+                    };
+                    self.code.items.push(crate::code::Item::Note(note));
+                }
                 Task::none()
             }
             Message::RouteSelect(value) => {

@@ -399,13 +399,25 @@ fn auto_approve_on() -> bool {
     true
 }
 
+/// The personality of `/personality`, before one was ever chosen.
+fn default_personality() -> String {
+    "default".into()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Prefs {
-    /// What of yours the model is told (about me, remembered facts).
     /// Whether harmless commands of the Code page run without a question (the switch of
     /// `/autoapprove`; the page keeps it in its localStorage under `fllm.studio.autoapprove`).
     #[serde(default = "auto_approve_on")]
     pub auto_approve: bool,
+    /// The allow/deny rules of the Code page, one block per folder — the page keys them the same
+    /// way in `fllm.studio.coderules.v1`.
+    #[serde(default)]
+    pub code_rules: std::collections::BTreeMap<String, crate::commands::Rules>,
+    /// How the agent talks in the Code page (`/personality`, its `PERSONALITIES` table).
+    #[serde(default = "default_personality")]
+    pub code_personality: String,
+    /// What of yours the model is told (about me, remembered facts).
     #[serde(default)]
     pub personal: Personal,
     /// Whether a local copy of the personalization exists (the Studio checks its key: only a first
@@ -591,7 +603,7 @@ fn default_top_p() -> f32 {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { auto_approve: true, personal: Personal::default(), personal_loaded: false, tour_seen: false, shortcut_overrides: std::collections::HashMap::new(), voice: VoicePrefs::default(), saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
+        Prefs { auto_approve: true, code_rules: std::collections::BTreeMap::new(), code_personality: default_personality(), personal: Personal::default(), personal_loaded: false, tour_seen: false, shortcut_overrides: std::collections::HashMap::new(), voice: VoicePrefs::default(), saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
     }
 }
 
