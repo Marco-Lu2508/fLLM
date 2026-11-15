@@ -114,9 +114,8 @@ fn every_button_asks_the_server_for_what_the_page_asks() {
     let (mut app, _dir) = app();
     let _ = lp(&mut app, LpMsg::ProfileLoaded(Ok(profile())));
     let _ = lp(&mut app, LpMsg::MemoryLoaded(Ok(memory())));
-    let mut pane = LearnPane::default();
     // Save
-    pane.editor = iced::widget::text_editor::Content::with_text("## Languages\n- Rust");
+    let mut pane = LearnPane { editor: iced::widget::text_editor::Content::with_text("## Languages\n- Rust"), ..Default::default() };
     let post = pane.post_of(&LpMsg::Save, "/w").unwrap();
     assert_eq!((post.path, post.body, post.done), ("/api/studio/learn/profile", json!({ "action": "save", "text": "## Languages\n- Rust" }), Some("Profile saved.")));
     // the switch of the prompt

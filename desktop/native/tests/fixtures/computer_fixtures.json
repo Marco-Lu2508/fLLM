@@ -1,0 +1,10302 @@
+{
+ "subjects": [
+  {
+   "name": "computer_screenshot",
+   "args": null,
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {},
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "hello"
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": 12
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": null
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "keys": null
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "ms": 250
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "ms": 0
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "ms": null
+   },
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {},
+   "result": "computer_screenshot"
+  },
+  {
+   "name": "computer_click",
+   "args": null,
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {},
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "computer_click 10,20"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "computer_click 10,20.1"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "computer_click 1.3,-3.7"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "computer_click 5,6"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "computer_click 1,2 right"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "computer_click 1,2"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "computer_click 1,2 double"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "computer_click 1,2 middle double"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "hello"
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": 12
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": null
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "keys": null
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "computer_click 5,6"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "computer_click 5,6"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "computer_click 5,6"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "ms": 250
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "ms": 0
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "ms": null
+   },
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_click",
+   "args": {},
+   "result": "computer_click 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": null,
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {},
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "computer_move 10,20"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "computer_move 10,20.1"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "computer_move 1.3,-3.7"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "computer_move 5,6"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "computer_move 1,2"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "computer_move 1,2"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "computer_move 1,2"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "computer_move 1,2"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "hello"
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": 12
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": null
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "keys": null
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "computer_move 5,6"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "computer_move 5,6"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "computer_move 5,6"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "ms": 250
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "ms": 0
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "ms": null
+   },
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_move",
+   "args": {},
+   "result": "computer_move 0,0"
+  },
+  {
+   "name": "computer_drag",
+   "args": null,
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {},
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "computer_drag 1,2 -> 30,40"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "computer_drag 1,2 -> 3,4"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "computer_drag 1,0 -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "hello"
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": 12
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": null
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "keys": null
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "ms": 250
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "ms": 0
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "ms": null
+   },
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {},
+   "result": "computer_drag ? -> ?"
+  },
+  {
+   "name": "computer_type",
+   "args": null,
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {},
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "hello"
+   },
+   "result": "computer_type \"hello\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_type \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_type \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_type \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "computer_type \"quote \\\" and \\\\ slash\\nline\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": 12
+   },
+   "result": "computer_type \"12\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": null
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "keys": null
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "ms": 250
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "ms": 0
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "ms": null
+   },
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_type",
+   "args": {},
+   "result": "computer_type \"\""
+  },
+  {
+   "name": "computer_key",
+   "args": null,
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {},
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "hello"
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": 12
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": null
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "computer_key ctrl+c"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "computer_key a"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "keys": null
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "ms": 250
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "ms": 0
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "ms": null
+   },
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_key",
+   "args": {},
+   "result": "computer_key "
+  },
+  {
+   "name": "computer_scroll",
+   "args": null,
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {},
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "computer_scroll 10,20 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "computer_scroll 10,20.1 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "computer_scroll 1.3,-3.7 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "computer_scroll 5,6 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "computer_scroll 1,2 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "computer_scroll 1,2 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "computer_scroll 1,2 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "computer_scroll 1,2 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "hello"
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": 12
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": null
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "keys": null
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "computer_scroll 5,6 dx=0 dy=120"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "computer_scroll 5,6 dx=-3.3 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "computer_scroll 5,6 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "computer_scroll 0,0 dx=1 dy=2"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "ms": 250
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "ms": 0
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "ms": null
+   },
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {},
+   "result": "computer_scroll 0,0 dx=0 dy=0"
+  },
+  {
+   "name": "computer_wait",
+   "args": null,
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {},
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "hello"
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": 12
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": null
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "keys": null
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "ms": 250
+   },
+   "result": "computer_wait 250"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "ms": 0
+   },
+   "result": "computer_wait 0"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "ms": null
+   },
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_wait",
+   "args": {},
+   "result": "computer_wait 1000"
+  },
+  {
+   "name": "computer_cursor",
+   "args": null,
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {},
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "hello"
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": 12
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": null
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "keys": null
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "ms": 250
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "ms": 0
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "ms": null
+   },
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {},
+   "result": "computer_cursor"
+  },
+  {
+   "name": "computer_displays",
+   "args": null,
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {},
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "hello"
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": 12
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": null
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "keys": null
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "ms": 250
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "ms": 0
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "ms": null
+   },
+   "result": "computer_displays"
+  },
+  {
+   "name": "computer_displays",
+   "args": {},
+   "result": "computer_displays"
+  },
+  {
+   "name": "something_else",
+   "args": null,
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {},
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "hello"
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": 12
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": null
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "keys": null
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "ms": 250
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "ms": 0
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "ms": null
+   },
+   "result": "something_else"
+  },
+  {
+   "name": "something_else",
+   "args": {},
+   "result": "something_else"
+  }
+ ],
+ "questions": [
+  {
+   "name": "computer_screenshot",
+   "args": null,
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {},
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "hello"
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": 12
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": null
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "keys": null
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "ms": 250
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "ms": 0
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "ms": null
+   },
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {},
+   "result": "Let the agent look at your screen?"
+  },
+  {
+   "name": "computer_click",
+   "args": null,
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {},
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "right-click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "Double-click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "Double-click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "hello"
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": 12
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": null
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "keys": null
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "ms": 250
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "ms": 0
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "ms": null
+   },
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_click",
+   "args": {},
+   "result": "Click at the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": null,
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {},
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "hello"
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": 12
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": null
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "keys": null
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "ms": 250
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "ms": 0
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "ms": null
+   },
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_move",
+   "args": {},
+   "result": "Move the mouse pointer to the marked point?"
+  },
+  {
+   "name": "computer_drag",
+   "args": null,
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {},
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "hello"
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": 12
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": null
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "keys": null
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "ms": 250
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "ms": 0
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "ms": null
+   },
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_drag",
+   "args": {},
+   "result": "Drag with the mouse along the marked line?"
+  },
+  {
+   "name": "computer_type",
+   "args": null,
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {},
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "hello"
+   },
+   "result": "Type \"hello\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Type \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" ... on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Type \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Type \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" ... on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "Type \"quote \\\" and \\\\ slash\\nline\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": 12
+   },
+   "result": "Type \"12\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": null
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "keys": null
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "ms": 250
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "ms": 0
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "ms": null
+   },
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_type",
+   "args": {},
+   "result": "Type \"\" on the keyboard?"
+  },
+  {
+   "name": "computer_key",
+   "args": null,
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {},
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "hello"
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": 12
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": null
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "Press ctrl+c?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "Press a?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "keys": null
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "ms": 250
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "ms": 0
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "ms": null
+   },
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_key",
+   "args": {},
+   "result": "Press ?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": null,
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {},
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "hello"
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": 12
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": null
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "keys": null
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "ms": 250
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "ms": 0
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "ms": null
+   },
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_scroll",
+   "args": {},
+   "result": "Scroll at the marked point?"
+  },
+  {
+   "name": "computer_wait",
+   "args": null,
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {},
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "hello"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": 12
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "keys": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "ms": 250
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "ms": 0
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "ms": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_wait",
+   "args": {},
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": null,
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {},
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "hello"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": 12
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "keys": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "ms": 250
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "ms": 0
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "ms": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_cursor",
+   "args": {},
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": null,
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {},
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "hello"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": 12
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "keys": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "ms": 250
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "ms": 0
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "ms": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "computer_displays",
+   "args": {},
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": null,
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {},
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "hello"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": 12
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "keys": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "ms": 250
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "ms": 0
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "ms": null
+   },
+   "result": "Allow this?"
+  },
+  {
+   "name": "something_else",
+   "args": {},
+   "result": "Allow this?"
+  }
+ ],
+ "marks": [
+  {
+   "name": "computer_screenshot",
+   "args": null,
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "hello"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": 12
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "text": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "keys": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "ms": 250
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "ms": 0
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {
+    "ms": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_screenshot",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": null,
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 10,
+     "y": 20,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 10.04,
+     "y": 20.05,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1.25,
+     "y": -3.75,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 5,
+     "y": 6,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1,
+     "y": 2,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1,
+     "y": 2,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1,
+     "y": 2,
+     "double": true
+    }
+   ]
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1,
+     "y": 2,
+     "double": true
+    }
+   ]
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "hello"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": 12
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "text": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "keys": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 5,
+     "y": 6,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 5,
+     "y": 6,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 5,
+     "y": 6,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "ms": 250
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "ms": 0
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {
+    "ms": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_click",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": null,
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 10,
+     "y": 20,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 10.04,
+     "y": 20.05,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1.25,
+     "y": -3.75,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 5,
+     "y": 6,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1,
+     "y": 2,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1,
+     "y": 2,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1,
+     "y": 2,
+     "double": true
+    }
+   ]
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1,
+     "y": 2,
+     "double": true
+    }
+   ]
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "hello"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": 12
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "text": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "keys": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 5,
+     "y": 6,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 5,
+     "y": 6,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 5,
+     "y": 6,
+     "double": false
+    }
+   ]
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "ms": 250
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "ms": 0
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {
+    "ms": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_move",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": null,
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": [
+    {
+     "kind": "line",
+     "x1": 1,
+     "y1": 2,
+     "x2": 30,
+     "y2": 40
+    },
+    {
+     "kind": "cross",
+     "x": 1,
+     "y": 2
+    },
+    {
+     "kind": "cross",
+     "x": 30,
+     "y": 40
+    }
+   ]
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": [
+    {
+     "kind": "line",
+     "x1": 1,
+     "y1": 2,
+     "x2": 3,
+     "y2": 4
+    },
+    {
+     "kind": "cross",
+     "x": 1,
+     "y": 2
+    },
+    {
+     "kind": "cross",
+     "x": 3,
+     "y": 4
+    }
+   ]
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "hello"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": 12
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "text": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "keys": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "ms": 250
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "ms": 0
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {
+    "ms": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_drag",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": null,
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "hello"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": 12
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "text": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "keys": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "ms": 250
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "ms": 0
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {
+    "ms": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_type",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": null,
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "hello"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": 12
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "text": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "keys": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "ms": 250
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "ms": 0
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {
+    "ms": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_key",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": null,
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 10,
+     "y": 20
+    },
+    {
+     "kind": "arrow",
+     "x": 10,
+     "y": 20,
+     "dx": 0,
+     "dy": 0
+    }
+   ]
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 10.04,
+     "y": 20.05
+    },
+    {
+     "kind": "arrow",
+     "x": 10.04,
+     "y": 20.05,
+     "dx": 0,
+     "dy": 0
+    }
+   ]
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1.25,
+     "y": -3.75
+    },
+    {
+     "kind": "arrow",
+     "x": 1.25,
+     "y": -3.75,
+     "dx": 0,
+     "dy": 0
+    }
+   ]
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 5,
+     "y": 6
+    },
+    {
+     "kind": "arrow",
+     "x": 5,
+     "y": 6,
+     "dx": 0,
+     "dy": 0
+    }
+   ]
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1,
+     "y": 2
+    },
+    {
+     "kind": "arrow",
+     "x": 1,
+     "y": 2,
+     "dx": 0,
+     "dy": 0
+    }
+   ]
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1,
+     "y": 2
+    },
+    {
+     "kind": "arrow",
+     "x": 1,
+     "y": 2,
+     "dx": 0,
+     "dy": 0
+    }
+   ]
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1,
+     "y": 2
+    },
+    {
+     "kind": "arrow",
+     "x": 1,
+     "y": 2,
+     "dx": 0,
+     "dy": 0
+    }
+   ]
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 1,
+     "y": 2
+    },
+    {
+     "kind": "arrow",
+     "x": 1,
+     "y": 2,
+     "dx": 0,
+     "dy": 0
+    }
+   ]
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "hello"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": 12
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "text": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "keys": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 5,
+     "y": 6
+    },
+    {
+     "kind": "arrow",
+     "x": 5,
+     "y": 6,
+     "dx": 0,
+     "dy": 120
+    }
+   ]
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 5,
+     "y": 6
+    },
+    {
+     "kind": "arrow",
+     "x": 5,
+     "y": 6,
+     "dx": -3.3,
+     "dy": 0.04
+    }
+   ]
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": [
+    {
+     "kind": "cross",
+     "x": 5,
+     "y": 6
+    },
+    {
+     "kind": "arrow",
+     "x": 5,
+     "y": 6,
+     "dx": 0,
+     "dy": 0
+    }
+   ]
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "ms": 250
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "ms": 0
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {
+    "ms": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_scroll",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": null,
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "hello"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": 12
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "text": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "keys": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "ms": 250
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "ms": 0
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {
+    "ms": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_wait",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": null,
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "hello"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": 12
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "text": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "keys": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "ms": 250
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "ms": 0
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {
+    "ms": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_cursor",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": null,
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "hello"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": 12
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "text": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "keys": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "ms": 250
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "ms": 0
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {
+    "ms": null
+   },
+   "result": []
+  },
+  {
+   "name": "computer_displays",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": null,
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {},
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 10,
+    "y": 20
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 10.04,
+    "y": 20.05
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1.25,
+    "y": -3.75
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": "5",
+    "y": "6"
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": "a",
+    "y": null
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "right"
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "left"
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 1,
+    "y": 2,
+    "button": "middle",
+    "double": true
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "from": {
+     "x": 1,
+     "y": 2
+    },
+    "to": {
+     "x": 30,
+     "y": 40
+    }
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "from": [
+     1,
+     2
+    ],
+    "to": [
+     3,
+     4
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "from": {
+     "x": 1
+    },
+    "to": "x"
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "from": null,
+    "to": null
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "hello"
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": "quote \" and \\ slash\nline"
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": 12
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "text": null
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "keys": "ctrl+c"
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "keys": [
+     "a"
+    ]
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "keys": null
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": 0,
+    "dy": 120
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 5,
+    "y": 6,
+    "dx": -3.3,
+    "dy": 0.04
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "x": 5,
+    "y": 6
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "dx": 1,
+    "dy": 2
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "ms": 250
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "ms": 0
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {
+    "ms": null
+   },
+   "result": []
+  },
+  {
+   "name": "something_else",
+   "args": {},
+   "result": []
+  }
+ ],
+ "svgs": [
+  {
+   "w": 1280,
+   "h": 800,
+   "name": "computer_click",
+   "args": {
+    "x": 100,
+    "y": 200
+   },
+   "result": "<svg class=\"cu-mark\" viewBox=\"0 0 1280 800\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><g stroke=\"#fff\" stroke-width=\"6\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"100\" cy=\"200\" r=\"14.1\"/><path d=\"M71.8 200H91.6M108.4 200H128.2M100 171.8V191.6M100 208.4V228.2\"/></g><g stroke=\"#e5231b\" stroke-width=\"3\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"100\" cy=\"200\" r=\"14.1\"/><path d=\"M71.8 200H91.6M108.4 200H128.2M100 171.8V191.6M100 208.4V228.2\"/></g></svg>"
+  },
+  {
+   "w": 1280,
+   "h": 800,
+   "name": "computer_click",
+   "args": {
+    "x": 100.55,
+    "y": 200.45,
+    "double": true
+   },
+   "result": "<svg class=\"cu-mark\" viewBox=\"0 0 1280 800\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><g stroke=\"#fff\" stroke-width=\"6\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"100.6\" cy=\"200.5\" r=\"14.1\"/><circle cx=\"100.6\" cy=\"200.5\" r=\"23.9\"/><path d=\"M72.4 200.5H92.1M109 200.5H128.7M100.6 172.3V192M100.6 208.9V228.6\"/></g><g stroke=\"#e5231b\" stroke-width=\"3\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"100.6\" cy=\"200.5\" r=\"14.1\"/><circle cx=\"100.6\" cy=\"200.5\" r=\"23.9\"/><path d=\"M72.4 200.5H92.1M109 200.5H128.7M100.6 172.3V192M100.6 208.9V228.6\"/></g></svg>"
+  },
+  {
+   "w": 1920,
+   "h": 1080,
+   "name": "computer_scroll",
+   "args": {
+    "x": 500,
+    "y": 500,
+    "dx": 0,
+    "dy": 300
+   },
+   "result": "<svg class=\"cu-mark\" viewBox=\"0 0 1920 1080\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><g stroke=\"#fff\" stroke-width=\"7\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"500\" cy=\"500\" r=\"21.1\"/><path d=\"M457.8 500H487.3M512.7 500H542.2M500 457.8V487.3M500 512.7V542.2\"/></g><path d=\"M500 500L500 615.2\" stroke=\"#fff\" stroke-width=\"7\" fill=\"none\" stroke-linecap=\"round\"/><g stroke=\"#e5231b\" stroke-width=\"4\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"500\" cy=\"500\" r=\"21.1\"/><path d=\"M457.8 500H487.3M512.7 500H542.2M500 457.8V487.3M500 512.7V542.2\"/></g><path d=\"M500 500L500 615.2\" stroke=\"#e5231b\" stroke-width=\"4\" fill=\"none\" stroke-linecap=\"round\"/></svg>"
+  },
+  {
+   "w": 1920,
+   "h": 1080,
+   "name": "computer_scroll",
+   "args": {
+    "x": 500,
+    "y": 500,
+    "dx": 0,
+    "dy": 0
+   },
+   "result": "<svg class=\"cu-mark\" viewBox=\"0 0 1920 1080\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><g stroke=\"#fff\" stroke-width=\"7\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"500\" cy=\"500\" r=\"21.1\"/><path d=\"M457.8 500H487.3M512.7 500H542.2M500 457.8V487.3M500 512.7V542.2\"/></g><path d=\"M500 500L500 500\" stroke=\"#fff\" stroke-width=\"7\" fill=\"none\" stroke-linecap=\"round\"/><g stroke=\"#e5231b\" stroke-width=\"4\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"500\" cy=\"500\" r=\"21.1\"/><path d=\"M457.8 500H487.3M512.7 500H542.2M500 457.8V487.3M500 512.7V542.2\"/></g><path d=\"M500 500L500 500\" stroke=\"#e5231b\" stroke-width=\"4\" fill=\"none\" stroke-linecap=\"round\"/></svg>"
+  },
+  {
+   "w": 800,
+   "h": 600,
+   "name": "computer_drag",
+   "args": {
+    "from": {
+     "x": 10,
+     "y": 20
+    },
+    "to": {
+     "x": 300,
+     "y": 400
+    }
+   },
+   "result": "<svg class=\"cu-mark\" viewBox=\"0 0 800 600\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><path d=\"M10 20L300 400\" stroke=\"#fff\" stroke-width=\"5\" fill=\"none\" stroke-linecap=\"round\" stroke-dasharray=\"8 5.6\"/><g stroke=\"#fff\" stroke-width=\"5\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"10\" cy=\"20\" r=\"8.8\"/><path d=\"M-7.6 20H4.7M15.3 20H27.6M10 2.4V14.7M10 25.3V37.6\"/></g><g stroke=\"#fff\" stroke-width=\"5\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"300\" cy=\"400\" r=\"8.8\"/><path d=\"M282.4 400H294.7M305.3 400H317.6M300 382.4V394.7M300 405.3V417.6\"/></g><path d=\"M10 20L300 400\" stroke=\"#e5231b\" stroke-width=\"2\" fill=\"none\" stroke-linecap=\"round\" stroke-dasharray=\"8 5.6\"/><g stroke=\"#e5231b\" stroke-width=\"2\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"10\" cy=\"20\" r=\"8.8\"/><path d=\"M-7.6 20H4.7M15.3 20H27.6M10 2.4V14.7M10 25.3V37.6\"/></g><g stroke=\"#e5231b\" stroke-width=\"2\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"300\" cy=\"400\" r=\"8.8\"/><path d=\"M282.4 400H294.7M305.3 400H317.6M300 382.4V394.7M300 405.3V417.6\"/></g></svg>"
+  },
+  {
+   "w": 400,
+   "h": 300,
+   "name": "computer_move",
+   "args": {
+    "x": 5,
+    "y": 5
+   },
+   "result": "<svg class=\"cu-mark\" viewBox=\"0 0 400 300\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><g stroke=\"#fff\" stroke-width=\"5\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"5\" cy=\"5\" r=\"7.7\"/><path d=\"M-10.4 5H0.4M9.6 5H20.4M5 -10.4V0.4M5 9.6V20.4\"/></g><g stroke=\"#e5231b\" stroke-width=\"2\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"5\" cy=\"5\" r=\"7.7\"/><path d=\"M-10.4 5H0.4M9.6 5H20.4M5 -10.4V0.4M5 9.6V20.4\"/></g></svg>"
+  },
+  {
+   "w": 3840,
+   "h": 2160,
+   "name": "computer_click",
+   "args": {
+    "x": 3000,
+    "y": 2000
+   },
+   "result": "<svg class=\"cu-mark\" viewBox=\"0 0 3840 2160\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><g stroke=\"#fff\" stroke-width=\"12\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"3000\" cy=\"2000\" r=\"22\"/><path d=\"M2956 2000H2986.8M3013.2 2000H3044M3000 1956V1986.8M3000 2013.2V2044\"/></g><g stroke=\"#e5231b\" stroke-width=\"9\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"3000\" cy=\"2000\" r=\"22\"/><path d=\"M2956 2000H2986.8M3013.2 2000H3044M3000 1956V1986.8M3000 2013.2V2044\"/></g></svg>"
+  },
+  {
+   "w": 100,
+   "h": 100,
+   "name": "computer_click",
+   "args": {
+    "x": 50,
+    "y": 50
+   },
+   "result": "<svg class=\"cu-mark\" viewBox=\"0 0 100 100\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><g stroke=\"#fff\" stroke-width=\"5\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"50\" cy=\"50\" r=\"7.7\"/><path d=\"M34.6 50H45.4M54.6 50H65.4M50 34.6V45.4M50 54.6V65.4\"/></g><g stroke=\"#e5231b\" stroke-width=\"2\" fill=\"none\" stroke-linecap=\"round\"><circle cx=\"50\" cy=\"50\" r=\"7.7\"/><path d=\"M34.6 50H45.4M54.6 50H65.4M50 34.6V45.4M50 54.6V65.4\"/></g></svg>"
+  },
+  {
+   "w": 0,
+   "h": 800,
+   "name": "computer_click",
+   "args": {
+    "x": 1,
+    "y": 1
+   },
+   "result": ""
+  },
+  {
+   "w": 800,
+   "h": 0,
+   "name": "computer_click",
+   "args": {
+    "x": 1,
+    "y": 1
+   },
+   "result": ""
+  },
+  {
+   "w": 800,
+   "h": 600,
+   "name": "computer_type",
+   "args": {
+    "text": "x"
+   },
+   "result": ""
+  }
+ ],
+ "images": [
+  {
+   "name": "none",
+   "messages": [],
+   "dropped": 0,
+   "afterKeep2": [],
+   "dropped1": 0,
+   "afterKeep1": [],
+   "without": [],
+   "wire": []
+  },
+  {
+   "name": "no pictures",
+   "messages": [
+    {
+     "role": "user",
+     "content": "hi"
+    },
+    {
+     "role": "assistant",
+     "content": "yo"
+    }
+   ],
+   "dropped": 0,
+   "afterKeep2": [
+    {
+     "role": "user",
+     "content": "hi"
+    },
+    {
+     "role": "assistant",
+     "content": "yo"
+    }
+   ],
+   "dropped1": 0,
+   "afterKeep1": [
+    {
+     "role": "user",
+     "content": "hi"
+    },
+    {
+     "role": "assistant",
+     "content": "yo"
+    }
+   ],
+   "without": [
+    {
+     "role": "user",
+     "content": "hi"
+    },
+    {
+     "role": "assistant",
+     "content": "yo"
+    }
+   ],
+   "wire": [
+    {
+     "role": "user",
+     "content": "hi"
+    },
+    {
+     "role": "assistant",
+     "content": "yo"
+    }
+   ]
+  },
+  {
+   "name": "one carrier",
+   "messages": [
+    {
+     "role": "user",
+     "content": "hi"
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    }
+   ],
+   "dropped": 0,
+   "afterKeep2": [
+    {
+     "role": "user",
+     "content": "hi"
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    }
+   ],
+   "dropped1": 0,
+   "afterKeep1": [
+    {
+     "role": "user",
+     "content": "hi"
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    }
+   ],
+   "without": [
+    {
+     "role": "user",
+     "content": "hi"
+    },
+    {
+     "role": "user",
+     "content": "shot 1\n[a screenshot was shown here and are not kept]"
+    }
+   ],
+   "wire": [
+    {
+     "role": "user",
+     "content": "hi"
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "shot 1"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,0"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "two carriers",
+   "messages": [
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": "x"
+    },
+    {
+     "role": "user",
+     "content": "shot 2",
+     "images": [
+      "data:image/png;base64,0",
+      "data:image/png;base64,1"
+     ]
+    }
+   ],
+   "dropped": 0,
+   "afterKeep2": [
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": "x"
+    },
+    {
+     "role": "user",
+     "content": "shot 2",
+     "images": [
+      "data:image/png;base64,0",
+      "data:image/png;base64,1"
+     ]
+    }
+   ],
+   "dropped1": 1,
+   "afterKeep1": [
+    {
+     "role": "user",
+     "content": "shot 1\n[The picture was removed from the conversation to save space. Take a new screenshot if you need to see the screen.]"
+    },
+    {
+     "role": "assistant",
+     "content": "x"
+    },
+    {
+     "role": "user",
+     "content": "shot 2",
+     "images": [
+      "data:image/png;base64,0",
+      "data:image/png;base64,1"
+     ]
+    }
+   ],
+   "without": [
+    {
+     "role": "user",
+     "content": "shot 1\n[a screenshot was shown here and are not kept]"
+    },
+    {
+     "role": "assistant",
+     "content": "x"
+    },
+    {
+     "role": "user",
+     "content": "shot 2\n[2 screenshots were shown here and are not kept]"
+    }
+   ],
+   "wire": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "shot 1"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,0"
+       }
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": "x"
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "shot 2"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,0"
+       }
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,1"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "three carriers",
+   "messages": [
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    },
+    {
+     "role": "user",
+     "content": "shot 2",
+     "images": [
+      "data:image/png;base64,0",
+      "data:image/png;base64,1"
+     ]
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    },
+    {
+     "role": "user",
+     "content": "end"
+    }
+   ],
+   "dropped": 1,
+   "afterKeep2": [
+    {
+     "role": "user",
+     "content": "shot 1\n[The picture was removed from the conversation to save space. Take a new screenshot if you need to see the screen.]"
+    },
+    {
+     "role": "user",
+     "content": "shot 2",
+     "images": [
+      "data:image/png;base64,0",
+      "data:image/png;base64,1"
+     ]
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    },
+    {
+     "role": "user",
+     "content": "end"
+    }
+   ],
+   "dropped1": 3,
+   "afterKeep1": [
+    {
+     "role": "user",
+     "content": "shot 1\n[The picture was removed from the conversation to save space. Take a new screenshot if you need to see the screen.]"
+    },
+    {
+     "role": "user",
+     "content": "shot 2\n[The picture was removed from the conversation to save space. Take a new screenshot if you need to see the screen.]"
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    },
+    {
+     "role": "user",
+     "content": "end"
+    }
+   ],
+   "without": [
+    {
+     "role": "user",
+     "content": "shot 1\n[a screenshot was shown here and are not kept]"
+    },
+    {
+     "role": "user",
+     "content": "shot 2\n[2 screenshots were shown here and are not kept]"
+    },
+    {
+     "role": "user",
+     "content": "shot 1\n[a screenshot was shown here and are not kept]"
+    },
+    {
+     "role": "user",
+     "content": "end"
+    }
+   ],
+   "wire": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "shot 1"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,0"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "shot 2"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,0"
+       }
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,1"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "shot 1"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,0"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": "end"
+    }
+   ]
+  },
+  {
+   "name": "four carriers keep two",
+   "messages": [
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    },
+    {
+     "role": "user",
+     "content": "shot 3",
+     "images": [
+      "data:image/png;base64,0",
+      "data:image/png;base64,1",
+      "data:image/png;base64,2"
+     ]
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    }
+   ],
+   "dropped": 2,
+   "afterKeep2": [
+    {
+     "role": "user",
+     "content": "shot 1\n[The picture was removed from the conversation to save space. Take a new screenshot if you need to see the screen.]"
+    },
+    {
+     "role": "user",
+     "content": "shot 1\n[The picture was removed from the conversation to save space. Take a new screenshot if you need to see the screen.]"
+    },
+    {
+     "role": "user",
+     "content": "shot 3",
+     "images": [
+      "data:image/png;base64,0",
+      "data:image/png;base64,1",
+      "data:image/png;base64,2"
+     ]
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    }
+   ],
+   "dropped1": 5,
+   "afterKeep1": [
+    {
+     "role": "user",
+     "content": "shot 1\n[The picture was removed from the conversation to save space. Take a new screenshot if you need to see the screen.]"
+    },
+    {
+     "role": "user",
+     "content": "shot 1\n[The picture was removed from the conversation to save space. Take a new screenshot if you need to see the screen.]"
+    },
+    {
+     "role": "user",
+     "content": "shot 3\n[The picture was removed from the conversation to save space. Take a new screenshot if you need to see the screen.]"
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    }
+   ],
+   "without": [
+    {
+     "role": "user",
+     "content": "shot 1\n[a screenshot was shown here and are not kept]"
+    },
+    {
+     "role": "user",
+     "content": "shot 1\n[a screenshot was shown here and are not kept]"
+    },
+    {
+     "role": "user",
+     "content": "shot 3\n[3 screenshots were shown here and are not kept]"
+    },
+    {
+     "role": "user",
+     "content": "shot 1\n[a screenshot was shown here and are not kept]"
+    }
+   ],
+   "wire": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "shot 1"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,0"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "shot 1"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,0"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "shot 3"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,0"
+       }
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,1"
+       }
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,2"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "shot 1"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,0"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "an empty images list is no carrier",
+   "messages": [
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    },
+    {
+     "role": "user",
+     "content": "e",
+     "images": []
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    }
+   ],
+   "dropped": 1,
+   "afterKeep2": [
+    {
+     "role": "user",
+     "content": "shot 1\n[The picture was removed from the conversation to save space. Take a new screenshot if you need to see the screen.]"
+    },
+    {
+     "role": "user",
+     "content": "e",
+     "images": []
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    }
+   ],
+   "dropped1": 2,
+   "afterKeep1": [
+    {
+     "role": "user",
+     "content": "shot 1\n[The picture was removed from the conversation to save space. Take a new screenshot if you need to see the screen.]"
+    },
+    {
+     "role": "user",
+     "content": "e",
+     "images": []
+    },
+    {
+     "role": "user",
+     "content": "shot 1\n[The picture was removed from the conversation to save space. Take a new screenshot if you need to see the screen.]"
+    },
+    {
+     "role": "user",
+     "content": "shot 1",
+     "images": [
+      "data:image/png;base64,0"
+     ]
+    }
+   ],
+   "without": [
+    {
+     "role": "user",
+     "content": "shot 1\n[a screenshot was shown here and are not kept]"
+    },
+    {
+     "role": "user",
+     "content": "e",
+     "images": []
+    },
+    {
+     "role": "user",
+     "content": "shot 1\n[a screenshot was shown here and are not kept]"
+    },
+    {
+     "role": "user",
+     "content": "shot 1\n[a screenshot was shown here and are not kept]"
+    }
+   ],
+   "wire": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "shot 1"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,0"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": "e",
+     "images": []
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "shot 1"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,0"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "shot 1"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/png;base64,0"
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "streaks": [
+  {
+   "times": [],
+   "now": 1000,
+   "result": {
+    "times": [
+     1000
+    ],
+    "fire": false
+   }
+  },
+  {
+   "times": [
+    900
+   ],
+   "now": 1000,
+   "result": {
+    "times": [
+     900,
+     1000
+    ],
+    "fire": false
+   }
+  },
+  {
+   "times": [
+    800,
+    900
+   ],
+   "now": 1000,
+   "result": {
+    "times": [],
+    "fire": true
+   }
+  },
+  {
+   "times": [
+    100,
+    900
+   ],
+   "now": 1000,
+   "result": {
+    "times": [],
+    "fire": true
+   }
+  },
+  {
+   "times": [
+    -500,
+    900
+   ],
+   "now": 1000,
+   "result": {
+    "times": [],
+    "fire": true
+   }
+  },
+  {
+   "times": [
+    -500,
+    -400,
+    900
+   ],
+   "now": 1000,
+   "result": {
+    "times": [],
+    "fire": true
+   }
+  },
+  {
+   "times": [
+    0,
+    800
+   ],
+   "now": 1500,
+   "result": {
+    "times": [],
+    "fire": true
+   }
+  },
+  {
+   "times": [
+    0,
+    800
+   ],
+   "now": 1501,
+   "result": {
+    "times": [
+     800,
+     1501
+    ],
+    "fire": false
+   }
+  },
+  {
+   "times": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "now": 5,
+   "result": {
+    "times": [],
+    "fire": true
+   }
+  }
+ ],
+ "streaks2": [
+  {
+   "times": [],
+   "now": 1000,
+   "windowMs": 100,
+   "needed": 2,
+   "result": {
+    "times": [
+     1000
+    ],
+    "fire": false
+   }
+  },
+  {
+   "times": [
+    900
+   ],
+   "now": 1000,
+   "windowMs": 100,
+   "needed": 2,
+   "result": {
+    "times": [],
+    "fire": true
+   }
+  },
+  {
+   "times": [
+    800,
+    900
+   ],
+   "now": 1000,
+   "windowMs": 100,
+   "needed": 2,
+   "result": {
+    "times": [],
+    "fire": true
+   }
+  },
+  {
+   "times": [
+    100,
+    900
+   ],
+   "now": 1000,
+   "windowMs": 100,
+   "needed": 2,
+   "result": {
+    "times": [],
+    "fire": true
+   }
+  },
+  {
+   "times": [
+    -500,
+    900
+   ],
+   "now": 1000,
+   "windowMs": 100,
+   "needed": 2,
+   "result": {
+    "times": [],
+    "fire": true
+   }
+  },
+  {
+   "times": [
+    -500,
+    -400,
+    900
+   ],
+   "now": 1000,
+   "windowMs": 100,
+   "needed": 2,
+   "result": {
+    "times": [],
+    "fire": true
+   }
+  },
+  {
+   "times": [
+    0,
+    800
+   ],
+   "now": 1500,
+   "windowMs": 100,
+   "needed": 2,
+   "result": {
+    "times": [
+     1500
+    ],
+    "fire": false
+   }
+  },
+  {
+   "times": [
+    0,
+    800
+   ],
+   "now": 1501,
+   "windowMs": 100,
+   "needed": 2,
+   "result": {
+    "times": [
+     1501
+    ],
+    "fire": false
+   }
+  },
+  {
+   "times": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "now": 5,
+   "windowMs": 100,
+   "needed": 2,
+   "result": {
+    "times": [],
+    "fire": true
+   }
+  }
+ ],
+ "panic": [
+  {
+   "e": {
+    "key": "Escape",
+    "ctrlKey": true,
+    "altKey": true,
+    "shiftKey": true
+   },
+   "result": true
+  },
+  {
+   "e": {
+    "key": "Escape",
+    "ctrlKey": true,
+    "altKey": true,
+    "shiftKey": false
+   },
+   "result": false
+  },
+  {
+   "e": {
+    "key": "Escape"
+   },
+   "result": false
+  },
+  {
+   "e": {
+    "key": "a",
+    "ctrlKey": true,
+    "altKey": true,
+    "shiftKey": true
+   },
+   "result": false
+  },
+  {
+   "e": null,
+   "result": false
+  },
+  {
+   "e": {},
+   "result": false
+  },
+  {
+   "e": {
+    "key": "Esc",
+    "ctrlKey": true,
+    "altKey": true,
+    "shiftKey": true
+   },
+   "result": false
+  }
+ ]
+}

@@ -463,6 +463,12 @@ pub enum CodeMsg {
     AgentsLoaded(Option<Vec<crate::subagents::CustomAgent>>),
     /// An event of one sub-agent's stream (the id is the `task` call that started it).
     KidStream(String, StreamEvent),
+    /// *Output* of a background job: opens or closes its box, reading the output when it opens.
+    JobOutput(String),
+    JobOutputDone(String, Result<String, String>),
+    /// *Stop* of a background job.
+    JobKill(String),
+    JobKillDone(String, Result<String, String>),
     /// What the server says of learning when a folder opens (`fllmLearnStatus`).
     LearnStatus(Option<crate::learn::Status>),
     /// The first-run sentence of the server, or nothing (`fllmLearnNotice`).
@@ -652,6 +658,8 @@ pub struct CodeState {
     session_id: String,
     /// A learning step ended: Settings > Personalization and Skills read their lists again.
     pub(crate) learn_refresh: bool,
+    /// The commands the agent started in the background (`code.jobs`).
+    pub jobs: Vec<crate::jobs::Job>,
 }
 
 /// Where one sub-agent's loop stands.
@@ -739,6 +747,7 @@ impl Default for CodeState {
             learn_last: None,
             session_id: String::new(),
             learn_refresh: false,
+            jobs: Vec::new(),
         }
     }
 }
@@ -1705,6 +1714,7 @@ impl CodeState {
                     self.steps = 0;
                     self.history.clear();
                     self.always_allow.clear();
+                    self.jobs.clear();
                 }
                 Step::Undo(steps) => {
                     // the page sends `{ steps }` above one, and one is the plain call
@@ -2386,6 +2396,29 @@ impl CodeState {
                 Task::none()
             }
             CodeMsg::AgentsLoaded(None) => Task::none(),
+            CodeMsg::JobOutput(id) => match crate::jobs::toggle_output(&mut self.jobs, &id) {
+                Some(true) => {
+                    let args = json!({ self.job_arg_name(): id });
+                    let base = env.base.to_string();
+                    Task::perform(run_tool(base, "bash_output".into(), args), move |r| Message::Code(CodeMsg::JobOutputDone(id.clone(), r)))
+                }
+                _ => Task::none(),
+            },
+            CodeMsg::JobOutputDone(id, answer) => {
+                crate::jobs::output_arrived(&mut self.jobs, &id, answer);
+                Task::none()
+            }
+            CodeMsg::JobKill(id) => {
+                let args = json!({ self.job_arg_name(): id });
+                let base = env.base.to_string();
+                Task::perform(run_tool(base, "bash_kill".into(), args), move |r| Message::Code(CodeMsg::JobKillDone(id.clone(), r)))
+            }
+            CodeMsg::JobKillDone(id, answer) => {
+                if let Some(toast) = crate::jobs::kill_answered(&mut self.jobs, &id, answer) {
+                    self.pending_toast = Some(toast);
+                }
+                Task::none()
+            }
             CodeMsg::LearnStatus(None) => Task::none(),
             CodeMsg::LearnStatus(Some(st)) => {
                 // the switch of the server is the truth (`fllm-rs learn off`, a folder's `.fllm/learn.json`)
@@ -2846,6 +2879,11 @@ impl CodeState {
                 if changed {
                     tasks.push(Task::perform(fetch_changes(env.base.to_string()), |r| Message::Code(CodeMsg::ChangesLoaded(r))));
                 }
+                if ok {
+                    // `trackJob(call.name, args, r.output)`: a command started in the background is kept
+                    let value: Value = serde_json::from_str(if args.trim().is_empty() { "{}" } else { &args }).unwrap_or(Value::Null);
+                    crate::jobs::track_job(&mut self.jobs, &name, &value, &reply);
+                }
                 if ok && name == "create_agent" {
                     // `await loadAgents()` of `createAgentFile`: the new agent is offered at once
                     tasks.push(self.load_agents(env));
@@ -3032,6 +3070,7 @@ impl CodeState {
                 self.steps = 0;
                 self.history.clear();
                 self.always_allow.clear();
+                self.jobs.clear();
                 Task::none()
             }
         }
@@ -3156,6 +3195,21 @@ impl CodeState {
         let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()) - 2.0;
         let body = crate::learn::after_run_body(&self.session_id, &workspace, failed, &skills, messages);
         Task::perform(crate::learn::after_run(env.base.to_string(), body), move |queued| Message::Code(CodeMsg::LearnQueued(queued, since)))
+    }
+
+    /// `jobArgName()`: what the server calls the id in `bash_output`.
+    pub fn job_arg_name(&self) -> String {
+        let props: Vec<String> = self
+            .tools_json
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|d| d.pointer("/function/name").and_then(Value::as_str) == Some("bash_output"))
+            .and_then(|d| d.pointer("/function/parameters/properties"))
+            .and_then(Value::as_object)
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
+        crate::jobs::job_arg_name(&props)
     }
 
     fn kid_index(&self, call_id: &str) -> Option<usize> {
@@ -3806,6 +3860,49 @@ pub fn page<'a>(
     row![main, side_settings(s, t)].align_y(Alignment::Start).width(Length::Fill).height(Length::Fill).into()
 }
 
+/// *Background jobs* of the side (`jobsHtml`): a dot, the command, *Output*, *Stop* while it runs and
+/// its state; the output under it while the box is open.
+fn jobs_block<'a>(s: &'a CodeState, t: Tokens) -> Element<'a, Message> {
+    let semibold = Font { weight: iced::font::Weight::Semibold, ..Font::default() };
+    let mut head = row![text("Background jobs").size(14).font(semibold)].spacing(8).align_y(Alignment::Center);
+    if !s.jobs.is_empty() {
+        head = head.push(text(s.jobs.len().to_string()).size(12).color(t.muted));
+    }
+    let mut block = column![head].spacing(8);
+    if s.jobs.is_empty() {
+        block = block.push(text(crate::jobs::EMPTY).size(12).color(t.muted));
+    }
+    for j in &s.jobs {
+        let running = j.status == "running";
+        let dot_colour = if running { t.ok } else { t.muted };
+        let dot = container(Space::new()).width(7).height(7).style(move |_| container::Style {
+            background: Some(iced::Background::Color(dot_colour)),
+            border: iced::border::rounded(999),
+            ..Default::default()
+        });
+        let mut actions = row![button(text("Output").size(12)).on_press(Message::Code(CodeMsg::JobOutput(j.id.clone()))).padding([2, 8]).style(theme::ghost_button(t))].spacing(4).align_y(Alignment::Center);
+        if running {
+            actions = actions.push(button(text("Stop").size(12)).on_press(Message::Code(CodeMsg::JobKill(j.id.clone()))).padding([2, 8]).style(theme::ghost_button(t)));
+        }
+        actions = actions.push(text(j.status.clone()).size(12).color(t.muted));
+        let mut entry = column![
+            row![dot, text(j.command.clone()).size(12).font(Font::MONOSPACE).wrapping(text::Wrapping::None)].spacing(6).align_y(Alignment::Center),
+            actions,
+        ]
+        .spacing(4);
+        if j.open {
+            entry = entry.push(
+                container(text(crate::jobs::shown_output(j).to_string()).size(11).font(Font::MONOSPACE))
+                    .padding([6, 8])
+                    .width(Length::Fill)
+                    .style(move |_| container::Style { border: iced::Border { width: 1.0, color: t.separator, radius: 6.0.into() }, ..Default::default() }),
+            );
+        }
+        block = block.push(entry);
+    }
+    block.into()
+}
+
 /// The side of the Code page — the blocks the rows build so far: *Specs* (row 80, the
 /// `Specs` block of `renderCodeSide` with `specsHtml`) and *Settings* (row 81, the two
 /// switches of `code.autoCheck` and `code.autoReview`), with their words of the page. The
@@ -3898,7 +3995,7 @@ fn side_settings<'a>(s: &'a CodeState, t: Tokens) -> Element<'a, Message> {
         .spacing(6),
     ]
     .spacing(10);
-    let side = column![specs, block].spacing(22);
+    let side = column![specs, jobs_block(s, t), block].spacing(22);
     container(scrollable(side))
         .width(Length::Fixed(272.0))
         .padding([18.0, 16.0])

@@ -426,7 +426,7 @@ fn item<'a>(t: Tokens, title: String, desc: String, buttons: Vec<Element<'a, Mes
 
 /// The three cards, one under the other.
 pub fn view<'a>(t: Tokens, pane: &'a LearnPane, pending: &'a str, last_run: &'a str, feed: &'a [LearnEntry]) -> Element<'a, Message> {
-    let enabled = pane.status.as_ref().map_or(true, |s| s.enabled != Some(false));
+    let enabled = pane.status.as_ref().is_none_or(|s| s.enabled != Some(false));
     let ask_first = pane.status.as_ref().is_some_and(|s| s.ask_first);
     let mut learn = column![line(t, LEARN_TEXT.into()), switch(t, "Learn from my sessions", enabled, LpMsg::Enabled), switch(t, "Ask me first (the agent only proposes; you decide below)", ask_first, LpMsg::AskFirst)].spacing(10);
     if let Some(note) = pane.status.as_ref().and_then(|s| s.project_override).map(|on| {

@@ -7,6 +7,11 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **Background jobs in the native app** (the *Background jobs* block of the Code page). A command the
+  agent starts with `background: true` shows up in the side with its state; *Output* opens and reads
+  it, *Stop* ends it, the answers of `bash_output` and `bash_kill` keep the list true, and a new
+  session forgets it. The id is read from the answer exactly as the page reads it (fixtures from the
+  page's own functions), nine window tests, fifty mutations.
 - **Learning from sessions in the native app** (`learn.js`, `learn.js`'s Code-page hooks and the
   three cards of Settings > Personalization). After a run the window hands the server what
   happened (the messages of the run, cut as the page cuts them, the skills it read, done or
