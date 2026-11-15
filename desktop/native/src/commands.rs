@@ -701,6 +701,123 @@ pub struct CmdState {
     pub usage: Option<String>,
 }
 
+// ---- the decision of one call ----------------------------------------------------------------
+
+/// What the answer to one tool call is after the rules, the mode and the remembered keys
+/// (`authorize` of `code.js`, with the plan check of `runToolCall` — line 1967 — in front).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Allow,
+    Ask,
+    Deny,
+}
+
+/// What the window makes of one call: the plan refusal, the block of a rule, a run (with the
+/// table's reason when it lifted a question), or the question itself.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Outcome {
+    Plan,
+    Blocked,
+    Running(Option<String>),
+    Ask,
+}
+
+/// What `Always` remembered for this call, the way `authorize` looks it up (code.js 1724-1728).
+/// The window never offers the computer tools, so that one key does not exist here.
+pub fn remembered(category: &str, tool_name: &str, subject: &str, always: &std::collections::HashSet<String>) -> bool {
+    match category {
+        "bash" => {
+            let key = if tool_name == "bash" { command_key(subject) } else { Some(tool_name.to_string()) };
+            key.is_some_and(|key| always.contains(&format!("bash:{key}")))
+        }
+        "network" => always.contains("network"),
+        "mcp" => always.contains(&format!("mcp:{subject}")),
+        _ => false,
+    }
+}
+
+/// `authorize` of the page over every subject a call has (a patch brings one per file): deny wins
+/// immediately, mode and rule and the remembered keys allow, and anything else is a question.
+/// The plan refusal runs before this on the page (`runToolCall`, line 1967) and stays in
+/// `code.rs`; a mode that *denies* a category comes only from plan mode, which never gets here.
+// the page calls this with a handful of pieces of the caller's state, and the window keeps
+// that shape so the fixtures of the page can drive it one to one
+#[allow(clippy::too_many_arguments)]
+pub fn authorize(
+    turbo: bool,
+    rules: &ParsedRules,
+    mode_allows: bool,
+    category: &str,
+    subjects: &[String],
+    agent: &str,
+    tool_name: &str,
+    always: &std::collections::HashSet<String>,
+) -> Decision {
+    if turbo {
+        // turbo: no question, no rule
+        return Decision::Allow;
+    }
+    let mut any_ask = false;
+    for subject in subjects {
+        if evaluate_rules(rules, category, subject, agent) == Some("deny") {
+            return Decision::Deny;
+        }
+        if mode_allows {
+            continue;
+        }
+        if evaluate_rules(rules, category, subject, agent) == Some("allow") {
+            continue;
+        }
+        if remembered(category, tool_name, subject, always) {
+            continue;
+        }
+        any_ask = true;
+    }
+    if any_ask { Decision::Ask } else { Decision::Allow }
+}
+
+/// One call from the plan check down to the table of `/autoapprove` — the chain of `runToolCall`
+/// (code.js 1955-2010) with everything the runner already knows passed in: whether plan mode is
+/// on and refuses this, and whether the mode allows it outright.
+#[allow(clippy::too_many_arguments)]
+pub fn call_decision(
+    turbo: bool,
+    rules: &Rules,
+    in_plan: bool,
+    mode_allows: bool,
+    permission: &str,
+    kind_mcp: Option<(&str, &str)>,
+    tool_name: &str,
+    args: &serde_json::Value,
+    auto_approve: bool,
+    agent: &str,
+    always: &std::collections::HashSet<String>,
+) -> Outcome {
+    let read_only = permission == "read";
+    if in_plan && !read_only {
+        // the window's tools are its own (no `source === 'client'`), as on the page
+        return Outcome::Plan;
+    }
+    let (category, subjects) = permission_info(permission, kind_mcp, tool_name, args);
+    let decision = authorize(turbo, &rules.parsed(), mode_allows, &category, &subjects, agent, tool_name, always);
+    match decision {
+        Decision::Deny => Outcome::Blocked,
+        Decision::Allow => Outcome::Running(None),
+        Decision::Ask => {
+            if !auto_approve {
+                return Outcome::Ask;
+            }
+            let subject = subjects.first().map(String::as_str).unwrap_or_default();
+            let verdict = crate::autoapprove::auto_verdict(&category, tool_name, subject);
+            if verdict.safe {
+                Outcome::Running(Some(verdict.reason))
+            } else {
+                Outcome::Ask
+            }
+        }
+    }
+}
+
 /// What a command asks the window to do (`runCodeCommand` of `code.js`, every case this window
 /// builds). The steps stand in the order the page performs them; `None` from
 /// [`dispatch`] means the words are no command here, so they go to the model.

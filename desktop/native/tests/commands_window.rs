@@ -5,7 +5,7 @@
 
 use fllm_app::api::{ModelInfo, StreamEvent};
 use fllm_app::app::{App, Message, View};
-use fllm_app::code::{CodeMsg, Permission, Tool, Workspace};
+use fllm_app::code::{CallState, CodeMsg, Permission, Tool, Workspace};
 use fllm_app::commands::CustomCommand;
 use fllm_app::runtime::{Confirm, Status};
 use fllm_app::store::Store;
@@ -72,6 +72,130 @@ fn notes(app: &App) -> Vec<String> {
 
 fn sim(app: &App) -> Simulator<'_, Message> {
     Simulator::with_size(settings(), iced::Size::new(1280.0, 9000.0), app.view())
+}
+
+/// What the state of one call is, as the window holds it.
+fn state(app: &App, id: &str) -> Option<CallState> {
+    app.code().items.iter().find_map(|i| match i {
+        fllm_app::code::Item::Call(c) if c.id == id => Some(c.state.clone()),
+        _ => None,
+    })
+}
+
+/// Press a labelled button of the current view and feed the window what it answers.
+fn click(app: &mut App, label: &str) {
+    let mut ui = sim(app);
+    ui.click(label).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+    for message in ui.into_messages().collect::<Vec<_>>() {
+        let _ = app.update(message);
+    }
+}
+
+/// A call of the model arrives through the stream, as the runner delivers it.
+fn tool_call(app: &mut App, index: usize, id: &str, name: &str, arguments: &str) {
+    code(
+        app,
+        CodeMsg::Stream(StreamEvent::ToolCall {
+            index,
+            id: Some(id.into()),
+            name: Some(name.into()),
+            arguments: arguments.into(),
+        }),
+    );
+}
+
+/// A rule of the page denies before anything else asks: the call is over before it starts, and
+/// the card carries the words the page's `finish('deny', …)` leaves there.
+#[test]
+fn a_rule_of_the_page_denies_before_anything_else() {
+    let (mut app, _dir) = app("light");
+    open_folder(&mut app);
+    say(&mut app, "/deny bash: rm -rf *");
+    say(&mut app, "clean the disk");
+    tool_call(&mut app, 0, "c1", "bash", r#"{"command":"rm -rf /home/marco"}"#);
+    // the calls of a round are built when the stream ends (`finish_round`), as the runner sends it
+    code(&mut app, CodeMsg::Stream(StreamEvent::Done));
+    let s = state(&app, "c1");
+    let blocked = matches!(
+        s,
+        Some(CallState::Done { ok: false, ref output }) if output == "Blocked by a permission rule."
+    );
+    assert!(blocked, "a rule of the page denies the call, not the window (state: {s:?})");
+}
+
+/// `Always` remembers the key for this session: the card runs like *Allow*, the same command
+/// does not ask again, and a new session starts asking — as `code.alwaysAllow` resets on the page.
+#[test]
+fn always_remembers_a_command_until_the_session_changes() {
+    let (mut app, _dir) = app("light");
+    open_folder(&mut app);
+    say(&mut app, "/autoapprove off");
+    say(&mut app, "run the tests");
+    tool_call(&mut app, 0, "c1", "bash", r#"{"command":"cargo test -p tokenizer"}"#);
+    code(&mut app, CodeMsg::Stream(StreamEvent::Done));
+    let s = state(&app, "c1");
+    assert!(matches!(s, Some(CallState::Pending)), "the question waits with the switch off (state: {s:?})");
+    click(&mut app, "Always (cargo)");
+    assert!(matches!(state(&app, "c1"), Some(CallState::Running)), "Always runs the call like Allow");
+    tool_call(&mut app, 1, "c2", "bash", r#"{"command":"cargo test -p tokenizer"}"#);
+    code(&mut app, CodeMsg::Stream(StreamEvent::Done));
+    assert!(matches!(state(&app, "c2"), Some(CallState::Running)), "the same command needs no question again");
+    // both calls answer; with them gone the runner would ask the model again, and that round
+    // ends here at once so the window is idle — only then may a new session start
+    code(&mut app, CodeMsg::ToolDone("c1".into(), Ok("ok".into())));
+    code(&mut app, CodeMsg::ToolDone("c2".into(), Ok("ok".into())));
+    code(&mut app, CodeMsg::Stream(StreamEvent::Done));
+    code(&mut app, CodeMsg::NewSession);
+    say(&mut app, "run the tests again");
+    tool_call(&mut app, 2, "c3", "bash", r#"{"command":"cargo test -p tokenizer"}"#);
+    code(&mut app, CodeMsg::Stream(StreamEvent::Done));
+    assert!(matches!(state(&app, "c3"), Some(CallState::Pending)), "a new session asks again");
+}
+
+/// Turbo answers every call without a rule or a question, as `authorize` starts.
+#[test]
+fn turbo_answers_even_a_risky_command_without_a_question() {
+    let (mut app, _dir) = app("light");
+    open_folder(&mut app);
+    say(&mut app, "/autoapprove off");
+    say(&mut app, "clean up");
+    let _ = app.update(Message::RuntimeSaved(Ok(fllm_app::runtime::Status {
+        turbo: true,
+        ..Default::default()
+    })));
+    tool_call(&mut app, 0, "c1", "bash", r#"{"command":"rm -rf /tmp/x"}"#);
+    code(&mut app, CodeMsg::Stream(StreamEvent::Done));
+    let s = state(&app, "c1");
+    assert!(matches!(s, Some(CallState::Running)), "with turbo on no command asks (state: {s:?})");
+}
+
+/// Plan mode reads only — and a memory tool is not reading, though the window's mode list lets
+/// memory pass in every other mode: the page's build agent allows it, its plan agent does not.
+#[test]
+fn plan_mode_refuses_a_memory_tool_the_way_the_page_does() {
+    let (mut app, _dir) = app("light");
+    open_folder(&mut app);
+    // the folder's tools without a memory one would answer "no tool called memory" instead of
+    // refusing it — the page's plan agent refuses the tools the page offers it
+    let tools: Vec<Tool> = [
+        ("read_file", Permission::Read),
+        ("bash", Permission::Command),
+        ("memory", Permission::Memory),
+    ]
+    .into_iter()
+    .map(|(n, p)| Tool::server(n, p))
+    .collect();
+    code(&mut app, CodeMsg::ToolsLoaded(Ok((tools, json!([])))));
+    say(&mut app, "remember the name");
+    code(&mut app, CodeMsg::SetMode(fllm_app::code::Mode::Plan));
+    tool_call(&mut app, 0, "c1", "memory", "{}");
+    code(&mut app, CodeMsg::Stream(StreamEvent::Done));
+    let s = state(&app, "c1");
+    let refused = matches!(
+        s,
+        Some(CallState::Done { ok: false, ref output }) if output == "Plan mode only allows reading. Write the plan instead."
+    );
+    assert!(refused, "a memory tool is not reading in plan mode (state: {s:?})");
 }
 
 /// `/stop` stops a running agent, an empty line does too, and everything else waits in the box

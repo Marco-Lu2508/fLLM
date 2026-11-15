@@ -7,6 +7,30 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **The slash commands of the Code page in the native app, and the decision of one call.** Every
+  command of `runCodeCommand` that the window has a place for is answered in the box — no
+  workspace, no model, the box cleared first as the page clears it: the forty-six built-ins of
+  `BUILTIN_COMMANDS` planned one to one against fixtures produced by running the page's own
+  dispatcher (sixty-four cases over the words, the arguments, the notices, the share of `/status`,
+  the save of `/clear`, the expansions of `/init` and of custom commands, the five personalities,
+  the insights of the store and the search of the conversation), custom commands from
+  `.fllm/commands` with `ARGUMENTS`, `/allow` and `/deny` and `/rules` keeping the parsed rules per
+  folder in the store, `/remember` and `/forget`, `/turbo` and `/sandbox` posting to the runtime
+  behind the confirm of `TURBO_CONFIRM` and the notice of its answer, `/personality` writing the
+  prompt and the store, `/help` listing the table. The decision of one call is the page's chain
+  end to end: the plan check of `runToolCall` (line 1967) where only a read passes, then
+  `authorize` over the subjects `permissionInfo` builds — a rule denies before anything else, the
+  mode, an allow-rule and a key *Always* remembered release it, anything else asks, and the
+  harmless table of row 59 has the last word with its reason under the card. Twenty-five
+  decisions recorded from the page's own `authorize`, `decidePermission`, `modeFor` and
+  `autoVerdict` pin the chain. *Always* is the middle button of the page's `permissionHtml` on
+  every waiting card (`Always (npm)` for a command): it runs the call like *Allow*, remembers
+  `bash:<command>` for a command, `bash:<tool>` otherwise, `network` and `mcp:<server>/<tool>`
+  for the session, and a new session asks again — never saved, as the page never saves
+  `code.alwaysAllow`. Plan mode refuses a memory tool the way the page's plan agent does (the
+  window's mode list lets memory pass in every other mode), and a tool with no permission of its
+  own is read, as `permissionInfo` reads it. Three unit tests over the fixtures (the plans, the
+  texts, the decisions), sixteen window tests, eighteen mutations.
 - **Automatic approval of harmless commands in the Code page of the native app.** The switch
   (`code.autoApprove` of `code.js`) with its whole harmless table — `HARMLESS`, `GIT_DANGER`,
   `DANGER_WORDS`, `commandParts`, `commandHead`, `classifyCommand`, `autoVerdict` — with the

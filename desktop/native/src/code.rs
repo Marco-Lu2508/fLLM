@@ -263,6 +263,9 @@ pub enum CodeMsg {
     NewSession,
     /// Leave plan mode and tell the agent to carry out the plan it wrote.
     ExecutePlan,
+    /// The *Always* button of a waiting call: what it remembers for this session, and the call
+    /// runs like an *Allow* (`answerPermission('always')` of `code.js`).
+    Always(String, String),
     /// The custom commands of the folder are known (`loadCustomCommands` of `code.js`).
     CustomLoaded(Vec<crate::commands::CustomCommand>),
     /// One custom command file (or the plugin's) was read: run what it holds.
@@ -339,6 +342,9 @@ pub struct CodeState {
     pub(crate) pending_turbo: Option<bool>,
     /// `/sandbox <mode>`: the mode for the window to post.
     pub(crate) pending_sandbox: Option<String>,
+    /// What `Always` remembered (`code.alwaysAllow` of the page): keys like `bash:npm`, `network`
+    /// or `mcp:server/tool`. The page clears them with the session, and never saves them.
+    pub always_allow: std::collections::HashSet<String>,
     pub running: bool,
     pub steps: usize,
     pub changes: Vec<Change>,
@@ -370,6 +376,7 @@ impl Default for CodeState {
             pending: Vec::new(),
             pending_turbo: None,
             pending_sandbox: None,
+            always_allow: std::collections::HashSet::new(),
             running: false,
             steps: 0,
             changes: Vec::new(),
@@ -1073,6 +1080,7 @@ impl CodeState {
                     self.items.clear();
                     self.todos.clear();
                     self.steps = 0;
+                    self.always_allow.clear();
                 }
                 Step::Undo(steps) => {
                     // the page sends `{ steps }` above one, and one is the plain call
@@ -1282,37 +1290,81 @@ impl CodeState {
         permission: Permission,
         name: &str,
         args: &str,
+        turbo: bool,
     ) -> (CallState, Option<String>) {
-        let mut auto_note: Option<String> = None;
-        let state = if !tool_known {
-            CallState::Done {
+        if !tool_known {
+            return (CallState::Done {
                 ok: false,
                 output: format!("There is no tool called {name}."),
-            }
-        } else if kind == ToolKind::Ask {
+            }, None);
+        }
+        if kind == ToolKind::Ask {
             // a question is for you in every mode
-            CallState::Pending
-        } else if self.mode.allows(permission) {
-            CallState::Running
-        } else if self.mode == Mode::Plan {
-            CallState::Done {
-                ok: false,
-                output: "Plan mode only allows reading. Write the plan instead.".into(),
-            }
-        } else if self.auto_approve {
-            let category = Self::category_of(permission, &kind);
-            let subject = Self::bash_subject(permission, &kind, name, args);
-            let verdict = crate::autoapprove::auto_verdict(category, name, &subject);
-            if verdict.safe {
-                auto_note = Some(verdict.reason);
-                CallState::Running
-            } else {
-                CallState::Pending
-            }
-        } else {
-            CallState::Pending
+            return (CallState::Pending, None);
+        }
+        // the chain of `runToolCall` (code.js 1955-2010): plan first, then the rules, the mode
+        // and the remembered keys of `authorize`, and the harmless table gets the last word on
+        // what is left as a question
+        let kind_mcp = match &kind {
+            ToolKind::Mcp { server, tool } => Some((server.as_str(), tool.as_str())),
+            _ => None,
         };
-        (state, auto_note)
+        let parsed: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+        let outcome = crate::commands::call_decision(
+            turbo,
+            &self.rules,
+            self.mode == Mode::Plan,
+            Self::mode_allows_for(&self.mode, Self::category_of(permission, &kind)),
+            Self::permission_word(permission),
+            kind_mcp,
+            name,
+            &parsed,
+            self.auto_approve,
+            if self.mode == Mode::Plan { "plan" } else { "build" },
+            &self.always_allow,
+        );
+        match outcome {
+            crate::commands::Outcome::Plan => (
+                CallState::Done {
+                    ok: false,
+                    output: "Plan mode only allows reading. Write the plan instead.".into(),
+                },
+                None,
+            ),
+            crate::commands::Outcome::Blocked => (
+                CallState::Done {
+                    ok: false,
+                    output: "Blocked by a permission rule.".into(),
+                },
+                None,
+            ),
+            crate::commands::Outcome::Running(note) => (CallState::Running, note),
+            crate::commands::Outcome::Ask => (CallState::Pending, None),
+        }
+    }
+
+    /// What a mode allows for a category, as the defaults of the page's build agent spell them:
+    /// read and memory always, edits from *Edit freely*, commands, network and mcp only from
+    /// *Everything* — the window's fourth mode, which the page reaches through its own switch.
+    pub fn mode_allows_for(mode: &Mode, category: &str) -> bool {
+        match category {
+            "read" | "memory" => true,
+            "edit" => matches!(mode, Mode::AutoEdit | Mode::Auto),
+            _ => *mode == Mode::Auto,
+        }
+    }
+
+    /// The word the page starts its categories from (`permissionInfo` begins at
+    /// `entry.permission`).
+    fn permission_word(permission: Permission) -> &'static str {
+        match permission {
+            Permission::Command => "command",
+            Permission::Edit => "edit",
+            Permission::Network => "network",
+            Permission::Memory => "memory",
+            Permission::Computer => "computer",
+            Permission::Read | Permission::Other => "read",
+        }
     }
 
     /// The category of a call for the harmless table (`permissionInfo` of the page): a tool of
@@ -1332,28 +1384,6 @@ impl CodeState {
         }
     }
 
-    /// What a shell command runs, as the page reads it (`permissionInfo`, the bash case): the
-    /// `command` of the arguments, or the name and the words of the arguments joined — the window
-    /// has no insertion order of the page for an object that is not a command, so its words come
-    /// in the order the JSON parser keeps them, which only a call without a `command` can show.
-    fn bash_subject(permission: Permission, kind: &ToolKind, name: &str, args: &str) -> String {
-        if permission != Permission::Command || matches!(kind, ToolKind::Mcp { .. }) {
-            return String::new();
-        }
-        let value: Value = serde_json::from_str(args).unwrap_or(Value::Null);
-        if let Some(command) = value.get("command").and_then(Value::as_str) {
-            return command.to_string();
-        }
-        let words: Vec<String> = match value.as_object() {
-            Some(object) => object.values().map(|v| match v.as_str() {
-                Some(text) => text.to_string(),
-                None => v.to_string(),
-            }).collect(),
-            None => Vec::new(),
-        };
-        format!("{name} {}", words.join(" ")).trim().to_string()
-    }
-
     /// The model answered: its calls become cards, and run at once or wait for approval.
     fn finish_round(&mut self, env: &Env) -> Task<Message> {
         let partial: Vec<Partial> = std::mem::take(&mut self.acc).into_iter().filter(|p| !p.name.is_empty()).collect();
@@ -1369,7 +1399,8 @@ impl CodeState {
             let tool = self.tool(&p.name).cloned();
             let permission = tool.as_ref().map_or(Permission::Other, |t| t.permission);
             let kind = tool.as_ref().map_or(ToolKind::Server, |t| t.kind.clone());
-            let (state, auto_note) = self.starting_state(tool.is_some(), kind.clone(), permission, &p.name, &p.args);
+            let (state, auto_note) =
+                self.starting_state(tool.is_some(), kind.clone(), permission, &p.name, &p.args, env.turbo);
             let run_now = state == CallState::Running;
             self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note }));
             if run_now {
@@ -1474,6 +1505,17 @@ impl CodeState {
             }
             CodeMsg::Send => {
                 let typed = self.editor.text().trim().to_string();
+                // a question of the agent is waiting: what you write is its answer (the page
+                // answers its questions from the card and queues everything else in the box;
+                // this window answers in the box, so the words go to the question and the
+                // commands of the table wait with them)
+                if let Some(id) = self.pending_ask().map(|c| c.id.clone()) {
+                    if typed.is_empty() {
+                        return Task::none();
+                    }
+                    self.editor = Content::new();
+                    return self.update(CodeMsg::Answer(id, typed), env);
+                }
                 // while the agent works: `/stop` stops it, and an empty line does too (the page's
                 // `submitCode`); everything else waits in the box, where the page queues it —
                 // this window has no queue
@@ -1486,20 +1528,11 @@ impl CodeState {
                     return self.update(CodeMsg::Stop, env);
                 }
                 // every command of the page is answered here — the switch of `/autoapprove`
-                // included, which is its case of `runCodeCommand` — before a waiting question can
-                // take the words as an answer, and without asking for a workspace or a model
+                // included, which is its case of `runCodeCommand` — and without asking for a
+                // workspace or a model
                 if let Some(steps) = crate::commands::dispatch(&typed, &self.cmd_state(env)) {
                     self.editor = Content::new();
                     return self.run_steps(steps, env);
-                }
-                // a question of the agent is waiting: what you write is the answer
-                if let Some(id) = self.pending_ask().map(|c| c.id.clone()) {
-                    let answer = self.editor.text().trim().to_string();
-                    if answer.is_empty() {
-                        return Task::none();
-                    }
-                    self.editor = Content::new();
-                    return self.update(CodeMsg::Answer(id, answer), env);
                 }
                 let prompt = self.editor.text().trim().to_string();
                 if prompt.is_empty() || self.workspace.is_none() || env.model.is_none() {
@@ -1548,6 +1581,20 @@ impl CodeState {
             CodeMsg::Approve(id) => {
                 if !self.call_mut(&id).is_some_and(|c| c.state == CallState::Pending) {
                     return Task::none();
+                }
+                let run = self.run(env.base, &id);
+                Task::batch([run, self.continue_if_done(env)])
+            }
+            CodeMsg::Always(id, key) => {
+                if !self.call_mut(&id).is_some_and(|c| c.state == CallState::Pending) {
+                    return Task::none();
+                }
+                if key == "edit" {
+                    // the page sets its perm straight (not through `setPerm`): the mode changes
+                    // and `lastBuildPerm` stays as it was
+                    self.mode = Mode::AutoEdit;
+                } else {
+                    self.always_allow.insert(key);
                 }
                 let run = self.run(env.base, &id);
                 Task::batch([run, self.continue_if_done(env)])
@@ -1691,6 +1738,7 @@ impl CodeState {
                 self.items.clear();
                 self.todos.clear();
                 self.steps = 0;
+                self.always_allow.clear();
                 Task::none()
             }
         }
@@ -1766,11 +1814,33 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
         body = body.push(options.push(button(text("Skip").size(13)).on_press(Message::Code(CodeMsg::Deny(c.id.clone()))).padding([5, 14]).style(theme::secondary_button(t))));
         body = body.push(text("Or type your answer below and press Enter.").size(12).color(t.muted));
     } else if c.state == CallState::Pending {
-        body = body.push(row![
-            button(text("Allow").size(13)).on_press(Message::Code(CodeMsg::Approve(c.id.clone()))).padding([5, 16]).style(theme::primary_button(t)),
-            button(text("Deny").size(13)).on_press(Message::Code(CodeMsg::Deny(c.id.clone()))).padding([5, 16]).style(theme::secondary_button(t)),
-        ]
-        .spacing(8));
+        let args_value: Value = serde_json::from_str(&c.args).unwrap_or(Value::Null);
+        let kind_mcp = match &c.kind {
+            ToolKind::Mcp { server, tool } => Some((server.as_str(), tool.as_str())),
+            _ => None,
+        };
+        // the middle button of the page's `permissionHtml`: it shows up only for what `Always`
+        // could remember, and for a command the part behind `bash:` stands in its label
+        let always = crate::commands::always_key(CodeState::permission_word(c.permission), kind_mcp, &c.name, &args_value);
+        let mut buttons = row![button(text("Allow").size(13))
+            .on_press(Message::Code(CodeMsg::Approve(c.id.clone())))
+            .padding([5, 16])
+            .style(theme::primary_button(t))];
+        if let Some(key) = always {
+            // the page slices five characters off after testing the prefix; `strip_prefix`
+            // reads the same
+            let label = match key.strip_prefix("bash:") {
+                Some(head) => format!("Always ({head})"),
+                None => "Always".to_string(),
+            };
+            buttons = buttons.push(button(text(label).size(13))
+                .on_press(Message::Code(CodeMsg::Always(c.id.clone(), key)))
+                .padding([5, 16])
+                .style(theme::ghost_button(t)));
+        }
+        body = body.push(buttons
+            .push(button(text("Deny").size(13)).on_press(Message::Code(CodeMsg::Deny(c.id.clone()))).padding([5, 16]).style(theme::secondary_button(t)))
+            .spacing(8));
     }
     container(body).padding(12).width(Length::Fill).style(theme::card(t, theme::R_MD, c.state == CallState::Pending)).into()
 }
@@ -1957,46 +2027,46 @@ mod tests {
         let server = ToolKind::Server;
 
         // an unknown tool fails whatever the switch says
-        let (start, note) = code.starting_state(false, server.clone(), Permission::Command, "nope", "{}");
+        let (start, note) = code.starting_state(false, server.clone(), Permission::Command, "nope", "{}", false);
         assert!(matches!(start, CallState::Done { ok: false, .. }));
         assert!(note.is_none());
 
         // a question waits in every case
         code.auto_approve = true;
         let (start, note) =
-            code.starting_state(true, ToolKind::Ask, Permission::Read, "ask_user", "{\"question\":\"?\"}");
+            code.starting_state(true, ToolKind::Ask, Permission::Read, "ask_user", "{\"question\":\"?\"}", false);
         assert!(matches!(start, CallState::Pending));
         assert!(note.is_none());
 
         // the switch off: a harmless command waits like every other one
         code.auto_approve = false;
-        let (start, note) = code.starting_state(true, server.clone(), Permission::Command, "bash", "{\"command\":\"ls\"}");
+        let (start, note) = code.starting_state(true, server.clone(), Permission::Command, "bash", "{\"command\":\"ls\"}", false);
         assert!(matches!(start, CallState::Pending));
         assert!(note.is_none());
 
         // the switch on: the table lets it through and its reason stands under the card
         code.auto_approve = true;
-        let (start, note) = code.starting_state(true, server.clone(), Permission::Command, "bash", "{\"command\":\"ls -la\"}");
+        let (start, note) = code.starting_state(true, server.clone(), Permission::Command, "bash", "{\"command\":\"ls -la\"}", false);
         assert!(matches!(start, CallState::Running));
         assert_eq!(note.as_deref(), Some("reads, builds or tests only"));
 
         // … and keeps a command that changes things waiting
-        let (start, note) = code.starting_state(true, server.clone(), Permission::Command, "bash", "{\"command\":\"git push\"}");
+        let (start, note) = code.starting_state(true, server.clone(), Permission::Command, "bash", "{\"command\":\"git push\"}", false);
         assert!(matches!(start, CallState::Pending));
         assert!(note.is_none());
 
         // an edit is never approved by the table, whatever it holds
-        let (start, _) = code.starting_state(true, server.clone(), Permission::Edit, "edit_file", "{\"path\":\"a\"}");
+        let (start, _) = code.starting_state(true, server.clone(), Permission::Edit, "edit_file", "{\"path\":\"a\"}", false);
         assert!(matches!(start, CallState::Pending));
 
         // plan mode refuses before the switch is asked
         let mut plan = state(Mode::Plan);
         plan.auto_approve = true;
-        let (start, _) = plan.starting_state(true, server.clone(), Permission::Edit, "edit_file", "{\"path\":\"a\"}");
+        let (start, _) = plan.starting_state(true, server.clone(), Permission::Edit, "edit_file", "{\"path\":\"a\"}", false);
         assert!(matches!(start, CallState::Done { ok: false, .. }));
 
         // a mode that allows something runs it without the table, and no words stand under it
-        let (start, note) = code.starting_state(true, server, Permission::Read, "read_file", "{\"path\":\"a\"}");
+        let (start, note) = code.starting_state(true, server, Permission::Read, "read_file", "{\"path\":\"a\"}", false);
         assert!(matches!(start, CallState::Running));
         assert!(note.is_none());
     }
@@ -2008,21 +2078,30 @@ mod tests {
         assert_eq!(CodeState::category_of(Permission::Command, &ToolKind::Mcp { server: "s".into(), tool: "t".into() }), "mcp");
         assert_eq!(CodeState::category_of(Permission::Edit, &ToolKind::Server), "edit");
         assert_eq!(CodeState::category_of(Permission::Other, &ToolKind::Server), "read");
+        let subject = |permission: &str, name: &str, args: serde_json::Value| {
+            crate::commands::permission_info(permission, None, name, &args).1
+        };
+        assert_eq!(subject("command", "bash", serde_json::json!({ "command": "ls -la" })), ["ls -la"]);
         assert_eq!(
-            CodeState::bash_subject(Permission::Command, &ToolKind::Server, "bash", "{\"command\":\"ls -la\"}"),
-            "ls -la"
-        );
-        assert_eq!(
-            CodeState::bash_subject(Permission::Command, &ToolKind::Server, "bash", "{\"pattern\":\"todo\",\"path\":\".\"}"),
-            "bash . todo",
+            subject("command", "bash", serde_json::json!({ "pattern": "todo", "path": "." })),
+            ["bash . todo"],
             "without a command the words of the arguments follow the name — in the order the JSON \
              parser of the window keeps them, where the page walks its own insertion order (the \
              difference shows only in this case, which a call with a `command` never reaches)"
         );
         assert_eq!(
-            CodeState::bash_subject(Permission::Edit, &ToolKind::Server, "edit_file", "{\"path\":\"a\"}"),
-            "",
-            "only a shell command has a subject"
+            subject("edit", "edit_file", serde_json::json!({ "path": "a" })),
+            ["a"],
+            "an edit is judged by its path, as permissionInfo reads it"
+        );
+        assert_eq!(
+            subject(
+                "edit",
+                "multi_edit",
+                serde_json::json!({ "patch": "--- a/x.rs\n+++ b/x.rs\n@@ -1 +1 @@\n-1\n+2\n" })
+            ),
+            ["x.rs"],
+            "and a patch brings every file it names"
         );
     }
 

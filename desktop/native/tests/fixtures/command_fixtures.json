@@ -3457,5 +3457,466 @@
    },
    "canned": null
   }
+ ],
+ "decisions": [
+  {
+   "name": "plan refuses an edit",
+   "entry": {
+    "name": "edit_file",
+    "permission": "edit",
+    "source": "server"
+   },
+   "args": {
+    "path": "a.rs"
+   },
+   "perm": "plan",
+   "result": {
+    "decision": "plan",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "plan lets a read run",
+   "entry": {
+    "name": "read_file",
+    "permission": "read",
+    "source": "server"
+   },
+   "args": {
+    "path": "a.rs"
+   },
+   "perm": "plan",
+   "result": {
+    "decision": "allow",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "turbo runs a risky command",
+   "entry": {
+    "name": "bash",
+    "permission": "command",
+    "source": "server"
+   },
+   "args": {
+    "command": "rm -rf /tmp/x"
+   },
+   "turbo": true,
+   "result": {
+    "decision": "allow",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "deny rule wins over the mode",
+   "entry": {
+    "name": "read_file",
+    "permission": "read",
+    "source": "server"
+   },
+   "args": {
+    "path": "/etc/hosts"
+   },
+   "rules": {
+    "deny": "read: /etc/*"
+   },
+   "result": {
+    "decision": "deny",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "an allow rule lifts a question",
+   "entry": {
+    "name": "bash",
+    "permission": "command",
+    "source": "server"
+   },
+   "args": {
+    "command": "npm test -- --watch"
+   },
+   "rules": {
+    "allow": "bash: npm test*"
+   },
+   "result": {
+    "decision": "allow",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "a risky program only when the rule names it",
+   "entry": {
+    "name": "bash",
+    "permission": "command",
+    "source": "server"
+   },
+   "args": {
+    "command": "git log -1"
+   },
+   "rules": {
+    "allow": "bash: git log*"
+   },
+   "result": {
+    "decision": "allow",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "a risky program without its name asks",
+   "entry": {
+    "name": "bash",
+    "permission": "command",
+    "source": "server"
+   },
+   "args": {
+    "command": "git log -1"
+   },
+   "rules": {
+    "allow": "bash: *"
+   },
+   "result": {
+    "decision": "allow",
+    "autoNote": "reads, builds or tests only"
+   },
+   "error": null
+  },
+  {
+   "name": "an allow rule never covers a compound command",
+   "entry": {
+    "name": "bash",
+    "permission": "command",
+    "source": "server"
+   },
+   "args": {
+    "command": "git status && rm -rf /"
+   },
+   "rules": {
+    "allow": "bash: git status"
+   },
+   "result": {
+    "decision": "ask",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "a compound command matches itself exactly",
+   "entry": {
+    "name": "bash",
+    "permission": "command",
+    "source": "server"
+   },
+   "args": {
+    "command": "ls && ls"
+   },
+   "rules": {
+    "allow": "bash: ls && ls"
+   },
+   "result": {
+    "decision": "allow",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "a path rule allows an edit",
+   "entry": {
+    "name": "edit_file",
+    "permission": "edit",
+    "source": "server"
+   },
+   "args": {
+    "path": "src/lib.rs"
+   },
+   "rules": {
+    "allow": "edit: src/*.rs"
+   },
+   "result": {
+    "decision": "allow",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "a deny rule blocks an edit",
+   "entry": {
+    "name": "write_file",
+    "permission": "edit",
+    "source": "server"
+   },
+   "args": {
+    "path": "/etc/passwd"
+   },
+   "rules": {
+    "deny": "edit: /etc/*"
+   },
+   "result": {
+    "decision": "deny",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "one path of a patch is enough to deny",
+   "entry": {
+    "name": "multi_edit",
+    "permission": "edit",
+    "source": "server"
+   },
+   "args": {
+    "patch": "--- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n-1\n+2\n--- a/y.txt\n+++ b/y.txt\n@@ -1 +1 @@\n-1\n+2\n"
+   },
+   "rules": {
+    "deny": "edit: y.txt"
+   },
+   "result": {
+    "decision": "deny",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "a remembered command runs without a question",
+   "entry": {
+    "name": "bash",
+    "permission": "command",
+    "source": "server"
+   },
+   "args": {
+    "command": "npm test --watch"
+   },
+   "always": [
+    "bash:npm"
+   ],
+   "result": {
+    "decision": "allow",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "a remembered external tool runs",
+   "entry": {
+    "name": "tool",
+    "permission": "read",
+    "source": "mcp",
+    "server": "srv",
+    "tool": "fetch"
+   },
+   "args": {},
+   "always": [
+    "mcp:srv/fetch"
+   ],
+   "result": {
+    "decision": "allow",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "a remembered network request runs",
+   "entry": {
+    "name": "web_fetch",
+    "permission": "network",
+    "source": "server"
+   },
+   "args": {
+    "url": "https://api.github.com/x"
+   },
+   "always": [
+    "network"
+   ],
+   "result": {
+    "decision": "allow",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "a network rule allows the url",
+   "entry": {
+    "name": "web_fetch",
+    "permission": "network",
+    "source": "server"
+   },
+   "args": {
+    "url": "https://api.github.com/x"
+   },
+   "rules": {
+    "allow": "network: https://api.github.com/*"
+   },
+   "result": {
+    "decision": "allow",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "a memory rule allows the scope",
+   "entry": {
+    "name": "memory",
+    "permission": "memory",
+    "source": "server"
+   },
+   "args": {
+    "scope": "workspace"
+   },
+   "rules": {
+    "allow": "memory: workspace"
+   },
+   "result": {
+    "decision": "allow",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "the star category reaches every call",
+   "entry": {
+    "name": "read_file",
+    "permission": "read",
+    "source": "server"
+   },
+   "args": {
+    "path": "anything"
+   },
+   "rules": {
+    "deny": "*: any*"
+   },
+   "result": {
+    "decision": "deny",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "a rule of another agent does not apply",
+   "entry": {
+    "name": "bash",
+    "permission": "command",
+    "source": "server"
+   },
+   "args": {
+    "command": "ls"
+   },
+   "rules": {
+    "allow": "[explore] bash: ls"
+   },
+   "result": {
+    "decision": "allow",
+    "autoNote": "reads, builds or tests only"
+   },
+   "error": null
+  },
+  {
+   "name": "a rule of the plan agent does not apply to build",
+   "entry": {
+    "name": "bash",
+    "permission": "command",
+    "source": "server"
+   },
+   "args": {
+    "command": "ls -la"
+   },
+   "rules": {
+    "allow": "[plan] bash: ls*"
+   },
+   "result": {
+    "decision": "allow",
+    "autoNote": "reads, builds or tests only"
+   },
+   "error": null
+  },
+  {
+   "name": "the table lifts a harmless command",
+   "entry": {
+    "name": "bash",
+    "permission": "command",
+    "source": "server"
+   },
+   "args": {
+    "command": "ls -la"
+   },
+   "result": {
+    "decision": "allow",
+    "autoNote": "reads, builds or tests only"
+   },
+   "error": null
+  },
+  {
+   "name": "the table leaves a risky one asking",
+   "entry": {
+    "name": "bash",
+    "permission": "command",
+    "source": "server"
+   },
+   "args": {
+    "command": "git push"
+   },
+   "result": {
+    "decision": "ask",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "without the switch the harmless command asks",
+   "entry": {
+    "name": "bash",
+    "permission": "command",
+    "source": "server"
+   },
+   "args": {
+    "command": "ls -la"
+   },
+   "autoApprove": false,
+   "result": {
+    "decision": "ask",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "the auto-edit switch allows edits for build",
+   "entry": {
+    "name": "edit_file",
+    "permission": "edit",
+    "source": "server"
+   },
+   "args": {
+    "path": "a.rs"
+   },
+   "perm": "edit",
+   "result": {
+    "decision": "allow",
+    "autoNote": null
+   },
+   "error": null
+  },
+  {
+   "name": "the command category is the one the rules judge",
+   "entry": {
+    "name": "shell",
+    "permission": "command",
+    "source": "server"
+   },
+   "args": {
+    "words": "ls -la"
+   },
+   "rules": {
+    "deny": "command: *ls*"
+   },
+   "result": {
+    "decision": "deny",
+    "autoNote": null
+   },
+   "error": null
+  }
  ]
 }

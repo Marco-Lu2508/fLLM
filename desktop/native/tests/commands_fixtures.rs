@@ -235,6 +235,70 @@ fn every_command_of_the_page_is_planned_the_same_way() {
     assert!(checked >= 40, "only {checked} commands were checked — the fixtures grew quiet");
 }
 
+/// One call from the plan check down to the table: what the page decides with its own
+/// `authorize`, `permissionInfo`, `modeFor` and `autoVerdict` (`__decision` of the fixture
+/// harness walks `runToolCall` 1955-2010 over those functions), and the window must decide the
+/// same for the same state.
+#[test]
+fn decisions_of_one_call_match_the_page() {
+    let raw = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/command_fixtures.json")).expect("the fixtures of the page");
+    let data: Value = serde_json::from_str(&raw).expect("fixtures as json");
+    let mut checked = 0;
+    for case in data["decisions"].as_array().expect("the decisions") {
+        let name = case["name"].as_str().expect("a name");
+        let entry = &case["entry"];
+        let args = case["args"].clone();
+        let permission = entry["permission"].as_str().unwrap_or("read");
+        let kind_mcp = (entry["source"].as_str() == Some("mcp"))
+            .then(|| (entry["server"].as_str().unwrap_or(""), entry["tool"].as_str().unwrap_or("")));
+        let mode = match case["perm"].as_str().unwrap_or("ask") {
+            "plan" => fllm_app::code::Mode::Plan,
+            "edit" => fllm_app::code::Mode::AutoEdit,
+            _ => fllm_app::code::Mode::Ask,
+        };
+        let rules = fllm_app::commands::Rules {
+            allow: case["rules"]["allow"].as_str().unwrap_or_default().to_string(),
+            deny: case["rules"]["deny"].as_str().unwrap_or_default().to_string(),
+        };
+        let always: std::collections::HashSet<String> = case["always"]
+            .as_array()
+            .map(|keys| keys.iter().filter_map(|k| k.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        // the category and the subject are the ones `permissionInfo` builds — production reads
+        // them the same way through `category_of`, which this unit test above pins
+        let tool_name = entry["name"].as_str().unwrap_or_default();
+        let (category, _) = fllm_app::commands::permission_info(permission, kind_mcp, tool_name, &args);
+        let outcome = fllm_app::commands::call_decision(
+            case["turbo"].as_bool().unwrap_or(false),
+            &rules,
+            mode == fllm_app::code::Mode::Plan,
+            fllm_app::code::CodeState::mode_allows_for(&mode, &category),
+            permission,
+            kind_mcp,
+            tool_name,
+            &args,
+            case["autoApprove"].as_bool().unwrap_or(true),
+            if mode == fllm_app::code::Mode::Plan { "plan" } else { "build" },
+            &always,
+        );
+        let (decision, auto_note) = match outcome {
+            fllm_app::commands::Outcome::Plan => ("plan", None),
+            fllm_app::commands::Outcome::Blocked => ("deny", None),
+            fllm_app::commands::Outcome::Running(note) => ("allow", note),
+            fllm_app::commands::Outcome::Ask => ("ask", None),
+        };
+        let want = &case["result"];
+        assert_eq!(Value::from(decision), want["decision"], "{name}: other decision than the page");
+        assert_eq!(
+            auto_note.as_deref().map(Value::from),
+            want["autoNote"].as_str().map(Value::from),
+            "{name}: other words under the card than the page"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 20, "only {checked} decisions were checked");
+}
+
 /// The parts the record cannot reach on its own: the help with custom commands, the counting of
 /// `/insights` with data, and the two text builders the cases above only exercise in one shape.
 #[test]
