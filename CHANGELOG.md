@@ -7,6 +7,12 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **Computer use in the native app** (`computer.js`). While the server has it on, the Code page shows
+  the banner with STOP, offers the screen and input tools to the model and asks before every action
+  that operates the machine (nothing lifts that but turbo). Cards draw the screenshot with the mark
+  of the action, the screenshots go to the model as pictures (the last two stay), and Esc three
+  times, Ctrl+Alt+Shift+Esc and STOP end the run and switch it off. The lines, questions, marks and
+  the SVG are compared with the page's own functions (1000+ fixture cases), nineteen window tests.
 - **Background jobs in the native app** (the *Background jobs* block of the Code page). A command the
   agent starts with `background: true` shows up in the side with its state; *Output* opens and reads
   it, *Stop* ends it, the answers of `bash_output` and `bash_kill` keep the list true, and a new

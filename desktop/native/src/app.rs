@@ -582,6 +582,8 @@ pub struct App {
     /// The command palette (`searchModal` of `shell.html`): open, what was typed, which row is
     /// active and the rows in the order they are shown.
     pub palette_open: bool,
+    /// A repeat of a held Esc is being handled: it does not count for the three presses of computer use.
+    esc_held: bool,
     pub palette_query: String,
     pub palette_active: i32,
     pub palette_rows: Vec<(palette::PaletteItem, PaletteAction)>,
@@ -670,6 +672,10 @@ pub enum Message {
     /// The Esc key: it ends a running answer or a research run (the title of the Studio's send
     /// button says "Stop the answer (Esc)").
     Esc,
+    /// Esc held down: it repeats, and the repeats do not count as presses of computer use.
+    EscHeld,
+    /// Ctrl+Alt+Shift+Esc: stops computer use (`isPanicChord`).
+    Panic,
     /// The reasoning of a message is shown or folded away (the `details` box of the Studio).
     ReasoningToggle(usize),
     /// The import of chats beside the select mode (the btnImportThreads of the Studio).
@@ -1594,6 +1600,7 @@ impl App {
             voice_names: Vec::new(),
             voice_can_notify: true,
             palette_open: false,
+            esc_held: false,
             palette_query: String::new(),
             palette_active: -1,
             palette_rows: Vec::new(),
@@ -2048,6 +2055,7 @@ impl App {
                     usage: Some(usage.as_str()),
                     session_file: &session_file,
                     ctx_max: self.model_info().max_context as usize,
+                    vision: self.model_info().vision,
                     hooks: code::HookGates {
                         submit: self.code.hook_events.iter().any(|e| e == "user_prompt_submit"),
                         stop: self.code.hook_events.iter().any(|e| e == "stop"),
@@ -3189,7 +3197,18 @@ impl App {
                 }
                 Task::none()
             }
+            Message::EscHeld => {
+                self.esc_held = true;
+                let task = self.update(Message::Esc);
+                self.esc_held = false;
+                task
+            }
+            Message::Panic => self.update(Message::Code(code::CodeMsg::ComputerStop("You pressed Ctrl+Alt+Shift+Esc.".into()))),
             Message::Esc => {
+                // Esc three times stops computer use, wherever the window is (the capture listener of computer.js)
+                if self.page == View::Code && !self.esc_held && self.code.computer_esc(now_ms()) {
+                    return self.update(Message::Code(code::CodeMsg::ComputerStop("You pressed Esc three times.".into())));
+                }
                 // closeOverlays of boot.js: the windows go before anything else happens
                 if self.palette_open {
                     self.palette_open = false;
@@ -7355,6 +7374,18 @@ impl App {
         // running answer (the title of the Studio's send button promises it)
         let dropped = iced::event::listen_with(|event, _status, _id| match event {
             iced::Event::Window(iced::window::Event::FileDropped(path)) => Some(Message::FilesDropped(vec![path])),
+            // Ctrl+Alt+Shift+Esc, the same chord the server watches for
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                modifiers,
+                ..
+            }) if modifiers.control() && modifiers.alt() && modifiers.shift() => Some(Message::Panic),
+            // a held key repeats: only the first press counts for the three presses
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                repeat: true,
+                ..
+            }) => Some(Message::EscHeld),
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                 key: keyboard::Key::Named(keyboard::key::Named::Escape),
                 ..
@@ -7672,6 +7703,7 @@ impl App {
             matches!(self.server, Server::Ready(_)),
             &self.store.prefs.recent_folders,
             self.store.colored_bubble,
+            self.runtime.turbo,
         );
         }
         let page: Element<'_, Message> = if self.page == View::Settings {
@@ -11647,4 +11679,9 @@ mod tests {
         assert_eq!(estimate_tokens(&[m(&"a".repeat(40))]), 14);
         assert_eq!(estimate_tokens(&[]), 0);
     }
+}
+
+/// The clock in milliseconds (`Date.now()`), for the presses of Esc.
+fn now_ms() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64)
 }

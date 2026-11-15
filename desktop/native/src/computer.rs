@@ -126,7 +126,7 @@ pub fn computer_subject(name: &str, args: &Value) -> String {
 }
 
 /// The first `n` UTF-16 units of a text (`String.prototype.slice(0, n)`).
-fn slice_units(text: &str, n: usize) -> String {
+pub fn slice_units(text: &str, n: usize) -> String {
     let mut used = 0;
     let mut out = String::new();
     for c in text.chars() {
@@ -358,4 +358,66 @@ pub fn escape_streak_default(times: &[f64], now: f64) -> (Vec<f64>, bool) {
 /// `isPanicChord(e)`: Ctrl+Alt+Shift+Esc, the same chord the server watches for.
 pub fn is_panic_chord(key: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
     key == "Escape" && ctrl && alt && shift
+}
+
+/// The computer tools that only look; every other one operates the machine (`COMPUTER_LOOK`).
+pub fn is_look(name: &str) -> bool {
+    matches!(name, "computer_screenshot" | "computer_cursor" | "computer_displays" | "computer_wait")
+}
+
+/// `toolLabel` of the page for the computer tools: the verb and what it is about, for the card's
+/// header and for the banner (*Operating your computer: Click 10, 20*).
+pub fn tool_label(name: &str, args: &Value) -> Option<(String, String)> {
+    let a = |k: &str| args.get(k);
+    let raw = |k: &str| js_or_undefined(a(k));
+    let t = |s: &str| s.to_string();
+    Some(match name {
+        "computer_screenshot" => (
+            t("Screenshot"),
+            if truthy(a("region")) {
+                t("a part of the screen")
+            } else if a("display").is_some() {
+                format!("display {}", raw("display"))
+            } else {
+                t("the screen")
+            },
+        ),
+        "computer_click" => {
+            let button = match a("button") {
+                Some(b) if truthy(Some(b)) && b.as_str() != Some("left") => format!("{}-", js_string(b)),
+                _ => String::new(),
+            };
+            (if truthy(a("double")) { t("Double-click") } else { format!("{button}Click") }, format!("{}, {}", raw("x"), raw("y")))
+        }
+        "computer_move" => (t("Move the pointer"), format!("{}, {}", raw("x"), raw("y"))),
+        "computer_drag" => {
+            let end = |v: Option<&Value>, k: &str| match v.and_then(|p| p.get(k)).filter(|x| !x.is_null()) {
+                Some(x) => js_string(x),
+                None => "?".to_string(),
+            };
+            (t("Drag"), format!("{}, {} to {}, {}", end(a("from"), "x"), end(a("from"), "y"), end(a("to"), "x"), end(a("to"), "y")))
+        }
+        "computer_type" => (t("Type"), serde_json::to_string(&slice_units(&text_or_empty(a("text")), 60)).unwrap_or_default()),
+        "computer_key" => (t("Press keys"), text_or_empty(a("keys"))),
+        "computer_scroll" => {
+            let dx = if truthy(a("dx")) { format!("{} right ", raw("dx")) } else { String::new() };
+            let dy = if truthy(a("dy")) { format!("{} down ", raw("dy")) } else { String::new() };
+            (t("Scroll"), format!("{dx}{dy}at {}, {}", raw("x"), raw("y")))
+        }
+        "computer_wait" => (
+            t("Wait"),
+            format!("{} ms", match a("ms") {
+                None | Some(Value::Null) => "1000".to_string(),
+                Some(v) => js_string(v),
+            }),
+        ),
+        "computer_cursor" => (t("Pointer position"), String::new()),
+        "computer_displays" => (t("List displays"), String::new()),
+        _ => return None,
+    })
+}
+
+/// A member in a template literal: `undefined` for a missing one.
+fn js_or_undefined(v: Option<&Value>) -> String {
+    v.map_or_else(|| "undefined".to_string(), js_string)
 }

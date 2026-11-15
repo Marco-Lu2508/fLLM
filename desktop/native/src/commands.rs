@@ -285,7 +285,10 @@ pub fn permission_info(permission: &str, kind_mcp: Option<(&str, &str)>, name: &
         }
     };
     let mut subjects: Vec<String> = Vec::new();
-    let subject = if cat == "bash" {
+    let subject = if cat == "computer" {
+        // `computerSubject`: the one line the rules of `computer` match
+        crate::computer::computer_subject(name, args)
+    } else if cat == "bash" {
         match args.get("command").and_then(|v| v.as_str()) {
             Some(command) => command.to_string(),
             None => {
@@ -727,7 +730,6 @@ pub enum Outcome {
 }
 
 /// What `Always` remembered for this call, the way `authorize` looks it up (code.js 1724-1728).
-/// The window never offers the computer tools, so that one key does not exist here.
 pub fn remembered(category: &str, tool_name: &str, subject: &str, always: &std::collections::HashSet<String>) -> bool {
     match category {
         "bash" => {
@@ -736,6 +738,8 @@ pub fn remembered(category: &str, tool_name: &str, subject: &str, always: &std::
         }
         "network" => always.contains("network"),
         "mcp" => always.contains(&format!("mcp:{subject}")),
+        // only looking can be remembered, and only by the screenshot card
+        "computer" => crate::computer::is_look(tool_name) && always.contains("computer:look"),
         _ => false,
     }
 }
@@ -765,6 +769,12 @@ pub fn authorize(
     for subject in subjects {
         if evaluate_rules(rules, category, subject, agent) == Some("deny") {
             return Decision::Deny;
+        }
+        // operating the computer (click, type, key, scroll, drag, move) is asked every single time:
+        // neither a mode, nor an allow rule, nor "Always" lifts that (`decidePermission`)
+        if category == "computer" && !crate::computer::is_look(subject.split(' ').next().unwrap_or_default()) {
+            any_ask = true;
+            continue;
         }
         if mode_allows {
             continue;

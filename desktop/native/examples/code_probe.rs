@@ -13,7 +13,7 @@ async fn main() {
     let task = args.next().unwrap_or_else(|| "List the files in the folder.".into());
     let w = code::open_workspace(base.clone(), folder).await.expect("workspace");
     println!("workspace: {w:?}");
-    let (tools, for_model) = code::fetch_tools(base.clone()).await.expect("tools");
+    let (tools, for_model) = code::fetch_tools(base.clone(), false).await.expect("tools");
     println!("{} tools; first: {:?}", tools.len(), tools.first());
     println!("tools: {} in the window, kinds: {:?}", tools.len(), tools.iter().filter(|t| t.kind != code::ToolKind::Server).map(|t| t.name.as_str()).collect::<Vec<_>>());
     let ctx = code::fetch_context(base.clone()).await.expect("context");

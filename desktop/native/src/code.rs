@@ -169,6 +169,8 @@ pub struct Call {
     pub sent: Option<String>,
     /// A `task` card: the conversation of its sub-agent as the card draws it (`item.children`).
     pub kid: Option<Box<KidView>>,
+    /// A computer tool's card: the pictures (`item.image`, `item.shot`).
+    pub cu: Option<Box<CuView>>,
 }
 
 /// What the card of a `task` call keeps of its sub-agent: its type, the words of the job, the
@@ -211,6 +213,63 @@ pub enum Item {
     StopHook(String),
 }
 
+/// A screenshot a computer tool answered with (`r.image` of the page): the picture, the data URL
+/// the model is sent, and its size in the pixels the coordinates refer to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shot {
+    pub url: String,
+    pub handle: iced::widget::image::Handle,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Shot {
+    /// `data:<mime>;base64,<data>` as the page builds it from the reply of the tool.
+    pub fn from_reply(image: &Value) -> Option<Shot> {
+        let data = image.get("data").and_then(Value::as_str).filter(|d| !d.is_empty())?;
+        let mime = image.get("mime").and_then(Value::as_str).filter(|m| !m.is_empty()).unwrap_or("image/png");
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).ok()?;
+        let num = |k: &str| image.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+        Some(Shot { url: format!("data:{mime};base64,{data}"), handle: iced::widget::image::Handle::from_bytes(bytes), width: num("width"), height: num("height") })
+    }
+}
+
+/// What a card of a computer tool shows besides its words (`item.image`, `item.shot`, `item.gone`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CuView {
+    /// What the tool answered with: the screen after the action.
+    pub image: Option<Shot>,
+    /// The screenshot the action refers to: the card draws the marks on it.
+    pub shot: Option<Shot>,
+    /// The picture was not kept when the session was saved.
+    pub gone: bool,
+}
+
+/// What the server says of computer use (`GET /api/studio/agent/computer`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CuStatus {
+    pub enabled: bool,
+    pub available: bool,
+    pub steps_used: u64,
+    pub max_steps: u64,
+}
+
+/// The window's side of computer use (`computer` and `code.lastShot` of the page).
+#[derive(Debug, Clone, Default)]
+pub struct Computer {
+    pub status: Option<CuStatus>,
+    /// What an action is doing right now, for the banner.
+    pub busy: String,
+    pub warned_vision: bool,
+    pub stopping: bool,
+    /// The times of the last presses of Esc (`computer.esc`).
+    pub esc: Vec<f64>,
+    /// Which chain of polls is the live one; an answer of an older one is ignored.
+    pub epoch: u64,
+    /// The last screenshot: the coordinates of the next action refer to it.
+    pub last_shot: Option<Shot>,
+}
+
 /// An item of a session as it is kept on disk.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -236,6 +295,9 @@ pub enum Saved {
         children: Vec<Saved>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<String>,
+        /// A computer card whose screenshot was not kept (`c.gone` of the page).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        gone: bool,
     },
     Note { text: String },
     /// Kept with the session like the messages of the page are, so the review rounds survive it.
@@ -274,13 +336,15 @@ fn saved_call(c: &Call) -> Saved {
         sent: c.sent.clone(),
         children,
         agent: c.kid.as_ref().map(|k| k.agent_type.clone()),
+        // screenshots are never written to the disk: they are large, and they show the screen
+        gone: c.cu.as_ref().is_some_and(|v| v.image.is_some() || v.shot.is_some() || v.gone),
     }
 }
 
 /// The call of a kept session (`kind` is the server's: the kinds of the window's own tools do
 /// not matter for a call that is over).
 fn restored_call(saved: Saved) -> Call {
-    let Saved::Call { id, name, args, permission, ok, output, sent, children, agent } = saved else {
+    let Saved::Call { id, name, args, permission, ok, output, sent, children, agent, gone } = saved else {
         unreachable!("restored_call is given calls")
     };
     let description = serde_json::from_str::<Value>(&args)
@@ -299,7 +363,7 @@ fn restored_call(saved: Saved) -> Call {
             })
             .collect(),
     }));
-    Call { id, name, args, permission: Permission::parse(&permission), kind: ToolKind::Server, state: CallState::Done { ok, output }, auto_note: None, check: None, sent, kid }
+    Call { id, name, args, permission: Permission::parse(&permission), kind: ToolKind::Server, state: CallState::Done { ok, output }, auto_note: None, check: None, sent, kid, cu: gone.then(|| Box::new(CuView { gone: true, ..Default::default() })) }
 }
 
 /// The most items kept per folder: the newest ones.
@@ -463,6 +527,13 @@ pub enum CodeMsg {
     AgentsLoaded(Option<Vec<crate::subagents::CustomAgent>>),
     /// An event of one sub-agent's stream (the id is the `task` call that started it).
     KidStream(String, StreamEvent),
+    /// What the server says of computer use (a poll of the chain `epoch`).
+    ComputerStatus(u64, Option<CuStatus>),
+    /// The STOP of the banner, Esc three times, Ctrl+Alt+Shift+Esc (`stopComputer(why)`).
+    ComputerStop(String),
+    ComputerStopped(String),
+    /// A tool answered, with the picture it may have taken (`r.image`).
+    ToolReply(String, Result<String, String>, Option<Shot>),
     /// *Output* of a background job: opens or closes its box, reading the output when it opens.
     JobOutput(String),
     JobOutputDone(String, Result<String, String>),
@@ -547,6 +618,8 @@ pub struct Env<'a> {
     /// Which hook events the window could ask about (empty in tests, and then no request is
     /// made at all — the page gets an empty answer from a server without the route).
     pub hooks: HookGates,
+    /// Whether the loaded model can look at pictures (a computer tool's screenshots go to it).
+    pub vision: bool,
 }
 
 /// What a command changed and the store has to keep (`saveCodeSettings` and the rules write of
@@ -660,6 +733,8 @@ pub struct CodeState {
     pub(crate) learn_refresh: bool,
     /// The commands the agent started in the background (`code.jobs`).
     pub jobs: Vec<crate::jobs::Job>,
+    /// Computer use: what the server says, the banner, the last screenshot.
+    pub computer: Computer,
 }
 
 /// Where one sub-agent's loop stands.
@@ -748,6 +823,7 @@ impl Default for CodeState {
             session_id: String::new(),
             learn_refresh: false,
             jobs: Vec::new(),
+            computer: Computer::default(),
         }
     }
 }
@@ -764,8 +840,20 @@ pub fn parse_workspace(v: &Value) -> Result<Workspace, String> {
 
 /// The tools of the agent: the OpenAI-format list for the model, and name and permission of each for the window.
 pub fn parse_tools(v: &Value) -> (Vec<Tool>, Value) {
-    // the screen and input tools are for computer use, which is not switched on here: the model is not offered them
-    let list: Vec<Value> = v.get("tools").and_then(Value::as_array).cloned().unwrap_or_default().into_iter().filter(|t| t.get("permission").and_then(Value::as_str) != Some("computer")).collect();
+    parse_tools_with(v, false)
+}
+
+/// The same with the screen and input tools when computer use is on: they only count when the
+/// status route says so (`computerOn()` in `loadRegistry`).
+pub fn parse_tools_with(v: &Value, computer_on: bool) -> (Vec<Tool>, Value) {
+    let list: Vec<Value> = v
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| computer_on || t.get("permission").and_then(Value::as_str) != Some("computer"))
+        .collect();
     let tools = list
         .iter()
         .filter_map(|t| Some(Tool::server(t.pointer("/function/name")?.as_str()?, Permission::parse(t.get("permission").and_then(Value::as_str).unwrap_or("")))))
@@ -1010,8 +1098,34 @@ pub async fn pick_folder(base: String) -> Result<Option<String>, String> {
     Ok(v.get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).map(str::to_string))
 }
 
-pub async fn fetch_tools(base: String) -> Result<(Vec<Tool>, Value), String> {
-    let (mut tools, for_model) = call(&base, reqwest::Method::GET, "/api/studio/agent/tools", None).await.map(|v| parse_tools(&v))?;
+/// `GET /api/studio/agent/computer`: `None` when the server does not answer or does not know it.
+pub async fn fetch_computer(base: String) -> Option<CuStatus> {
+    let v = call(&base, reqwest::Method::GET, "/api/studio/agent/computer", None).await.ok()?;
+    let flag = |k: &str| v.get(k).is_some_and(|x| crate::jobs::truthy(Some(x)));
+    let count = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+    Some(CuStatus { enabled: flag("enabled"), available: flag("available"), steps_used: count("steps_used"), max_steps: count("max_steps") })
+}
+
+/// `POST` of `computer/stop` and `computer/begin`: the answer does not matter.
+async fn post_computer(base: String, what: &'static str) {
+    let _ = call(&base, reqwest::Method::POST, &format!("/api/studio/agent/computer/{what}"), Some(json!({}))).await;
+}
+
+/// The next look at the status after `delay_ms` (`scheduleComputerPoll`), for the chain `epoch`.
+fn computer_poll(base: String, epoch: u64, delay_ms: u64) -> Task<Message> {
+    Task::perform(
+        async move {
+            if delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            fetch_computer(base).await
+        },
+        move |status| Message::Code(CodeMsg::ComputerStatus(epoch, status)),
+    )
+}
+
+pub async fn fetch_tools(base: String, computer_on: bool) -> Result<(Vec<Tool>, Value), String> {
+    let (mut tools, for_model) = call(&base, reqwest::Method::GET, "/api/studio/agent/tools", None).await.map(|v| parse_tools_with(&v, computer_on))?;
     let mut defs = for_model.as_array().cloned().unwrap_or_default();
     let (client, client_defs) = client_tools();
     tools.extend(client);
@@ -1094,6 +1208,34 @@ pub fn fire_answer(value: &Value) -> HookFire {
         blocked: value.get("blocked").and_then(Value::as_bool).unwrap_or(false),
         reason: value.get("reason").and_then(Value::as_str).unwrap_or_default().to_string(),
         context: value.get("context").and_then(Value::as_str).unwrap_or_default().to_string(),
+    }
+}
+
+/// `dropOldImages(ctx.messages, 2)`: only the last two screenshot messages keep their pictures; an
+/// older one says the picture was taken out.
+fn drop_old_screenshots(wire: &mut [WireMessage]) {
+    let carriers: Vec<usize> = wire.iter().enumerate().filter(|(_, m)| m.parts.is_some() && m.content.starts_with("[Screenshot from the computer tools")).map(|(i, _)| i).collect();
+    let mut msgs: Vec<crate::computer::Msg> = carriers
+        .iter()
+        .map(|&i| crate::computer::Msg { role: wire[i].role.clone(), content: wire[i].content.clone(), images: vec![String::new()] })
+        .collect();
+    crate::computer::drop_old_images(&mut msgs, 2);
+    for (&i, m) in carriers.iter().zip(&msgs) {
+        if m.images.is_empty() {
+            wire[i].content = m.content.clone();
+            wire[i].parts = None;
+        }
+    }
+}
+
+/// A tool's answer with the picture it may carry (`r.image`: the screen after a computer action).
+pub async fn run_tool_full(base: String, name: String, args: Value) -> (Result<String, String>, Option<Shot>) {
+    match call(&base, reqwest::Method::POST, "/api/studio/agent/tool", Some(json!({ "name": name, "args": args }))).await {
+        Ok(v) => {
+            let shot = (v.get("ok").and_then(Value::as_bool) == Some(true)).then(|| v.get("image").and_then(Shot::from_reply)).flatten();
+            (tool_result(&v), shot)
+        }
+        Err(e) => (Err(e), None),
     }
 }
 
@@ -1488,12 +1630,33 @@ impl CodeState {
                         t.tool_call_id = Some(c.id.clone());
                         wire.push(t);
                     }
+                    // `computerAttachImages`: the screenshots of this step go to the model as one message with pictures
+                    let shots: Vec<(&Shot, String)> = calls
+                        .iter()
+                        .filter(|c| c.permission == Permission::Computer)
+                        .filter_map(|c| {
+                            let shot = c.cu.as_ref()?.image.as_ref()?;
+                            let CallState::Done { ok: true, output } = &c.state else { return None };
+                            Some((shot, output.clone()))
+                        })
+                        .collect();
+                    if !shots.is_empty() {
+                        let content = shots
+                            .iter()
+                            .map(|(s, text)| format!("[Screenshot from the computer tools: {}x{} px. {}]", crate::loopguard::js_number(s.width), crate::loopguard::js_number(s.height), crate::computer::slice_units(text, 300)))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let mut parts = vec![json!({ "type": "text", "text": content })];
+                        parts.extend(shots.iter().map(|(s, _)| json!({ "type": "image_url", "image_url": { "url": s.url } })));
+                        wire.push(WireMessage::with_parts("user", content, parts));
+                    }
                     i += calls.len();
                 }
                 Item::Call(_) => {}
             }
             i += 1;
         }
+        drop_old_screenshots(&mut wire);
         wire
     }
 
@@ -1572,6 +1735,7 @@ impl CodeState {
         let id = format!("call_{}_u{}", self.steps, self.items.len());
         let call = Call {
             kid: None,
+            cu: None,
             id: id.clone(),
             name: "bash".into(),
             args: serde_json::json!({ "command": command }).to_string(),
@@ -1612,6 +1776,7 @@ impl CodeState {
             check: None,
             sent: None,
             kid: None,
+            cu: None,
         }));
         let base = env.base.to_string();
         Task::perform(
@@ -1936,6 +2101,7 @@ impl CodeState {
             }
         };
         let kind = c.kind.clone();
+        let permission = c.permission;
         let (base, name, id) = (base.to_string(), c.name.clone(), id.to_string());
         match kind {
             ToolKind::Todo { write } => {
@@ -1979,7 +2145,10 @@ impl CodeState {
                 if let Some(c) = self.call_mut(&id) {
                     c.state = CallState::Running;
                 }
-                Task::perform(run_tool(base, name, args), move |r| Message::Code(CodeMsg::ToolDone(id.clone(), r)))
+                if permission == Permission::Computer {
+                    self.computer_activity(&id, false);
+                }
+                Task::perform(run_tool_full(base, name, args), move |(r, shot)| Message::Code(CodeMsg::ToolReply(id.clone(), r, shot)))
             }
         }
     }
@@ -1995,14 +2164,29 @@ impl CodeState {
         self.change_mark = self.changes.iter().map(|c| c.id).max().unwrap_or(0);
         self.main_run = true;
         self.tail = TailPhase::Review;
-        if env.hooks.submit {
+        // `computerBegin()`: the step count and the remembered screenshot start again, and the
+        // tool list follows the setting (the window does not wait for it)
+        self.computer.last_shot = None;
+        self.computer.busy.clear();
+        let begin = self.computer_begin(env);
+        let started = if env.hooks.submit {
             Task::perform(
                 fire_hook(env.base.to_string(), "user_prompt_submit", "", json!({ "prompt": prompt.clone() })),
                 move |answer| Message::Code(CodeMsg::SubmitHookDone { prompt, display, answer }),
             )
         } else {
             self.run_prompt(&prompt, &display, env)
+        };
+        Task::batch([begin, started])
+    }
+
+    /// `computerBegin` of the page: when computer use is on, the server counts its actions from here.
+    fn computer_begin(&mut self, env: &Env) -> Task<Message> {
+        if !self.computer_on() {
+            return Task::none();
         }
+        let base = env.base.to_string();
+        Task::perform(post_computer(base, "begin"), |()| Message::Code(CodeMsg::HookFired))
     }
 
     /// The state one call starts in, and the words under its card when it ran without a
@@ -2150,11 +2334,23 @@ impl CodeState {
                     }
                 }
             }
+            // computer use: the card shows what the model saw last with a marker where the action goes
+            let mut cu = None;
+            if permission == Permission::Computer && !matches!(state, CallState::Done { .. }) {
+                match self.computer_prepare(&p.name) {
+                    Err(early) => state = CallState::Done { ok: false, output: early.into() },
+                    Ok(shot) => cu = shot.map(|shot| Box::new(CuView { shot: Some(shot), ..Default::default() })),
+                }
+            }
             let run_now = state == CallState::Running && kind != ToolKind::Task;
             let start_task = state == CallState::Running && kind == ToolKind::Task;
             let waiting = state == CallState::Pending;
             let tool_name = p.name.clone();
-            self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note, check: None, sent, kid: None }));
+            let activity = (permission == Permission::Computer && matches!(state, CallState::Pending | CallState::Running)).then_some(waiting);
+            self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note, check: None, sent, kid: None, cu }));
+            if let Some(waiting) = activity {
+                self.computer_activity(&id, waiting);
+            }
             if start_task {
                 tasks.push(self.start_task(&id, env));
             }
@@ -2383,6 +2579,9 @@ impl CodeState {
             }
             CodeMsg::Close => {
                 self.workspace = None;
+                self.computer.epoch += 1;
+                self.computer.last_shot = None;
+                self.computer.busy.clear();
                 self.context = Context::default();
                 self.todos.clear();
                 self.items.clear();
@@ -2396,6 +2595,66 @@ impl CodeState {
                 Task::none()
             }
             CodeMsg::AgentsLoaded(None) => Task::none(),
+            CodeMsg::ComputerStatus(epoch, status) => {
+                if epoch != self.computer.epoch || self.workspace.is_none() {
+                    return Task::none();
+                }
+                let was = self.computer_on();
+                self.computer.status = status;
+                let now = self.computer_on();
+                let mut tasks = Vec::new();
+                if was && !now && !self.computer.stopping {
+                    // switched off behind the window's back: the panic chord on the keyboard, or the setting in another window
+                    if self.running {
+                        tasks.push(self.stop_now(env));
+                    }
+                    self.items.push(Item::Note("Computer use was stopped and switched off. Switch it on again in Settings > Runtime if you want to continue.".into()));
+                }
+                if self.tools.iter().any(|t| t.name == "computer_screenshot") != now && !self.tools.is_empty() {
+                    tasks.push(Task::perform(fetch_tools(env.base.to_string(), now), |r| Message::Code(CodeMsg::ToolsLoaded(r))));
+                }
+                if !now {
+                    self.computer.busy.clear();
+                }
+                self.computer.stopping = false;
+                tasks.push(computer_poll(env.base.to_string(), epoch, if now { 1500 } else { 15000 }));
+                Task::batch(tasks)
+            }
+            CodeMsg::ComputerStop(why) => {
+                self.computer.stopping = true;
+                let base = env.base.to_string();
+                Task::perform(post_computer(base, "stop"), move |()| Message::Code(CodeMsg::ComputerStopped(why.clone())))
+            }
+            CodeMsg::ComputerStopped(why) => {
+                let mut tasks = Vec::new();
+                if self.running {
+                    tasks.push(self.stop_now(env));
+                }
+                self.computer.last_shot = None;
+                self.computer.busy.clear();
+                self.items.push(Item::Note(format!("{why} Computer use is switched off; the agent cannot see or touch the screen any more. Switch it on again in Settings > Runtime.")));
+                self.pending_toast = Some("Computer use stopped and switched off".into());
+                // the status is read again at once; `stopping` ends with that answer
+                tasks.push(computer_poll(env.base.to_string(), self.computer.epoch, 0));
+                Task::batch(tasks)
+            }
+            CodeMsg::ToolReply(id, result, shot) => {
+                if let Some(shot) = shot {
+                    let computer = self.call_mut(&id).is_some_and(|c| c.permission == Permission::Computer);
+                    if let Some(c) = self.call_mut(&id) {
+                        c.cu.get_or_insert_with(Default::default).image = Some(shot.clone());
+                    }
+                    if computer && result.is_ok() {
+                        self.computer.last_shot = Some(shot);
+                        if !self.computer.warned_vision && !env.vision {
+                            self.computer.warned_vision = true;
+                            self.items.push(Item::Note("The loaded model cannot look at pictures, so it will not see the screenshots. Choose a vision model (the model list marks them with \"vision\"), or use a provider model that can see images.".into()));
+                        }
+                    }
+                }
+                self.computer.busy.clear();
+                self.update(CodeMsg::ToolDone(id, result), env)
+            }
             CodeMsg::JobOutput(id) => match crate::jobs::toggle_output(&mut self.jobs, &id) {
                 Some(true) => {
                     let args = json!({ self.job_arg_name(): id });
@@ -2644,7 +2903,8 @@ impl CodeState {
                 }
                 let base = env.base.to_string();
                 Task::batch([
-                    Task::perform(fetch_tools(base.clone()), |r| Message::Code(CodeMsg::ToolsLoaded(r))),
+                    Task::perform(fetch_tools(base.clone(), self.computer_on()), |r| Message::Code(CodeMsg::ToolsLoaded(r))),
+                    self.computer_start_poll(&base),
                     Task::perform(fetch_changes(base.clone()), |r| Message::Code(CodeMsg::ChangesLoaded(r))),
                     Task::perform(fetch_context(base.clone()), |r| Message::Code(CodeMsg::ContextLoaded(r))),
                     // the custom commands of the folder come with it (`loadCustomCommands`
@@ -2854,6 +3114,7 @@ impl CodeState {
                 if let Some(c) = self.call_mut(&id).filter(|c| c.state == CallState::Pending) {
                     let output = if c.kind == ToolKind::Ask { "The user did not answer. Decide yourself or go on without it." } else { "The user declined this call. Do not repeat it; ask what to do instead or take another way." };
                     c.state = CallState::Done { ok: false, output: output.into() };
+                    self.computer.busy.clear();
                 }
                 self.continue_if_done(env)
             }
@@ -3197,6 +3458,47 @@ impl CodeState {
         Task::perform(crate::learn::after_run(env.base.to_string(), body), move |queued| Message::Code(CodeMsg::LearnQueued(queued, since)))
     }
 
+    /// `computerOn()`.
+    pub fn computer_on(&self) -> bool {
+        self.computer.status.as_ref().is_some_and(|s| s.enabled && s.available)
+    }
+
+    /// The chain of polls starts again (a folder was opened): the older one ends by itself.
+    fn computer_start_poll(&mut self, base: &str) -> Task<Message> {
+        self.computer.epoch += 1;
+        computer_poll(base.to_string(), self.computer.epoch, 0)
+    }
+
+    /// One press of Esc (`escapeStreak`): `true` when the third one came within the time.
+    pub fn computer_esc(&mut self, now_ms: f64) -> bool {
+        if !self.computer_on() {
+            return false;
+        }
+        let (times, fire) = crate::computer::escape_streak_default(&self.computer.esc, now_ms);
+        self.computer.esc = times;
+        fire
+    }
+
+    /// `computerActivity(item, waiting)`: what the banner says an action is doing.
+    fn computer_activity(&mut self, id: &str, waiting: bool) {
+        let Some(c) = self.call_mut(id) else { return };
+        let args: Value = serde_json::from_str(&c.args).unwrap_or(Value::Null);
+        let (verb, target) = crate::computer::tool_label(&c.name, &args).unwrap_or_else(|| (c.name.clone(), String::new()));
+        self.computer.busy = format!("{} {verb} {target}", if waiting { "Waiting for your answer:" } else { "Operating your computer:" });
+    }
+
+    /// `computerPrepare(item)` at the start of a computer card: the screenshot the action refers
+    /// to is remembered; an action before the first screenshot is an error.
+    fn computer_prepare(&self, name: &str) -> Result<Option<Shot>, &'static str> {
+        if crate::computer::is_look(name) {
+            return Ok(None);
+        }
+        match &self.computer.last_shot {
+            Some(shot) => Ok(Some(shot.clone())),
+            None => Err("Take a screenshot first (computer_screenshot): coordinates refer to the last screenshot you took."),
+        }
+    }
+
     /// `jobArgName()`: what the server calls the id in `bash_output`.
     pub fn job_arg_name(&self) -> String {
         let props: Vec<String> = self
@@ -3444,7 +3746,7 @@ impl CodeState {
             let run_now = state == CallState::Running;
             let waiting = state == CallState::Pending;
             let tool_name = p.name.clone();
-            let call = Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note, check: None, sent, kid: None };
+            let call = Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note, check: None, sent, kid: None, cu: None };
             if let Some(view) = self.call_mut(call_id).and_then(|c| c.kid.as_mut()) {
                 view.items.push(KidItem::Call(Box::new(call)));
             }
@@ -3550,7 +3852,13 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
         CallState::Done { ok: false, .. } => text("Failed").size(12).color(t.danger).into(),
     };
     // a task is labelled as the page labels it: `Sub-agent (explore)` and the words of the job
-    let (verb, target) = if c.name == "task" { crate::subagents::task_label(&args) } else { (c.name.clone(), summary(&c.name, &args)) };
+    let (verb, target) = if c.name == "task" {
+        crate::subagents::task_label(&args)
+    } else if let Some(label) = crate::computer::tool_label(&c.name, &args).filter(|_| c.permission == Permission::Computer) {
+        label
+    } else {
+        (c.name.clone(), summary(&c.name, &args))
+    };
     let progress = c.kid.as_ref().filter(|_| c.state == CallState::Running).map(|k| k.progress.clone()).unwrap_or_default();
     let header = row![
         text(verb).size(13).font(Font { weight: iced::font::Weight::Semibold, ..Font::MONOSPACE }),
@@ -3645,6 +3953,11 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
             .spacing(4),
         );
     }
+    if c.permission == Permission::Computer {
+        if let Some(picture) = computer_body(t, c, &args) {
+            body = body.push(picture);
+        }
+    }
     if c.state == CallState::Pending && c.kind == ToolKind::Ask {
         let question = args.get("question").and_then(Value::as_str).unwrap_or("The agent has a question.").to_string();
         body = body.push(text(question).size(14));
@@ -3662,6 +3975,9 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
         };
         // the middle button of the page's `permissionHtml`: it shows up only for what `Always`
         // could remember, and for a command the part behind `bash:` stands in its label
+        if c.permission == Permission::Computer {
+            body = body.push(text(crate::computer::computer_question(&c.name, &args_value)).size(14).font(Font { weight: iced::font::Weight::Bold, ..Font::default() }));
+        }
         let always = crate::commands::always_key(CodeState::permission_word(c.permission), kind_mcp, &c.name, &args_value);
         let mut buttons = row![button(text("Allow").size(13))
             .on_press(Message::Code(CodeMsg::Approve(c.id.clone())))
@@ -3729,6 +4045,7 @@ pub fn page<'a>(
     can_send: bool,
     recent: &'a [String],
     tint: bool,
+    turbo: bool,
 ) -> Element<'a, Message> {
     let Some(w) = &s.workspace else {
         let input = text_input("/path/to/your/project", &s.path_input)
@@ -3856,8 +4173,57 @@ pub fn page<'a>(
     let composer = container(composer).width(Length::Fill).center_x(Length::Fill).padding(Padding { top: 8.0, right: 24.0, bottom: 20.0, left: 24.0 });
     let bar = container(container(bar).max_width(820).width(Length::Fill)).center_x(Length::Fill).padding(Padding { top: 0.0, right: 24.0, bottom: 0.0, left: 24.0 });
 
-    let main = column![header, rule(t), timeline(s, t, theme, tint), bar, composer].width(Length::Fill).height(Length::Fill);
+    let mut main = column![].width(Length::Fill).height(Length::Fill);
+    if let Some(banner) = computer_banner(s, t, turbo) {
+        main = main.push(banner);
+    }
+    let main = main.push(header).push(rule(t)).push(timeline(s, t, theme, tint)).push(bar).push(composer);
     row![main, side_settings(s, t)].align_y(Alignment::Start).width(Length::Fill).height(Length::Fill).into()
+}
+
+/// The banner on top while computer use is on (`renderComputerBanner`): what the agent is doing
+/// or that it is allowed to, how many actions are used, and the STOP button.
+fn computer_banner<'a>(s: &'a CodeState, t: Tokens, turbo: bool) -> Option<Element<'a, Message>> {
+    if !s.computer_on() {
+        return None;
+    }
+    let bold = Font { weight: iced::font::Weight::Bold, ..Font::default() };
+    let st = s.computer.status.as_ref()?;
+    let line: Element<'a, Message> = if s.computer.busy.is_empty() {
+        let mut r = row![text("Computer use is ON.").size(13).font(bold), text(" The agent can see your screen and use your mouse and keyboard").size(13)].align_y(Alignment::Center);
+        r = if turbo { r.push(text(" WITHOUT ASKING (turbo)").size(13).font(bold)) } else { r.push(text(", and asks you before every action").size(13)) };
+        r.push(text(".").size(13)).into()
+    } else {
+        text(s.computer.busy.as_str()).size(13).font(bold).into()
+    };
+    let used = if st.steps_used > 0 { format!(" {} of {} actions used in this task.", st.steps_used, st.max_steps) } else { String::new() };
+    let keys = text(format!("Emergency stop: press Esc three times, or Ctrl+Alt+Shift+Esc anywhere.{used}")).size(11);
+    let colour = if turbo { t.danger } else { t.primary };
+    let dot = container(Space::new()).width(9).height(9).style(move |_| container::Style { background: Some(iced::Background::Color(colour)), border: iced::border::rounded(999), ..Default::default() });
+    let stop = button(text("STOP").size(13).font(bold)).on_press(Message::Code(CodeMsg::ComputerStop("You pressed STOP.".into()))).padding([5, 16]).style(theme::primary_button(t));
+    Some(
+        container(row![dot, column![line, keys].spacing(2).width(Length::Fill), stop].spacing(10).align_y(Alignment::Center))
+            .padding([8, 24])
+            .width(Length::Fill)
+            .style(move |_| container::Style { background: Some(iced::Background::Color(t.primary_soft)), border: iced::Border { width: 1.0, color: colour, radius: 0.0.into() }, ..Default::default() })
+            .into(),
+    )
+}
+
+/// What a computer card shows under its words (`computerBodyHtml`): the screen after the action,
+/// or the screen the action refers to with its marks drawn on it.
+fn computer_body<'a>(t: Tokens, c: &'a Call, args: &Value) -> Option<Element<'a, Message>> {
+    let cu = c.cu.as_ref()?;
+    let Some(shot) = cu.image.as_ref().or(cu.shot.as_ref()) else {
+        return cu.gone.then(|| text("(the screenshot is not kept after the session was saved)").size(12).color(t.muted).into());
+    };
+    let picture = iced::widget::image(shot.handle.clone()).width(Length::Fill);
+    let marks = if cu.image.is_some() { String::new() } else { crate::computer::marks_svg(shot.width, shot.height, &crate::computer::computer_marks(&c.name, args)) };
+    Some(if marks.is_empty() {
+        picture.into()
+    } else {
+        iced::widget::stack![picture, iced::widget::svg(iced::widget::svg::Handle::from_memory(marks.into_bytes())).width(Length::Fill)].into()
+    })
 }
 
 /// *Background jobs* of the side (`jobsHtml`): a dot, the command, *Output*, *Stop* while it runs and
@@ -4147,6 +4513,7 @@ mod tests {
             session_file: std::path::Path::new(""),
             ctx_max: 8192,
             hooks: HookGates::default(),
+            vision: true,
         }
     }
 
