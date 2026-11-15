@@ -1610,6 +1610,9 @@ impl App {
         app.personal_about = Content::with_text(&app.store.prefs.personal.about);
         app.sampling_text = settings::SamplingTexts::from(&app.store.prefs.sampling);
         app.max_tokens_text = if app.store.prefs.max_tokens > 0 { app.store.prefs.max_tokens.to_string() } else { String::new() };
+        // the switch of `/autoapprove` comes from the saved preference, as the page reads it
+        // from its localStorage when it builds the state
+        app.code.auto_approve = app.store.prefs.auto_approve;
         if let Some(first) = app.store.chats.first().map(|c| c.id) {
             app.open(first);
         }
@@ -2011,6 +2014,15 @@ impl App {
                 let env = code::Env { base: &base, model: model.as_deref(), params: self.chat_params(), extra: extra.as_deref() };
                 let was_running_before = was_running;
                 let task = self.code.update(msg, &env);
+                // the switch of `/autoapprove` goes with the store, as the page keeps its own
+                // copy when the command sets it — read after the update, which is where the
+                // command leaves it
+                if let Some(on) = self.code.pending_auto_approve.take() {
+                    if self.store.prefs.auto_approve != on {
+                        self.store.prefs.auto_approve = on;
+                        self.save();
+                    }
+                }
                 if !was_running_before && self.code.running {
                     // the run began (the `started` of watchRun in voice.js)
                     self.code_started = Some(std::time::Instant::now());

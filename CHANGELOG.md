@@ -7,6 +7,24 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **Automatic approval of harmless commands in the Code page of the native app.** The switch
+  (`code.autoApprove` of `code.js`) with its whole harmless table — `HARMLESS`, `GIT_DANGER`,
+  `DANGER_WORDS`, `commandParts`, `commandHead`, `classifyCommand`, `autoVerdict` — with the
+  fixtures produced by running that block of the page itself (seventy-one cases over four
+  groups): a command the table calls harmless runs on its own and its reason stands under the
+  card as *Approved on its own: …*, a risky one waits like every other call, a question waits in
+  every mode, plan mode refuses before the switch is asked, and an edit is never approved however
+  harmless it looks. The window keeps the switch in its store (on by default, the way
+  `localStorage['fllm.studio.autoapprove'] !== '0'` reads) and the Code page takes it over when
+  the window is built; the decision stands in one place — `starting_state` of `code.rs`, with the
+  chain of `submitStep` above it. `/autoapprove on|off` is answered in the box of the Code page,
+  with no workspace and no model asked for: the first word lower-cased as `runCodeCommand`
+  lower-cases it, only `on` and `off` changing anything, the box cleared before it runs as the
+  page's `submitCode` clears it first, and the notice of `codeNotice` standing in the list of the
+  page with both of its lines. In the box of the chat the command is a question like any other,
+  and a word that only starts like it falls through to the agent (the Studio answers *Unknown
+  command …*, which is the row *Slash commands*). Two unit tests over the fixtures, two where the
+  decision stands in `code.rs`, three window tests, eleven mutations.
 - **The seven cards of *Skills, scheduled tasks, skill library* in the native app.** *Skills* with
   the list and its rows, *Edit* with the read of the skill, *Delete* behind the question of
   `askDialog`, and *New from template* with the text of `skTemplate`; *Skill improvements* with

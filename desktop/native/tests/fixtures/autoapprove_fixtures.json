@@ -1,0 +1,398 @@
+{
+ "classify": [
+  [
+   "",
+   "risky",
+   "the command is empty"
+  ],
+  [
+   "ls\ncat x",
+   "risky",
+   "it has more than one line"
+  ],
+  [
+   "ls &",
+   "risky",
+   "it starts a background job"
+  ],
+  [
+   "(ls)",
+   "risky",
+   "it uses a group, a subshell or an expansion"
+  ],
+  [
+   "{ ls; }",
+   "risky",
+   "it uses a group, a subshell or an expansion"
+  ],
+  [
+   "echo ${HOME}",
+   "risky",
+   "it uses a group, a subshell or an expansion"
+  ],
+  [
+   "echo hi > notes.txt",
+   "risky",
+   "it writes into notes.txt through a redirect"
+  ],
+  [
+   "ls > /dev/null",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "cat <<EOF\nhi\nEOF",
+   "risky",
+   "it has more than one line"
+  ],
+  [
+   "echo hi <<EOF",
+   "risky",
+   "it uses a heredoc, which writes a file or feeds a program"
+  ],
+  [
+   "echo $(ls)",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "echo `ls -la`",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "echo $(rm x)",
+   "risky",
+   "inside the substitution: `rm` is not on the list of harmless programs"
+  ],
+  [
+   "foo bar",
+   "risky",
+   "`foo` is not on the list of harmless programs"
+  ],
+  [
+   "ls -la",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "ls",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "cat a b",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "grep ln notes.txt",
+   "risky",
+   "`grep` is given something that changes files or the system"
+  ],
+  [
+   "cargo test",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "cargo build --release",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "cargo publish",
+   "risky",
+   "`cargo publish` is not on the list of harmless subcommands"
+  ],
+  [
+   "cargo --version",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "npm run build",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "npm install",
+   "risky",
+   "`npm install` is not on the list of harmless subcommands"
+  ],
+  [
+   "git status",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "git diff -- src",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "git push origin main",
+   "risky",
+   "`git push` changes history or the working tree"
+  ],
+  [
+   "git -c core.pager=cat log",
+   "risky",
+   "`git` is given an option before its command"
+  ],
+  [
+   "git diff --output=patch.txt",
+   "risky",
+   "a `git` option writes a file or starts a program"
+  ],
+  [
+   "git diff -o patch.txt",
+   "risky",
+   "a `git` option writes a file or starts a program"
+  ],
+  [
+   "sed -n '3,9p' notes.txt",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "sed -i s/a/b/ file",
+   "risky",
+   "`sed` is only approved for `sed -n '3,9p' file`"
+  ],
+  [
+   "sed s/a/b/ file",
+   "risky",
+   "`sed` is only approved for `sed -n '3,9p' file`"
+  ],
+  [
+   "sort names.txt",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "sort -o out.txt names.txt",
+   "risky",
+   "`sort` would write a file or start a program"
+  ],
+  [
+   "rg foo src",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "rg --pre=cat foo src",
+   "risky",
+   "`rg` would start a program"
+  ],
+  [
+   "find . -name \"*.rs\"",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "find . -delete",
+   "risky",
+   "`find` would run a program or write or delete files"
+  ],
+  [
+   "awk '{print $1}' names.txt",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "awk 'BEGIN{system(\"ls\")}'",
+   "risky",
+   "`awk` would start a program or write a file"
+  ],
+  [
+   "python3 -m pytest",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "python3 -m unittest test_x",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "python3 --version",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "python3 main.py",
+   "risky",
+   "`python3` would run code that is no test"
+  ],
+  [
+   "node --check app.js",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "node app.js",
+   "risky",
+   "`node` would run code that is no syntax check"
+  ],
+  [
+   "ls && grep x file",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "ls | grep x",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "cargo test || echo failed",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "FOO=1 ls -la",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "/bin/ls -la",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "rm -rf /",
+   "risky",
+   "`rm` is not on the list of harmless programs"
+  ],
+  [
+   "git",
+   "risky",
+   "`git ` is not on the list of harmless subcommands"
+  ],
+  [
+   "git log -1",
+   "safe",
+   "reads, builds or tests only"
+  ]
+ ],
+ "auto": [
+  [
+   "mcp",
+   "fetch_page",
+   "https://example.com",
+   "risky",
+   "a mcp call is never approved on its own"
+  ],
+  [
+   "network",
+   "browser_open",
+   "https://example.com",
+   "risky",
+   "a network call is never approved on its own"
+  ],
+  [
+   "bash",
+   "edit_file",
+   "README.md",
+   "risky",
+   "`edit_file` is not a plain shell command"
+  ],
+  [
+   "bash",
+   "bash",
+   "ls -la",
+   "safe",
+   "reads, builds or tests only"
+  ],
+  [
+   "bash",
+   "bash",
+   "git push",
+   "risky",
+   "`git push` changes history or the working tree"
+  ]
+ ],
+ "parts": [
+  [
+   "ls",
+   [
+    "ls"
+   ]
+  ],
+  [
+   "ls && cat x",
+   [
+    "ls",
+    "cat x"
+   ]
+  ],
+  [
+   "ls; cat x",
+   [
+    "ls",
+    "cat x"
+   ]
+  ],
+  [
+   "cat a || cat b",
+   [
+    "cat a",
+    "cat b"
+   ]
+  ],
+  [
+   "ls | grep x",
+   [
+    "ls",
+    "grep x"
+   ]
+  ],
+  [
+   "  ls   &&   ",
+   [
+    "ls"
+   ]
+  ],
+  [
+   "",
+   []
+  ]
+ ],
+ "head": [
+  [
+   "ls -la",
+   [
+    "ls",
+    [
+     "-la"
+    ]
+   ]
+  ],
+  [
+   "/bin/ls -la",
+   [
+    "ls",
+    [
+     "-la"
+    ]
+   ]
+  ],
+  [
+   "FOO=1 BAR=2 ls -la",
+   [
+    "ls",
+    [
+     "-la"
+    ]
+   ]
+  ],
+  [
+   "",
+   [
+    "",
+    []
+   ]
+  ]
+ ]
+}

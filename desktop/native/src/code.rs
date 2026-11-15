@@ -154,6 +154,9 @@ pub struct Call {
     pub permission: Permission,
     pub kind: ToolKind,
     pub state: CallState,
+    /// The words under a card that ran without a question (`autoNote` of the page: *Approved on
+    /// its own: …*).
+    pub auto_note: Option<String>,
 }
 
 pub enum Item {
@@ -268,6 +271,11 @@ pub struct CodeState {
     pub mode: Mode,
     /// The mode to go back to when a plan is carried out.
     pub build_mode: Mode,
+    /// Whether harmless commands run without a question (`code.autoApprove` of the page).
+    pub auto_approve: bool,
+    /// The switch as the command last set it, for the window to write into its store — the page
+    /// writes its own copy at once, and this state has no store of its own.
+    pub(crate) pending_auto_approve: Option<bool>,
     pub running: bool,
     pub steps: usize,
     pub changes: Vec<Change>,
@@ -289,6 +297,8 @@ impl Default for CodeState {
             editor: Content::new(),
             mode: Mode::Ask,
             build_mode: Mode::Ask,
+            auto_approve: true,
+            pending_auto_approve: None,
             running: false,
             steps: 0,
             changes: Vec::new(),
@@ -632,7 +642,7 @@ impl CodeState {
                     md.push_str(&text);
                     Item::Assistant { text, md: Box::new(md) }
                 }
-                Saved::Call { id, name, args, permission, ok, output } => Item::Call(Call { id, name, args, permission: Permission::parse(&permission), kind: ToolKind::Server, state: CallState::Done { ok, output } }),
+                Saved::Call { id, name, args, permission, ok, output } => Item::Call(Call { id, name, args, permission: Permission::parse(&permission), kind: ToolKind::Server, state: CallState::Done { ok, output }, auto_note: None }),
                 Saved::Note { text } => Item::Note(text),
             })
             .collect();
@@ -797,6 +807,90 @@ impl CodeState {
         }
     }
 
+    /// The state one call starts in, and the words under its card when it ran without a
+    /// question. The chain of `finish_round` kept whole: an unknown tool fails, a question waits
+    /// in every mode, the mode decides what it allows, plan mode refuses the rest — and behind
+    /// that, the switch of `/autoapprove` asks the harmless table instead of the user
+    /// (`if (decision === 'ask' && code.autoApprove)` of the page).
+    fn starting_state(
+        &self,
+        tool_known: bool,
+        kind: ToolKind,
+        permission: Permission,
+        name: &str,
+        args: &str,
+    ) -> (CallState, Option<String>) {
+        let mut auto_note: Option<String> = None;
+        let state = if !tool_known {
+            CallState::Done {
+                ok: false,
+                output: format!("There is no tool called {name}."),
+            }
+        } else if kind == ToolKind::Ask {
+            // a question is for you in every mode
+            CallState::Pending
+        } else if self.mode.allows(permission) {
+            CallState::Running
+        } else if self.mode == Mode::Plan {
+            CallState::Done {
+                ok: false,
+                output: "Plan mode only allows reading. Write the plan instead.".into(),
+            }
+        } else if self.auto_approve {
+            let category = Self::category_of(permission, &kind);
+            let subject = Self::bash_subject(permission, &kind, name, args);
+            let verdict = crate::autoapprove::auto_verdict(category, name, &subject);
+            if verdict.safe {
+                auto_note = Some(verdict.reason);
+                CallState::Running
+            } else {
+                CallState::Pending
+            }
+        } else {
+            CallState::Pending
+        };
+        (state, auto_note)
+    }
+
+    /// The category of a call for the harmless table (`permissionInfo` of the page): a tool of
+    /// an MCP server is `mcp`, a shell tool is `bash`, and every other permission is named as the
+    /// page names it — a permission neither knows falls back to `read`.
+    fn category_of(permission: Permission, kind: &ToolKind) -> &'static str {
+        if matches!(kind, ToolKind::Mcp { .. }) {
+            return "mcp";
+        }
+        match permission {
+            Permission::Command => "bash",
+            Permission::Edit => "edit",
+            Permission::Network => "network",
+            Permission::Memory => "memory",
+            Permission::Computer => "computer",
+            Permission::Read | Permission::Other => "read",
+        }
+    }
+
+    /// What a shell command runs, as the page reads it (`permissionInfo`, the bash case): the
+    /// `command` of the arguments, or the name and the words of the arguments joined — the window
+    /// has no insertion order of the page for an object that is not a command, so its words come
+    /// in the order the JSON parser keeps them, which only a call without a `command` can show.
+    fn bash_subject(permission: Permission, kind: &ToolKind, name: &str, args: &str) -> String {
+        if permission != Permission::Command || matches!(kind, ToolKind::Mcp { .. }) {
+            return String::new();
+        }
+        let value: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+        if let Some(command) = value.get("command").and_then(Value::as_str) {
+            return command.to_string();
+        }
+        let words: Vec<String> = match value.as_object() {
+            Some(object) => object.values().map(|v| match v.as_str() {
+                Some(text) => text.to_string(),
+                None => v.to_string(),
+            }).collect(),
+            None => Vec::new(),
+        };
+        format!("{name} {}", words.join(" ")).trim().to_string()
+    }
+
     /// The model answered: its calls become cards, and run at once or wait for approval.
     fn finish_round(&mut self, env: &Env) -> Task<Message> {
         let partial: Vec<Partial> = std::mem::take(&mut self.acc).into_iter().filter(|p| !p.name.is_empty()).collect();
@@ -812,20 +906,9 @@ impl CodeState {
             let tool = self.tool(&p.name).cloned();
             let permission = tool.as_ref().map_or(Permission::Other, |t| t.permission);
             let kind = tool.as_ref().map_or(ToolKind::Server, |t| t.kind.clone());
-            let state = if tool.is_none() {
-                CallState::Done { ok: false, output: format!("There is no tool called {}.", p.name) }
-            } else if kind == ToolKind::Ask {
-                // a question is for you in every mode
-                CallState::Pending
-            } else if self.mode.allows(permission) {
-                CallState::Running
-            } else if self.mode == Mode::Plan {
-                CallState::Done { ok: false, output: "Plan mode only allows reading. Write the plan instead.".into() }
-            } else {
-                CallState::Pending
-            };
+            let (state, auto_note) = self.starting_state(tool.is_some(), kind.clone(), permission, &p.name, &p.args);
             let run_now = state == CallState::Running;
-            self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state }));
+            self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note }));
             if run_now {
                 ids.push(id);
             }
@@ -924,6 +1007,23 @@ impl CodeState {
                 Task::none()
             }
             CodeMsg::Send => {
+                // the command of the page (`case 'autoapprove'` of `code.js`): it is answered
+                // here, the box goes away before it runs as the page's `submitCode` clears it
+                // first, and neither a workspace nor a model is asked for
+                let typed = self.editor.text().trim().to_string();
+                if let Some(want) = crate::autoapprove::command(&typed) {
+                    self.editor = Content::new();
+                    let changed = want.is_some_and(|on| on != self.auto_approve);
+                    if let Some(on) = want {
+                        self.auto_approve = on;
+                    }
+                    let note = crate::autoapprove::notice(self.auto_approve);
+                    self.items.push(Item::Note(note));
+                    if changed {
+                        self.pending_auto_approve = Some(self.auto_approve);
+                    }
+                    return Task::none();
+                }
                 // a question of the agent is waiting: what you write is the answer
                 if let Some(id) = self.pending_ask().map(|c| c.id.clone()) {
                     let answer = self.editor.text().trim().to_string();
@@ -1117,6 +1217,14 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
     .spacing(10)
     .align_y(Alignment::Center);
     let mut body = column![header].spacing(8);
+    if let Some(reason) = &c.auto_note {
+        // `tool-auto` of the page: its own line over the body of the card
+        body = body.push(
+            container(text(format!("Approved on its own: {reason}")).size(11).color(t.muted))
+                .padding(iced::Padding { top: 2.0, right: 0.0, bottom: 0.0, left: 22.0 })
+                .width(Length::Fill),
+        );
+    }
 
     // a command is already in the header; an edit shows what it removes and adds, each line on a tinted band
     let lines = if c.name == "bash" { Vec::new() } else { preview(&c.name, &args) };
@@ -1339,6 +1447,83 @@ pub fn page<'a>(
 mod tests {
     use super::*;
 
+    /// The chain of `starting_state`: what waits, what runs, and the words under a card the
+    /// harmless table let through without a question — the switch of `/autoapprove` decides it.
+    #[test]
+    fn the_switch_decides_what_runs_without_a_question() {
+        let mut code = state(Mode::Ask);
+        let server = ToolKind::Server;
+
+        // an unknown tool fails whatever the switch says
+        let (start, note) = code.starting_state(false, server.clone(), Permission::Command, "nope", "{}");
+        assert!(matches!(start, CallState::Done { ok: false, .. }));
+        assert!(note.is_none());
+
+        // a question waits in every case
+        code.auto_approve = true;
+        let (start, note) =
+            code.starting_state(true, ToolKind::Ask, Permission::Read, "ask_user", "{\"question\":\"?\"}");
+        assert!(matches!(start, CallState::Pending));
+        assert!(note.is_none());
+
+        // the switch off: a harmless command waits like every other one
+        code.auto_approve = false;
+        let (start, note) = code.starting_state(true, server.clone(), Permission::Command, "bash", "{\"command\":\"ls\"}");
+        assert!(matches!(start, CallState::Pending));
+        assert!(note.is_none());
+
+        // the switch on: the table lets it through and its reason stands under the card
+        code.auto_approve = true;
+        let (start, note) = code.starting_state(true, server.clone(), Permission::Command, "bash", "{\"command\":\"ls -la\"}");
+        assert!(matches!(start, CallState::Running));
+        assert_eq!(note.as_deref(), Some("reads, builds or tests only"));
+
+        // … and keeps a command that changes things waiting
+        let (start, note) = code.starting_state(true, server.clone(), Permission::Command, "bash", "{\"command\":\"git push\"}");
+        assert!(matches!(start, CallState::Pending));
+        assert!(note.is_none());
+
+        // an edit is never approved by the table, whatever it holds
+        let (start, _) = code.starting_state(true, server.clone(), Permission::Edit, "edit_file", "{\"path\":\"a\"}");
+        assert!(matches!(start, CallState::Pending));
+
+        // plan mode refuses before the switch is asked
+        let mut plan = state(Mode::Plan);
+        plan.auto_approve = true;
+        let (start, _) = plan.starting_state(true, server.clone(), Permission::Edit, "edit_file", "{\"path\":\"a\"}");
+        assert!(matches!(start, CallState::Done { ok: false, .. }));
+
+        // a mode that allows something runs it without the table, and no words stand under it
+        let (start, note) = code.starting_state(true, server, Permission::Read, "read_file", "{\"path\":\"a\"}");
+        assert!(matches!(start, CallState::Running));
+        assert!(note.is_none());
+    }
+
+    /// The category of a call and the words of a shell command, as `permissionInfo` reads them.
+    #[test]
+    fn the_category_and_the_subject_are_the_ones_of_the_page() {
+        assert_eq!(CodeState::category_of(Permission::Command, &ToolKind::Server), "bash");
+        assert_eq!(CodeState::category_of(Permission::Command, &ToolKind::Mcp { server: "s".into(), tool: "t".into() }), "mcp");
+        assert_eq!(CodeState::category_of(Permission::Edit, &ToolKind::Server), "edit");
+        assert_eq!(CodeState::category_of(Permission::Other, &ToolKind::Server), "read");
+        assert_eq!(
+            CodeState::bash_subject(Permission::Command, &ToolKind::Server, "bash", "{\"command\":\"ls -la\"}"),
+            "ls -la"
+        );
+        assert_eq!(
+            CodeState::bash_subject(Permission::Command, &ToolKind::Server, "bash", "{\"pattern\":\"todo\",\"path\":\".\"}"),
+            "bash . todo",
+            "without a command the words of the arguments follow the name — in the order the JSON \
+             parser of the window keeps them, where the page walks its own insertion order (the \
+             difference shows only in this case, which a call with a `command` never reaches)"
+        );
+        assert_eq!(
+            CodeState::bash_subject(Permission::Edit, &ToolKind::Server, "edit_file", "{\"path\":\"a\"}"),
+            "",
+            "only a shell command has a subject"
+        );
+    }
+
     fn tools() -> Vec<Tool> {
         let mut list: Vec<Tool> = ["read_file:read", "grep:read", "edit_file:edit", "write_file:edit", "bash:command", "web_fetch:network"]
             .iter()
@@ -1490,6 +1675,9 @@ mod tests {
     #[test]
     fn allowing_runs_the_call_and_a_freer_mode_releases_waiting_calls() {
         let mut s = state(Mode::Ask);
+        // this test is about the modes, so the switch of `/autoapprove` stands off: with it on
+        // (its default) the harmless `ls` runs before any mode is touched
+        s.auto_approve = false;
         say(&mut s, "x");
         answer(&mut s, "", &[("w1", "write_file", r#"{"path":"n.txt","content":"hi"}"#), ("b1", "bash", r#"{"command":"ls"}"#)]);
         assert_eq!((call(&s, "w1").state.clone(), call(&s, "b1").state.clone()), (CallState::Pending, CallState::Pending));

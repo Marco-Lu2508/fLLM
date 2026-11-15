@@ -394,9 +394,18 @@ impl Default for VoicePrefs {
 }
 
 /// What the person chose for the answers. Everything is automatic until it is switched to manual: then the value is sent with every request.
+/// The switch starts on, the way the page reads an untouched localStorage (`!== '0'`).
+fn auto_approve_on() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Prefs {
     /// What of yours the model is told (about me, remembered facts).
+    /// Whether harmless commands of the Code page run without a question (the switch of
+    /// `/autoapprove`; the page keeps it in its localStorage under `fllm.studio.autoapprove`).
+    #[serde(default = "auto_approve_on")]
+    pub auto_approve: bool,
     #[serde(default)]
     pub personal: Personal,
     /// Whether a local copy of the personalization exists (the Studio checks its key: only a first
@@ -582,7 +591,7 @@ fn default_top_p() -> f32 {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { personal: Personal::default(), personal_loaded: false, tour_seen: false, shortcut_overrides: std::collections::HashMap::new(), voice: VoicePrefs::default(), saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
+        Prefs { auto_approve: true, personal: Personal::default(), personal_loaded: false, tour_seen: false, shortcut_overrides: std::collections::HashMap::new(), voice: VoicePrefs::default(), saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
     }
 }
 
