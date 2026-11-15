@@ -864,6 +864,10 @@ pub enum Step {
     /// `/batch <name> <task>`: a new worktree, the notice of it, and then the task as a run of
     /// its own (`agentRun(task, '/batch')` there).
     Batch { name: String, task: String },
+    /// `/learn [on|off|project …]`: the words as typed; `learn::plan_learn` reads them.
+    Learn(String),
+    /// `/good` (`up`) and `/bad` (`down`): a thumb for the skills of the last run.
+    Thumb(&'static str),
     /// `/spec` with no argument: reload the list and write the listing (`specCommand`'s
     /// empty branch).
     SpecList,
@@ -1165,6 +1169,9 @@ pub fn dispatch(text: &str, state: &CmdState) -> Option<Vec<Step>> {
                 }]
             }
         }
+        "learn" => vec![Step::Learn(arg_text.clone())],
+        "good" => vec![Step::Thumb("up")],
+        "bad" => vec![Step::Thumb("down")],
         "autoreview" => {
             // only `on` and `off` change anything, and the notice follows either way
             let want: Option<bool> = match arg_text.to_ascii_lowercase().as_str() {

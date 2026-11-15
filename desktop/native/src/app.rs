@@ -441,6 +441,10 @@ pub struct App {
     /// The change of *Skill improvements* waiting for the answer of its dialog (the page's
     /// `askDialog` before a rollback or an approval).
     pub ln_confirm: Option<crate::skills::LnConfirm>,
+    /// What the three learning cards of Personalization hold and ask.
+    pub lp: crate::learncards::LearnPane,
+    /// Every entry of the log (the Personalization card shows all, the Skills card only its own).
+    pub ln_all: Vec<crate::skills::LearnEntry>,
     /// What waits for a decision, the last step, the feed and the rows of *Skills with a history*.
     pub ln_pending: String,
     pub ln_last: String,
@@ -1132,6 +1136,8 @@ pub enum Message {
     LnUndoDone(Result<serde_json::Value, String>),
     LnConsolidate,
     LnConsolidated(Result<serde_json::Value, String>),
+    /// The three learning cards of Settings > Personalization.
+    Lp(crate::learncards::LpMsg),
     /// The task form: its eight fields, its two buttons and the preview of what the schedule means.
     ScName(String),
     ScPrompt(iced::widget::text_editor::Action),
@@ -1537,6 +1543,8 @@ impl App {
             sk_remove: None,
             sk_current: None,
             ln_confirm: None,
+            lp: crate::learncards::LearnPane::default(),
+            ln_all: Vec::new(),
             ln_pending: String::new(),
             ln_last: String::new(),
             ln_feed: Vec::new(),
@@ -1625,6 +1633,7 @@ impl App {
         // from its localStorage when it builds the state
         app.code.auto_approve = app.store.prefs.auto_approve;
         app.code.auto_review = app.store.prefs.auto_review;
+        app.code.learn = app.store.prefs.learn;
         app.code.auto_check = app.store.prefs.auto_check;
         app.code.personality = app.store.prefs.code_personality.clone();
         if let Some(first) = app.store.chats.first().map(|c| c.id) {
@@ -2063,6 +2072,12 @@ impl App {
                         self.save();
                     }
                 }
+                if let Some(on) = self.code.pending_learn.take() {
+                    if self.store.prefs.learn != on {
+                        self.store.prefs.learn = on;
+                        self.save();
+                    }
+                }
                 if let Some(on) = self.code.pending_auto_check.take() {
                     if self.store.prefs.auto_check != on {
                         self.store.prefs.auto_check = on;
@@ -2099,6 +2114,12 @@ impl App {
                 // `/turbo` and `/sandbox` are asked of the runtime here: the same post the
                 // switches of Settings > Runtime send, and the answer is noted on the Code page
                 let mut posts: Vec<Task<Message>> = Vec::new();
+                // a learning step ended or a thumb was noted: the lists of the Settings page are
+                // read again (`lnRefreshAll`)
+                if std::mem::take(&mut self.code.learn_refresh) {
+                    posts.push(self.ln_refresh());
+                    posts.push(self.sk_refresh());
+                }
                 if let Some(next) = self.code.pending_turbo.take() {
                     self.runtime_notice = Some(RuntimeNotice::Turbo);
                     if next {
@@ -4957,6 +4978,7 @@ impl App {
             }
             Message::LnLogLoaded(Ok(answer)) => {
                 // the card shows the changes that are about a skill (`kind.startsWith('skill')`)
+                self.ln_all = answer.log.clone();
                 self.ln_feed = answer
                     .log
                     .into_iter()
@@ -5049,6 +5071,20 @@ impl App {
                 Task::batch([self.ln_refresh(), self.sk_refresh()])
             }
             Message::LnImproveTick => self.ln_refresh(),
+            Message::Lp(m) => {
+                let root = self.code.workspace.as_ref().map(|w| w.root.clone()).unwrap_or_default();
+                let posted = matches!(m, crate::learncards::LpMsg::Posted(..));
+                let mut toast = None;
+                let task = self.lp.update(m, &self.base, &root, &mut toast);
+                if toast.is_some() {
+                    self.toast = toast;
+                }
+                if posted {
+                    // `lnPost` reads every list again, the skills and the feed among them
+                    return Task::batch([task, self.ln_refresh(), self.sk_refresh()]);
+                }
+                task
+            }
             Message::LnUndo(id) => {
                 Task::perform(models::learn_undo(self.base.clone(), id), Message::LnUndoDone)
             }
@@ -7519,6 +7555,12 @@ impl App {
                 Message::ScDeleteCancel,
             ));
         }
+        if let Some(dialog) = self.lp.dialog.as_ref() {
+            // the `askDialog` of `learn.js` before a profile or a memory entry goes
+            layers = layers
+                .push(backdrop(Message::Lp(crate::learncards::LpMsg::DialogCancel)))
+                .push(crate::learncards::dialog_window(t, dialog));
+        }
         if let Some(confirm) = self.ln_confirm.as_ref() {
             // the `askDialog` of `learn.js` before a rollback or an approval
             layers = layers
@@ -7643,6 +7685,7 @@ impl App {
                 &self.sampling_text,
                 engine_settings::view(t, &self.engine, !matches!(self.server, Server::Down(_))),
                 self.personal_view(),
+                crate::learncards::view(t, &self.lp, &self.ln_pending, &self.ln_last, &self.ln_all),
                 settings::VoiceView {
                     voices: &self.voice_names,
                     can_notify: self.voice_can_notify,
@@ -10442,7 +10485,9 @@ impl App {
     /// `lnRefreshFeed` of `learn.js`, which the page runs together).
     fn ln_refresh(&self) -> Task<Message> {
         let workspace = self.sk_workspace.trim().to_string();
+        let code_root = self.code.workspace.as_ref().map(|w| w.root.clone()).unwrap_or_default();
         Task::batch([
+            self.lp.refresh(&self.base, &code_root),
             Task::perform(models::learn_skills(self.base.clone(), workspace.clone()), Message::LnRevisionsLoaded),
             Task::perform(models::learn_overview(self.base.clone(), workspace), Message::LnStatusLoaded),
             Task::perform(models::learn_log(self.base.clone()), Message::LnLogLoaded),

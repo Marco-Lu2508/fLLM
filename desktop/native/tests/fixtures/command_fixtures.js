@@ -303,9 +303,25 @@ const CASES = [
   ['/worktree'],
   ['/batch'],
   ['/check src'],
-  ['/learn'],
-  ['/good'],
-  ['/bad'],
+  ['/good', '', { learn: {} }],
+  ['/bad', '', { learn: {} }],
+  ['/learn', '', { learn: { status: null } }],
+  ['/learn', '', { learn: { status: { enabled: true } } }],
+  ['/learn', '', { learn: { status: { enabled: true, ask_first: true } } }],
+  ['/learn', '', { learn: { status: { enabled: true, pending: 1 } } }],
+  ['/learn', '', { learn: { status: { enabled: false, pending: 3, ask_first: true } } }],
+  ['/learn', '', { learn: { status: { pending: 0 } } }],
+  ['/learn on', '', { learn: { status: { enabled: true } } }],
+  ['/learn ON', '', { learn: { status: { enabled: true, pending: 2 } } }],
+  ['/learn off', '', { learn: { status: { enabled: false } } }],
+  ['/learn off', 'code.learn = true;', { learn: { status: null } }],
+  ['/learn banana', '', { learn: { status: { enabled: true } } }],
+  ['/learn project on', '', { learn: { status: { enabled: true } } }],
+  ['/learn project OFF', '', { learn: { status: { enabled: false } } }],
+  ['/learn project default', '', { learn: { status: { enabled: true } } }],
+  ['/learn project', '', { learn: { status: { enabled: true } } }],
+  ['/learn project maybe', '', { learn: { status: { enabled: true } } }],
+  ['/learn project on', '', { learn: { status: null } }],
   ['/deploy something', '', { custom: [{ name: 'deploy', description: 'Ship it' }] }],
   ['/agent', 'code.running = true;'],
   ['/stop', 'code.running = true;'],
@@ -583,6 +599,15 @@ async function main() {
            }
            return { ok: true, json: async () => ({}) };
          };`,
+        context,
+      );
+    }
+    if (canned && canned.learn) {
+      // row 88: the three functions learn.js hangs on `window`, with the status of the server canned
+      vm.runInContext(
+        `window.fllmLearnStatus = async () => { __log.push(['learnStatus']); return ${JSON.stringify(canned.learn.status === undefined ? null : canned.learn.status)}; };
+         window.fllmLearnSetEnabled = async (on) => { __log.push(['learnSet', on]); return true; };
+         window.fllmLearnFeedback = async (value) => { __log.push(['learnFeedback', value]); return true; };`,
         context,
       );
     }

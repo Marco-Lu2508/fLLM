@@ -1,0 +1,3172 @@
+{
+ "cases": [
+  {
+   "kind": "skills",
+   "name": "none",
+   "messages": [],
+   "result": []
+  },
+  {
+   "kind": "skills",
+   "name": "a read",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\",\"name\":\"deploy\"}"
+       }
+      }
+     ]
+    }
+   ],
+   "result": [
+    "deploy"
+   ]
+  },
+  {
+   "kind": "skills",
+   "name": "twice and in order",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\",\"name\":\"zeta\"}"
+       }
+      },
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\",\"name\":\"deploy\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\",\"name\":\"zeta\"}"
+       }
+      }
+     ]
+    }
+   ],
+   "result": [
+    "zeta",
+    "deploy"
+   ]
+  },
+  {
+   "kind": "skills",
+   "name": "list is no read",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"list\"}"
+       }
+      }
+     ]
+    }
+   ],
+   "result": []
+  },
+  {
+   "kind": "skills",
+   "name": "another tool",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"action\":\"read\",\"name\":\"x\"}"
+       }
+      }
+     ]
+    }
+   ],
+   "result": []
+  },
+  {
+   "kind": "skills",
+   "name": "bad name",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\",\"name\":\"Bad Name\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\",\"name\":\"\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\"}"
+       }
+      }
+     ]
+    }
+   ],
+   "result": []
+  },
+  {
+   "kind": "skills",
+   "name": "a name with 64 and 65 characters",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\",\"name\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\",\"name\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+       }
+      }
+     ]
+    }
+   ],
+   "result": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ]
+  },
+  {
+   "kind": "skills",
+   "name": "a number is a name",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\",\"name\":5}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\",\"name\":0}"
+       }
+      }
+     ]
+    }
+   ],
+   "result": [
+    5
+   ]
+  },
+  {
+   "kind": "skills",
+   "name": "arguments that are no json",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{not json"
+       }
+      }
+     ]
+    }
+   ],
+   "result": []
+  },
+  {
+   "kind": "skills",
+   "name": "arguments that are no object",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "[1]"
+       }
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "\"read\""
+       }
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "null"
+       }
+      }
+     ]
+    }
+   ],
+   "result": []
+  },
+  {
+   "kind": "skills",
+   "name": "dash and underscore",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\",\"name\":\"a_b-c\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\",\"name\":\"-lead\"}"
+       }
+      }
+     ]
+    }
+   ],
+   "result": [
+    "a_b-c"
+   ]
+  },
+  {
+   "kind": "skills",
+   "name": "a message with no calls",
+   "messages": [
+    {
+     "role": "user",
+     "content": "hi"
+    },
+    {
+     "role": "assistant",
+     "content": "x",
+     "tool_calls": []
+    }
+   ],
+   "result": []
+  },
+  {
+   "kind": "run",
+   "name": "empty",
+   "messages": [],
+   "from": 0,
+   "max": 300,
+   "result": []
+  },
+  {
+   "kind": "run",
+   "name": "roles",
+   "messages": [
+    {
+     "role": "system",
+     "content": "s"
+    },
+    {
+     "role": "user",
+     "content": "u"
+    },
+    {
+     "role": "assistant",
+     "content": "a"
+    },
+    {
+     "role": "tool",
+     "content": "t",
+     "tool_call_id": "x"
+    },
+    {
+     "role": "developer",
+     "content": "d"
+    }
+   ],
+   "from": 0,
+   "max": 300,
+   "result": [
+    {
+     "role": "user",
+     "content": "u"
+    },
+    {
+     "role": "assistant",
+     "content": "a"
+    },
+    {
+     "role": "tool",
+     "content": "t"
+    }
+   ]
+  },
+  {
+   "kind": "run",
+   "name": "from skips",
+   "messages": [
+    {
+     "role": "user",
+     "content": "old"
+    },
+    {
+     "role": "user",
+     "content": "new"
+    },
+    {
+     "role": "assistant",
+     "content": "ans"
+    }
+   ],
+   "from": 1,
+   "max": 300,
+   "result": [
+    {
+     "role": "user",
+     "content": "new"
+    },
+    {
+     "role": "assistant",
+     "content": "ans"
+    }
+   ]
+  },
+  {
+   "kind": "run",
+   "name": "from past the end",
+   "messages": [
+    {
+     "role": "user",
+     "content": "x"
+    }
+   ],
+   "from": 5,
+   "max": 300,
+   "result": []
+  },
+  {
+   "kind": "run",
+   "name": "text cut at 3000",
+   "messages": [
+    {
+     "role": "user",
+     "content": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+    },
+    {
+     "role": "user",
+     "content": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   ],
+   "from": 0,
+   "max": 300,
+   "result": [
+    {
+     "role": "user",
+     "content": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+    },
+    {
+     "role": "user",
+     "content": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   ]
+  },
+  {
+   "kind": "run",
+   "name": "calls",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\":\"p\"}"
+       }
+      },
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\",\"name\":\"x\"}"
+       }
+      }
+     ]
+    }
+   ],
+   "from": 0,
+   "max": 300,
+   "result": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\":\"p\"}"
+       }
+      },
+      {
+       "id": "c1",
+       "function": {
+        "name": "skill",
+        "arguments": "{\"action\":\"read\",\"name\":\"x\"}"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "kind": "run",
+   "name": "arguments cut at 800",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+       }
+      }
+     ]
+    }
+   ],
+   "from": 0,
+   "max": 300,
+   "result": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "function": {
+        "name": "bash",
+        "arguments": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "kind": "run",
+   "name": "no arguments",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c",
+       "function": {
+        "name": "n"
+       }
+      }
+     ]
+    }
+   ],
+   "from": 0,
+   "max": 300,
+   "result": [
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c",
+       "function": {
+        "name": "n",
+        "arguments": "{}"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "kind": "run",
+   "name": "the last 300",
+   "messages": [
+    {
+     "role": "user",
+     "content": "m0"
+    },
+    {
+     "role": "user",
+     "content": "m1"
+    },
+    {
+     "role": "user",
+     "content": "m2"
+    },
+    {
+     "role": "user",
+     "content": "m3"
+    },
+    {
+     "role": "user",
+     "content": "m4"
+    },
+    {
+     "role": "user",
+     "content": "m5"
+    },
+    {
+     "role": "user",
+     "content": "m6"
+    },
+    {
+     "role": "user",
+     "content": "m7"
+    },
+    {
+     "role": "user",
+     "content": "m8"
+    },
+    {
+     "role": "user",
+     "content": "m9"
+    },
+    {
+     "role": "user",
+     "content": "m10"
+    },
+    {
+     "role": "user",
+     "content": "m11"
+    },
+    {
+     "role": "user",
+     "content": "m12"
+    },
+    {
+     "role": "user",
+     "content": "m13"
+    },
+    {
+     "role": "user",
+     "content": "m14"
+    },
+    {
+     "role": "user",
+     "content": "m15"
+    },
+    {
+     "role": "user",
+     "content": "m16"
+    },
+    {
+     "role": "user",
+     "content": "m17"
+    },
+    {
+     "role": "user",
+     "content": "m18"
+    },
+    {
+     "role": "user",
+     "content": "m19"
+    },
+    {
+     "role": "user",
+     "content": "m20"
+    },
+    {
+     "role": "user",
+     "content": "m21"
+    },
+    {
+     "role": "user",
+     "content": "m22"
+    },
+    {
+     "role": "user",
+     "content": "m23"
+    },
+    {
+     "role": "user",
+     "content": "m24"
+    },
+    {
+     "role": "user",
+     "content": "m25"
+    },
+    {
+     "role": "user",
+     "content": "m26"
+    },
+    {
+     "role": "user",
+     "content": "m27"
+    },
+    {
+     "role": "user",
+     "content": "m28"
+    },
+    {
+     "role": "user",
+     "content": "m29"
+    },
+    {
+     "role": "user",
+     "content": "m30"
+    },
+    {
+     "role": "user",
+     "content": "m31"
+    },
+    {
+     "role": "user",
+     "content": "m32"
+    },
+    {
+     "role": "user",
+     "content": "m33"
+    },
+    {
+     "role": "user",
+     "content": "m34"
+    },
+    {
+     "role": "user",
+     "content": "m35"
+    },
+    {
+     "role": "user",
+     "content": "m36"
+    },
+    {
+     "role": "user",
+     "content": "m37"
+    },
+    {
+     "role": "user",
+     "content": "m38"
+    },
+    {
+     "role": "user",
+     "content": "m39"
+    },
+    {
+     "role": "user",
+     "content": "m40"
+    },
+    {
+     "role": "user",
+     "content": "m41"
+    },
+    {
+     "role": "user",
+     "content": "m42"
+    },
+    {
+     "role": "user",
+     "content": "m43"
+    },
+    {
+     "role": "user",
+     "content": "m44"
+    },
+    {
+     "role": "user",
+     "content": "m45"
+    },
+    {
+     "role": "user",
+     "content": "m46"
+    },
+    {
+     "role": "user",
+     "content": "m47"
+    },
+    {
+     "role": "user",
+     "content": "m48"
+    },
+    {
+     "role": "user",
+     "content": "m49"
+    },
+    {
+     "role": "user",
+     "content": "m50"
+    },
+    {
+     "role": "user",
+     "content": "m51"
+    },
+    {
+     "role": "user",
+     "content": "m52"
+    },
+    {
+     "role": "user",
+     "content": "m53"
+    },
+    {
+     "role": "user",
+     "content": "m54"
+    },
+    {
+     "role": "user",
+     "content": "m55"
+    },
+    {
+     "role": "user",
+     "content": "m56"
+    },
+    {
+     "role": "user",
+     "content": "m57"
+    },
+    {
+     "role": "user",
+     "content": "m58"
+    },
+    {
+     "role": "user",
+     "content": "m59"
+    },
+    {
+     "role": "user",
+     "content": "m60"
+    },
+    {
+     "role": "user",
+     "content": "m61"
+    },
+    {
+     "role": "user",
+     "content": "m62"
+    },
+    {
+     "role": "user",
+     "content": "m63"
+    },
+    {
+     "role": "user",
+     "content": "m64"
+    },
+    {
+     "role": "user",
+     "content": "m65"
+    },
+    {
+     "role": "user",
+     "content": "m66"
+    },
+    {
+     "role": "user",
+     "content": "m67"
+    },
+    {
+     "role": "user",
+     "content": "m68"
+    },
+    {
+     "role": "user",
+     "content": "m69"
+    },
+    {
+     "role": "user",
+     "content": "m70"
+    },
+    {
+     "role": "user",
+     "content": "m71"
+    },
+    {
+     "role": "user",
+     "content": "m72"
+    },
+    {
+     "role": "user",
+     "content": "m73"
+    },
+    {
+     "role": "user",
+     "content": "m74"
+    },
+    {
+     "role": "user",
+     "content": "m75"
+    },
+    {
+     "role": "user",
+     "content": "m76"
+    },
+    {
+     "role": "user",
+     "content": "m77"
+    },
+    {
+     "role": "user",
+     "content": "m78"
+    },
+    {
+     "role": "user",
+     "content": "m79"
+    },
+    {
+     "role": "user",
+     "content": "m80"
+    },
+    {
+     "role": "user",
+     "content": "m81"
+    },
+    {
+     "role": "user",
+     "content": "m82"
+    },
+    {
+     "role": "user",
+     "content": "m83"
+    },
+    {
+     "role": "user",
+     "content": "m84"
+    },
+    {
+     "role": "user",
+     "content": "m85"
+    },
+    {
+     "role": "user",
+     "content": "m86"
+    },
+    {
+     "role": "user",
+     "content": "m87"
+    },
+    {
+     "role": "user",
+     "content": "m88"
+    },
+    {
+     "role": "user",
+     "content": "m89"
+    },
+    {
+     "role": "user",
+     "content": "m90"
+    },
+    {
+     "role": "user",
+     "content": "m91"
+    },
+    {
+     "role": "user",
+     "content": "m92"
+    },
+    {
+     "role": "user",
+     "content": "m93"
+    },
+    {
+     "role": "user",
+     "content": "m94"
+    },
+    {
+     "role": "user",
+     "content": "m95"
+    },
+    {
+     "role": "user",
+     "content": "m96"
+    },
+    {
+     "role": "user",
+     "content": "m97"
+    },
+    {
+     "role": "user",
+     "content": "m98"
+    },
+    {
+     "role": "user",
+     "content": "m99"
+    },
+    {
+     "role": "user",
+     "content": "m100"
+    },
+    {
+     "role": "user",
+     "content": "m101"
+    },
+    {
+     "role": "user",
+     "content": "m102"
+    },
+    {
+     "role": "user",
+     "content": "m103"
+    },
+    {
+     "role": "user",
+     "content": "m104"
+    },
+    {
+     "role": "user",
+     "content": "m105"
+    },
+    {
+     "role": "user",
+     "content": "m106"
+    },
+    {
+     "role": "user",
+     "content": "m107"
+    },
+    {
+     "role": "user",
+     "content": "m108"
+    },
+    {
+     "role": "user",
+     "content": "m109"
+    },
+    {
+     "role": "user",
+     "content": "m110"
+    },
+    {
+     "role": "user",
+     "content": "m111"
+    },
+    {
+     "role": "user",
+     "content": "m112"
+    },
+    {
+     "role": "user",
+     "content": "m113"
+    },
+    {
+     "role": "user",
+     "content": "m114"
+    },
+    {
+     "role": "user",
+     "content": "m115"
+    },
+    {
+     "role": "user",
+     "content": "m116"
+    },
+    {
+     "role": "user",
+     "content": "m117"
+    },
+    {
+     "role": "user",
+     "content": "m118"
+    },
+    {
+     "role": "user",
+     "content": "m119"
+    },
+    {
+     "role": "user",
+     "content": "m120"
+    },
+    {
+     "role": "user",
+     "content": "m121"
+    },
+    {
+     "role": "user",
+     "content": "m122"
+    },
+    {
+     "role": "user",
+     "content": "m123"
+    },
+    {
+     "role": "user",
+     "content": "m124"
+    },
+    {
+     "role": "user",
+     "content": "m125"
+    },
+    {
+     "role": "user",
+     "content": "m126"
+    },
+    {
+     "role": "user",
+     "content": "m127"
+    },
+    {
+     "role": "user",
+     "content": "m128"
+    },
+    {
+     "role": "user",
+     "content": "m129"
+    },
+    {
+     "role": "user",
+     "content": "m130"
+    },
+    {
+     "role": "user",
+     "content": "m131"
+    },
+    {
+     "role": "user",
+     "content": "m132"
+    },
+    {
+     "role": "user",
+     "content": "m133"
+    },
+    {
+     "role": "user",
+     "content": "m134"
+    },
+    {
+     "role": "user",
+     "content": "m135"
+    },
+    {
+     "role": "user",
+     "content": "m136"
+    },
+    {
+     "role": "user",
+     "content": "m137"
+    },
+    {
+     "role": "user",
+     "content": "m138"
+    },
+    {
+     "role": "user",
+     "content": "m139"
+    },
+    {
+     "role": "user",
+     "content": "m140"
+    },
+    {
+     "role": "user",
+     "content": "m141"
+    },
+    {
+     "role": "user",
+     "content": "m142"
+    },
+    {
+     "role": "user",
+     "content": "m143"
+    },
+    {
+     "role": "user",
+     "content": "m144"
+    },
+    {
+     "role": "user",
+     "content": "m145"
+    },
+    {
+     "role": "user",
+     "content": "m146"
+    },
+    {
+     "role": "user",
+     "content": "m147"
+    },
+    {
+     "role": "user",
+     "content": "m148"
+    },
+    {
+     "role": "user",
+     "content": "m149"
+    },
+    {
+     "role": "user",
+     "content": "m150"
+    },
+    {
+     "role": "user",
+     "content": "m151"
+    },
+    {
+     "role": "user",
+     "content": "m152"
+    },
+    {
+     "role": "user",
+     "content": "m153"
+    },
+    {
+     "role": "user",
+     "content": "m154"
+    },
+    {
+     "role": "user",
+     "content": "m155"
+    },
+    {
+     "role": "user",
+     "content": "m156"
+    },
+    {
+     "role": "user",
+     "content": "m157"
+    },
+    {
+     "role": "user",
+     "content": "m158"
+    },
+    {
+     "role": "user",
+     "content": "m159"
+    },
+    {
+     "role": "user",
+     "content": "m160"
+    },
+    {
+     "role": "user",
+     "content": "m161"
+    },
+    {
+     "role": "user",
+     "content": "m162"
+    },
+    {
+     "role": "user",
+     "content": "m163"
+    },
+    {
+     "role": "user",
+     "content": "m164"
+    },
+    {
+     "role": "user",
+     "content": "m165"
+    },
+    {
+     "role": "user",
+     "content": "m166"
+    },
+    {
+     "role": "user",
+     "content": "m167"
+    },
+    {
+     "role": "user",
+     "content": "m168"
+    },
+    {
+     "role": "user",
+     "content": "m169"
+    },
+    {
+     "role": "user",
+     "content": "m170"
+    },
+    {
+     "role": "user",
+     "content": "m171"
+    },
+    {
+     "role": "user",
+     "content": "m172"
+    },
+    {
+     "role": "user",
+     "content": "m173"
+    },
+    {
+     "role": "user",
+     "content": "m174"
+    },
+    {
+     "role": "user",
+     "content": "m175"
+    },
+    {
+     "role": "user",
+     "content": "m176"
+    },
+    {
+     "role": "user",
+     "content": "m177"
+    },
+    {
+     "role": "user",
+     "content": "m178"
+    },
+    {
+     "role": "user",
+     "content": "m179"
+    },
+    {
+     "role": "user",
+     "content": "m180"
+    },
+    {
+     "role": "user",
+     "content": "m181"
+    },
+    {
+     "role": "user",
+     "content": "m182"
+    },
+    {
+     "role": "user",
+     "content": "m183"
+    },
+    {
+     "role": "user",
+     "content": "m184"
+    },
+    {
+     "role": "user",
+     "content": "m185"
+    },
+    {
+     "role": "user",
+     "content": "m186"
+    },
+    {
+     "role": "user",
+     "content": "m187"
+    },
+    {
+     "role": "user",
+     "content": "m188"
+    },
+    {
+     "role": "user",
+     "content": "m189"
+    },
+    {
+     "role": "user",
+     "content": "m190"
+    },
+    {
+     "role": "user",
+     "content": "m191"
+    },
+    {
+     "role": "user",
+     "content": "m192"
+    },
+    {
+     "role": "user",
+     "content": "m193"
+    },
+    {
+     "role": "user",
+     "content": "m194"
+    },
+    {
+     "role": "user",
+     "content": "m195"
+    },
+    {
+     "role": "user",
+     "content": "m196"
+    },
+    {
+     "role": "user",
+     "content": "m197"
+    },
+    {
+     "role": "user",
+     "content": "m198"
+    },
+    {
+     "role": "user",
+     "content": "m199"
+    },
+    {
+     "role": "user",
+     "content": "m200"
+    },
+    {
+     "role": "user",
+     "content": "m201"
+    },
+    {
+     "role": "user",
+     "content": "m202"
+    },
+    {
+     "role": "user",
+     "content": "m203"
+    },
+    {
+     "role": "user",
+     "content": "m204"
+    },
+    {
+     "role": "user",
+     "content": "m205"
+    },
+    {
+     "role": "user",
+     "content": "m206"
+    },
+    {
+     "role": "user",
+     "content": "m207"
+    },
+    {
+     "role": "user",
+     "content": "m208"
+    },
+    {
+     "role": "user",
+     "content": "m209"
+    },
+    {
+     "role": "user",
+     "content": "m210"
+    },
+    {
+     "role": "user",
+     "content": "m211"
+    },
+    {
+     "role": "user",
+     "content": "m212"
+    },
+    {
+     "role": "user",
+     "content": "m213"
+    },
+    {
+     "role": "user",
+     "content": "m214"
+    },
+    {
+     "role": "user",
+     "content": "m215"
+    },
+    {
+     "role": "user",
+     "content": "m216"
+    },
+    {
+     "role": "user",
+     "content": "m217"
+    },
+    {
+     "role": "user",
+     "content": "m218"
+    },
+    {
+     "role": "user",
+     "content": "m219"
+    },
+    {
+     "role": "user",
+     "content": "m220"
+    },
+    {
+     "role": "user",
+     "content": "m221"
+    },
+    {
+     "role": "user",
+     "content": "m222"
+    },
+    {
+     "role": "user",
+     "content": "m223"
+    },
+    {
+     "role": "user",
+     "content": "m224"
+    },
+    {
+     "role": "user",
+     "content": "m225"
+    },
+    {
+     "role": "user",
+     "content": "m226"
+    },
+    {
+     "role": "user",
+     "content": "m227"
+    },
+    {
+     "role": "user",
+     "content": "m228"
+    },
+    {
+     "role": "user",
+     "content": "m229"
+    },
+    {
+     "role": "user",
+     "content": "m230"
+    },
+    {
+     "role": "user",
+     "content": "m231"
+    },
+    {
+     "role": "user",
+     "content": "m232"
+    },
+    {
+     "role": "user",
+     "content": "m233"
+    },
+    {
+     "role": "user",
+     "content": "m234"
+    },
+    {
+     "role": "user",
+     "content": "m235"
+    },
+    {
+     "role": "user",
+     "content": "m236"
+    },
+    {
+     "role": "user",
+     "content": "m237"
+    },
+    {
+     "role": "user",
+     "content": "m238"
+    },
+    {
+     "role": "user",
+     "content": "m239"
+    },
+    {
+     "role": "user",
+     "content": "m240"
+    },
+    {
+     "role": "user",
+     "content": "m241"
+    },
+    {
+     "role": "user",
+     "content": "m242"
+    },
+    {
+     "role": "user",
+     "content": "m243"
+    },
+    {
+     "role": "user",
+     "content": "m244"
+    },
+    {
+     "role": "user",
+     "content": "m245"
+    },
+    {
+     "role": "user",
+     "content": "m246"
+    },
+    {
+     "role": "user",
+     "content": "m247"
+    },
+    {
+     "role": "user",
+     "content": "m248"
+    },
+    {
+     "role": "user",
+     "content": "m249"
+    },
+    {
+     "role": "user",
+     "content": "m250"
+    },
+    {
+     "role": "user",
+     "content": "m251"
+    },
+    {
+     "role": "user",
+     "content": "m252"
+    },
+    {
+     "role": "user",
+     "content": "m253"
+    },
+    {
+     "role": "user",
+     "content": "m254"
+    },
+    {
+     "role": "user",
+     "content": "m255"
+    },
+    {
+     "role": "user",
+     "content": "m256"
+    },
+    {
+     "role": "user",
+     "content": "m257"
+    },
+    {
+     "role": "user",
+     "content": "m258"
+    },
+    {
+     "role": "user",
+     "content": "m259"
+    },
+    {
+     "role": "user",
+     "content": "m260"
+    },
+    {
+     "role": "user",
+     "content": "m261"
+    },
+    {
+     "role": "user",
+     "content": "m262"
+    },
+    {
+     "role": "user",
+     "content": "m263"
+    },
+    {
+     "role": "user",
+     "content": "m264"
+    },
+    {
+     "role": "user",
+     "content": "m265"
+    },
+    {
+     "role": "user",
+     "content": "m266"
+    },
+    {
+     "role": "user",
+     "content": "m267"
+    },
+    {
+     "role": "user",
+     "content": "m268"
+    },
+    {
+     "role": "user",
+     "content": "m269"
+    },
+    {
+     "role": "user",
+     "content": "m270"
+    },
+    {
+     "role": "user",
+     "content": "m271"
+    },
+    {
+     "role": "user",
+     "content": "m272"
+    },
+    {
+     "role": "user",
+     "content": "m273"
+    },
+    {
+     "role": "user",
+     "content": "m274"
+    },
+    {
+     "role": "user",
+     "content": "m275"
+    },
+    {
+     "role": "user",
+     "content": "m276"
+    },
+    {
+     "role": "user",
+     "content": "m277"
+    },
+    {
+     "role": "user",
+     "content": "m278"
+    },
+    {
+     "role": "user",
+     "content": "m279"
+    },
+    {
+     "role": "user",
+     "content": "m280"
+    },
+    {
+     "role": "user",
+     "content": "m281"
+    },
+    {
+     "role": "user",
+     "content": "m282"
+    },
+    {
+     "role": "user",
+     "content": "m283"
+    },
+    {
+     "role": "user",
+     "content": "m284"
+    },
+    {
+     "role": "user",
+     "content": "m285"
+    },
+    {
+     "role": "user",
+     "content": "m286"
+    },
+    {
+     "role": "user",
+     "content": "m287"
+    },
+    {
+     "role": "user",
+     "content": "m288"
+    },
+    {
+     "role": "user",
+     "content": "m289"
+    },
+    {
+     "role": "user",
+     "content": "m290"
+    },
+    {
+     "role": "user",
+     "content": "m291"
+    },
+    {
+     "role": "user",
+     "content": "m292"
+    },
+    {
+     "role": "user",
+     "content": "m293"
+    },
+    {
+     "role": "user",
+     "content": "m294"
+    },
+    {
+     "role": "user",
+     "content": "m295"
+    },
+    {
+     "role": "user",
+     "content": "m296"
+    },
+    {
+     "role": "user",
+     "content": "m297"
+    },
+    {
+     "role": "user",
+     "content": "m298"
+    },
+    {
+     "role": "user",
+     "content": "m299"
+    },
+    {
+     "role": "user",
+     "content": "m300"
+    },
+    {
+     "role": "user",
+     "content": "m301"
+    },
+    {
+     "role": "user",
+     "content": "m302"
+    },
+    {
+     "role": "user",
+     "content": "m303"
+    },
+    {
+     "role": "user",
+     "content": "m304"
+    }
+   ],
+   "from": 0,
+   "max": 300,
+   "result": [
+    {
+     "role": "user",
+     "content": "m5"
+    },
+    {
+     "role": "user",
+     "content": "m6"
+    },
+    {
+     "role": "user",
+     "content": "m7"
+    },
+    {
+     "role": "user",
+     "content": "m8"
+    },
+    {
+     "role": "user",
+     "content": "m9"
+    },
+    {
+     "role": "user",
+     "content": "m10"
+    },
+    {
+     "role": "user",
+     "content": "m11"
+    },
+    {
+     "role": "user",
+     "content": "m12"
+    },
+    {
+     "role": "user",
+     "content": "m13"
+    },
+    {
+     "role": "user",
+     "content": "m14"
+    },
+    {
+     "role": "user",
+     "content": "m15"
+    },
+    {
+     "role": "user",
+     "content": "m16"
+    },
+    {
+     "role": "user",
+     "content": "m17"
+    },
+    {
+     "role": "user",
+     "content": "m18"
+    },
+    {
+     "role": "user",
+     "content": "m19"
+    },
+    {
+     "role": "user",
+     "content": "m20"
+    },
+    {
+     "role": "user",
+     "content": "m21"
+    },
+    {
+     "role": "user",
+     "content": "m22"
+    },
+    {
+     "role": "user",
+     "content": "m23"
+    },
+    {
+     "role": "user",
+     "content": "m24"
+    },
+    {
+     "role": "user",
+     "content": "m25"
+    },
+    {
+     "role": "user",
+     "content": "m26"
+    },
+    {
+     "role": "user",
+     "content": "m27"
+    },
+    {
+     "role": "user",
+     "content": "m28"
+    },
+    {
+     "role": "user",
+     "content": "m29"
+    },
+    {
+     "role": "user",
+     "content": "m30"
+    },
+    {
+     "role": "user",
+     "content": "m31"
+    },
+    {
+     "role": "user",
+     "content": "m32"
+    },
+    {
+     "role": "user",
+     "content": "m33"
+    },
+    {
+     "role": "user",
+     "content": "m34"
+    },
+    {
+     "role": "user",
+     "content": "m35"
+    },
+    {
+     "role": "user",
+     "content": "m36"
+    },
+    {
+     "role": "user",
+     "content": "m37"
+    },
+    {
+     "role": "user",
+     "content": "m38"
+    },
+    {
+     "role": "user",
+     "content": "m39"
+    },
+    {
+     "role": "user",
+     "content": "m40"
+    },
+    {
+     "role": "user",
+     "content": "m41"
+    },
+    {
+     "role": "user",
+     "content": "m42"
+    },
+    {
+     "role": "user",
+     "content": "m43"
+    },
+    {
+     "role": "user",
+     "content": "m44"
+    },
+    {
+     "role": "user",
+     "content": "m45"
+    },
+    {
+     "role": "user",
+     "content": "m46"
+    },
+    {
+     "role": "user",
+     "content": "m47"
+    },
+    {
+     "role": "user",
+     "content": "m48"
+    },
+    {
+     "role": "user",
+     "content": "m49"
+    },
+    {
+     "role": "user",
+     "content": "m50"
+    },
+    {
+     "role": "user",
+     "content": "m51"
+    },
+    {
+     "role": "user",
+     "content": "m52"
+    },
+    {
+     "role": "user",
+     "content": "m53"
+    },
+    {
+     "role": "user",
+     "content": "m54"
+    },
+    {
+     "role": "user",
+     "content": "m55"
+    },
+    {
+     "role": "user",
+     "content": "m56"
+    },
+    {
+     "role": "user",
+     "content": "m57"
+    },
+    {
+     "role": "user",
+     "content": "m58"
+    },
+    {
+     "role": "user",
+     "content": "m59"
+    },
+    {
+     "role": "user",
+     "content": "m60"
+    },
+    {
+     "role": "user",
+     "content": "m61"
+    },
+    {
+     "role": "user",
+     "content": "m62"
+    },
+    {
+     "role": "user",
+     "content": "m63"
+    },
+    {
+     "role": "user",
+     "content": "m64"
+    },
+    {
+     "role": "user",
+     "content": "m65"
+    },
+    {
+     "role": "user",
+     "content": "m66"
+    },
+    {
+     "role": "user",
+     "content": "m67"
+    },
+    {
+     "role": "user",
+     "content": "m68"
+    },
+    {
+     "role": "user",
+     "content": "m69"
+    },
+    {
+     "role": "user",
+     "content": "m70"
+    },
+    {
+     "role": "user",
+     "content": "m71"
+    },
+    {
+     "role": "user",
+     "content": "m72"
+    },
+    {
+     "role": "user",
+     "content": "m73"
+    },
+    {
+     "role": "user",
+     "content": "m74"
+    },
+    {
+     "role": "user",
+     "content": "m75"
+    },
+    {
+     "role": "user",
+     "content": "m76"
+    },
+    {
+     "role": "user",
+     "content": "m77"
+    },
+    {
+     "role": "user",
+     "content": "m78"
+    },
+    {
+     "role": "user",
+     "content": "m79"
+    },
+    {
+     "role": "user",
+     "content": "m80"
+    },
+    {
+     "role": "user",
+     "content": "m81"
+    },
+    {
+     "role": "user",
+     "content": "m82"
+    },
+    {
+     "role": "user",
+     "content": "m83"
+    },
+    {
+     "role": "user",
+     "content": "m84"
+    },
+    {
+     "role": "user",
+     "content": "m85"
+    },
+    {
+     "role": "user",
+     "content": "m86"
+    },
+    {
+     "role": "user",
+     "content": "m87"
+    },
+    {
+     "role": "user",
+     "content": "m88"
+    },
+    {
+     "role": "user",
+     "content": "m89"
+    },
+    {
+     "role": "user",
+     "content": "m90"
+    },
+    {
+     "role": "user",
+     "content": "m91"
+    },
+    {
+     "role": "user",
+     "content": "m92"
+    },
+    {
+     "role": "user",
+     "content": "m93"
+    },
+    {
+     "role": "user",
+     "content": "m94"
+    },
+    {
+     "role": "user",
+     "content": "m95"
+    },
+    {
+     "role": "user",
+     "content": "m96"
+    },
+    {
+     "role": "user",
+     "content": "m97"
+    },
+    {
+     "role": "user",
+     "content": "m98"
+    },
+    {
+     "role": "user",
+     "content": "m99"
+    },
+    {
+     "role": "user",
+     "content": "m100"
+    },
+    {
+     "role": "user",
+     "content": "m101"
+    },
+    {
+     "role": "user",
+     "content": "m102"
+    },
+    {
+     "role": "user",
+     "content": "m103"
+    },
+    {
+     "role": "user",
+     "content": "m104"
+    },
+    {
+     "role": "user",
+     "content": "m105"
+    },
+    {
+     "role": "user",
+     "content": "m106"
+    },
+    {
+     "role": "user",
+     "content": "m107"
+    },
+    {
+     "role": "user",
+     "content": "m108"
+    },
+    {
+     "role": "user",
+     "content": "m109"
+    },
+    {
+     "role": "user",
+     "content": "m110"
+    },
+    {
+     "role": "user",
+     "content": "m111"
+    },
+    {
+     "role": "user",
+     "content": "m112"
+    },
+    {
+     "role": "user",
+     "content": "m113"
+    },
+    {
+     "role": "user",
+     "content": "m114"
+    },
+    {
+     "role": "user",
+     "content": "m115"
+    },
+    {
+     "role": "user",
+     "content": "m116"
+    },
+    {
+     "role": "user",
+     "content": "m117"
+    },
+    {
+     "role": "user",
+     "content": "m118"
+    },
+    {
+     "role": "user",
+     "content": "m119"
+    },
+    {
+     "role": "user",
+     "content": "m120"
+    },
+    {
+     "role": "user",
+     "content": "m121"
+    },
+    {
+     "role": "user",
+     "content": "m122"
+    },
+    {
+     "role": "user",
+     "content": "m123"
+    },
+    {
+     "role": "user",
+     "content": "m124"
+    },
+    {
+     "role": "user",
+     "content": "m125"
+    },
+    {
+     "role": "user",
+     "content": "m126"
+    },
+    {
+     "role": "user",
+     "content": "m127"
+    },
+    {
+     "role": "user",
+     "content": "m128"
+    },
+    {
+     "role": "user",
+     "content": "m129"
+    },
+    {
+     "role": "user",
+     "content": "m130"
+    },
+    {
+     "role": "user",
+     "content": "m131"
+    },
+    {
+     "role": "user",
+     "content": "m132"
+    },
+    {
+     "role": "user",
+     "content": "m133"
+    },
+    {
+     "role": "user",
+     "content": "m134"
+    },
+    {
+     "role": "user",
+     "content": "m135"
+    },
+    {
+     "role": "user",
+     "content": "m136"
+    },
+    {
+     "role": "user",
+     "content": "m137"
+    },
+    {
+     "role": "user",
+     "content": "m138"
+    },
+    {
+     "role": "user",
+     "content": "m139"
+    },
+    {
+     "role": "user",
+     "content": "m140"
+    },
+    {
+     "role": "user",
+     "content": "m141"
+    },
+    {
+     "role": "user",
+     "content": "m142"
+    },
+    {
+     "role": "user",
+     "content": "m143"
+    },
+    {
+     "role": "user",
+     "content": "m144"
+    },
+    {
+     "role": "user",
+     "content": "m145"
+    },
+    {
+     "role": "user",
+     "content": "m146"
+    },
+    {
+     "role": "user",
+     "content": "m147"
+    },
+    {
+     "role": "user",
+     "content": "m148"
+    },
+    {
+     "role": "user",
+     "content": "m149"
+    },
+    {
+     "role": "user",
+     "content": "m150"
+    },
+    {
+     "role": "user",
+     "content": "m151"
+    },
+    {
+     "role": "user",
+     "content": "m152"
+    },
+    {
+     "role": "user",
+     "content": "m153"
+    },
+    {
+     "role": "user",
+     "content": "m154"
+    },
+    {
+     "role": "user",
+     "content": "m155"
+    },
+    {
+     "role": "user",
+     "content": "m156"
+    },
+    {
+     "role": "user",
+     "content": "m157"
+    },
+    {
+     "role": "user",
+     "content": "m158"
+    },
+    {
+     "role": "user",
+     "content": "m159"
+    },
+    {
+     "role": "user",
+     "content": "m160"
+    },
+    {
+     "role": "user",
+     "content": "m161"
+    },
+    {
+     "role": "user",
+     "content": "m162"
+    },
+    {
+     "role": "user",
+     "content": "m163"
+    },
+    {
+     "role": "user",
+     "content": "m164"
+    },
+    {
+     "role": "user",
+     "content": "m165"
+    },
+    {
+     "role": "user",
+     "content": "m166"
+    },
+    {
+     "role": "user",
+     "content": "m167"
+    },
+    {
+     "role": "user",
+     "content": "m168"
+    },
+    {
+     "role": "user",
+     "content": "m169"
+    },
+    {
+     "role": "user",
+     "content": "m170"
+    },
+    {
+     "role": "user",
+     "content": "m171"
+    },
+    {
+     "role": "user",
+     "content": "m172"
+    },
+    {
+     "role": "user",
+     "content": "m173"
+    },
+    {
+     "role": "user",
+     "content": "m174"
+    },
+    {
+     "role": "user",
+     "content": "m175"
+    },
+    {
+     "role": "user",
+     "content": "m176"
+    },
+    {
+     "role": "user",
+     "content": "m177"
+    },
+    {
+     "role": "user",
+     "content": "m178"
+    },
+    {
+     "role": "user",
+     "content": "m179"
+    },
+    {
+     "role": "user",
+     "content": "m180"
+    },
+    {
+     "role": "user",
+     "content": "m181"
+    },
+    {
+     "role": "user",
+     "content": "m182"
+    },
+    {
+     "role": "user",
+     "content": "m183"
+    },
+    {
+     "role": "user",
+     "content": "m184"
+    },
+    {
+     "role": "user",
+     "content": "m185"
+    },
+    {
+     "role": "user",
+     "content": "m186"
+    },
+    {
+     "role": "user",
+     "content": "m187"
+    },
+    {
+     "role": "user",
+     "content": "m188"
+    },
+    {
+     "role": "user",
+     "content": "m189"
+    },
+    {
+     "role": "user",
+     "content": "m190"
+    },
+    {
+     "role": "user",
+     "content": "m191"
+    },
+    {
+     "role": "user",
+     "content": "m192"
+    },
+    {
+     "role": "user",
+     "content": "m193"
+    },
+    {
+     "role": "user",
+     "content": "m194"
+    },
+    {
+     "role": "user",
+     "content": "m195"
+    },
+    {
+     "role": "user",
+     "content": "m196"
+    },
+    {
+     "role": "user",
+     "content": "m197"
+    },
+    {
+     "role": "user",
+     "content": "m198"
+    },
+    {
+     "role": "user",
+     "content": "m199"
+    },
+    {
+     "role": "user",
+     "content": "m200"
+    },
+    {
+     "role": "user",
+     "content": "m201"
+    },
+    {
+     "role": "user",
+     "content": "m202"
+    },
+    {
+     "role": "user",
+     "content": "m203"
+    },
+    {
+     "role": "user",
+     "content": "m204"
+    },
+    {
+     "role": "user",
+     "content": "m205"
+    },
+    {
+     "role": "user",
+     "content": "m206"
+    },
+    {
+     "role": "user",
+     "content": "m207"
+    },
+    {
+     "role": "user",
+     "content": "m208"
+    },
+    {
+     "role": "user",
+     "content": "m209"
+    },
+    {
+     "role": "user",
+     "content": "m210"
+    },
+    {
+     "role": "user",
+     "content": "m211"
+    },
+    {
+     "role": "user",
+     "content": "m212"
+    },
+    {
+     "role": "user",
+     "content": "m213"
+    },
+    {
+     "role": "user",
+     "content": "m214"
+    },
+    {
+     "role": "user",
+     "content": "m215"
+    },
+    {
+     "role": "user",
+     "content": "m216"
+    },
+    {
+     "role": "user",
+     "content": "m217"
+    },
+    {
+     "role": "user",
+     "content": "m218"
+    },
+    {
+     "role": "user",
+     "content": "m219"
+    },
+    {
+     "role": "user",
+     "content": "m220"
+    },
+    {
+     "role": "user",
+     "content": "m221"
+    },
+    {
+     "role": "user",
+     "content": "m222"
+    },
+    {
+     "role": "user",
+     "content": "m223"
+    },
+    {
+     "role": "user",
+     "content": "m224"
+    },
+    {
+     "role": "user",
+     "content": "m225"
+    },
+    {
+     "role": "user",
+     "content": "m226"
+    },
+    {
+     "role": "user",
+     "content": "m227"
+    },
+    {
+     "role": "user",
+     "content": "m228"
+    },
+    {
+     "role": "user",
+     "content": "m229"
+    },
+    {
+     "role": "user",
+     "content": "m230"
+    },
+    {
+     "role": "user",
+     "content": "m231"
+    },
+    {
+     "role": "user",
+     "content": "m232"
+    },
+    {
+     "role": "user",
+     "content": "m233"
+    },
+    {
+     "role": "user",
+     "content": "m234"
+    },
+    {
+     "role": "user",
+     "content": "m235"
+    },
+    {
+     "role": "user",
+     "content": "m236"
+    },
+    {
+     "role": "user",
+     "content": "m237"
+    },
+    {
+     "role": "user",
+     "content": "m238"
+    },
+    {
+     "role": "user",
+     "content": "m239"
+    },
+    {
+     "role": "user",
+     "content": "m240"
+    },
+    {
+     "role": "user",
+     "content": "m241"
+    },
+    {
+     "role": "user",
+     "content": "m242"
+    },
+    {
+     "role": "user",
+     "content": "m243"
+    },
+    {
+     "role": "user",
+     "content": "m244"
+    },
+    {
+     "role": "user",
+     "content": "m245"
+    },
+    {
+     "role": "user",
+     "content": "m246"
+    },
+    {
+     "role": "user",
+     "content": "m247"
+    },
+    {
+     "role": "user",
+     "content": "m248"
+    },
+    {
+     "role": "user",
+     "content": "m249"
+    },
+    {
+     "role": "user",
+     "content": "m250"
+    },
+    {
+     "role": "user",
+     "content": "m251"
+    },
+    {
+     "role": "user",
+     "content": "m252"
+    },
+    {
+     "role": "user",
+     "content": "m253"
+    },
+    {
+     "role": "user",
+     "content": "m254"
+    },
+    {
+     "role": "user",
+     "content": "m255"
+    },
+    {
+     "role": "user",
+     "content": "m256"
+    },
+    {
+     "role": "user",
+     "content": "m257"
+    },
+    {
+     "role": "user",
+     "content": "m258"
+    },
+    {
+     "role": "user",
+     "content": "m259"
+    },
+    {
+     "role": "user",
+     "content": "m260"
+    },
+    {
+     "role": "user",
+     "content": "m261"
+    },
+    {
+     "role": "user",
+     "content": "m262"
+    },
+    {
+     "role": "user",
+     "content": "m263"
+    },
+    {
+     "role": "user",
+     "content": "m264"
+    },
+    {
+     "role": "user",
+     "content": "m265"
+    },
+    {
+     "role": "user",
+     "content": "m266"
+    },
+    {
+     "role": "user",
+     "content": "m267"
+    },
+    {
+     "role": "user",
+     "content": "m268"
+    },
+    {
+     "role": "user",
+     "content": "m269"
+    },
+    {
+     "role": "user",
+     "content": "m270"
+    },
+    {
+     "role": "user",
+     "content": "m271"
+    },
+    {
+     "role": "user",
+     "content": "m272"
+    },
+    {
+     "role": "user",
+     "content": "m273"
+    },
+    {
+     "role": "user",
+     "content": "m274"
+    },
+    {
+     "role": "user",
+     "content": "m275"
+    },
+    {
+     "role": "user",
+     "content": "m276"
+    },
+    {
+     "role": "user",
+     "content": "m277"
+    },
+    {
+     "role": "user",
+     "content": "m278"
+    },
+    {
+     "role": "user",
+     "content": "m279"
+    },
+    {
+     "role": "user",
+     "content": "m280"
+    },
+    {
+     "role": "user",
+     "content": "m281"
+    },
+    {
+     "role": "user",
+     "content": "m282"
+    },
+    {
+     "role": "user",
+     "content": "m283"
+    },
+    {
+     "role": "user",
+     "content": "m284"
+    },
+    {
+     "role": "user",
+     "content": "m285"
+    },
+    {
+     "role": "user",
+     "content": "m286"
+    },
+    {
+     "role": "user",
+     "content": "m287"
+    },
+    {
+     "role": "user",
+     "content": "m288"
+    },
+    {
+     "role": "user",
+     "content": "m289"
+    },
+    {
+     "role": "user",
+     "content": "m290"
+    },
+    {
+     "role": "user",
+     "content": "m291"
+    },
+    {
+     "role": "user",
+     "content": "m292"
+    },
+    {
+     "role": "user",
+     "content": "m293"
+    },
+    {
+     "role": "user",
+     "content": "m294"
+    },
+    {
+     "role": "user",
+     "content": "m295"
+    },
+    {
+     "role": "user",
+     "content": "m296"
+    },
+    {
+     "role": "user",
+     "content": "m297"
+    },
+    {
+     "role": "user",
+     "content": "m298"
+    },
+    {
+     "role": "user",
+     "content": "m299"
+    },
+    {
+     "role": "user",
+     "content": "m300"
+    },
+    {
+     "role": "user",
+     "content": "m301"
+    },
+    {
+     "role": "user",
+     "content": "m302"
+    },
+    {
+     "role": "user",
+     "content": "m303"
+    },
+    {
+     "role": "user",
+     "content": "m304"
+    }
+   ]
+  },
+  {
+   "kind": "run",
+   "name": "the last 3 of 5",
+   "messages": [
+    {
+     "role": "user",
+     "content": "m0"
+    },
+    {
+     "role": "user",
+     "content": "m1"
+    },
+    {
+     "role": "user",
+     "content": "m2"
+    },
+    {
+     "role": "user",
+     "content": "m3"
+    },
+    {
+     "role": "user",
+     "content": "m4"
+    }
+   ],
+   "from": 0,
+   "max": 3,
+   "result": [
+    {
+     "role": "user",
+     "content": "m2"
+    },
+    {
+     "role": "user",
+     "content": "m3"
+    },
+    {
+     "role": "user",
+     "content": "m4"
+    }
+   ]
+  },
+  {
+   "kind": "run",
+   "name": "from counts before the filter",
+   "messages": [
+    {
+     "role": "system",
+     "content": "s"
+    },
+    {
+     "role": "user",
+     "content": "u1"
+    },
+    {
+     "role": "user",
+     "content": "u2"
+    }
+   ],
+   "from": 2,
+   "max": 300,
+   "result": [
+    {
+     "role": "user",
+     "content": "u2"
+    }
+   ]
+  },
+  {
+   "kind": "run",
+   "name": "empty calls list has no key",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "x",
+     "tool_calls": []
+    }
+   ],
+   "from": 0,
+   "max": 300,
+   "result": [
+    {
+     "role": "assistant",
+     "content": "x"
+    }
+   ]
+  }
+ ],
+ "failed": [
+  {
+   "error": false,
+   "hitLimit": false,
+   "result": false
+  },
+  {
+   "error": true,
+   "hitLimit": false,
+   "result": true
+  },
+  {
+   "error": false,
+   "hitLimit": true,
+   "result": true
+  },
+  {
+   "error": true,
+   "hitLimit": true,
+   "result": true
+  }
+ ],
+ "toasts": [
+  {
+   "last": null,
+   "result": ""
+  },
+  {
+   "last": {},
+   "result": ""
+  },
+  {
+   "last": {
+    "summary": ""
+   },
+   "result": ""
+  },
+  {
+   "last": {
+    "summary": "a skill"
+   },
+   "result": "Learned: a skill"
+  }
+ ]
+}

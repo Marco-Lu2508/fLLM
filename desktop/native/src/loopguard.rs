@@ -28,7 +28,7 @@ pub const REPEATED_CARD: &str = "The same call was repeated three times.";
 
 /// `Number.prototype.toString` for the numbers `JSON.stringify` writes: the shortest digits that
 /// read back, in the exponent form from 1e21 and below 1e-6.
-fn js_number(f: f64) -> String {
+pub fn js_number(f: f64) -> String {
     if !f.is_finite() {
         return "null".into();
     }

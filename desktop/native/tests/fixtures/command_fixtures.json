@@ -3268,10 +3268,113 @@
    "canned": null
   },
   {
+   "text": "/good",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "learnFeedback",
+     "up"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {}
+   }
+  },
+  {
+   "text": "/bad",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "learnFeedback",
+     "down"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {}
+   }
+  },
+  {
    "text": "/learn",
    "ret": true,
    "error": null,
    "record": [
+    [
+     "learnStatus"
+    ],
     [
      "notice",
      "Learning from my sessions: off."
@@ -3313,13 +3416,25 @@
     "turbo": false,
     "view": 0
    },
-   "canned": null
+   "canned": {
+    "learn": {
+     "status": null
+    }
+   }
   },
   {
-   "text": "/good",
+   "text": "/learn",
    "ret": true,
    "error": null,
-   "record": [],
+   "record": [
+    [
+     "learnStatus"
+    ],
+    [
+     "notice",
+     "Learning from my sessions: off. "
+    ]
+   ],
    "pre": {
     "running": false,
     "perm": "ask",
@@ -3356,13 +3471,27 @@
     "turbo": false,
     "view": 0
    },
-   "canned": null
+   "canned": {
+    "learn": {
+     "status": {
+      "enabled": true
+     }
+    }
+   }
   },
   {
-   "text": "/bad",
+   "text": "/learn",
    "ret": true,
    "error": null,
-   "record": [],
+   "record": [
+    [
+     "learnStatus"
+    ],
+    [
+     "notice",
+     "Learning from my sessions: off. It proposes and waits for your yes."
+    ]
+   ],
    "pre": {
     "running": false,
     "perm": "ask",
@@ -3399,7 +3528,915 @@
     "turbo": false,
     "view": 0
    },
-   "canned": null
+   "canned": {
+    "learn": {
+     "status": {
+      "enabled": true,
+      "ask_first": true
+     }
+    }
+   }
+  },
+  {
+   "text": "/learn",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "learnStatus"
+    ],
+    [
+     "notice",
+     "Learning from my sessions: off.  1 proposal waits for a decision."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {
+     "status": {
+      "enabled": true,
+      "pending": 1
+     }
+    }
+   }
+  },
+  {
+   "text": "/learn",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "learnStatus"
+    ],
+    [
+     "notice",
+     "Learning from my sessions: off. It proposes and waits for your yes. 3 proposals wait for a decision."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {
+     "status": {
+      "enabled": false,
+      "pending": 3,
+      "ask_first": true
+     }
+    }
+   }
+  },
+  {
+   "text": "/learn",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "learnStatus"
+    ],
+    [
+     "notice",
+     "Learning from my sessions: off. "
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {
+     "status": {
+      "pending": 0
+     }
+    }
+   }
+  },
+  {
+   "text": "/learn on",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "saveSettings"
+    ],
+    [
+     "renderSide",
+     true
+    ],
+    [
+     "learnSet",
+     true
+    ],
+    [
+     "learnStatus"
+    ],
+    [
+     "notice",
+     "Learning from my sessions: on. After each run the agent saves skills, notes and profile lines on its own and logs every change (Settings > Personalization > What I learned, with Undo). "
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {
+     "status": {
+      "enabled": true
+     }
+    }
+   }
+  },
+  {
+   "text": "/learn ON",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "saveSettings"
+    ],
+    [
+     "renderSide",
+     true
+    ],
+    [
+     "learnSet",
+     true
+    ],
+    [
+     "learnStatus"
+    ],
+    [
+     "notice",
+     "Learning from my sessions: on. After each run the agent saves skills, notes and profile lines on its own and logs every change (Settings > Personalization > What I learned, with Undo).  2 proposals wait for a decision."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {
+     "status": {
+      "enabled": true,
+      "pending": 2
+     }
+    }
+   }
+  },
+  {
+   "text": "/learn off",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "saveSettings"
+    ],
+    [
+     "renderSide",
+     true
+    ],
+    [
+     "learnSet",
+     false
+    ],
+    [
+     "learnStatus"
+    ],
+    [
+     "notice",
+     "Learning from my sessions: off. "
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {
+     "status": {
+      "enabled": false
+     }
+    }
+   }
+  },
+  {
+   "text": "/learn off",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "saveSettings"
+    ],
+    [
+     "renderSide",
+     true
+    ],
+    [
+     "learnSet",
+     false
+    ],
+    [
+     "learnStatus"
+    ],
+    [
+     "notice",
+     "Learning from my sessions: off."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {
+     "status": null
+    }
+   }
+  },
+  {
+   "text": "/learn banana",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "learnStatus"
+    ],
+    [
+     "notice",
+     "Learning from my sessions: off. "
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {
+     "status": {
+      "enabled": true
+     }
+    }
+   }
+  },
+  {
+   "text": "/learn project on",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/learn/settings",
+     {
+      "method": "POST",
+      "body": {
+       "workspace": "/home/marco/p",
+       "project": true
+      }
+     }
+    ],
+    [
+     "learnStatus"
+    ],
+    [
+     "saveSettings"
+    ],
+    [
+     "renderSide",
+     true
+    ],
+    [
+     "notice",
+     "Learning in this folder: on."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {
+     "status": {
+      "enabled": true
+     }
+    }
+   }
+  },
+  {
+   "text": "/learn project OFF",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/learn/settings",
+     {
+      "method": "POST",
+      "body": {
+       "workspace": "/home/marco/p",
+       "project": false
+      }
+     }
+    ],
+    [
+     "learnStatus"
+    ],
+    [
+     "saveSettings"
+    ],
+    [
+     "renderSide",
+     true
+    ],
+    [
+     "notice",
+     "Learning in this folder: off."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {
+     "status": {
+      "enabled": false
+     }
+    }
+   }
+  },
+  {
+   "text": "/learn project default",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/learn/settings",
+     {
+      "method": "POST",
+      "body": {
+       "workspace": "/home/marco/p",
+       "project": null
+      }
+     }
+    ],
+    [
+     "learnStatus"
+    ],
+    [
+     "saveSettings"
+    ],
+    [
+     "renderSide",
+     true
+    ],
+    [
+     "notice",
+     "Learning in this folder: follows the global setting."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {
+     "status": {
+      "enabled": true
+     }
+    }
+   }
+  },
+  {
+   "text": "/learn project",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Usage: /learn project on|off|default (for the open folder; it is kept in .fllm/learn.json there)"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {
+     "status": {
+      "enabled": true
+     }
+    }
+   }
+  },
+  {
+   "text": "/learn project maybe",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Usage: /learn project on|off|default (for the open folder; it is kept in .fllm/learn.json there)"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {
+     "status": {
+      "enabled": true
+     }
+    }
+   }
+  },
+  {
+   "text": "/learn project on",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/learn/settings",
+     {
+      "method": "POST",
+      "body": {
+       "workspace": "/home/marco/p",
+       "project": true
+      }
+     }
+    ],
+    [
+     "learnStatus"
+    ],
+    [
+     "notice",
+     "Learning in this folder: on."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "learn": {
+     "status": null
+    }
+   }
   },
   {
    "text": "/deploy something",

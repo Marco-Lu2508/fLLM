@@ -875,7 +875,7 @@ fn input<'a>(
         .into()
 }
 
-fn editor_style<'a>(t: Tokens) -> impl Fn(&iced::Theme, text_editor::Status) -> text_editor::Style + 'a {
+pub(crate) fn editor_style<'a>(t: Tokens) -> impl Fn(&iced::Theme, text_editor::Status) -> text_editor::Style + 'a {
     move |_, status| text_editor::Style {
         background: iced::Background::Color(t.surface_2),
         border: iced::Border {
@@ -1101,7 +1101,7 @@ fn improvements_card<'a>(t: Tokens, v: &SkillsView<'a>) -> Element<'a, Message> 
 }
 
 /// One entry of *What I learned*: what happened, when, and its Undo button (`lnFeedHtml`).
-fn feed_row<'a>(t: Tokens, entry: &'a LearnEntry) -> Element<'a, Message> {
+pub(crate) fn feed_row<'a>(t: Tokens, entry: &'a LearnEntry) -> Element<'a, Message> {
     let mut head = row![text(log_title(entry)).size(13).color(t.fg)]
         .push(Space::new().width(Length::Fill))
         .align_y(Alignment::Center);

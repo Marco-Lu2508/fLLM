@@ -463,6 +463,26 @@ pub enum CodeMsg {
     AgentsLoaded(Option<Vec<crate::subagents::CustomAgent>>),
     /// An event of one sub-agent's stream (the id is the `task` call that started it).
     KidStream(String, StreamEvent),
+    /// What the server says of learning when a folder opens (`fllmLearnStatus`).
+    LearnStatus(Option<crate::learn::Status>),
+    /// The first-run sentence of the server, or nothing (`fllmLearnNotice`).
+    LearnNotice(String),
+    /// The checkbox *Learn from my sessions* of the side.
+    LearnToggle(bool),
+    /// The answer of the server to the switch.
+    LearnSwitched(Result<(), String>),
+    /// The server took the run (or did not) and the window starts to watch for its step; the
+    /// number is the second the page watches from (`Date.now() / 1000 - 2`).
+    LearnQueued(bool, f64),
+    /// The timer of the watch: ask the server how the step goes (`tries` polls have been made).
+    LearnPoll(f64, u32),
+    LearnPolled(Option<crate::learn::Status>, f64, u32),
+    /// *Skills helped* / *Skills did not help* and `/good`, `/bad`.
+    LearnThumb(&'static str),
+    LearnThumbDone(&'static str, Vec<String>, Result<(u64, Vec<String>), String>),
+    /// What `/learn` was about, once the server has answered: the plan, the status and an error
+    /// of the switch.
+    LearnCommand(crate::learn::LearnPlan, Option<crate::learn::Status>, Option<String>),
     /// The specs of the folder as they are (`loadSpecs` of the page).
     SpecsLoaded(Vec<crate::specs::Spec>),
     /// The listing of `/spec` with no argument, ready to be written into the list.
@@ -620,6 +640,18 @@ pub struct CodeState {
     pub agents: Vec<crate::subagents::CustomAgent>,
     /// The sub-agents that work or wait for a place (at most `MAX_PARALLEL_CHILDREN` work at a time).
     kids: Vec<Kid>,
+    /// *Learn from my sessions* (`code.learn`, on by default): after a run the server learns from it.
+    pub learn: bool,
+    /// The switch changed and the store keeps the new state (`saveCodeSettings`).
+    pub(crate) pending_learn: Option<bool>,
+    /// Where the run in progress began in the conversation (`turn.msgIndex`).
+    learn_from: Option<usize>,
+    /// The skills of the last run that was handed over (`window.fllmLearnLast`): what a thumb is about.
+    pub learn_last: Option<crate::learn::Last>,
+    /// What the server calls this conversation in its log (`code.sessionId`).
+    session_id: String,
+    /// A learning step ended: Settings > Personalization and Skills read their lists again.
+    pub(crate) learn_refresh: bool,
 }
 
 /// Where one sub-agent's loop stands.
@@ -701,6 +733,12 @@ impl Default for CodeState {
             handle: None,
             agents: Vec::new(),
             kids: Vec::new(),
+            learn: true,
+            pending_learn: None,
+            learn_from: None,
+            learn_last: None,
+            session_id: String::new(),
+            learn_refresh: false,
         }
     }
 }
@@ -1506,6 +1544,8 @@ impl CodeState {
         self.error = None;
         self.steps = 0;
         self.history.clear();
+        // the run begins where the conversation ends now (the page's `turn.msgIndex`)
+        self.learn_from = Some(self.wire(None).len().saturating_sub(1));
         self.items.push(Item::User {
             text: display.to_string(),
             sent,
@@ -1713,6 +1753,8 @@ impl CodeState {
                         self.pending_auto_review = Some(self.auto_review);
                     }
                 }
+                Step::Learn(arg) => tasks.push(self.learn_command(&arg, env)),
+                Step::Thumb(value) => tasks.push(self.update(CodeMsg::LearnThumb(value), env)),
                 Step::UserTool { name, args } => tasks.push(self.user_tool(name, args, env)),
                 Step::Worktree { action, name } => {
                     let base = env.base.to_string();
@@ -2148,10 +2190,14 @@ impl CodeState {
     fn end_round(&mut self, env: &Env) -> Task<Message> {
         self.running = false;
         self.handle = None;
-        Task::perform(
-            crate::specs::fetch_specs(env.base.to_string()),
-            |r| Message::Code(CodeMsg::SpecsLoaded(r.unwrap_or_default())),
-        )
+        let learn = self.learn_after_run(env, false);
+        Task::batch([
+            Task::perform(
+                crate::specs::fetch_specs(env.base.to_string()),
+                |r| Message::Code(CodeMsg::SpecsLoaded(r.unwrap_or_default())),
+            ),
+            learn,
+        ])
     }
 
     /// The tail of a turn in the page's order (`submitText`): the self-review of row 81 first —
@@ -2340,6 +2386,92 @@ impl CodeState {
                 Task::none()
             }
             CodeMsg::AgentsLoaded(None) => Task::none(),
+            CodeMsg::LearnStatus(None) => Task::none(),
+            CodeMsg::LearnStatus(Some(st)) => {
+                // the switch of the server is the truth (`fllm-rs learn off`, a folder's `.fllm/learn.json`)
+                if st.enabled != Some(self.learn) {
+                    self.learn = st.enabled != Some(false);
+                    self.pending_learn = Some(self.learn);
+                }
+                if st.enabled == Some(false) {
+                    return Task::none();
+                }
+                let root = self.workspace.as_ref().map(|w| w.root.clone()).unwrap_or_default();
+                Task::perform(crate::learn::fetch_notice(env.base.to_string(), root), |n| Message::Code(CodeMsg::LearnNotice(n)))
+            }
+            CodeMsg::LearnNotice(notice) => {
+                if !notice.is_empty() {
+                    self.items.push(Item::Note(notice));
+                }
+                Task::none()
+            }
+            CodeMsg::LearnToggle(on) => {
+                self.learn = on;
+                self.pending_learn = Some(on);
+                let root = self.workspace.as_ref().map(|w| w.root.clone()).unwrap_or_default();
+                Task::perform(crate::learn::set_enabled(env.base.to_string(), on, root), |r| Message::Code(CodeMsg::LearnSwitched(r)))
+            }
+            CodeMsg::LearnSwitched(Err(e)) => {
+                self.pending_toast = Some(e);
+                Task::none()
+            }
+            CodeMsg::LearnSwitched(Ok(())) => Task::none(),
+            CodeMsg::LearnQueued(false, _) => Task::none(),
+            CodeMsg::LearnQueued(true, since) => Self::learn_poll_in(crate::learn::FIRST_POLL_MS, since, 0),
+            CodeMsg::LearnPoll(since, tries) => {
+                let root = self.workspace.as_ref().map(|w| w.root.clone()).unwrap_or_default();
+                Task::perform(crate::learn::fetch_status(env.base.to_string(), root), move |st| Message::Code(CodeMsg::LearnPolled(st, since, tries + 1)))
+            }
+            CodeMsg::LearnPolled(st, since, tries) => {
+                if crate::learn::poll_done(st.as_ref(), since) {
+                    let toast = crate::learn::toast_text(st.as_ref().and_then(|s| s.last_run.as_ref()));
+                    if !toast.is_empty() {
+                        self.pending_toast = Some(toast);
+                    }
+                    self.learn_refresh = true;
+                    return Task::none();
+                }
+                if tries < crate::learn::MAX_POLLS {
+                    return Self::learn_poll_in(crate::learn::POLL_MS, since, tries);
+                }
+                Task::none()
+            }
+            CodeMsg::LearnThumb(value) => {
+                let Some(last) = self.learn_last.clone().filter(|l| !l.skills.is_empty()) else {
+                    self.pending_toast = Some(crate::learn::NO_SKILL_TOAST.to_string());
+                    return Task::none();
+                };
+                let skills = last.skills.clone();
+                let body = crate::learn::feedback_body(value, &last);
+                Task::perform(crate::learn::feedback(env.base.to_string(), body), move |r| Message::Code(CodeMsg::LearnThumbDone(value, skills.clone(), r)))
+            }
+            CodeMsg::LearnThumbDone(value, skills, Ok((_, notes))) => {
+                self.pending_toast = Some(crate::learn::thumb_toast(value, &skills, &notes));
+                self.learn_refresh = true;
+                Task::none()
+            }
+            CodeMsg::LearnThumbDone(_, _, Err(e)) => {
+                self.pending_toast = Some(e);
+                Task::none()
+            }
+            CodeMsg::LearnCommand(plan, status, error) => {
+                use crate::learn::LearnPlan;
+                if let Some(e) = error {
+                    self.pending_toast = Some(e);
+                }
+                match plan {
+                    LearnPlan::ProjectUsage => {}
+                    LearnPlan::Project(project) => {
+                        if let Some(st) = &status {
+                            self.learn = st.enabled == Some(true);
+                            self.pending_learn = Some(self.learn);
+                        }
+                        self.items.push(Item::Note(crate::learn::project_notice(project)));
+                    }
+                    LearnPlan::Show(_) => self.items.push(Item::Note(crate::learn::learn_notice(self.learn, status.as_ref()))),
+                }
+                Task::none()
+            }
             CodeMsg::KidStream(id, ev) => self.kid_event(&id, ev, env),
             CodeMsg::SpecsLoaded(specs) => {
                 self.specs = specs;
@@ -2487,6 +2619,8 @@ impl CodeState {
                     Task::perform(load_custom_commands(base.clone()), |r| Message::Code(CodeMsg::CustomLoaded(r))),
                     // and the specs of `.fllm/specs` (`loadSpecs` runs with them at 814)
                     Task::perform(crate::specs::fetch_specs(base.clone()), |r| Message::Code(CodeMsg::SpecsLoaded(r.unwrap_or_default()))),
+                    // what the server says of learning in this folder (`fllmLearnStatus`)
+                    Task::perform(crate::learn::fetch_status(base.clone(), w_root.clone()), |st| Message::Code(CodeMsg::LearnStatus(st))),
                     // and the custom sub-agents of the folder (`loadAgents`)
                     Task::perform(fetch_agents(base, w_root), |r| Message::Code(CodeMsg::AgentsLoaded(r.ok()))),
                 ])
@@ -2646,7 +2780,8 @@ impl CodeState {
                         self.items.push(Item::Note(e));
                         self.running = false;
                         self.handle = None;
-                        Task::none()
+                        // a run that ended in an error is still learned from, as a failed one
+                        self.learn_after_run(env, true)
                     }
                     StreamEvent::Reasoning(_) | StreamEvent::Logprobs(_) | StreamEvent::Usage { .. } | StreamEvent::Timings { .. } => Task::none(),
                 }
@@ -2957,6 +3092,72 @@ pub async fn create_agent_file(base: String, root: String, args: Value) -> Resul
 }
 
 impl CodeState {
+    /// The timer of the watch for a learning step (`window.setTimeout(poll, …)` of `lnWatchRun`).
+    fn learn_poll_in(ms: u64, since: f64, tries: u32) -> Task<Message> {
+        Task::perform(async move { tokio::time::sleep(std::time::Duration::from_millis(ms)).await }, move |_| Message::Code(CodeMsg::LearnPoll(since, tries)))
+    }
+
+    /// `/learn` (`case 'learn'`): the plan of the words, the request and the status behind it.
+    fn learn_command(&mut self, arg: &str, env: &Env) -> Task<Message> {
+        use crate::learn::LearnPlan;
+        let plan = crate::learn::plan_learn(arg, self.workspace.is_some());
+        let (base, root) = (env.base.to_string(), self.workspace.as_ref().map(|w| w.root.clone()).unwrap_or_default());
+        match plan {
+            LearnPlan::ProjectUsage => {
+                self.items.push(Item::Note(crate::learn::PROJECT_USAGE.to_string()));
+                Task::none()
+            }
+            LearnPlan::Project(project) => Task::perform(
+                async move {
+                    // the page does not look at the answer of this request
+                    let _ = crate::learn::set_project(base.clone(), root.clone(), project).await;
+                    crate::learn::fetch_status(base, root).await
+                },
+                move |st| Message::Code(CodeMsg::LearnCommand(plan, st, None)),
+            ),
+            LearnPlan::Show(set) => {
+                if let Some(on) = set {
+                    self.learn = on;
+                    self.pending_learn = Some(on);
+                }
+                Task::perform(
+                    async move {
+                        let mut error = None;
+                        if let Some(on) = set {
+                            error = crate::learn::set_enabled(base.clone(), on, root.clone()).await.err();
+                        }
+                        (crate::learn::fetch_status(base, root).await, error)
+                    },
+                    move |(st, error)| Message::Code(CodeMsg::LearnCommand(plan, st, error)),
+                )
+            }
+        }
+    }
+
+    /// The answer is delivered: the server learns from the run in the background
+    /// (`fllmLearnAfterRun`), unless learning is off or the run said nothing.
+    fn learn_after_run(&mut self, env: &Env, failed: bool) -> Task<Message> {
+        let Some(from) = self.learn_from.take() else { return Task::none() };
+        if !self.learn {
+            return Task::none();
+        }
+        let wire = self.wire(None);
+        let messages = crate::learn::run_messages_default(&wire[1..], from);
+        if messages.is_empty() {
+            return Task::none();
+        }
+        // the skills are read from the reduced messages, as the page reads them (`lnSkillsRead(run)`)
+        let skills = crate::learn::skills_read_run(&messages);
+        if self.session_id.is_empty() {
+            self.session_id = format!("s{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis()));
+        }
+        let workspace = self.workspace.as_ref().map(|w| w.root.clone()).unwrap_or_default();
+        self.learn_last = Some(crate::learn::Last { session: self.session_id.clone(), workspace: workspace.clone(), skills: skills.clone() });
+        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()) - 2.0;
+        let body = crate::learn::after_run_body(&self.session_id, &workspace, failed, &skills, messages);
+        Task::perform(crate::learn::after_run(env.base.to_string(), body), move |queued| Message::Code(CodeMsg::LearnQueued(queued, since)))
+    }
+
     fn kid_index(&self, call_id: &str) -> Option<usize> {
         self.kids.iter().position(|k| k.call_id == call_id)
     }
@@ -3608,8 +3809,8 @@ pub fn page<'a>(
 /// The side of the Code page — the blocks the rows build so far: *Specs* (row 80, the
 /// `Specs` block of `renderCodeSide` with `specsHtml`) and *Settings* (row 81, the two
 /// switches of `code.autoCheck` and `code.autoReview`), with their words of the page. The
-/// others it sits among (tasks, changed files, jobs, sessions, memory, permissions, the
-/// style and what the agent learns) are still open and come with their own rows.
+/// others it sits among (tasks, changed files, jobs, sessions, memory, permissions and the
+/// style) come with their own rows.
 fn side_settings<'a>(s: &'a CodeState, t: Tokens) -> Element<'a, Message> {
     let semibold = Font { weight: iced::font::Weight::Semibold, ..Font::default() };
     let mut specs = column![].spacing(8);
@@ -3684,6 +3885,17 @@ fn side_settings<'a>(s: &'a CodeState, t: Tokens) -> Element<'a, Message> {
         text("When a run changed files, the agent reads its own diff once more together with the findings of a fixed rule set and the diagnostics, and fixes what is wrong (two rounds at most). It costs one extra step per run. Switch it on with /autoreview on.")
             .size(12)
             .color(t.muted),
+        checkbox(s.learn)
+            .label("Learn from my sessions")
+            .size(16)
+            .text_size(13)
+            .on_toggle(|value| Message::Code(CodeMsg::LearnToggle(value))),
+        text(crate::learn::SIDE_TEXT).size(12).color(t.muted),
+        row![
+            button(text("Skills helped").size(12)).on_press(Message::Code(CodeMsg::LearnThumb("up"))).padding([4, 8]).style(theme::ghost_button(t)),
+            button(text("Skills did not help").size(12)).on_press(Message::Code(CodeMsg::LearnThumb("down"))).padding([4, 8]).style(theme::ghost_button(t)),
+        ]
+        .spacing(6),
     ]
     .spacing(10);
     let side = column![specs, block].spacing(22);

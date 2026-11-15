@@ -75,7 +75,7 @@ pub fn sub_agent_prompt(description: &str, prompt: &str, general: bool) -> Strin
 
 /// `String(value || fallback)`: what the page reads of an argument the model may have written
 /// as anything (a number for a text, nothing at all).
-fn js_text(v: Option<&Value>, fallback: &str) -> String {
+pub(crate) fn js_text(v: Option<&Value>, fallback: &str) -> String {
     match v {
         Some(Value::String(s)) if !s.is_empty() => s.clone(),
         Some(Value::Number(n)) if n.as_f64().is_some_and(|f| f != 0.0 && !f.is_nan()) => crate::specs::index_text(n.as_f64().unwrap_or_default()),

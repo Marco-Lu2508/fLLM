@@ -7,6 +7,17 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **Learning from sessions in the native app** (`learn.js`, `learn.js`'s Code-page hooks and the
+  three cards of Settings > Personalization). After a run the window hands the server what
+  happened (the messages of the run, cut as the page cuts them, the skills it read, done or
+  failed) and says what the server learned in a toast; *Learn from my sessions* is a checkbox in
+  the side of the Code page and follows the server's own switch; *Skills helped* / *Skills did not
+  help*, `/good` and `/bad` tell it how the skills of the last run went; `/learn`, `/learn on|off`
+  and `/learn project on|off|default` work as on the page. Settings > Personalization shows the
+  profile the agent keeps of you (edit, save, export, delete), its memory with Edit and Delete,
+  what waits for a yes, the two switches and *What I learned* with Undo. Twenty-four fixtures from
+  the page's own functions, nineteen dispatcher cases, twenty-one window tests, four tests against a
+  small server, fifty-three mutations.
 - **Sub-agents in the native app** (`runSubAgent`, `runLoop`, `create_agent` and the guard of
   `runToolCall` in `code.js`). A `task` call starts a conversation of its own — its messages, its
   stream, its steps (sixteen unless the agent says otherwise) — drawn inside the task's card with

@@ -1140,6 +1140,7 @@ pub fn page<'a>(
     sampling: &'a SamplingTexts,
     engine: Element<'a, Message>,
     personal: PersonalView<'a>,
+    learn_cards: Element<'a, Message>,
     voice: VoiceView<'a>,
     usage: UsageView<'a>,
     look: LookView<'a>,
@@ -1681,6 +1682,8 @@ pub fn page<'a>(
             content = content.push(crate::settingssearch::marker(t));
         }
         content = content.push(card(t, "Personalization", pers.into()));
+        // the three cards of `learn.js` follow it in the same pane
+        content = content.push(learn_cards);
     }
     if crate::settingssearch::keep("engine", query) {
         if hit == Some("engine") {

@@ -532,5 +532,5 @@ fn the_side_with_specs_is_drawn() {
 fn opening_a_folder_reads_the_specs_too() {
     let (mut app, _dir) = app("light");
     let task = app.update(Message::Code(CodeMsg::Opened(Ok(Workspace { root: FOLDER.into(), name: "fllm".into(), branch: Some("main".into()) }))));
-    assert_eq!(task.units(), 6, "the loads of an opened folder, the specs and the custom agents among them");
+    assert_eq!(task.units(), 7, "the loads of an opened folder, the specs, the custom agents and the learning status among them");
 }

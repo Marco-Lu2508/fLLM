@@ -1,0 +1,1533 @@
+{
+ "parse": [
+  {
+   "text": "Started background job job1. Read its output with bash_output {job_id: \"job1\"} and stop it with bash_kill.",
+   "id": "job1"
+  },
+  {
+   "text": "Job 12 started",
+   "id": "12"
+  },
+  {
+   "text": "started shell abc-1",
+   "id": "abc-1"
+  },
+  {
+   "text": "no id here at all",
+   "id": "here"
+  },
+  {
+   "text": "pid 4242",
+   "id": "4242"
+  },
+  {
+   "text": "process: p_9",
+   "id": "p_9"
+  },
+  {
+   "text": "deadbeef01 is running",
+   "id": "deadbeef01"
+  },
+  {
+   "text": "bash_7f3a started",
+   "id": "bash_7f3a"
+  },
+  {
+   "text": "",
+   "id": null
+  },
+  {
+   "text": "task=7",
+   "id": "7"
+  },
+  {
+   "text": "id=#42",
+   "id": "42"
+  },
+  {
+   "text": "ID: Ünï",
+   "id": null
+  },
+  {
+   "text": "job '(x_y-z)'",
+   "id": "x_y-z"
+  },
+  {
+   "text": "the job",
+   "id": null
+  },
+  {
+   "text": "job",
+   "id": null
+  },
+  {
+   "text": "jobs 5",
+   "id": "5"
+  },
+  {
+   "text": "taskid 5",
+   "id": "5"
+  },
+  {
+   "text": "background job: ",
+   "id": null
+  },
+  {
+   "text": "exit code 0",
+   "id": "0"
+  },
+  {
+   "text": "12",
+   "id": "12"
+  },
+  {
+   "text": "Started job_1",
+   "id": null
+  },
+  {
+   "text": "Process 99 (python)",
+   "id": "99"
+  },
+  {
+   "text": "shell \"s-1\"",
+   "id": "s-1"
+  },
+  {
+   "text": null,
+   "id": null
+  },
+  {
+   "text": "__undefined__",
+   "id": null
+  },
+  {
+   "text": 42,
+   "id": "42"
+  }
+ ],
+ "scenarios": [
+  {
+   "name": "a background bash starts a job",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "npm run dev",
+       "background": true
+      },
+      "Started background job job1. Read its output."
+     ]
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "job1",
+       "command": "npm run dev",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "a bash that is not in the background is no job",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "ls"
+      },
+      "Started background job job1."
+     ]
+    }
+   ],
+   "after": [
+    {
+     "jobs": [],
+     "calls": [],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "a background bash with no id in the answer",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "x",
+       "background": true
+      },
+      "nothing to see"
+     ]
+    }
+   ],
+   "after": [
+    {
+     "jobs": [],
+     "calls": [],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "output keeps the text and an exit ends the job",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job j1"
+     ]
+    },
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash_output",
+      {
+       "job_id": "j1"
+      },
+      "building..."
+     ]
+    },
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash_output",
+      {
+       "job_id": "j1"
+      },
+      "process exited with exit code 0"
+     ]
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "building...",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "done",
+       "out": "process exited with exit code 0",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "a word that only contains finished is not finished",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job j1"
+     ]
+    },
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash_output",
+      {
+       "job_id": "j1"
+      },
+      "unfinished business, exited_ok"
+     ]
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "unfinished business, exited_ok",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "case does not matter for the exit",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job j1"
+     ]
+    },
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash_output",
+      {
+       "job_id": "j1"
+      },
+      "Process FINISHED"
+     ]
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "done",
+       "out": "Process FINISHED",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "kill marks the job",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job j1"
+     ]
+    },
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash_kill",
+      {
+       "job_id": "j1"
+      },
+      "killed"
+     ]
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "killed",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "an id the page does not know",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash_output",
+      {
+       "job_id": "zzz"
+      },
+      "out"
+     ]
+    },
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash_kill",
+      {
+       "job_id": "zzz"
+      },
+      "out"
+     ]
+    }
+   ],
+   "after": [
+    {
+     "jobs": [],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [],
+     "calls": [],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "the first value of the arguments is the id, numbers too",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job 7"
+     ]
+    },
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash_output",
+      {
+       "n": 7
+      },
+      "ok"
+     ]
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "7",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "7",
+       "command": "make",
+       "status": "running",
+       "out": "ok",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "two jobs",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "a",
+       "background": true
+      },
+      "job a1"
+     ]
+    },
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "b"
+      },
+      "x"
+     ]
+    },
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "c",
+       "background": true
+      },
+      "job c3"
+     ]
+    },
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash_output",
+      {
+       "job_id": "c3"
+      },
+      "finished"
+     ]
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "a1",
+       "command": "a",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "a1",
+       "command": "a",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "a1",
+       "command": "a",
+       "status": "running",
+       "out": "",
+       "open": false
+      },
+      {
+       "id": "c3",
+       "command": "c",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "a1",
+       "command": "a",
+       "status": "running",
+       "out": "",
+       "open": false
+      },
+      {
+       "id": "c3",
+       "command": "c",
+       "status": "done",
+       "out": "finished",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "the output button opens, reads and closes",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job j1"
+     ]
+    },
+    {
+     "fn": "jobOutput",
+     "args": [
+      "j1"
+     ],
+     "answer": {
+      "ok": true,
+      "output": "hello\nexit code 1"
+     }
+    },
+    {
+     "fn": "jobOutput",
+     "args": [
+      "j1"
+     ],
+     "answer": {
+      "ok": true,
+      "output": "not read"
+     }
+    },
+    {
+     "fn": "jobOutput",
+     "args": [
+      "j1"
+     ],
+     "answer": {
+      "ok": false,
+      "error": "gone"
+     }
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "done",
+       "out": "hello\nexit code 1",
+       "open": true
+      }
+     ],
+     "calls": [
+      [
+       "bash_output",
+       {
+        "job_id": "j1"
+       }
+      ]
+     ],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "done",
+       "out": "hello\nexit code 1",
+       "open": false
+      }
+     ],
+     "calls": [
+      [
+       "bash_output",
+       {
+        "job_id": "j1"
+       }
+      ]
+     ],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "done",
+       "out": "gone",
+       "open": true
+      }
+     ],
+     "calls": [
+      [
+       "bash_output",
+       {
+        "job_id": "j1"
+       }
+      ],
+      [
+       "bash_output",
+       {
+        "job_id": "j1"
+       }
+      ]
+     ],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "the output button with a refusal",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job j1"
+     ]
+    },
+    {
+     "fn": "jobOutput",
+     "args": [
+      "j1"
+     ],
+     "answer": {
+      "ok": false,
+      "error": "no such job"
+     }
+    },
+    {
+     "fn": "jobOutput",
+     "args": [
+      "j1"
+     ],
+     "answer": {
+      "ok": false
+     }
+    },
+    {
+     "fn": "jobOutput",
+     "args": [
+      "j1"
+     ],
+     "answer": {
+      "ok": false
+     }
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "no such job",
+       "open": true
+      }
+     ],
+     "calls": [
+      [
+       "bash_output",
+       {
+        "job_id": "j1"
+       }
+      ]
+     ],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "no such job",
+       "open": false
+      }
+     ],
+     "calls": [
+      [
+       "bash_output",
+       {
+        "job_id": "j1"
+       }
+      ]
+     ],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": true
+      }
+     ],
+     "calls": [
+      [
+       "bash_output",
+       {
+        "job_id": "j1"
+       }
+      ],
+      [
+       "bash_output",
+       {
+        "job_id": "j1"
+       }
+      ]
+     ],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "the output button with a failed call",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job j1"
+     ]
+    },
+    {
+     "fn": "jobOutput",
+     "args": [
+      "j1"
+     ],
+     "answer": "throw:no server"
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "no server",
+       "open": true
+      }
+     ],
+     "calls": [
+      [
+       "bash_output",
+       {
+        "job_id": "j1"
+       }
+      ]
+     ],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "the output button for an unknown job",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "jobOutput",
+     "args": [
+      "nope"
+     ],
+     "answer": {
+      "ok": true,
+      "output": "x"
+     }
+    }
+   ],
+   "after": [
+    {
+     "jobs": [],
+     "calls": [],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "stop",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job j1"
+     ]
+    },
+    {
+     "fn": "jobKill",
+     "args": [
+      "j1"
+     ],
+     "answer": {
+      "ok": true,
+      "output": "ok"
+     }
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "killed",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [
+      [
+       "bash_kill",
+       {
+        "job_id": "j1"
+       }
+      ]
+     ],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "stop refused",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job j1"
+     ]
+    },
+    {
+     "fn": "jobKill",
+     "args": [
+      "j1"
+     ],
+     "answer": {
+      "ok": false,
+      "error": "not running"
+     }
+    },
+    {
+     "fn": "jobKill",
+     "args": [
+      "j1"
+     ],
+     "answer": {
+      "ok": false
+     }
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [
+      [
+       "bash_kill",
+       {
+        "job_id": "j1"
+       }
+      ]
+     ],
+     "toasts": [
+      "not running"
+     ]
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [
+      [
+       "bash_kill",
+       {
+        "job_id": "j1"
+       }
+      ],
+      [
+       "bash_kill",
+       {
+        "job_id": "j1"
+       }
+      ]
+     ],
+     "toasts": [
+      "not running",
+      "The job could not be stopped."
+     ]
+    }
+   ]
+  },
+  {
+   "name": "stop with a failed call",
+   "registry": {
+    "props": [
+     "job_id"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job j1"
+     ]
+    },
+    {
+     "fn": "jobKill",
+     "args": [
+      "j1"
+     ],
+     "answer": "throw:no server"
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [
+      [
+       "bash_kill",
+       {
+        "job_id": "j1"
+       }
+      ]
+     ],
+     "toasts": [
+      "no server"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "the argument name of a server that calls it shell",
+   "registry": {
+    "props": [
+     "shell"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job j1"
+     ]
+    },
+    {
+     "fn": "jobOutput",
+     "args": [
+      "j1"
+     ],
+     "answer": {
+      "ok": true,
+      "output": "x"
+     }
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "x",
+       "open": true
+      }
+     ],
+     "calls": [
+      [
+       "bash_output",
+       {
+        "shell": "j1"
+       }
+      ]
+     ],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "the argument name: first that looks like an id, else the first",
+   "registry": {
+    "props": [
+     "since",
+     "bash_id",
+     "x"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job j1"
+     ]
+    },
+    {
+     "fn": "jobOutput",
+     "args": [
+      "j1"
+     ],
+     "answer": {
+      "ok": true,
+      "output": "x"
+     }
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "x",
+       "open": true
+      }
+     ],
+     "calls": [
+      [
+       "bash_output",
+       {
+        "bash_id": "j1"
+       }
+      ]
+     ],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "the argument name: none looks like an id",
+   "registry": {
+    "props": [
+     "since",
+     "x"
+    ]
+   },
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job j1"
+     ]
+    },
+    {
+     "fn": "jobOutput",
+     "args": [
+      "j1"
+     ],
+     "answer": {
+      "ok": true,
+      "output": "x"
+     }
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "x",
+       "open": true
+      }
+     ],
+     "calls": [
+      [
+       "bash_output",
+       {
+        "since": "j1"
+       }
+      ]
+     ],
+     "toasts": []
+    }
+   ]
+  },
+  {
+   "name": "the argument name: no bash_output tool at all",
+   "registry": null,
+   "steps": [
+    {
+     "fn": "trackJob",
+     "args": [
+      "bash",
+      {
+       "command": "make",
+       "background": true
+      },
+      "job j1"
+     ]
+    },
+    {
+     "fn": "jobKill",
+     "args": [
+      "j1"
+     ],
+     "answer": {
+      "ok": true,
+      "output": "ok"
+     }
+    }
+   ],
+   "after": [
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "running",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [],
+     "toasts": []
+    },
+    {
+     "jobs": [
+      {
+       "id": "j1",
+       "command": "make",
+       "status": "killed",
+       "out": "",
+       "open": false
+      }
+     ],
+     "calls": [
+      [
+       "bash_kill",
+       {
+        "id": "j1"
+       }
+      ]
+     ],
+     "toasts": []
+    }
+   ]
+  }
+ ]
+}

@@ -33,9 +33,6 @@ const NOT_BUILT: &[&str] = &[
     "/model",
     "/sessions",
     "/memory",
-    "/learn",
-    "/good",
-    "/bad",
     "/retry",
 ];
 
@@ -248,6 +245,27 @@ fn native_events(steps: &[Step], case: &Value) -> Vec<Value> {
                 sessions.push(Vec::new());
                 out.push(json!(["notice", insights_notice(&session_insights(&sessions))]));
             }
+            Step::Learn(arg) => {
+                use fllm_app::learn::*;
+                let status: Option<Status> = serde_json::from_value(case["canned"]["learn"]["status"].clone()).ok().flatten();
+                let learn_before = case["pre"]["learn"].as_bool().unwrap_or(false);
+                match plan_learn(arg, true) {
+                    LearnPlan::ProjectUsage => out.push(json!(["notice", PROJECT_USAGE])),
+                    LearnPlan::Project(project) => {
+                        out.push(json!(["api", "/api/studio/learn/settings", { "method": "POST", "body": { "workspace": "/home/marco/p", "project": project } }]));
+                        out.push(json!(["learnStatus"]));
+                        out.push(json!(["notice", project_notice(project)]));
+                    }
+                    LearnPlan::Show(set) => {
+                        if let Some(on) = set {
+                            out.push(json!(["learnSet", on]));
+                        }
+                        out.push(json!(["learnStatus"]));
+                        out.push(json!(["notice", learn_notice(set.unwrap_or(learn_before), status.as_ref())]));
+                    }
+                }
+            }
+            Step::Thumb(value) => out.push(json!(["learnFeedback", value])),
             Step::SetPersonality(_key, notice) => out.push(json!(["notice", notice])),
             Step::CustomCommand { name, arg_text, source } => {
                 out.push(json!(["readCustom", name]));
