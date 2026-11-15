@@ -30,6 +30,8 @@ const OUTSIDE = [slice(code, 1460, 1473), slice(code, 1475, 1487), slice(code, 1
 // PURE_PROMPTS already; the check after an edit and the clip of its reply sit outside it
 const AUTOCHECK = slice(code, 1937, 1954);         // CHECKED_EXTENSIONS + autoCheckEdit
 const CLIP = slice(code, 1884, 1887);              // clipOutput, over a ctxMax of the harness
+const SPECS_A = slice(code, 921, 933);             // loadSpecs + specAction (row 80)
+const SPECS_B = slice(code, 945, 978);             // runSpecTask + specCommand
 
 const log = [];
 const rec = (name) =>
@@ -39,7 +41,7 @@ const rec = (name) =>
 
 // identifiers the slices themselves declare: a recorder of the harness must not collide with them
 const pageNames = new Set(
-  [PURE_CODE, PURE_PROMPTS, BUILTIN, INIT, TOGGLE, MAX_SESSIONS, AGENT_NAME, READ_ONLY, PARSED_RULES, OUTSIDE, DISPATCH, AUTOCHECK, CLIP].join('\n').match(
+  [PURE_CODE, PURE_PROMPTS, BUILTIN, INIT, TOGGLE, MAX_SESSIONS, AGENT_NAME, READ_ONLY, PARSED_RULES, OUTSIDE, DISPATCH, AUTOCHECK, CLIP, SPECS_A, SPECS_B].join('\n').match(
     /(?:const|let|function|class)\s+([A-Za-z_$][\w$]*)/g,
   ).map((s) => s.split(/\s+/)[1]),
 );
@@ -51,7 +53,7 @@ const CODE_SEED =
   " sandbox: 'workspace', sandboxAvailable: true, rules: { allow: '', deny: '' }, custom: []," +
   " personality: 'default', learn: false, autoCheck: false, autoReview: false, lastBuildPerm: 'ask', memory: ''," +
   " compactedAt: 0, reverted: null, alwaysAllow: new Set(), registry: new Map(), abort: null," +
-  " sideOpen: {}, memDraft: null, todos: [], changed: new Map(), disabled: null }";
+  " sideOpen: {}, memDraft: null, todos: [], changed: new Map(), disabled: null, specs: [] }";
 
 // what the page talks to, replaced by recorders; the pure code above supplies the real logic
 const stubs = [
@@ -74,7 +76,6 @@ const stubs = [
   ['undoChange', "__rec('undo')"],
   ['showRewind', "__rec('rewind')"],
   ['compactSession', "__rec('compact')"],
-  ['specCommand', "__rec('spec')"],
   ['workspaceSessions', "() => __savedSessions"],
   ['turnChoices', "() => [{ label: 'Fix the bug', data: 'm1' }]"],
   ['forkSession', "__rec('fork')"],
@@ -148,6 +149,7 @@ function harness() {
     sandboxAvailable: code.sandboxAvailable, autoCheck: code.autoCheck, autoReview: code.autoReview,
     personality: code.personality, rules: { allow: code.rules.allow, deny: code.rules.deny },
     custom: code.custom.map((c) => ({ name: c.name, description: c.description })),
+    specs: code.specs,
   });
   const __defaultSaved = () => [{ id: 'other', title: 'Older', time: 1699990000 }];
   let __savedSessions = __defaultSaved();
@@ -376,6 +378,53 @@ const WORKTREE_CASES = [
   },
 ];
 
+// the spec commands with the answers of the server canned (row 80): `specs` is what the page
+// has loaded when the command comes (`code.specs`), `spec.list` what a reload then reads,
+// `spec.prompt` the prompt `task_prompt` / `new_prompt` hand back, `spec.error` a refusal
+const SPEC_EXPORT = {
+  name: 'export', requirements: true, design: true, tasks_file: true, total: 3, done: 1,
+  tasks: [
+    { index: 1, text: 'Write the exporter', done: true, depth: 0 },
+    { index: 2, text: 'Wire the button', done: false, depth: 0 },
+    { index: 3, text: 'Add a test', done: false, depth: 1 },
+  ],
+};
+const SPEC_DONE = {
+  name: 'search', requirements: true, design: true, tasks_file: true, total: 1, done: 1,
+  tasks: [{ index: 1, text: 'Index the pages', done: true, depth: 0 }],
+};
+const SPEC_CASES = [
+  { text: '/spec', specs: [], canned: { spec: { list: [] } } },
+  { text: '/spec', specs: [], canned: { spec: { list: [SPEC_EXPORT, SPEC_DONE] } } },
+  { text: '/spec   ', specs: [SPEC_EXPORT], canned: { spec: { list: [SPEC_EXPORT] } } },
+  { text: '/spec run export', specs: [SPEC_EXPORT], canned: { spec: { prompt: 'Do task 2 of export.' } } },
+  { text: '/spec run export 3', specs: [SPEC_EXPORT], canned: { spec: { prompt: 'Do task 3 of export.' } } },
+  { text: '/spec run export 9', specs: [SPEC_EXPORT], canned: { spec: { prompt: 'Do task 9.' } } },
+  { text: '/spec run export 0', specs: [SPEC_EXPORT], canned: { spec: { prompt: 'Do task 2 of export.' } } },
+  { text: '/spec run export x', specs: [SPEC_EXPORT], canned: { spec: { prompt: 'Do task 2 of export.' } } },
+  { text: '/spec run export -1', specs: [SPEC_EXPORT], canned: { spec: { prompt: 'Do task -1.' } } },
+  { text: '/spec run export 1.5', specs: [SPEC_EXPORT], canned: { spec: { prompt: 'Do task 1.5.' } } },
+  { text: '/spec run export 0x2', specs: [SPEC_EXPORT], canned: { spec: { prompt: 'Do task 2 of export.' } } },
+  { text: '/spec run export 1e1', specs: [SPEC_EXPORT], canned: { spec: { prompt: 'Do task 10.' } } },
+  { text: '/spec run export inf', specs: [SPEC_EXPORT], canned: { spec: { prompt: 'Do task 2 of export.' } } },
+  { text: '/spec run export Infinity', specs: [SPEC_EXPORT], canned: { spec: { prompt: 'Do task Infinity.' } } },
+  { text: '/spec run export 3 extra words', specs: [SPEC_EXPORT], canned: { spec: { prompt: 'Do task 3 of export.' } } },
+  { text: '/spec run search', specs: [SPEC_DONE], canned: { spec: { prompt: 'unused' } } },
+  { text: '/spec run search 1', specs: [SPEC_DONE], canned: { spec: { prompt: 'Do task 1 again.' } } },
+  { text: '/spec run nope', specs: [SPEC_EXPORT], canned: { spec: { list: [SPEC_EXPORT] } } },
+  { text: '/spec run', specs: [], canned: { spec: { list: [] } } },
+  // the list the page holds is stale: the reload finds the spec and the run goes on
+  { text: '/spec run export', specs: [], canned: { spec: { list: [SPEC_EXPORT], prompt: 'Do task 2 of export.' } } },
+  { text: '/spec run export', specs: [], canned: { spec: { list: [SPEC_DONE] } } },
+  { text: '/spec run search', specs: [], canned: { spec: { list: [SPEC_DONE] } } },
+  { text: '/spec csv-export Export the report as CSV.', specs: [], canned: { spec: { prompt: 'Write requirements.md for csv-export.' } } },
+  { text: '/spec   csv-export   Export   the report', specs: [], canned: { spec: { prompt: 'Write requirements.md for csv-export.' } } },
+  { text: '/spec csv-export', specs: [], canned: null },
+  { text: '/spec run export 2', specs: [SPEC_EXPORT], canned: { spec: { ok: false, error: 'the task has no text' } } },
+  { text: '/spec run export 2', specs: [SPEC_EXPORT], canned: { spec: { ok: false } } },
+  { text: '/spec csv-export Export it', specs: [], canned: { spec: { ok: false, error: 'a spec of that name exists' } } },
+];
+
 // ---- row 81: the self-review pair of codeprompts.js, called as the page calls it ----------
 const REVIEW_CASES = [
   // isCleanDiagnostic: the four shapes the page counts as clean, and two that are not
@@ -474,7 +523,7 @@ const REPLY_CASES = [
 
 async function main() {
   const context = { console, __log: [], __out: () => [] };
-  const setup = [harness(), PURE_CODE, PURE_PROMPTS, BUILTIN, INIT, TOGGLE, MAX_SESSIONS, AGENT_NAME, READ_ONLY, PARSED_RULES, OUTSIDE, DISPATCH, AUTOCHECK, CLIP].join('\n');
+  const setup = [harness(), PURE_CODE, PURE_PROMPTS, BUILTIN, INIT, TOGGLE, MAX_SESSIONS, AGENT_NAME, READ_ONLY, PARSED_RULES, OUTSIDE, DISPATCH, AUTOCHECK, CLIP, SPECS_A, SPECS_B].join('\n');
   vm.createContext(context);
   try {
     vm.runInContext(setup, context, { filename: 'page-slices.js' });
@@ -489,6 +538,7 @@ async function main() {
     ...CASES,
     ...REVIEW_TEXTS.map((text) => [text, null, null]),
     ...WORKTREE_CASES.map((row) => [row.text, null, row.canned]),
+    ...SPEC_CASES.map((row) => [row.text, `code.specs = ${JSON.stringify(row.specs)};`, row.canned]),
   ];
   for (const [text, setupScript, canned] of allCases) {
     vm.runInContext('__reset();', context);
@@ -514,6 +564,22 @@ async function main() {
            __log.push(['api', url, opts]);
            if (String(url).includes('/agent/worktree')) {
              return { ok: ${wt.ok !== false}, json: async () => (${JSON.stringify(wt.data || {})}) };
+           }
+           return { ok: true, json: async () => ({}) };
+         };`,
+        context,
+      );
+    }
+    if (canned && canned.spec) {
+      const sp = canned.spec;
+      vm.runInContext(
+        `apiFetch = async (url, opts) => {
+           __log.push(opts === undefined ? ['api', url] : ['api', url, opts]);
+           if (String(url).includes('/agent/specs')) {
+             if (opts && opts.method === 'POST') {
+               return { ok: ${sp.ok !== false}, json: async () => (${sp.ok === false ? JSON.stringify({ error: sp.error ? { message: sp.error } : undefined }) : JSON.stringify({ prompt: sp.prompt })}) };
+             }
+             return { ok: true, json: async () => ({ specs: ${JSON.stringify(sp.list || [])} }) };
            }
            return { ok: true, json: async () => ({}) };
          };`,

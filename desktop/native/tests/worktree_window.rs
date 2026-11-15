@@ -288,7 +288,7 @@ fn a_removed_worktree_notices_at_once_and_the_failures_keep_the_page_texts() {
 }
 
 /// `/batch` end to end: the worktree opens, its notice stands, and the task runs as a run of
-/// its own — display `/batch`, not a turn of the conversation.
+/// its own — display `/batch`.
 #[test]
 fn a_batch_opens_its_worktree_and_runs_the_task_as_its_own_run() {
     let (mut app, _dir) = app("light");
@@ -335,7 +335,7 @@ fn a_batch_opens_its_worktree_and_runs_the_task_as_its_own_run() {
     assert_eq!(display, "/batch", "with `/batch` as its display, as the page passes it");
     assert!(
         app.code().review.is_none(),
-        "a batch is not a turn of the conversation: no self-review"
+        "the review comes after the run, not at its start (tests/specs_window.rs holds the hook of a batch)"
     );
 }
 

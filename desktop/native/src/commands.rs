@@ -693,6 +693,8 @@ pub struct CmdState {
     pub auto_approve: bool,
     /// `code.autoReview`: what the notice of `/autoreview` without an argument reads.
     pub auto_review: bool,
+    /// `code.specs`: the listing of `/spec` is built from it (the page reloads before it).
+    pub specs: Vec<crate::specs::Spec>,
     pub turbo: bool,
     pub sandbox: Option<String>,
     pub sandbox_available: bool,
@@ -862,6 +864,14 @@ pub enum Step {
     /// `/batch <name> <task>`: a new worktree, the notice of it, and then the task as a run of
     /// its own (`agentRun(task, '/batch')` there).
     Batch { name: String, task: String },
+    /// `/spec` with no argument: reload the list and write the listing (`specCommand`'s
+    /// empty branch).
+    SpecList,
+    /// `/spec run [NAME] [N]`: find the spec against the fresh list (the page reloads when it
+    /// does not have the name) and run the task it picks.
+    SpecRun { name: String, asked: Option<f64> },
+    /// `/spec NAME what you want`: the prompt of `new_prompt`, run with the words as they came.
+    SpecNew { name: String, description: String, display: String },
     /// `/search words`: the search over the stored sessions of this window.
     Search(String),
     /// The counts of `/insights` over this folder's session(s).
@@ -1204,6 +1214,26 @@ pub fn dispatch(text: &str, state: &CmdState) -> Option<Vec<Step>> {
                 vec![Step::Notice(BATCH_USAGE.to_string())]
             } else {
                 vec![Step::Batch { name: name.to_string(), task: rest.to_string() }]
+            }
+        }
+        "spec" => {
+            let words: Vec<&str> = arg_text.split_whitespace().collect();
+            if words.is_empty() {
+                vec![Step::SpecList]
+            } else if words[0] == "run" {
+                // the task is picked against the list the state has, reloaded when the name is
+                // missing — as the page does, only across the round trip
+                let name = words.get(1).copied().unwrap_or("").to_string();
+                let asked = crate::specs::asked_task(words.get(2).copied());
+                vec![Step::SpecRun { name, asked }]
+            } else {
+                let name = words[0].to_string();
+                let description = words[1..].join(" ");
+                if description.is_empty() {
+                    vec![Step::Notice(crate::specs::SPEC_USAGE.to_string())]
+                } else {
+                    vec![Step::SpecNew { name, description, display: format!("/spec {}", arg_text) }]
+                }
             }
         }
         "diff" => vec![Step::UserRun("git diff --stat && git diff".to_string(), true)],

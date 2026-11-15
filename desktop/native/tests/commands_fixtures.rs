@@ -24,7 +24,6 @@ const NOT_BUILT: &[&str] = &[
     "/skill",
     "/rewind",
     "/compact",
-    "/spec a b",
     "/resume",
     "/fork",
     "/revert",
@@ -74,6 +73,7 @@ fn base_state(case: &Value) -> CmdState {
         },
         custom,
         usage: Some(USAGE.to_string()),
+        specs: specs_of(pre),
     }
 }
 
@@ -82,17 +82,41 @@ fn base_state(case: &Value) -> CmdState {
 /// ANSWER's doing (the folder switch, the agent run and the notice that follows the request)
 /// drops out here — the fixtures pin the request those steps plan, and `tests/worktree_window.rs`
 /// pins what the answer then does, with the same canned data.
+/// The `specs` of a fixture's pre-state (`code.specs`, as the snapshot writes it).
+fn specs_of(pre: &Value) -> Vec<fllm_app::specs::Spec> {
+    pre.get("specs")
+        .and_then(Value::as_array)
+        .map(|rows| rows.iter().filter_map(|row| serde_json::from_value(row.clone()).ok()).collect())
+        .unwrap_or_default()
+}
+
 fn page_events(case: &Value) -> Vec<Value> {
     let text = case["text"].as_str().unwrap_or_default();
     let worktree_family = text.starts_with("/worktree") || text.starts_with("/wt") || text.starts_with("/batch");
+    // a spec's run answers after the prompt: `agentRun` and the reload behind it happen when the
+    // window performs them, so the record is cut where the answer begins (as row 82 cut it)
+    let spec_family = text.starts_with("/spec");
     let mut out = Vec::new();
     let mut asked = false;
+    let mut answered = false;
     for event in case["record"].as_array().expect("a record") {
         let name = event[0].as_str().unwrap_or_default();
         if matches!(name, "render" | "renderSide" | "saveSession" | "saveSettings" | "busy" | "pickMention" | "hook") {
             continue;
         }
         if worktree_family && (name == "setWorkspace" || name == "agentRun" || (asked && name == "notice")) {
+            continue;
+        }
+        // after the run is handed over, what the page does is the window's reload
+        if spec_family && answered {
+            continue;
+        }
+        if spec_family && name == "agentRun" {
+            answered = true;
+        }
+        // a notice that follows a request is the answer's doing (`specs_window.rs` holds it)
+        if spec_family && asked && name == "notice" {
+            answered = true;
             continue;
         }
         if name == "api" {
@@ -163,6 +187,50 @@ fn native_events(steps: &[Step], case: &Value) -> Vec<Value> {
             }
             Step::Batch { name, task: _ } => {
                 out.push(json!(["api", "/api/studio/agent/worktree", { "method": "POST", "body": { "action": "new", "name": name } }]));
+            }
+            Step::SpecList => out.push(json!(["api", "/api/studio/agent/specs"])),
+            Step::SpecNew { name, description, display } => {
+                out.push(json!(["api", "/api/studio/agent/specs", {
+                    "method": "POST",
+                    "body": { "action": "new_prompt", "name": name, "description": description }
+                }]));
+                // the answer of a refusal is a notice the window pins (`specs_window.rs`)
+                if case["canned"]["spec"]["ok"] != json!(false) {
+                    out.push(json!(["agentRun", case["canned"]["spec"]["prompt"], display]));
+                }
+            }
+            Step::SpecRun { name, asked } => {
+                // the page finds the spec in the list it has and reloads only when the name is
+                // missing — both legs, against the fixture's own state and canned answer
+                use fllm_app::specs::{decide_run, index_json, index_text, parse_specs, RunDecision};
+                let pre = specs_of(&case["pre"]);
+                let mut decision = decide_run(&pre, name, *asked);
+                let mut reloaded = false;
+                if matches!(decision, RunDecision::NeedReload) {
+                    reloaded = true;
+                    out.push(json!(["api", "/api/studio/agent/specs"]));
+                    decision = match decide_run(&parse_specs(&case["canned"]["spec"]["list"].as_array().map_or(Value::Null, |_| json!({ "specs": case["canned"]["spec"]["list"] }))), name, *asked) {
+                        RunDecision::NeedReload => RunDecision::NotFound,
+                        other => other,
+                    };
+                }
+                match decision {
+                    RunDecision::Act { name, index } => {
+                        out.push(json!(["api", "/api/studio/agent/specs", {
+                            "method": "POST",
+                            "body": { "action": "task_prompt", "name": name, "index": index_json(index) }
+                        }]));
+                        if case["canned"]["spec"]["ok"] != json!(false) {
+                            out.push(json!(["agentRun", case["canned"]["spec"]["prompt"], format!("/spec run {name} {}", index_text(index))]));
+                        }
+                    }
+                    // behind a reload the page's notice comes after its GET and the record cuts
+                    // it there (`asked`); without one it is the whole answer and stays
+                    RunDecision::NotFound if !reloaded => out.push(json!(["notice", fllm_app::specs::no_spec_notice(name)])),
+                    RunDecision::AllDone if !reloaded => out.push(json!(["notice", fllm_app::specs::ALL_DONE_NOTICE])),
+                    RunDecision::NotFound | RunDecision::AllDone => {}
+                    RunDecision::NeedReload => unreachable!("folded above"),
+                }
             }
             Step::Search(query) => {
                 // `encodeURIComponent` of the page: this window's own queries are plain words

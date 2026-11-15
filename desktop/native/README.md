@@ -381,8 +381,13 @@ review over a card of their own. `/worktree new <name>` (also `wt`) creates a gi
 moves the agent into it, `/worktree leave` comes back to the main folder, `/worktree remove
 <name>` deletes one and a bare `/worktree` lists them with the branch and path; `/batch <name>
 <task>` does the same and then runs the task there as a run of its own, so the main folder stays
-untouched. The hooks of the agent loop fire from the same places the page
-fires them: what `user_prompt_submit` answers rides along with the message in `[hooks]`, a blocked
+untouched. `/spec` plans a feature before it is coded: with no words it lists the specs of
+`.fllm/specs/`, `/spec NAME what you want` has the agent write `requirements.md`, `design.md`
+and `tasks.md` and `/spec run NAME [N]` does the next open task (or task N); the side shows each
+spec with its files, its tasks as checkboxes and a *Run next task* button, and the list is read
+again when a run ends. The steering files of the folder come with the instructions the server
+sends. The hooks of the agent loop fire from the same places the page
+fires them: what `user_prompt_submit` answers rides along with the prompt of every run (a message, `/init`, a custom command, `/batch`, a spec's task) in `[hooks]`, a blocked
 stop hook notices in the list, sends the model its words unseen and runs it once more, and a card
 that starts waiting tells the server about it — the window asks only when the list read for the
 card holds that event. Reading and the

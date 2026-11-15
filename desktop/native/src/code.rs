@@ -361,6 +361,21 @@ pub enum CodeMsg {
     StopHookDone(HookFire),
     /// A `notification` hook was fired for a waiting card; nothing comes of it.
     HookFired,
+    /// The specs of the folder as they are (`loadSpecs` of the page).
+    SpecsLoaded(Vec<crate::specs::Spec>),
+    /// The listing of `/spec` with no argument, ready to be written into the list.
+    SpecListDone(Vec<crate::specs::Spec>),
+    /// A prompt of a spec is ready: the run starts with `/spec …` as its display.
+    SpecPrompt { prompt: String, display: String },
+    /// An answer of the spec route that changes the list (`tick` / `untick`).
+    SpecReplaced(Vec<crate::specs::Spec>),
+    /// A spec route failed: the message the page would show — as a toast where the page toasts
+    /// it (the checkbox of the side) and in the list where it notices it.
+    SpecFailed { message: String, toast: bool },
+    /// A checkbox of the side panel (`specAction` with `tick` or `untick`).
+    SpecTick { name: String, index: u64, done: bool },
+    /// The *Run next task* button of the side panel (`specAction` with `task_prompt`).
+    SpecRunTask { name: String, index: u64 },
     /// What `/worktree` and `/batch` asked the server: what the answer does (switch the
     /// folder, notice the rows) happens here, as the page does it after its fetch.
     WorktreeDone {
@@ -458,6 +473,8 @@ pub struct CodeState {
     /// A notice that waits for the folder of a worktree to be open (the page awaits
     /// `setWorkspace` before it writes it).
     pub(crate) pending_notice: Option<String>,
+    /// The specs of the folder, as the side panel keeps them (`code.specs`).
+    pub specs: Vec<crate::specs::Spec>,
     /// The task of `/batch`, waiting for the tools of the new folder (the page awaits
     /// `setWorkspace`, which loads them, before it runs `agentRun`).
     pub(crate) pending_batch: Option<String>,
@@ -521,6 +538,7 @@ impl Default for CodeState {
             tail: TailPhase::Done,
             pending_notice: None,
             pending_batch: None,
+            specs: Vec::new(),
             rules: crate::commands::Rules::default(),
             personality: "default".into(),
             custom: Vec::new(),
@@ -727,6 +745,63 @@ pub fn worktree_error(base: &str, e: &str) -> String {
         return rest.to_string();
     }
     format!("{base}: {}", e.strip_prefix("transport:").unwrap_or(e))
+}
+
+/// The whole `run` branch of the page's `specCommand`: find the spec in the list the window
+/// has, reload once when the name is missing (`if (!sp) await loadSpecs()`), pick the task with
+/// `next_index` and ask the server for its prompt. The answer is the prompt with the page's
+/// display, or the message it would show.
+pub async fn spec_run(
+    base: String,
+    current: Vec<crate::specs::Spec>,
+    name: String,
+    asked: Option<f64>,
+) -> Result<(String, String), String> {
+    use crate::specs::{decide_run, no_spec_notice, spec_act, task_prompt_body, RunDecision, ALL_DONE_NOTICE};
+    let first = decide_run(&current, &name, asked);
+    let decision = match first {
+        RunDecision::NeedReload => match fetch_specs_maybe(&base).await {
+            Some(fresh) => match decide_run(&fresh, &name, asked) {
+                RunDecision::NeedReload => RunDecision::NotFound,
+                other => other,
+            },
+            None => RunDecision::NotFound,
+        },
+        other => other,
+    };
+    match decision {
+        RunDecision::Act { name, index } => {
+            let v = spec_act(base, task_prompt_body(&name, index)).await?;
+            let prompt = v.get("prompt").and_then(Value::as_str).unwrap_or_default().to_string();
+            Ok((prompt, crate::specs::run_display(&name, index)))
+        }
+        RunDecision::NotFound => Err(no_spec_notice(&name)),
+        RunDecision::AllDone => Err(ALL_DONE_NOTICE.to_string()),
+        RunDecision::NeedReload => unreachable!("folded above"),
+    }
+}
+
+/// `new_prompt` of the page: the prompt of the server, run with the words as they came.
+pub async fn spec_new(base: String, name: String, description: String, display: String) -> Result<(String, String), String> {
+    let v = crate::specs::spec_act(base, crate::specs::new_prompt_body(&name, &description)).await?;
+    Ok((v.get("prompt").and_then(Value::as_str).unwrap_or_default().to_string(), display))
+}
+
+/// A reload that a failure turns into nothing (the page's `loadSpecs` catch: `code.specs = []`
+/// would clear it — here the caller keeps what it had, which is what the page does not show
+/// either way).
+async fn fetch_specs_maybe(base: &str) -> Option<Vec<crate::specs::Spec>> {
+    crate::specs::fetch_specs(base.to_string()).await.ok()
+}
+
+/// A GET of the agent's routes (`specAction`'s read side and the rest of the row-80 reads).
+pub async fn call_get(base: &str, path: &str) -> Result<Value, String> {
+    call(base, reqwest::Method::GET, path, None).await
+}
+
+/// A POST of the agent's routes with a JSON body.
+pub async fn call_post(base: &str, path: &str, body: Value) -> Result<Value, String> {
+    call(base, reqwest::Method::POST, path, Some(body)).await
 }
 
 pub async fn open_workspace(base: String, path: String) -> Result<Workspace, String> {
@@ -1160,6 +1235,7 @@ impl CodeState {
             last_build_perm: Self::perm_of(&self.build_mode),
             auto_approve: self.auto_approve,
             auto_review: self.auto_review,
+            specs: self.specs.clone(),
             turbo: env.turbo,
             sandbox: env.sandbox.map(str::to_string),
             sandbox_available: env.sandbox_available,
@@ -1368,13 +1444,9 @@ impl CodeState {
                     let n = if steps > 1.0 { Some(steps as u64) } else { None };
                     tasks.push(self.update(CodeMsg::Undo(n), env));
                 }
-                Step::AgentRun(prompt, display) => {
-                    // a run of the agents pane ends without a self-review or a stop hook (the
-                    // page calls both from `submitText` only)
-                    self.main_run = false;
-                    self.tail = TailPhase::Done;
-                    tasks.push(self.run_prompt(&prompt, &display, env))
-                }
+                // every `agentRun` of the page carries its hooks and the self-review (they sit in
+                // `agentRunNow`, not in `submitText`), so a run of a command starts as a turn does
+                Step::AgentRun(prompt, display) => tasks.push(self.begin_run(prompt, display, env)),
                 Step::SetPerm(perm, notice) => {
                     tasks.push(self.update(CodeMsg::SetMode(Self::mode_of(perm)), env));
                     self.items.push(Item::Note(notice));
@@ -1421,6 +1493,25 @@ impl CodeState {
                         worktree_fetch(base, action, name.clone()),
                         move |result| Message::Code(CodeMsg::WorktreeDone { action, name, batch: None, result }),
                     ));
+                }
+                Step::SpecList => tasks.push(Task::perform(
+                    crate::specs::fetch_specs(env.base.to_string()),
+                    |r| Message::Code(CodeMsg::SpecListDone(r.unwrap_or_default())),
+                )),
+                Step::SpecRun { name, asked } => {
+                    let base = env.base.to_string();
+                    let current = self.specs.clone();
+                    tasks.push(Task::perform(spec_run(base, current, name, asked), |r| match r {
+                        Ok((prompt, display)) => Message::Code(CodeMsg::SpecPrompt { prompt, display }),
+                        Err(message) => Message::Code(CodeMsg::SpecFailed { message, toast: false }),
+                    }));
+                }
+                Step::SpecNew { name, description, display } => {
+                    let base = env.base.to_string();
+                    tasks.push(Task::perform(spec_new(base, name, description, display), |r| match r {
+                        Ok((prompt, display)) => Message::Code(CodeMsg::SpecPrompt { prompt, display }),
+                        Err(message) => Message::Code(CodeMsg::SpecFailed { message, toast: false }),
+                    }));
                 }
                 Step::Batch { name, task } => {
                     let base = env.base.to_string();
@@ -1595,12 +1686,15 @@ impl CodeState {
     /// `user_prompt_submit` hook the turn waits for its answer — `context` arrives in the
     /// prompt, the words of the box stay as they were typed.
     fn begin_run(&mut self, prompt: String, display: String, env: &Env) -> Task<Message> {
+        if self.workspace.is_none() || env.model.is_none() || self.running {
+            return Task::none();
+        }
         self.change_mark = self.changes.iter().map(|c| c.id).max().unwrap_or(0);
         self.main_run = true;
         self.tail = TailPhase::Review;
         if env.hooks.submit {
             Task::perform(
-                fire_hook(env.base.to_string(), "user_prompt_submit", "", json!({ "prompt": display.clone() })),
+                fire_hook(env.base.to_string(), "user_prompt_submit", "", json!({ "prompt": prompt.clone() })),
                 move |answer| Message::Code(CodeMsg::SubmitHookDone { prompt, display, answer }),
             )
         } else {
@@ -1764,11 +1858,15 @@ impl CodeState {
         self.start_stream(env)
     }
 
-    /// The end of a round that is really over (the `finally` of the page's `submitText`).
-    fn end_round(&mut self) -> Task<Message> {
+    /// The end of a round that is really over (the `finally` of the page's `agentRunNow`): the
+    /// specs are read again, because the agent may have written them (`loadSpecs()` there).
+    fn end_round(&mut self, env: &Env) -> Task<Message> {
         self.running = false;
         self.handle = None;
-        Task::none()
+        Task::perform(
+            crate::specs::fetch_specs(env.base.to_string()),
+            |r| Message::Code(CodeMsg::SpecsLoaded(r.unwrap_or_default())),
+        )
     }
 
     /// The tail of a turn in the page's order (`submitText`): the self-review of row 81 first —
@@ -1823,7 +1921,7 @@ impl CodeState {
             // the run the hook asked for (or its refusal) ended: the turn is over
             self.tail = TailPhase::Done;
         }
-        self.end_round()
+        self.end_round(env)
     }
 
     /// `refreshChanges()` before a review round: the files are read from `self.changes` when the
@@ -1890,15 +1988,13 @@ impl CodeState {
     }
 
     /// `/batch` runs its task once the tools of the new folder are read (`agentRun(task,
-    /// '/batch')` after `await setWorkspace`): a run of its own, not a turn of the
-    /// conversation — no review, no hooks, as every `agentRun` of the page.
+    /// '/batch')` after `await setWorkspace`): a run like every `agentRun` of the page, with
+    /// its submit hook, its self-review and its stop hook.
     fn batch_when_ready(&mut self, env: &Env) -> Task<Message> {
         let Some(task) = self.pending_batch.take() else {
             return Task::none();
         };
-        self.main_run = false;
-        self.tail = TailPhase::Done;
-        self.run_prompt(&task, "/batch", env)
+        self.begin_run(task, "/batch".to_string(), env)
     }
 
     /// The files the automatic check would ask diagnostics for after one finished edit — the
@@ -1953,6 +2049,55 @@ impl CodeState {
                 self.running = false;
                 self.handle = None;
                 Task::none()
+            }
+            CodeMsg::SpecsLoaded(specs) => {
+                self.specs = specs;
+                Task::none()
+            }
+            CodeMsg::SpecListDone(specs) => {
+                self.specs = specs.clone();
+                self.items.push(Item::Note(crate::specs::listing_notice(&specs)));
+                Task::none()
+            }
+            // `agentRun(data.prompt, '/spec …')`: a run like every other, and the specs are
+            // read again when it ends (the `finally` of `agentRunNow` calls `loadSpecs`)
+            CodeMsg::SpecPrompt { prompt, display } => self.begin_run(prompt, display, env),
+            CodeMsg::SpecReplaced(specs) => {
+                self.specs = specs;
+                Task::none()
+            }
+            CodeMsg::SpecFailed { message, toast } => {
+                if toast {
+                    // the checkbox of the side toasts and reads the list again (`catch` of 3035)
+                    self.pending_toast = Some(message);
+                    Task::perform(crate::specs::fetch_specs(env.base.to_string()), |r| Message::Code(CodeMsg::SpecsLoaded(r.unwrap_or_default())))
+                } else {
+                    self.items.push(Item::Note(message));
+                    Task::none()
+                }
+            }
+            CodeMsg::SpecTick { name, index, done } => {
+                let action = crate::specs::tick_action(done);
+                Task::perform(
+                    crate::specs::spec_act(env.base.to_string(), crate::specs::tick_body(action, &name, index)),
+                    |r| match r {
+                        Ok(v) => Message::Code(CodeMsg::SpecReplaced(crate::specs::parse_specs(&v))),
+                        Err(e) => Message::Code(CodeMsg::SpecFailed { message: e, toast: true }),
+                    },
+                )
+            }
+            CodeMsg::SpecRunTask { name, index } => {
+                let base = env.base.to_string();
+                let index = index as f64;
+                Task::perform(crate::specs::spec_act(base, crate::specs::task_prompt_body(&name, index)), move |r| {
+                    match r {
+                        Ok(v) => Message::Code(CodeMsg::SpecPrompt {
+                            prompt: v.get("prompt").and_then(Value::as_str).unwrap_or_default().to_string(),
+                            display: crate::specs::run_display(&name, index),
+                        }),
+                        Err(e) => Message::Code(CodeMsg::SpecFailed { message: e, toast: false }),
+                    }
+                })
             }
             CodeMsg::WorktreeDone { action, name, batch, result } => match result {
                 Ok(data) => match action {
@@ -2047,7 +2192,9 @@ impl CodeState {
                     Task::perform(fetch_context(base.clone()), |r| Message::Code(CodeMsg::ContextLoaded(r))),
                     // the custom commands of the folder come with it (`loadCustomCommands`
                     // runs with the other loads when the page opens a workspace)
-                    Task::perform(load_custom_commands(base), |r| Message::Code(CodeMsg::CustomLoaded(r))),
+                    Task::perform(load_custom_commands(base.clone()), |r| Message::Code(CodeMsg::CustomLoaded(r))),
+                    // and the specs of `.fllm/specs` (`loadSpecs` runs with them at 814)
+                    Task::perform(crate::specs::fetch_specs(base), |r| Message::Code(CodeMsg::SpecsLoaded(r.unwrap_or_default()))),
                 ])
             }
             CodeMsg::ContextLoaded(Ok(c)) => {
@@ -2068,7 +2215,7 @@ impl CodeState {
                     self.items.push(Item::Note(note));
                 }
                 self.error = Some(e);
-                Task::none()
+                self.end_round(env)
             }
             CodeMsg::ToolsLoaded(Ok((tools, for_model))) => {
                 self.tools = tools;
@@ -2323,7 +2470,7 @@ impl CodeState {
                     return self.start_stream(env);
                 }
                 self.tail = TailPhase::Done;
-                self.end_round()
+                self.end_round(env)
             }
             CodeMsg::HookFired => Task::none(),
             CodeMsg::CheckDone { id, reply, outputs } => {
@@ -2745,11 +2892,65 @@ pub fn page<'a>(
     row![main, side_settings(s, t)].align_y(Alignment::Start).width(Length::Fill).height(Length::Fill).into()
 }
 
-/// The side of the Code page — the part row 81 builds: the *Settings* block of `renderCodeSide`
-/// with the two switches of `code.autoCheck` and `code.autoReview`, with their words of the
-/// page. The other blocks it sits among (sessions, memory, permissions, the style and what the
-/// agent learns) are still open and come with their own rows.
+/// The side of the Code page — the blocks the rows build so far: *Specs* (row 80, the
+/// `Specs` block of `renderCodeSide` with `specsHtml`) and *Settings* (row 81, the two
+/// switches of `code.autoCheck` and `code.autoReview`), with their words of the page. The
+/// others it sits among (tasks, changed files, jobs, sessions, memory, permissions, the
+/// style and what the agent learns) are still open and come with their own rows.
 fn side_settings<'a>(s: &'a CodeState, t: Tokens) -> Element<'a, Message> {
+    let semibold = Font { weight: iced::font::Weight::Semibold, ..Font::default() };
+    let mut specs = column![].spacing(8);
+    let mut head = row![text("Specs").size(14).font(semibold)].spacing(8).align_y(Alignment::Center);
+    if !s.specs.is_empty() {
+        head = head.push(text(s.specs.len().to_string()).size(12).color(t.muted));
+    }
+    specs = specs.push(head);
+    if s.specs.is_empty() {
+        specs = specs.push(text(crate::specs::PITCH).size(12).color(t.muted));
+    }
+    for sp in &s.specs {
+        let mut files = row![].spacing(6);
+        for (on, label, file) in [(sp.requirements, "Req", "requirements.md"), (sp.design, "Design", "design.md"), (sp.tasks_file, "Tasks", "tasks.md")] {
+            let title = crate::specs::chip_title(file, on);
+            let chip = container(text(label).size(11).color(if on { t.fg } else { t.muted })).padding([2, 8]).style(move |_| container::Style {
+                background: on.then_some(iced::Background::Color(t.fill)),
+                border: iced::Border { width: 1.0, color: t.separator, radius: 999.0.into() },
+                ..Default::default()
+            });
+            files = files.push(iced::widget::tooltip(chip, text(title).size(11), iced::widget::tooltip::Position::Bottom));
+        }
+        let mut boxed = column![
+            row![text(sp.name.as_str()).size(13).font(semibold), Space::new().width(Length::Fill), text(format!("{}/{}", sp.done, sp.total)).size(12).color(t.muted)]
+                .align_y(Alignment::Center),
+            files,
+        ]
+        .spacing(6);
+        for task in &sp.tasks {
+            let (name, index) = (sp.name.clone(), task.index);
+            let tick = checkbox(task.done)
+                .label(task.text.as_str())
+                .size(16)
+                .text_size(12)
+                .on_toggle(move |done| Message::Code(CodeMsg::SpecTick { name: name.clone(), index, done }));
+            boxed = boxed.push(container(tick).padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: crate::specs::task_indent(task.depth) }));
+        }
+        if let Some(next) = sp.tasks.iter().find(|task| !task.done) {
+            let (name, index) = (sp.name.clone(), next.index);
+            let run = button(text("Run next task").size(12))
+                .on_press_maybe((!s.running).then_some(Message::Code(CodeMsg::SpecRunTask { name, index })))
+                .padding([4, 10])
+                .style(theme::secondary_button(t));
+            boxed = boxed.push(iced::widget::tooltip(run, text("The agent does this task and ticks it").size(11), iced::widget::tooltip::Position::Bottom));
+        } else if sp.total > 0 {
+            boxed = boxed.push(text("Every task is done.").size(12).color(t.muted));
+        }
+        specs = specs.push(
+            container(boxed).padding(10).width(Length::Fill).style(move |_| container::Style {
+                border: iced::Border { width: 1.0, color: t.separator, radius: 8.0.into() },
+                ..Default::default()
+            }),
+        );
+    }
     let check_label = "Check my edits automatically".to_string();
     let review_label = "Review my work before it counts as done".to_string();
     let block = column![
@@ -2772,7 +2973,8 @@ fn side_settings<'a>(s: &'a CodeState, t: Tokens) -> Element<'a, Message> {
             .color(t.muted),
     ]
     .spacing(10);
-    container(block)
+    let side = column![specs, block].spacing(22);
+    container(scrollable(side))
         .width(Length::Fixed(272.0))
         .padding([18.0, 16.0])
         .style(move |_| container::Style {

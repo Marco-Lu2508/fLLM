@@ -7,6 +7,25 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **Specs and steering files in the native app** (`specCommand`, `runSpecTask`, `loadSpecs` and
+  `specsHtml` of `code.js`). `/spec` with no words reads the list and writes the listing;
+  `/spec run NAME [N]` finds the spec (reading the list again when the name is missing, then
+  *There is no spec "NAME". /spec lists them.*), picks the task the page picks — `Number(word)`
+  as JavaScript reads it, so `-1`, `1.5`, `0x2` and `Infinity` are taken and `0`, `x` and `inf`
+  fall through to the first open task — says *Every task of this spec is done.* without asking
+  the server for a prompt, and otherwise runs the prompt of `task_prompt` as `/spec run NAME N`;
+  `/spec NAME what you want` runs the prompt of `new_prompt` with the words as typed. The Code
+  page's side gets the *Specs* block: the pitch for a folder without a spec, else a box per spec
+  with its counts, the chips *Req*, *Design*, *Tasks*, the tasks as checkboxes (a tick posts
+  `tick` or `untick`, the answer replaces the list, a refusal toasts), and *Run next task*. The
+  list is read when a folder opens and when a run ends. The steering files already reach the
+  model with the instructions (the server hands them over as files of the instructions and as
+  one `steering index`); a test pins that. **Fix of rows 78, 79 and 82:** the submit hook, the
+  self-review and the stop hook belong to the page's `agentRunNow`, so `/init`, a custom
+  command, `/batch` and a spec's run start the way a turn of the conversation does (they had
+  started without them), and the hook is given the prompt, not the words the list shows.
+  Twenty-eight fixtures over the page's own functions, four tests against a small server, sixteen
+  window tests, fifty mutations.
 - **Worktrees in the native app.** `/worktree` (and `wt`) with the page's four actions — the
   usage line when a name is missing, the request with `{ action, name }` (the name left out
   when there is none), and its answer doing what it does there: `new` opens the folder first
@@ -15,13 +34,13 @@ behaviour between versions).
   failures keep the page's two families: the message of the server's body, its own fallback
   without one, and the caught request. `/batch <name> <task>` is a new worktree with the task
   behind it: the folder's notice stands, and the task runs as a run of its own (`display
-  `/batch``, no turn of the conversation) once the tools of the new folder are in, the way the
-  page awaits `setWorkspace` before its `agentRun`. Ten fixtures over the commands with the
+  `/batch``) once the tools of the new folder are in, the way the page awaits `setWorkspace`
+  before its `agentRun`. Ten fixtures over the commands with the
   server's answers canned, six window tests, fifteen mutations.
 - **The hooks of the agent loop fire in the native app** (`fireHook` of `code.js`, the three
-  places the page asks one): `user_prompt_submit` before a turn starts — its `context` goes to
+  places the page asks one): `user_prompt_submit` before a run starts — its `context` goes to
   the model with the message in `[hooks]` while the words of the box stay as they were typed;
-  `stop` once per turn after the self-review, in the page's order — a blocked answer notices
+  `stop` once per run after the self-review, in the page's order — a blocked answer notices
   *A stop hook asks the agent to continue: …*, gives the model its words unseen over the wire
   and runs it once more, and that run ends plainly; `notification` without awaiting when a card
   starts waiting, with `{ kind: 'tool', name }`. Every failure of the request means nothing was

@@ -24,7 +24,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -70,7 +71,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -117,7 +119,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -164,7 +167,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -211,7 +215,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -262,7 +267,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -313,7 +319,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -364,7 +371,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -415,7 +423,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -466,7 +475,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -513,7 +523,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -561,7 +572,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -609,7 +621,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -656,7 +669,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -702,7 +716,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -749,7 +764,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -801,7 +817,8 @@
       "name": "deploy",
       "description": "Ship it"
      }
-    ]
+    ],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -855,7 +872,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -910,7 +928,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -957,7 +976,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1004,7 +1024,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1059,7 +1080,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1106,7 +1128,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1160,7 +1183,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1207,7 +1231,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1259,7 +1284,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1311,7 +1337,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1358,7 +1385,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1412,7 +1440,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1459,7 +1488,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1523,7 +1553,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1576,7 +1607,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1642,7 +1674,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1698,7 +1731,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1750,7 +1784,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1797,7 +1832,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1852,7 +1888,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1903,7 +1940,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -1962,7 +2000,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2009,7 +2048,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2056,7 +2096,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2170,7 +2211,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2224,7 +2266,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2271,7 +2314,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2319,7 +2363,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2366,7 +2411,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2415,7 +2461,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "New title",
@@ -2462,7 +2509,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2509,7 +2557,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2551,7 +2600,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2620,7 +2670,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2674,7 +2725,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2721,7 +2773,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2768,7 +2821,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2815,7 +2869,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2861,7 +2916,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2889,8 +2945,28 @@
    "error": null,
    "record": [
     [
-     "spec",
-     "a b"
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "new_prompt",
+       "name": "a",
+       "description": "b"
+      }
+     }
+    ],
+    [
+     "agentRun",
+     null,
+     "/spec a b"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
     ]
    ],
    "pre": {
@@ -2908,7 +2984,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -2958,7 +3035,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3009,7 +3087,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3066,7 +3145,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3113,7 +3193,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3163,7 +3244,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3210,7 +3292,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3252,7 +3335,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3294,7 +3378,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3351,7 +3436,8 @@
       "name": "deploy",
       "description": "Ship it"
      }
-    ]
+    ],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3405,7 +3491,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3451,7 +3538,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3493,7 +3581,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3535,7 +3624,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3577,7 +3667,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3627,7 +3718,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3677,7 +3769,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3728,7 +3821,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3779,7 +3873,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3827,7 +3922,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3884,7 +3980,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -3964,7 +4061,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -4032,7 +4130,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -4097,7 +4196,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -4150,7 +4250,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -4212,7 +4313,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -4266,7 +4368,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -4313,7 +4416,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -4380,7 +4484,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -4444,7 +4549,8 @@
      "allow": "",
      "deny": ""
     },
-    "custom": []
+    "custom": [],
+    "specs": []
    },
    "state": {
     "title": "t",
@@ -4472,6 +4578,2558 @@
        "message": "not a git repository"
       }
      }
+    }
+   }
+  },
+  {
+   "text": "/spec",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ],
+    [
+     "notice",
+     "No specs yet. /spec NAME what you want writes requirements.md, design.md and tasks.md under .fllm/specs/NAME and stops after each file for your review."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "list": []
+    }
+   }
+  },
+  {
+   "text": "/spec",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ],
+    [
+     "notice",
+     "Specs of this folder:\nexport: 1/3 tasks done\nsearch: 1/1 tasks done\n/spec run NAME [N] does the next open task (or task N); /spec NAME what you want starts a new spec."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "list": [
+      {
+       "name": "export",
+       "requirements": true,
+       "design": true,
+       "tasks_file": true,
+       "total": 3,
+       "done": 1,
+       "tasks": [
+        {
+         "index": 1,
+         "text": "Write the exporter",
+         "done": true,
+         "depth": 0
+        },
+        {
+         "index": 2,
+         "text": "Wire the button",
+         "done": false,
+         "depth": 0
+        },
+        {
+         "index": 3,
+         "text": "Add a test",
+         "done": false,
+         "depth": 1
+        }
+       ]
+      },
+      {
+       "name": "search",
+       "requirements": true,
+       "design": true,
+       "tasks_file": true,
+       "total": 1,
+       "done": 1,
+       "tasks": [
+        {
+         "index": 1,
+         "text": "Index the pages",
+         "done": true,
+         "depth": 0
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "text": "/spec   ",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ],
+    [
+     "notice",
+     "Specs of this folder:\nexport: 1/3 tasks done\n/spec run NAME [N] does the next open task (or task N); /spec NAME what you want starts a new spec."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "list": [
+      {
+       "name": "export",
+       "requirements": true,
+       "design": true,
+       "tasks_file": true,
+       "total": 3,
+       "done": 1,
+       "tasks": [
+        {
+         "index": 1,
+         "text": "Write the exporter",
+         "done": true,
+         "depth": 0
+        },
+        {
+         "index": 2,
+         "text": "Wire the button",
+         "done": false,
+         "depth": 0
+        },
+        {
+         "index": 3,
+         "text": "Add a test",
+         "done": false,
+         "depth": 1
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "text": "/spec run export",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": 2
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Do task 2 of export.",
+     "/spec run export 2"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Do task 2 of export."
+    }
+   }
+  },
+  {
+   "text": "/spec run export 3",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": 3
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Do task 3 of export.",
+     "/spec run export 3"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Do task 3 of export."
+    }
+   }
+  },
+  {
+   "text": "/spec run export 9",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": 9
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Do task 9.",
+     "/spec run export 9"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Do task 9."
+    }
+   }
+  },
+  {
+   "text": "/spec run export 0",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": 2
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Do task 2 of export.",
+     "/spec run export 2"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Do task 2 of export."
+    }
+   }
+  },
+  {
+   "text": "/spec run export x",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": 2
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Do task 2 of export.",
+     "/spec run export 2"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Do task 2 of export."
+    }
+   }
+  },
+  {
+   "text": "/spec run export -1",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": -1
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Do task -1.",
+     "/spec run export -1"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Do task -1."
+    }
+   }
+  },
+  {
+   "text": "/spec run export 1.5",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": 1.5
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Do task 1.5.",
+     "/spec run export 1.5"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Do task 1.5."
+    }
+   }
+  },
+  {
+   "text": "/spec run export 0x2",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": 2
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Do task 2 of export.",
+     "/spec run export 2"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Do task 2 of export."
+    }
+   }
+  },
+  {
+   "text": "/spec run export 1e1",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": 10
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Do task 10.",
+     "/spec run export 10"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Do task 10."
+    }
+   }
+  },
+  {
+   "text": "/spec run export inf",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": 2
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Do task 2 of export.",
+     "/spec run export 2"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Do task 2 of export."
+    }
+   }
+  },
+  {
+   "text": "/spec run export Infinity",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": null
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Do task Infinity.",
+     "/spec run export Infinity"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Do task Infinity."
+    }
+   }
+  },
+  {
+   "text": "/spec run export 3 extra words",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": 3
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Do task 3 of export.",
+     "/spec run export 3"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Do task 3 of export."
+    }
+   }
+  },
+  {
+   "text": "/spec run search",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Every task of this spec is done."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "search",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 1,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Index the pages",
+        "done": true,
+        "depth": 0
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "unused"
+    }
+   }
+  },
+  {
+   "text": "/spec run search 1",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "search",
+       "index": 1
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Do task 1 again.",
+     "/spec run search 1"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "search",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 1,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Index the pages",
+        "done": true,
+        "depth": 0
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Do task 1 again."
+    }
+   }
+  },
+  {
+   "text": "/spec run nope",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ],
+    [
+     "notice",
+     "There is no spec \"nope\". /spec lists them."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "list": [
+      {
+       "name": "export",
+       "requirements": true,
+       "design": true,
+       "tasks_file": true,
+       "total": 3,
+       "done": 1,
+       "tasks": [
+        {
+         "index": 1,
+         "text": "Write the exporter",
+         "done": true,
+         "depth": 0
+        },
+        {
+         "index": 2,
+         "text": "Wire the button",
+         "done": false,
+         "depth": 0
+        },
+        {
+         "index": 3,
+         "text": "Add a test",
+         "done": false,
+         "depth": 1
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "text": "/spec run",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ],
+    [
+     "notice",
+     "There is no spec \"\". /spec lists them."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "list": []
+    }
+   }
+  },
+  {
+   "text": "/spec run export",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": 2
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Do task 2 of export.",
+     "/spec run export 2"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "list": [
+      {
+       "name": "export",
+       "requirements": true,
+       "design": true,
+       "tasks_file": true,
+       "total": 3,
+       "done": 1,
+       "tasks": [
+        {
+         "index": 1,
+         "text": "Write the exporter",
+         "done": true,
+         "depth": 0
+        },
+        {
+         "index": 2,
+         "text": "Wire the button",
+         "done": false,
+         "depth": 0
+        },
+        {
+         "index": 3,
+         "text": "Add a test",
+         "done": false,
+         "depth": 1
+        }
+       ]
+      }
+     ],
+     "prompt": "Do task 2 of export."
+    }
+   }
+  },
+  {
+   "text": "/spec run export",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ],
+    [
+     "notice",
+     "There is no spec \"export\". /spec lists them."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "list": [
+      {
+       "name": "search",
+       "requirements": true,
+       "design": true,
+       "tasks_file": true,
+       "total": 1,
+       "done": 1,
+       "tasks": [
+        {
+         "index": 1,
+         "text": "Index the pages",
+         "done": true,
+         "depth": 0
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "text": "/spec run search",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ],
+    [
+     "notice",
+     "Every task of this spec is done."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "list": [
+      {
+       "name": "search",
+       "requirements": true,
+       "design": true,
+       "tasks_file": true,
+       "total": 1,
+       "done": 1,
+       "tasks": [
+        {
+         "index": 1,
+         "text": "Index the pages",
+         "done": true,
+         "depth": 0
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "text": "/spec csv-export Export the report as CSV.",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "new_prompt",
+       "name": "csv-export",
+       "description": "Export the report as CSV."
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Write requirements.md for csv-export.",
+     "/spec csv-export Export the report as CSV."
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Write requirements.md for csv-export."
+    }
+   }
+  },
+  {
+   "text": "/spec   csv-export   Export   the report",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "new_prompt",
+       "name": "csv-export",
+       "description": "Export the report"
+      }
+     }
+    ],
+    [
+     "agentRun",
+     "Write requirements.md for csv-export.",
+     "/spec csv-export   Export   the report"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "prompt": "Write requirements.md for csv-export."
+    }
+   }
+  },
+  {
+   "text": "/spec csv-export",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "notice",
+     "Usage: /spec NAME what you want. Example: /spec csv-export Export the report as CSV."
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": null
+  },
+  {
+   "text": "/spec run export 2",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": 2
+      }
+     }
+    ],
+    [
+     "notice",
+     "the task has no text"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "ok": false,
+     "error": "the task has no text"
+    }
+   }
+  },
+  {
+   "text": "/spec run export 2",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "task_prompt",
+       "name": "export",
+       "index": 2
+      }
+     }
+    ],
+    [
+     "notice",
+     "The spec action failed."
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": [
+     {
+      "name": "export",
+      "requirements": true,
+      "design": true,
+      "tasks_file": true,
+      "total": 3,
+      "done": 1,
+      "tasks": [
+       {
+        "index": 1,
+        "text": "Write the exporter",
+        "done": true,
+        "depth": 0
+       },
+       {
+        "index": 2,
+        "text": "Wire the button",
+        "done": false,
+        "depth": 0
+       },
+       {
+        "index": 3,
+        "text": "Add a test",
+        "done": false,
+        "depth": 1
+       }
+      ]
+     }
+    ]
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "ok": false
+    }
+   }
+  },
+  {
+   "text": "/spec csv-export Export it",
+   "ret": true,
+   "error": null,
+   "record": [
+    [
+     "api",
+     "/api/studio/agent/specs",
+     {
+      "method": "POST",
+      "body": {
+       "action": "new_prompt",
+       "name": "csv-export",
+       "description": "Export it"
+      }
+     }
+    ],
+    [
+     "notice",
+     "a spec of that name exists"
+    ],
+    [
+     "api",
+     "/api/studio/agent/specs"
+    ],
+    [
+     "renderSide"
+    ]
+   ],
+   "pre": {
+    "running": false,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "autoApprove": true,
+    "turbo": false,
+    "sandbox": "workspace",
+    "sandboxAvailable": true,
+    "autoCheck": false,
+    "autoReview": false,
+    "personality": "default",
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "custom": [],
+    "specs": []
+   },
+   "state": {
+    "title": "t",
+    "titleLocked": false,
+    "rules": {
+     "allow": "",
+     "deny": ""
+    },
+    "personality": "default",
+    "learn": false,
+    "autoCheck": false,
+    "autoReview": false,
+    "autoApprove": true,
+    "perm": "ask",
+    "lastBuildPerm": "ask",
+    "sandbox": "workspace",
+    "turbo": false,
+    "view": 0
+   },
+   "canned": {
+    "spec": {
+     "ok": false,
+     "error": "a spec of that name exists"
     }
    }
   }
