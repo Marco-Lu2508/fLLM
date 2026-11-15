@@ -377,7 +377,11 @@ runs a diagnostics check after every finished edit and gives the model its first
 under *Automatic check*), and *Review my work before it counts as done* (`/autoreview on` or `off`) makes the agent read its own
 diff and the diagnostics again before a run counts as done — two rounds at most, their feedback going to the model unseen while
 the notice *Reviewing my own changes…* stands in the list. `/check`, `/review staged` and `/security-review` ask the server for a
-review over a card of their own. Reading and the
+review over a card of their own. The hooks of the agent loop fire from the same places the page
+fires them: what `user_prompt_submit` answers rides along with the message in `[hooks]`, a blocked
+stop hook notices in the list, sends the model its words unseen and runs it once more, and a card
+that starts waiting tells the server about it — the window asks only when the list read for the
+card holds that event. Reading and the
   agent's own notes run alone; the rest asks (*Allow* / *Deny*; a denial goes back to the model) unless you pick *Edit freely* or *Everything*,
   and switching the mode releases the calls that wait. The switch of automatic approval (`/autoapprove on|off` in the box of the page, on by default and kept with the window's store) runs what the
   Studio's table calls harmless — reading, building and testing commands — without a question and says so under the card as *Approved on its own: …*; everything else still asks. *Stop* ends the stream and the running commands. The bar under the conversation counts
@@ -391,7 +395,7 @@ call is answered is the page's decision: a rule of `/deny` blocks it before anyt
 an allow-rule, the mode or a key *Always* remembered on the card run it without a question (the
 button shows what it remembers, `Always (npm)` for a command, and a new session asks again),
 turbo answers everything, and plan mode refuses everything that does not read. The screen and
-input tools are not offered. Not yet: sub-agents (`task`), hooks. The conversation of each folder is kept (`code-sessions.json` next to the chats, the newest 200 items; a call that had not finished comes back as interrupted) and returns when the folder is opened again; *New session* forgets it.
+input tools are not offered. Not yet: sub-agents (`task`). The conversation of each folder is kept (`code-sessions.json` next to the chats, the newest 200 items; a call that had not finished comes back as interrupted) and returns when the folder is opened again; *New session* forgets it.
 - Long chats: the conversation draws the newest 60 messages; *Show 60 earlier messages* adds the next older ones. Laying out every message on every
   frame of a stream cost 63 ms for 800 messages (release build, `cargo run --release --example view_bench -- 50 200 800`); with the window the
   build and layout of the view stay at about 6 ms however long the chat is (opening an 800-message chat still parses its markdown once, 124 ms).

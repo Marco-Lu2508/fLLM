@@ -2039,6 +2039,11 @@ impl App {
                     usage: Some(usage.as_str()),
                     session_file: &session_file,
                     ctx_max: self.model_info().max_context as usize,
+                    hooks: code::HookGates {
+                        submit: self.code.hook_events.iter().any(|e| e == "user_prompt_submit"),
+                        stop: self.code.hook_events.iter().any(|e| e == "stop"),
+                        notification: self.code.hook_events.iter().any(|e| e == "notification"),
+                    },
                 };
                 let was_running_before = was_running;
                 let task = self.code.update(msg, &env);
@@ -4028,6 +4033,16 @@ impl App {
             }
             Message::HooksLoaded(Ok(answer)) => {
                 self.hooks_rows = crate::hooks::rows_of(&answer.hooks);
+                // the events of the hooks themselves and the ones the plugins bring: the Code
+                // page reads them off this list before it asks a hook for one event
+                self.code.hook_events = answer
+                    .hooks
+                    .keys()
+                    .cloned()
+                    .chain(answer.from_plugins.iter().map(|h| h.event.clone()))
+                    .collect();
+                // the map of the answer has no order of its own; the list stays readable
+                self.code.hook_events.sort();
                 self.hooks_file = answer.file;
                 self.hooks_plugins = answer.from_plugins;
                 // `say('')` of `load()`: the status line is empty after a load that worked
@@ -6556,6 +6571,13 @@ impl App {
                 self.picker_open = false;
                 if page == View::Models {
                     return self.refresh_models();
+                }
+                if page == View::Code && !self.hooks_loaded {
+                    // the hooks are read once before the page asks them for anything (`load()`
+                    // of hooks.js reads them when the pane is built; the Code page needs the
+                    // list first and shares the guard with it)
+                    self.hooks_loaded = true;
+                    return Task::perform(models::fetch_hooks(self.base.clone()), Message::HooksLoaded);
                 }
                 if page == View::Settings {
                     // the settings of voice.js fill their selects with what the machine has

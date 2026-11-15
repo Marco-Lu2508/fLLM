@@ -181,6 +181,9 @@ pub enum Item {
     /// The self-review's message to the model (`selfReview` pushes it into `ctx.messages` and
     /// never shows it): the view skips it, the wire sends it.
     ReviewFeedback(String),
+    /// The message a blocked stop hook gives the model (`ctx.messages.push` there — the notice
+    /// with the same words stands in the list): the view skips it, the wire sends it.
+    StopHook(String),
 }
 
 /// An item of a session as it is kept on disk.
@@ -198,6 +201,8 @@ pub enum Saved {
     Note { text: String },
     /// Kept with the session like the messages of the page are, so the review rounds survive it.
     ReviewFeedback { text: String },
+    /// The same for the message of a blocked stop hook.
+    StopHook { text: String },
 }
 
 /// The most items kept per folder: the newest ones.
@@ -216,6 +221,32 @@ pub struct Review {
     pub files: Vec<String>,
     /// What came back: the review text and the diagnostics that are not clean.
     pub report: crate::review::Report,
+}
+
+/// Which hook events the window knows of (`GET /api/studio/hooks`: the events of the hooks
+/// themselves and the ones the plugins bring). The page asks the server on every submit, no
+/// matter what it knows; this window asks only when a hook could answer — a request that is
+/// not made returns exactly what an unanswered one does, and the tests, which have no server,
+/// start with nothing hooked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HookGates {
+    pub submit: bool,
+    pub stop: bool,
+    pub notification: bool,
+}
+
+/// Where a turn of the conversation stands at its end (`submitText` runs its tail in order):
+/// the self-review of row 81, then the stop hook once, and then the turn is over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TailPhase {
+    /// The review may still start.
+    Review,
+    /// The stop hook may still be asked.
+    Hook,
+    /// The run the stop hook asked for: it ends plainly (the page checks once).
+    Continue,
+    /// Nothing of the tail is left.
+    Done,
 }
 
 /// The three waits of one review round.
@@ -323,6 +354,13 @@ pub enum CodeMsg {
     /// The diagnostics an automatic check asked for after an edit: the call, the reply the model
     /// had, and the answers it kept (one per path that was checked).
     CheckDone { id: String, reply: String, outputs: Vec<String> },
+    /// What `user_prompt_submit` answered: the turn starts with its context in the prompt
+    /// (`submitted.context` of `submitText`).
+    SubmitHookDone { prompt: String, display: String, answer: HookFire },
+    /// What the stop hook answered after the review (`fireHook('stop', …)` there).
+    StopHookDone(HookFire),
+    /// A `notification` hook was fired for a waiting card; nothing comes of it.
+    HookFired,
     /// The custom commands of the folder are known (`loadCustomCommands` of `code.js`).
     CustomLoaded(Vec<crate::commands::CustomCommand>),
     /// One custom command file (or the plugin's) was read: run what it holds.
@@ -355,6 +393,9 @@ pub struct Env<'a> {
     /// The context of the loaded model: `clipOutput` of the automatic check cuts its answer
     /// against it (`ctxMax()` of the page).
     pub ctx_max: usize,
+    /// Which hook events the window could ask about (empty in tests, and then no request is
+    /// made at all — the page gets an empty answer from a server without the route).
+    pub hooks: HookGates,
 }
 
 /// What a command changed and the store has to keep (`saveCodeSettings` and the rules write of
@@ -401,6 +442,11 @@ pub struct CodeState {
     /// The call whose automatic check is running: the model waits for it (`autoCheckEdit` is
     /// awaited inside `runToolCall` on the page, before the call is answered).
     pub(crate) check_hold: Option<String>,
+    /// The hook events this window knows of — own ones and the plugins' — from
+    /// `GET /api/studio/hooks`; empty until the list is read.
+    pub hook_events: Vec<String>,
+    /// Where the tail of the current turn stands (see `TailPhase`).
+    pub(crate) tail: TailPhase,
     /// The allow/deny rules of `/allow` and `/deny`, kept per folder like the page keeps them per
     /// workspace in its own storage.
     pub rules: crate::commands::Rules,
@@ -457,6 +503,8 @@ impl Default for CodeState {
             review: None,
             main_run: false,
             check_hold: None,
+            hook_events: Vec::new(),
+            tail: TailPhase::Done,
             rules: crate::commands::Rules::default(),
             personality: "default".into(),
             custom: Vec::new(),
@@ -697,6 +745,35 @@ pub async fn review_tools(base: String, with_review: bool, with_diagnostics: boo
     answers
 }
 
+/// What one hook event answered (`fireHook` of code.js): every failure — a server without the
+/// route among them — means nothing was hooked.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HookFire {
+    pub blocked: bool,
+    pub reason: String,
+    pub context: String,
+}
+
+/// `fireHook(event, tool, args)`: ask the server's hooks for one event of the loop. The page
+/// sends `{ event, tool, arguments }` and reads `blocked`, `reason` and `context` back.
+pub async fn fire_hook(base: String, event: &str, tool: &str, arguments: Value) -> HookFire {
+    let body = json!({ "event": event, "tool": tool, "arguments": arguments });
+    match call(&base, reqwest::Method::POST, "/api/studio/agent/hook", Some(body)).await {
+        Ok(v) => fire_answer(&v),
+        Err(_) => HookFire::default(),
+    }
+}
+
+/// What `fireHook` reads out of the answer (`blocked`, `reason`, `context`, each with the page's
+/// fallbacks); anything the server does not say is the empty answer.
+pub fn fire_answer(value: &Value) -> HookFire {
+    HookFire {
+        blocked: value.get("blocked").and_then(Value::as_bool).unwrap_or(false),
+        reason: value.get("reason").and_then(Value::as_str).unwrap_or_default().to_string(),
+        context: value.get("context").and_then(Value::as_str).unwrap_or_default().to_string(),
+    }
+}
+
 pub async fn run_tool(base: String, name: String, args: Value) -> Result<String, String> {
     tool_result(&call(&base, reqwest::Method::POST, "/api/studio/agent/tool", Some(json!({ "name": name, "args": args }))).await?)
 }
@@ -889,6 +966,7 @@ impl CodeState {
                 Item::Assistant { text, .. } => (!text.is_empty()).then(|| Saved::Assistant { text: text.clone() }),
                 Item::Note(t) => Some(Saved::Note { text: t.clone() }),
                 Item::ReviewFeedback(t) => Some(Saved::ReviewFeedback { text: t.clone() }),
+                Item::StopHook(t) => Some(Saved::StopHook { text: t.clone() }),
                 Item::Call(c) => {
                     let (ok, output) = match &c.state {
                         CallState::Done { ok, output } => (*ok, output.clone()),
@@ -922,6 +1000,7 @@ impl CodeState {
                 Saved::Call { id, name, args, permission, ok, output, sent } => Item::Call(Call { id, name, args, permission: Permission::parse(&permission), kind: ToolKind::Server, state: CallState::Done { ok, output }, auto_note: None, check: None, sent }),
                 Saved::Note { text } => Item::Note(text),
                 Saved::ReviewFeedback { text } => Item::ReviewFeedback(text),
+                Saved::StopHook { text } => Item::StopHook(text),
             })
             .collect();
     }
@@ -977,8 +1056,8 @@ impl CodeState {
         let mut i = 0;
         while i < self.items.len() {
             match &self.items[i] {
-                Item::ReviewFeedback(text) => {
-                    // sent as it stands, and never drawn (the view skips this variant)
+                Item::ReviewFeedback(text) | Item::StopHook(text) => {
+                    // sent as it stands, and never drawn (the view skips these variants)
                     wire.push(WireMessage::new("user", text.clone()));
                 }
                 Item::User { text, sent } => {
@@ -1238,9 +1317,10 @@ impl CodeState {
                     tasks.push(self.update(CodeMsg::Undo(n), env));
                 }
                 Step::AgentRun(prompt, display) => {
-                    // a run of the agents pane ends without a self-review (the page calls
-                    // `selfReview` from `submitText` only)
+                    // a run of the agents pane ends without a self-review or a stop hook (the
+                    // page calls both from `submitText` only)
                     self.main_run = false;
+                    self.tail = TailPhase::Done;
                     tasks.push(self.run_prompt(&prompt, &display, env))
                 }
                 Step::SetPerm(perm, notice) => {
@@ -1444,6 +1524,24 @@ impl CodeState {
         }
     }
 
+    /// The start of a turn of the conversation (`submitText` of the page): where the run begins
+    /// is marked, the tail is reset to the review, and when the window knows of a
+    /// `user_prompt_submit` hook the turn waits for its answer — `context` arrives in the
+    /// prompt, the words of the box stay as they were typed.
+    fn begin_run(&mut self, prompt: String, display: String, env: &Env) -> Task<Message> {
+        self.change_mark = self.changes.iter().map(|c| c.id).max().unwrap_or(0);
+        self.main_run = true;
+        self.tail = TailPhase::Review;
+        if env.hooks.submit {
+            Task::perform(
+                fire_hook(env.base.to_string(), "user_prompt_submit", "", json!({ "prompt": display.clone() })),
+                move |answer| Message::Code(CodeMsg::SubmitHookDone { prompt, display, answer }),
+            )
+        } else {
+            self.run_prompt(&prompt, &display, env)
+        }
+    }
+
     /// The state one call starts in, and the words under its card when it ran without a
     /// question. The chain of `finish_round` kept whole: an unknown tool fails, a question waits
     /// in every mode, the mode decides what it allows, plan mode refuses the rest — and behind
@@ -1554,34 +1652,7 @@ impl CodeState {
     fn finish_round(&mut self, env: &Env) -> Task<Message> {
         let partial: Vec<Partial> = std::mem::take(&mut self.acc).into_iter().filter(|p| !p.name.is_empty()).collect();
         if partial.is_empty() {
-            // between the last answer and the `done` sits the self-review (`selfReview` of the
-            // page, called right after its `runLoop`): the run stays open while it works
-            if let Some(rv) = self.review.as_ref() {
-                return match rv.stage {
-                    ReviewStage::Run if rv.round < 2 => {
-                        if let Some(rv) = self.review.as_mut() {
-                            rv.round += 1;
-                        }
-                        // every round reads the changes again (`await refreshChanges()`)
-                        self.begin_review(env)
-                    }
-                    _ => {
-                        // two rounds are done, or an answer arrived out of order: the run ends
-                        self.review = None;
-                        self.end_round()
-                    }
-                };
-            }
-            if self.main_run && self.auto_review && self.mode != Mode::Plan {
-                self.review = Some(Review {
-                    round: 1,
-                    stage: ReviewStage::Changes,
-                    files: Vec::new(),
-                    report: crate::review::Report::default(),
-                });
-                return self.begin_review(env);
-            }
-            return self.end_round();
+            return self.turn_tail(env);
         }
         let mut tasks = Vec::new();
         let mut ids = Vec::new();
@@ -1593,9 +1664,19 @@ impl CodeState {
             let (state, auto_note) =
                 self.starting_state(tool.is_some(), kind.clone(), permission, &p.name, &p.args, env.turbo);
             let run_now = state == CallState::Running;
+            let waiting = state == CallState::Pending;
+            let tool_name = p.name.clone();
             self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note, check: None, sent: None }));
             if run_now {
                 ids.push(id);
+            }
+            if waiting && env.hooks.notification {
+                // `waitFor` of the page fires this the moment a card starts waiting — no await,
+                // nothing comes of it (`fireHook('notification', …)` there)
+                tasks.push(Task::perform(
+                    fire_hook(env.base.to_string(), "notification", "", json!({ "kind": "tool", "name": tool_name })),
+                    |_| Message::Code(CodeMsg::HookFired),
+                ));
             }
         }
         for id in ids {
@@ -1624,6 +1705,61 @@ impl CodeState {
         Task::none()
     }
 
+    /// The tail of a turn in the page's order (`submitText`): the self-review of row 81 first —
+    /// it may still start or advance here — then the stop hook once, then the turn is over.
+    fn turn_tail(&mut self, env: &Env) -> Task<Message> {
+        if let Some(rv) = self.review.as_ref() {
+            return match rv.stage {
+                ReviewStage::Run if rv.round < 2 => {
+                    if let Some(rv) = self.review.as_mut() {
+                        rv.round += 1;
+                    }
+                    // every round reads the changes again (`await refreshChanges()`)
+                    self.begin_review(env)
+                }
+                _ => {
+                    // the review is over (or an answer arrived out of order): the stop hook of
+                    // the page follows it
+                    self.review = None;
+                    self.tail = TailPhase::Hook;
+                    self.tail_hook_or_end(env)
+                }
+            };
+        }
+        if matches!(self.tail, TailPhase::Review) {
+            if self.main_run && self.auto_review && self.mode != Mode::Plan {
+                self.review = Some(Review {
+                    round: 1,
+                    stage: ReviewStage::Changes,
+                    files: Vec::new(),
+                    report: crate::review::Report::default(),
+                });
+                return self.begin_review(env);
+            }
+            self.tail = TailPhase::Hook;
+        }
+        self.tail_hook_or_end(env)
+    }
+
+    /// The stop hook is asked once per turn, only for a conversation run that still goes
+    /// (`if (code.running)` there), and only when the window knows of one; a blocked answer
+    /// sends the model back to work once, and that run ends plainly.
+    fn tail_hook_or_end(&mut self, env: &Env) -> Task<Message> {
+        if matches!(self.tail, TailPhase::Hook) && self.main_run && env.hooks.stop && self.running {
+            // whatever comes next, the page checks this only once
+            self.tail = TailPhase::Continue;
+            return Task::perform(
+                fire_hook(env.base.to_string(), "stop", "", json!({})),
+                |answer| Message::Code(CodeMsg::StopHookDone(answer)),
+            );
+        }
+        if matches!(self.tail, TailPhase::Continue) {
+            // the run the hook asked for (or its refusal) ended: the turn is over
+            self.tail = TailPhase::Done;
+        }
+        self.end_round()
+    }
+
     /// `refreshChanges()` before a review round: the files are read from `self.changes` when the
     /// answer lands, so a refresh that failed leaves the page's behaviour of working with the
     /// changes it already has.
@@ -1649,8 +1785,10 @@ impl CodeState {
         }
         if files.is_empty() {
             // nothing this run changed: the review does not even start (`if (!files.length) return;`)
+            // — the stop hook still follows, as it does after `selfReview` returns
             self.review = None;
-            return self.end_round();
+            self.tail = TailPhase::Hook;
+            return self.tail_hook_or_end(env);
         }
         if let Some(rv) = self.review.as_mut() {
             rv.files = files;
@@ -1807,9 +1945,11 @@ impl CodeState {
                 };
                 let feedback = crate::review::review_feedback(&report, round);
                 let Some(feedback) = feedback else {
-                    // the second round with nothing a machine can state: the review is over
+                    // the second round with nothing a machine can state: the review is over —
+                    // and the stop hook follows it (`selfReview` returned)
                     self.review = None;
-                    return self.end_round();
+                    self.tail = TailPhase::Hook;
+                    return self.tail_hook_or_end(env);
                 };
                 let notice = if round == 1 {
                     crate::review::reviewing_notice(files_changed)
@@ -1865,10 +2005,7 @@ impl CodeState {
                     return Task::none();
                 }
                 self.editor = Content::new();
-                // `turn.changeMark`: the self-review only looks at what this run changes
-                self.change_mark = self.changes.iter().map(|c| c.id).max().unwrap_or(0);
-                self.main_run = true;
-                self.run_prompt(&prompt, &prompt, env)
+                self.begin_run(prompt.clone(), prompt, env)
             }
             CodeMsg::Stop => self.stop_now(env),
             CodeMsg::Stream(ev) => {
@@ -1996,6 +2133,33 @@ impl CodeState {
                 ));
                 Task::batch(tasks)
             }
+            CodeMsg::SubmitHookDone { prompt, display, answer } => {
+                // `submitted.context` of `submitText`: what the hooks have to say rides along
+                // with this message, in its own block after the words of the box
+                let prompt = if answer.context.is_empty() {
+                    prompt
+                } else {
+                    format!("{prompt}\n\n[hooks]\n{}", answer.context)
+                };
+                self.run_prompt(&prompt, &display, env)
+            }
+            CodeMsg::StopHookDone(answer) => {
+                if answer.blocked && self.running {
+                    // the notice stands in the list, the words for the model do not (the page
+                    // pushes them into `ctx.messages`), and the model runs once more — the tail
+                    // stands on `Continue`, so that run ends plainly
+                    self.items.push(Item::Note(format!("A stop hook asks the agent to continue: {}", answer.reason)));
+                    self.items
+                        .push(Item::StopHook(format!(
+                            "A stop hook asks you to continue before you finish: {}",
+                            answer.reason
+                        )));
+                    return self.start_stream(env);
+                }
+                self.tail = TailPhase::Done;
+                self.end_round()
+            }
+            CodeMsg::HookFired => Task::none(),
             CodeMsg::CheckDone { id, reply, outputs } => {
                 self.check_hold = None;
                 if !outputs.is_empty() {
@@ -2065,9 +2229,7 @@ impl CodeState {
             CodeMsg::CustomBody(result, arg_text, source) => match result {
                 Ok(body) => {
                     let prompt = crate::commands::expand_command(&body, &arg_text);
-                    self.change_mark = self.changes.iter().map(|c| c.id).max().unwrap_or(0);
-                    self.main_run = true;
-                    self.run_prompt(&prompt, &source, env)
+                    self.begin_run(prompt, source, env)
                 }
                 Err(e) => {
                     self.items.push(Item::Note(e));
@@ -2258,8 +2420,9 @@ fn timeline<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, tint: bool) ->
     }
     for (i, item) in s.items.iter().enumerate() {
         let element: Element<'a, Message> = match item {
-            // the feedback of the self-review is for the model only — it draws nothing
-            Item::ReviewFeedback(_) => Space::new().into(),
+            // the feedback of the self-review and the words of a stop hook are for the model
+            // only — they draw nothing
+            Item::ReviewFeedback(_) | Item::StopHook(_) => Space::new().into(),
             Item::User { text: text_, .. } => row![Space::new().width(Length::Fill), container(text(text_.as_str()).size(15)).padding([9, 15]).max_width(560).style(theme::bubble(t, tint))].into(),
             Item::Assistant { text: body, md: content } => {
                 if body.is_empty() {
@@ -2458,6 +2621,19 @@ fn side_settings<'a>(s: &'a CodeState, t: Tokens) -> Element<'a, Message> {
 mod tests {
     use super::*;
 
+    /// What `fireHook` makes of the server's answer, with the page's fallbacks.
+    #[test]
+    fn the_hook_answer_reads_what_the_page_reads() {
+        let full = fire_answer(&json!({ "blocked": true, "reason": "run the tests", "context": "[x]" }));
+        assert_eq!(
+            full,
+            HookFire { blocked: true, reason: "run the tests".into(), context: "[x]".into() }
+        );
+        // every field the page falls back on when the server says nothing of it
+        assert_eq!(fire_answer(&json!({})), HookFire::default());
+        assert_eq!(fire_answer(&json!({ "blocked": 0, "reason": 5 })), HookFire::default());
+    }
+
     /// The chain of `starting_state`: what waits, what runs, and the words under a card the
     /// harmless table let through without a question — the switch of `/autoapprove` decides it.
     #[test]
@@ -2580,6 +2756,7 @@ mod tests {
             // nothing saves a session in the tests: the write fails and only says so
             session_file: std::path::Path::new(""),
             ctx_max: 8192,
+            hooks: HookGates::default(),
         }
     }
 

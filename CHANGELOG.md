@@ -7,6 +7,20 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **The hooks of the agent loop fire in the native app** (`fireHook` of `code.js`, the three
+  places the page asks one): `user_prompt_submit` before a turn starts — its `context` goes to
+  the model with the message in `[hooks]` while the words of the box stay as they were typed;
+  `stop` once per turn after the self-review, in the page's order — a blocked answer notices
+  *A stop hook asks the agent to continue: …*, gives the model its words unseen over the wire
+  and runs it once more, and that run ends plainly; `notification` without awaiting when a card
+  starts waiting, with `{ kind: 'tool', name }`. Every failure of the request means nothing was
+  hooked, as on the page, and the window asks only when the list behind row 66's card holds the
+  event (read when the Code page opens and on the pane's Reload — a request that is not made
+  returns exactly the nothing an unanswered one does, which is also what lets the tests run
+  without a server). Own events and the plugins' count alike, sorted; the runs of the agents
+  pane skip the tail, plan mode asks the hook though the page does, and `/compact`'s
+  `pre_compact` waits with it on row 79's not-built list. Seven window tests, one over the
+  answer the page reads, eleven mutations.
 - **Review and self-review in the Code page of the native app.** *Review my work before it
   counts as done* (`code.autoReview`, off by default, kept in the window's store where the page
   keeps `fllm.studio.codesettings.v1`) with the checkbox of the page's side *Settings* block and
