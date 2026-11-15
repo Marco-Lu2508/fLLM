@@ -334,6 +334,11 @@ pub struct CodeState {
     /// What `/status` and `/diff` ran: the output goes with the next message (`pending` of the
     /// page), never into the conversation itself.
     pub pending: Vec<String>,
+    /// `/turbo`: the switch for the window to ask its confirm and post (the answer is noted on
+    /// this page when `runtime_notice` of the window says so).
+    pub(crate) pending_turbo: Option<bool>,
+    /// `/sandbox <mode>`: the mode for the window to post.
+    pub(crate) pending_sandbox: Option<String>,
     pub running: bool,
     pub steps: usize,
     pub changes: Vec<Change>,
@@ -363,6 +368,8 @@ impl Default for CodeState {
             pending_prefs: None,
             pending_toast: None,
             pending: Vec::new(),
+            pending_turbo: None,
+            pending_sandbox: None,
             running: false,
             steps: 0,
             changes: Vec::new(),
@@ -1087,10 +1094,11 @@ impl CodeState {
                     self.pending_prefs.get_or_insert_with(Default::default).rules = Some(self.rules.clone());
                     self.items.push(Item::Note(notice));
                 }
-                // the confirm and the answer of the runtime are the window's own (the same dialog
-                // the switches of Settings > Runtime ask), so those two steps name the message
-                Step::Turbo(next) => tasks.push(Task::done(Message::TurboFromCommand(next))),
-                Step::SetSandbox(mode) => tasks.push(Task::done(Message::SandboxFromCommand(mode))),
+                // the confirm and the post belong to the window (the same dialog and the same
+                // route the switches of Settings > Runtime use); the flags are read in the very
+                // message that ran the command, so the dialog is up at once
+                Step::Turbo(next) => self.pending_turbo = Some(next),
+                Step::SetSandbox(mode) => self.pending_sandbox = Some(mode),
                 Step::AutoApprove(want, note) => {
                     let changed = want.is_some_and(|on| on != self.auto_approve);
                     if let Some(on) = want {

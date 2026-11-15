@@ -962,11 +962,6 @@ pub enum Message {
     RuntimeStepsSave,
     /// The question before a switch goes on (`confirmDialog` of `runtime.js`).
     RuntimeConfirm(crate::runtime::Confirm),
-    /// `/turbo [on|off]`: the confirm of the runtime switches, then the answer noted on the Code
-    /// page (`case 'turbo'` of `code.js`).
-    TurboFromCommand(bool),
-    /// `/sandbox <mode>`: the mode goes to the runtime, the answer is noted on the Code page.
-    SandboxFromCommand(String),
     RuntimeConfirmOk,
     RuntimeConfirmCancel,
     /// The save answered (`POST /api/studio/runtime`).
@@ -2080,6 +2075,28 @@ impl App {
                 if let Some(text) = self.code.pending_toast.take() {
                     self.toast = Some(text);
                 }
+                // `/turbo` and `/sandbox` are asked of the runtime here: the same post the
+                // switches of Settings > Runtime send, and the answer is noted on the Code page
+                let mut posts: Vec<Task<Message>> = Vec::new();
+                if let Some(next) = self.code.pending_turbo.take() {
+                    self.runtime_notice = Some(RuntimeNotice::Turbo);
+                    if next {
+                        // the very question the switches ask (`confirmDialog` of runtime.js)
+                        self.runtime_confirm = Some(crate::runtime::Confirm::Turbo);
+                    } else {
+                        posts.push(Task::perform(
+                            models::post_runtime(self.base.clone(), serde_json::json!({ "turbo": false })),
+                            Message::RuntimeSaved,
+                        ));
+                    }
+                }
+                if let Some(mode) = self.code.pending_sandbox.take() {
+                    self.runtime_notice = Some(RuntimeNotice::Sandbox);
+                    posts.push(Task::perform(
+                        models::post_runtime(self.base.clone(), serde_json::json!({ "sandbox": mode })),
+                        Message::RuntimeSaved,
+                    ));
+                }
                 if !was_running_before && self.code.running {
                     // the run began (the `started` of watchRun in voice.js)
                     self.code_started = Some(std::time::Instant::now());
@@ -2115,7 +2132,12 @@ impl App {
                         }
                     }
                 }
-                task
+                if posts.is_empty() {
+                    task
+                } else {
+                    posts.push(task);
+                    Task::batch(posts)
+                }
             }
             Message::Regenerate(i) => {
                 if self.live.is_some() || !self.messages.get(i).is_some_and(|m| m.role == Role::Assistant) {
@@ -3651,26 +3673,6 @@ impl App {
                 // nothing was asked of the runtime after all
                 self.runtime_notice = None;
                 Task::none()
-            }
-            Message::TurboFromCommand(next) => {
-                self.runtime_notice = Some(RuntimeNotice::Turbo);
-                if next {
-                    // the very question the switches of Settings > Runtime ask
-                    self.runtime_confirm = Some(crate::runtime::Confirm::Turbo);
-                    Task::none()
-                } else {
-                    Task::perform(
-                        models::post_runtime(self.base.clone(), serde_json::json!({ "turbo": false })),
-                        Message::RuntimeSaved,
-                    )
-                }
-            }
-            Message::SandboxFromCommand(mode) => {
-                self.runtime_notice = Some(RuntimeNotice::Sandbox);
-                Task::perform(
-                    models::post_runtime(self.base.clone(), serde_json::json!({ "sandbox": mode })),
-                    Message::RuntimeSaved,
-                )
             }
             Message::RuntimeSaved(Ok(status)) => {
                 self.fill_runtime(status);
