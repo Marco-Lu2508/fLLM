@@ -85,6 +85,10 @@ pub enum ToolKind {
     Todo { write: bool },
     /// A question to you with a few answers; your answer is the result.
     Ask,
+    /// `task`: a sub-agent with a conversation of its own, started by the window (`runSubAgent`).
+    Task,
+    /// `create_agent`: writes the file of a custom sub-agent through `/api/studio/agents`.
+    CreateAgent,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,6 +167,27 @@ pub struct Call {
     /// What the model gets back when it differs from the card (`reply = …` of the automatic
     /// check: the clipped answer with the problems of the check between the two markers).
     pub sent: Option<String>,
+    /// A `task` card: the conversation of its sub-agent as the card draws it (`item.children`).
+    pub kid: Option<Box<KidView>>,
+}
+
+/// What the card of a `task` call keeps of its sub-agent: its type, the words of the job, the
+/// progress line while it works and the items of its conversation (`item.agentType`,
+/// `item.progress`, `item.children`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct KidView {
+    pub agent_type: String,
+    pub description: String,
+    pub progress: String,
+    pub items: Vec<KidItem>,
+}
+
+/// An item of a sub-agent's conversation: its words, or one of its calls (it asks like the
+/// conversation does, and a sub-agent starts no further sub-agent, so a call here has no `kid`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum KidItem {
+    Assistant(String),
+    Call(Box<Call>),
 }
 
 pub enum Item {
@@ -197,12 +222,84 @@ pub enum Saved {
         sent: Option<String>,
     },
     Assistant { text: String },
-    Call { id: String, name: String, args: String, permission: String, ok: bool, output: String, #[serde(default)] sent: Option<String> },
+    Call {
+        id: String,
+        name: String,
+        args: String,
+        permission: String,
+        ok: bool,
+        output: String,
+        #[serde(default)]
+        sent: Option<String>,
+        /// A `task` card keeps the conversation of its sub-agent and its type.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        children: Vec<Saved>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+    },
     Note { text: String },
     /// Kept with the session like the messages of the page are, so the review rounds survive it.
     ReviewFeedback { text: String },
     /// The same for the message of a blocked stop hook.
     StopHook { text: String },
+}
+
+/// A call as it is kept: one that had not finished is kept as interrupted, and a `task` keeps the
+/// conversation of its sub-agent.
+fn saved_call(c: &Call) -> Saved {
+    let (ok, output) = match &c.state {
+        CallState::Done { ok, output } => (*ok, output.clone()),
+        _ => (false, "Interrupted.".to_string()),
+    };
+    let children: Vec<Saved> = c
+        .kid
+        .as_ref()
+        .map(|k| {
+            k.items
+                .iter()
+                .filter_map(|i| match i {
+                    KidItem::Assistant(text) => (!text.is_empty()).then(|| Saved::Assistant { text: text.clone() }),
+                    KidItem::Call(cc) => Some(saved_call(cc)),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Saved::Call {
+        id: c.id.clone(),
+        name: c.name.clone(),
+        args: c.args.clone(),
+        permission: permission_name(c.permission).into(),
+        ok,
+        output,
+        sent: c.sent.clone(),
+        children,
+        agent: c.kid.as_ref().map(|k| k.agent_type.clone()),
+    }
+}
+
+/// The call of a kept session (`kind` is the server's: the kinds of the window's own tools do
+/// not matter for a call that is over).
+fn restored_call(saved: Saved) -> Call {
+    let Saved::Call { id, name, args, permission, ok, output, sent, children, agent } = saved else {
+        unreachable!("restored_call is given calls")
+    };
+    let description = serde_json::from_str::<Value>(&args)
+        .ok()
+        .and_then(|v| v.get("description").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_default();
+    let kid = (name == "task" || agent.is_some()).then(|| Box::new(KidView {
+        agent_type: agent.unwrap_or_default(),
+        description,
+        progress: String::new(),
+        items: children
+            .into_iter()
+            .map(|c| match c {
+                Saved::Assistant { text } => KidItem::Assistant(text),
+                other => KidItem::Call(Box::new(restored_call(other))),
+            })
+            .collect(),
+    }));
+    Call { id, name, args, permission: Permission::parse(&permission), kind: ToolKind::Server, state: CallState::Done { ok, output }, auto_note: None, check: None, sent, kid }
 }
 
 /// The most items kept per folder: the newest ones.
@@ -361,6 +458,11 @@ pub enum CodeMsg {
     StopHookDone(HookFire),
     /// A `notification` hook was fired for a waiting card; nothing comes of it.
     HookFired,
+    /// The custom sub-agents of the folder (`loadAgents`); `None` when the route did not answer,
+    /// which leaves the list as it was.
+    AgentsLoaded(Option<Vec<crate::subagents::CustomAgent>>),
+    /// An event of one sub-agent's stream (the id is the `task` call that started it).
+    KidStream(String, StreamEvent),
     /// The specs of the folder as they are (`loadSpecs` of the page).
     SpecsLoaded(Vec<crate::specs::Spec>),
     /// The listing of `/spec` with no argument, ready to be written into the list.
@@ -505,12 +607,52 @@ pub struct CodeState {
     pub always_allow: std::collections::HashSet<String>,
     pub running: bool,
     pub steps: usize,
+    /// The last calls of this run, as signatures (`ctx.history`): the same call three times in a
+    /// row is refused (`loopguard`).
+    history: Vec<String>,
     pub changes: Vec<Change>,
     pub context: Context,
     pub todos: Vec<Todo>,
     pub error: Option<String>,
     acc: Vec<Partial>,
     handle: Option<task::Handle>,
+    /// The custom sub-agents of the folder (`code.agents`, `loadAgents`).
+    pub agents: Vec<crate::subagents::CustomAgent>,
+    /// The sub-agents that work or wait for a place (at most `MAX_PARALLEL_CHILDREN` work at a time).
+    kids: Vec<Kid>,
+}
+
+/// Where one sub-agent's loop stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KidPhase {
+    /// Four others work: it starts when one is done (the page runs groups of four).
+    Queued,
+    /// The model is answering.
+    Streaming,
+    /// The calls of its last answer are being run or waiting for you.
+    Calls,
+}
+
+/// One sub-agent's conversation with the model (`ctx` of `runSubAgent`): its own messages, its own
+/// stream and its own step count. Its cards live in the `task` call that started it.
+struct Kid {
+    call_id: String,
+    plan: crate::subagents::ChildPlan,
+    phase: KidPhase,
+    system: String,
+    tools: Value,
+    messages: Vec<WireMessage>,
+    budget: usize,
+    step: usize,
+    wrap_up: bool,
+    acc: Vec<Partial>,
+    /// What the model has said in this step.
+    text: String,
+    /// The ids of the calls of this step, in the order the model made them.
+    calls: Vec<String>,
+    handle: Option<task::Handle>,
+    /// Its last calls (`ctx.history`), for the guard against the same call again and again.
+    history: Vec<String>,
 }
 
 impl Default for CodeState {
@@ -550,12 +692,15 @@ impl Default for CodeState {
             always_allow: std::collections::HashSet::new(),
             running: false,
             steps: 0,
+            history: Vec::new(),
             changes: Vec::new(),
             context: Context::default(),
             todos: Vec::new(),
             error: None,
             acc: Vec::new(),
             handle: None,
+            agents: Vec::new(),
+            kids: Vec::new(),
         }
     }
 }
@@ -599,6 +744,8 @@ pub fn client_tools() -> (Vec<Tool>, Vec<Value>) {
         Tool { name: "todo_write".into(), permission: Permission::Read, kind: ToolKind::Todo { write: true } },
         Tool { name: "todo_read".into(), permission: Permission::Read, kind: ToolKind::Todo { write: false } },
         Tool { name: "ask_user".into(), permission: Permission::Read, kind: ToolKind::Ask },
+        Tool { name: "task".into(), permission: Permission::Read, kind: ToolKind::Task },
+        Tool { name: "create_agent".into(), permission: Permission::Edit, kind: ToolKind::CreateAgent },
     ];
     let defs = vec![
         def(
@@ -614,6 +761,8 @@ pub fn client_tools() -> (Vec<Tool>, Vec<Value>) {
             json!({"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "description": "Two to five short choices."}}),
             json!(["question"]),
         ),
+        def("task", "Start a sub-agent with a fresh context and get back only its final report. agent \"explore\" is read-only and fast: use it for broad research (\"where is X handled\", \"how does Y work\"). agent \"general\" may also edit files and run commands: use it for a self-contained job. Several task calls in one turn run in parallel. The sub-agent does not see this conversation, so the prompt must contain everything it needs: the goal, where to look, and what the report must contain.", json!({"description": {"type": "string", "description": "Three to six words naming the job."}, "prompt": {"type": "string", "description": "The complete task and what the report should contain."}, "agent": {"type": "string", "enum": ["explore", "general"], "description": "explore (default): read and search only. general: may also edit and run commands, with the usual permission questions."}}), json!(["description", "prompt"])),
+        def("create_agent", "Create a reusable sub-agent as a file that the task tool can start by name afterwards (like a custom agent in Claude Code). Use it when a kind of job comes back again and again (review, test writing, migrations, research in one area). The user is asked before it is written. Give it a short lowercase name, a description of when to use it, the tools it may use (for example read_file, grep, glob, list_dir for a reviewer that must not change anything; leave the list empty for all tools) and its instructions: what it does, how it works and what its report looks like.", json!({"name": {"type": "string", "description": "Lowercase letters, digits, - and _ (for example code-reviewer)."}, "description": {"type": "string", "description": "One sentence: when to use this agent."}, "instructions": {"type": "string", "description": "The system prompt of the agent."}, "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names it may use; empty means all."}, "scope": {"type": "string", "enum": ["workspace", "user"], "description": "workspace (default): only for this folder. user: for every folder."}, "model": {"type": "string", "description": "Optional: another model for this agent."}}), json!(["name", "description", "instructions"])),
     ];
     (tools, defs)
 }
@@ -1094,13 +1243,7 @@ impl CodeState {
                 Item::Note(t) => Some(Saved::Note { text: t.clone() }),
                 Item::ReviewFeedback(t) => Some(Saved::ReviewFeedback { text: t.clone() }),
                 Item::StopHook(t) => Some(Saved::StopHook { text: t.clone() }),
-                Item::Call(c) => {
-                    let (ok, output) = match &c.state {
-                        CallState::Done { ok, output } => (*ok, output.clone()),
-                        _ => (false, "Interrupted.".to_string()),
-                    };
-                    Some(Saved::Call { id: c.id.clone(), name: c.name.clone(), args: c.args.clone(), permission: permission_name(c.permission).into(), ok, output, sent: c.sent.clone() })
-                }
+                Item::Call(c) => Some(saved_call(c)),
             })
             .collect();
         if out.len() > SAVED_ITEMS {
@@ -1115,6 +1258,7 @@ impl CodeState {
     /// Takes a kept session back as the conversation.
     pub fn restore(&mut self, saved: Vec<Saved>) {
         self.steps = 0;
+        self.history.clear();
         self.items = saved
             .into_iter()
             .map(|s| match s {
@@ -1124,7 +1268,7 @@ impl CodeState {
                     md.push_str(&text);
                     Item::Assistant { text, md: Box::new(md) }
                 }
-                Saved::Call { id, name, args, permission, ok, output, sent } => Item::Call(Call { id, name, args, permission: Permission::parse(&permission), kind: ToolKind::Server, state: CallState::Done { ok, output }, auto_note: None, check: None, sent }),
+                call @ Saved::Call { .. } => Item::Call(restored_call(call)),
                 Saved::Note { text } => Item::Note(text),
                 Saved::ReviewFeedback { text } => Item::ReviewFeedback(text),
                 Saved::StopHook { text } => Item::StopHook(text),
@@ -1150,15 +1294,88 @@ impl CodeState {
         })
     }
 
+    /// A call of the conversation or of a sub-agent's: the cards of a `task` hold the calls of
+    /// its sub-agent, and they are answered, allowed and denied like every other.
     fn call_mut(&mut self, id: &str) -> Option<&mut Call> {
-        self.items.iter_mut().find_map(|i| match i {
-            Item::Call(c) if c.id == id => Some(c),
-            _ => None,
-        })
+        for item in self.items.iter_mut() {
+            let Item::Call(c) = item else { continue };
+            if c.id == id {
+                return Some(c);
+            }
+            if let Some(kid) = c.kid.as_mut() {
+                for k in kid.items.iter_mut() {
+                    if let KidItem::Call(cc) = k {
+                        if cc.id == id {
+                            return Some(cc);
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
-    /// The messages of the next request: the agent's instructions, then the session with every call answered.
-    pub fn wire(&self, extra: Option<&str>) -> Vec<WireMessage> {
+    /// Every call that is on a card: the conversation's and its sub-agents'.
+    fn each_call_mut(&mut self, mut f: impl FnMut(&mut Call)) {
+        for item in self.items.iter_mut() {
+            let Item::Call(c) = item else { continue };
+            if let Some(kid) = c.kid.as_mut() {
+                for k in kid.items.iter_mut() {
+                    if let KidItem::Call(cc) = k {
+                        f(cc);
+                    }
+                }
+            }
+            f(c);
+        }
+    }
+
+    /// The ids of the calls that wait for you and that `pred` lets through (the conversation's
+    /// and its sub-agents').
+    fn waiting_ids(&self, pred: impl Fn(&Call) -> bool) -> Vec<String> {
+        let mut out = Vec::new();
+        for item in &self.items {
+            let Item::Call(c) = item else { continue };
+            if let Some(kid) = &c.kid {
+                for k in &kid.items {
+                    if let KidItem::Call(cc) = k {
+                        if cc.state == CallState::Pending && pred(cc) {
+                            out.push(cc.id.clone());
+                        }
+                    }
+                }
+            }
+            if c.state == CallState::Pending && pred(c) {
+                out.push(c.id.clone());
+            }
+        }
+        out
+    }
+
+    /// The state of a call by its id, wherever it is.
+    fn call_state(&self, id: &str) -> Option<&CallState> {
+        for item in &self.items {
+            let Item::Call(c) = item else { continue };
+            if c.id == id {
+                return Some(&c.state);
+            }
+            if let Some(kid) = &c.kid {
+                for k in &kid.items {
+                    if let KidItem::Call(cc) = k {
+                        if cc.id == id {
+                            return Some(&cc.state);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The agent's instructions (`codeSystemPrompt` of the page): the mode's prompt, the folder,
+    /// the style, the project's own instructions and what the Settings page adds. A sub-agent is
+    /// told the same words (`parent.system`).
+    pub fn system_prompt(&self, extra: Option<&str>) -> String {
         let mut system = if self.mode == Mode::Plan { PLAN_PROMPT } else { CODE_PROMPT }.to_string();
         if let Some(w) = &self.workspace {
             system.push_str(&format!("\n\nThe project folder is {} (tool paths are relative to it).", w.root));
@@ -1179,6 +1396,12 @@ impl CodeState {
             system.push_str("\n\n");
             system.push_str(x.trim());
         }
+        system
+    }
+
+    /// The messages of the next request: the agent's instructions, then the session with every call answered.
+    pub fn wire(&self, extra: Option<&str>) -> Vec<WireMessage> {
+        let system = self.system_prompt(extra);
         let mut wire = vec![WireMessage::new("system", system)];
         let mut i = 0;
         while i < self.items.len() {
@@ -1282,6 +1505,7 @@ impl CodeState {
         let sent = (sent_full != display).then_some(sent_full);
         self.error = None;
         self.steps = 0;
+        self.history.clear();
         self.items.push(Item::User {
             text: display.to_string(),
             sent,
@@ -1298,6 +1522,7 @@ impl CodeState {
         }
         let id = format!("call_{}_u{}", self.steps, self.items.len());
         let call = Call {
+            kid: None,
             id: id.clone(),
             name: "bash".into(),
             args: serde_json::json!({ "command": command }).to_string(),
@@ -1337,6 +1562,7 @@ impl CodeState {
             auto_note: None,
             check: None,
             sent: None,
+            kid: None,
         }));
         let base = env.base.to_string();
         Task::perform(
@@ -1437,6 +1663,7 @@ impl CodeState {
                     self.items.clear();
                     self.todos.clear();
                     self.steps = 0;
+                    self.history.clear();
                     self.always_allow.clear();
                 }
                 Step::Undo(steps) => {
@@ -1567,13 +1794,17 @@ impl CodeState {
         self.handle = None;
         self.running = false;
         self.acc.clear();
-        for i in self.items.iter_mut() {
-            if let Item::Call(c) = i {
-                if matches!(c.state, CallState::Pending | CallState::Running) {
-                    c.state = CallState::Done { ok: false, output: "Stopped.".into() };
-                }
+        // the sub-agents stop with the conversation: their streams end, their calls and the
+        // `task` calls that started them are closed
+        self.kids.clear();
+        self.each_call_mut(|c| {
+            if matches!(c.state, CallState::Pending | CallState::Running) {
+                c.state = CallState::Done { ok: false, output: "Stopped.".into() };
             }
-        }
+            if let Some(kid) = c.kid.as_mut() {
+                kid.progress.clear();
+            }
+        });
         let base = env.base.to_string();
         Task::perform(
             async move { cancel(base.clone()).await; fetch_changes(base).await },
@@ -1620,11 +1851,22 @@ impl CodeState {
 
     /// The tools the model is offered: in plan mode only those that read.
     pub fn tools_for_model(&self) -> Value {
-        if self.mode != Mode::Plan {
+        // the task tool names the custom agents of the folder (`toolListFor`)
+        let listed = |all: Vec<Value>| -> Value {
+            Value::Array(
+                all.into_iter()
+                    .map(|d| if d.pointer("/function/name").and_then(Value::as_str) == Some("task") { crate::subagents::task_with_agents(&d, &self.agents) } else { d })
+                    .collect(),
+            )
+        };
+        if !self.tools_json.is_array() {
             return self.tools_json.clone();
         }
+        if self.mode != Mode::Plan {
+            return listed(self.tools_json.as_array().cloned().unwrap_or_default());
+        }
         let readable = |name: &str| self.tool(name).is_some_and(|t| self.mode.allows(t.permission));
-        Value::Array(self.tools_json.as_array().into_iter().flatten().filter(|t| t.pointer("/function/name").and_then(Value::as_str).is_some_and(readable)).cloned().collect())
+        listed(self.tools_json.as_array().into_iter().flatten().filter(|t| t.pointer("/function/name").and_then(Value::as_str).is_some_and(readable)).cloned().collect())
     }
 
     fn run(&mut self, base: &str, id: &str) -> Task<Message> {
@@ -1671,6 +1913,15 @@ impl CodeState {
                     c.state = CallState::Running;
                 }
                 Task::perform(call_mcp(base, server, tool, args), move |r| Message::Code(CodeMsg::ToolDone(id.clone(), r)))
+            }
+            // a task starts in `finish_round`, where the window's model and settings are at hand
+            ToolKind::Task => Task::none(),
+            ToolKind::CreateAgent => {
+                if let Some(c) = self.call_mut(&id) {
+                    c.state = CallState::Running;
+                }
+                let root = self.workspace.as_ref().map(|w| w.root.clone()).unwrap_or_default();
+                Task::perform(create_agent_file(base, root, args), move |r| Message::Code(CodeMsg::ToolDone(id.clone(), r)))
             }
             ToolKind::Server | ToolKind::Ask => {
                 if let Some(c) = self.call_mut(&id) {
@@ -1725,6 +1976,11 @@ impl CodeState {
         if kind == ToolKind::Ask {
             // a question is for you in every mode
             return (CallState::Pending, None);
+        }
+        if kind == ToolKind::Task {
+            // `runToolCall` hands a task to `runSubAgent` before it asks anything; what the
+            // sub-agent may then do is asked call by call
+            return (CallState::Running, None);
         }
         // the chain of `runToolCall` (code.js 1955-2010): plan first, then the rules, the mode
         // and the remembered keys of `authorize`, and the harmless table gets the last word on
@@ -1821,12 +2077,35 @@ impl CodeState {
             let tool = self.tool(&p.name).cloned();
             let permission = tool.as_ref().map_or(Permission::Other, |t| t.permission);
             let kind = tool.as_ref().map_or(ToolKind::Server, |t| t.kind.clone());
-            let (state, auto_note) =
+            let (mut state, auto_note) =
                 self.starting_state(tool.is_some(), kind.clone(), permission, &p.name, &p.args, env.turbo);
-            let run_now = state == CallState::Running;
+            // an agent for every folder is written outside the workspace: that is always the
+            // user's call, unless a rule forbids it (`create_agent` in `runToolCall`)
+            if kind == ToolKind::CreateAgent && state == CallState::Running {
+                let parsed: Value = serde_json::from_str(&p.args).unwrap_or(Value::Null);
+                if parsed.get("scope").and_then(Value::as_str) == Some("user") {
+                    state = CallState::Pending;
+                }
+            }
+            // the same call again and again: the model is stuck, so it is told so instead of
+            // being run a third time (only a call that gets this far counts, `runToolCall`)
+            let mut sent = None;
+            if !matches!(state, CallState::Done { .. }) && tool.is_some() {
+                if let Some(args) = guard_args(&p.args) {
+                    if crate::loopguard::check(&mut self.history, &p.name, &args) {
+                        state = CallState::Done { ok: false, output: crate::loopguard::REPEATED_CARD.into() };
+                        sent = Some(crate::loopguard::REPEATED_REPLY.to_string());
+                    }
+                }
+            }
+            let run_now = state == CallState::Running && kind != ToolKind::Task;
+            let start_task = state == CallState::Running && kind == ToolKind::Task;
             let waiting = state == CallState::Pending;
             let tool_name = p.name.clone();
-            self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note, check: None, sent: None }));
+            self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note, check: None, sent, kid: None }));
+            if start_task {
+                tasks.push(self.start_task(&id, env));
+            }
             if run_now {
                 ids.push(id);
             }
@@ -1848,6 +2127,12 @@ impl CodeState {
 
     /// When every call of the last round has an answer, the model gets them.
     fn continue_if_done(&mut self, env: &Env) -> Task<Message> {
+        let kids = self.kids_continue(env);
+        Task::batch([self.continue_parent_if_done(env), kids])
+    }
+
+    /// The conversation's own next request, once every call of its last round is answered.
+    fn continue_parent_if_done(&mut self, env: &Env) -> Task<Message> {
         if self.check_hold.is_some() {
             // the answer of one call is still being checked (`await autoCheckEdit` there)
             return Task::none();
@@ -2050,6 +2335,12 @@ impl CodeState {
                 self.handle = None;
                 Task::none()
             }
+            CodeMsg::AgentsLoaded(Some(agents)) => {
+                self.agents = agents;
+                Task::none()
+            }
+            CodeMsg::AgentsLoaded(None) => Task::none(),
+            CodeMsg::KidStream(id, ev) => self.kid_event(&id, ev, env),
             CodeMsg::SpecsLoaded(specs) => {
                 self.specs = specs;
                 Task::none()
@@ -2177,6 +2468,7 @@ impl CodeState {
                 }
             },
             CodeMsg::Opened(Ok(w)) => {
+                let w_root = w.root.clone();
                 self.path_input = w.root.clone();
                 self.workspace = Some(w);
                 self.error = None;
@@ -2194,7 +2486,9 @@ impl CodeState {
                     // runs with the other loads when the page opens a workspace)
                     Task::perform(load_custom_commands(base.clone()), |r| Message::Code(CodeMsg::CustomLoaded(r))),
                     // and the specs of `.fllm/specs` (`loadSpecs` runs with them at 814)
-                    Task::perform(crate::specs::fetch_specs(base), |r| Message::Code(CodeMsg::SpecsLoaded(r.unwrap_or_default()))),
+                    Task::perform(crate::specs::fetch_specs(base.clone()), |r| Message::Code(CodeMsg::SpecsLoaded(r.unwrap_or_default()))),
+                    // and the custom sub-agents of the folder (`loadAgents`)
+                    Task::perform(fetch_agents(base, w_root), |r| Message::Code(CodeMsg::AgentsLoaded(r.ok()))),
                 ])
             }
             CodeMsg::ContextLoaded(Ok(c)) => {
@@ -2417,6 +2711,10 @@ impl CodeState {
                 if changed {
                     tasks.push(Task::perform(fetch_changes(env.base.to_string()), |r| Message::Code(CodeMsg::ChangesLoaded(r))));
                 }
+                if ok && name == "create_agent" {
+                    // `await loadAgents()` of `createAgentFile`: the new agent is offered at once
+                    tasks.push(self.load_agents(env));
+                }
                 // `autoCheckEdit`: after a successful edit the check runs first, and the model
                 // gets its answer with the problems between the two markers — the card is done
                 // while it runs, as on the page, and the round waits on `check_hold`
@@ -2494,17 +2792,16 @@ impl CodeState {
                 }
                 self.mode = m;
                 if m == Mode::Plan {
-                    // a plan changes nothing: what waited for approval is refused
-                    for i in self.items.iter_mut() {
-                        if let Item::Call(c) = i {
-                            if c.state == CallState::Pending && c.kind != ToolKind::Ask {
-                                c.state = CallState::Done { ok: false, output: "Plan mode only allows reading. Write the plan instead.".into() };
-                            }
+                    // a plan changes nothing: what waited for approval is refused (a
+                    // sub-agent's calls as well)
+                    self.each_call_mut(|c| {
+                        if c.state == CallState::Pending && c.kind != ToolKind::Ask {
+                            c.state = CallState::Done { ok: false, output: "Plan mode only allows reading. Write the plan instead.".into() };
                         }
-                    }
+                    });
                 }
                 // calls that wait now may be allowed
-                let ids: Vec<String> = self.items.iter().filter_map(|i| if let Item::Call(c) = i { (c.state == CallState::Pending && c.kind != ToolKind::Ask && m.allows(c.permission)).then(|| c.id.clone()) } else { None }).collect();
+                let ids: Vec<String> = self.waiting_ids(|c| c.kind != ToolKind::Ask && m.allows(c.permission));
                 let mut tasks = Vec::new();
                 for id in ids {
                     tasks.push(self.run(env.base, &id));
@@ -2598,10 +2895,388 @@ impl CodeState {
                 self.items.clear();
                 self.todos.clear();
                 self.steps = 0;
+                self.history.clear();
                 self.always_allow.clear();
                 Task::none()
             }
         }
+    }
+}
+
+// ---- sub-agents ------------------------------------------------------------------------------------------------------------------
+
+/// The arguments as `parseArgs` reads them for the guard: an empty text is `{}`, a text that is
+/// no JSON is no call to count (the call is refused before the guard anyway).
+fn guard_args(text: &str) -> Option<Value> {
+    if text.trim().is_empty() {
+        return Some(json!({}));
+    }
+    serde_json::from_str(text).ok()
+}
+
+/// `GET /api/studio/agents?workspace=…`: the custom agents of the folder and of the user.
+pub async fn fetch_agents(base: String, root: String) -> Result<Vec<crate::subagents::CustomAgent>, String> {
+    let query = if root.is_empty() { String::new() } else { format!("?workspace={}", encode_query(&root)) };
+    call_get(&base, &format!("/api/studio/agents{query}")).await.map(|v| crate::subagents::parse_agents(&v))
+}
+
+/// `createAgentFile` of the page: the file of a custom agent through the agents route. The answer
+/// is the line the model reads, or the message of the route (`Error 400` without one).
+pub async fn create_agent_file(base: String, root: String, args: Value) -> Result<String, String> {
+    let scope = if args.get("scope").and_then(Value::as_str) == Some("user") { "user" } else { "workspace" };
+    // `args.x || ''`: what the model wrote goes on as it is, unless it is empty or zero
+    let raw = |key: &str| match args.get(key) {
+        Some(Value::String(s)) if s.is_empty() => json!(""),
+        Some(Value::Number(n)) if n.as_f64() == Some(0.0) => json!(""),
+        Some(Value::Null | Value::Bool(false)) | None => json!(""),
+        Some(v) => v.clone(),
+    };
+    let name = match raw("name") {
+        Value::String(s) => s.trim().to_string(),
+        other => other.to_string().trim().to_string(),
+    };
+    let body = json!({
+        "name": name,
+        "description": raw("description"),
+        "tools": args.get("tools").filter(|t| t.is_array()).cloned().unwrap_or_else(|| json!([])),
+        "model": raw("model"),
+        "body": raw("instructions"),
+        "scope": scope,
+        "workspace": if root.is_empty() { Value::Null } else { json!(root) },
+    });
+    match call_post(&base, "/api/studio/agents", body).await {
+        Ok(_) => Ok(format!(
+            "The agent \"{name}\" was created ({}). Start it with the task tool: agent \"{name}\".",
+            if scope == "user" { "for every folder" } else { "for this folder" }
+        )),
+        Err(e) => Err(match e.strip_prefix("the server answered ") {
+            Some(status) => format!("Error {}", status.split_whitespace().next().unwrap_or_default()),
+            None => e,
+        }),
+    }
+}
+
+impl CodeState {
+    fn kid_index(&self, call_id: &str) -> Option<usize> {
+        self.kids.iter().position(|k| k.call_id == call_id)
+    }
+
+    /// What a sub-agent is sent: its instructions and its messages so far (`None` once it is
+    /// over). The window never shows it; the tests read the conversation through it.
+    pub fn kid_wire(&self, call_id: &str) -> Option<Vec<WireMessage>> {
+        let kid = &self.kids[self.kid_index(call_id)?];
+        let mut wire = vec![WireMessage::new("system", kid.system.clone())];
+        wire.extend(kid.messages.iter().cloned());
+        Some(wire)
+    }
+
+    /// The tools a sub-agent is offered (`None` once it is over).
+    pub fn kid_tools(&self, call_id: &str) -> Option<Value> {
+        Some(self.kids[self.kid_index(call_id)?].tools.clone())
+    }
+
+    /// How many sub-agents work, and how many wait for a place.
+    pub fn kids_working_and_waiting(&self) -> (usize, usize) {
+        let waiting = self.kids.iter().filter(|k| k.phase == KidPhase::Queued).count();
+        (self.kids.len() - waiting, waiting)
+    }
+
+    /// `loadAgents()`; the Settings page asks for it after it saved or deleted an agent
+    /// (`window.fllmReloadAgents`).
+    pub fn reload_agents(&self, base: &str) -> Task<Message> {
+        let root = self.workspace.as_ref().map(|w| w.root.clone()).unwrap_or_default();
+        Task::perform(fetch_agents(base.to_string(), root), |r| Message::Code(CodeMsg::AgentsLoaded(r.ok())))
+    }
+
+    fn load_agents(&self, env: &Env) -> Task<Message> {
+        self.reload_agents(env.base)
+    }
+
+    /// A `task` call has been made: `runSubAgent` decides what it is, and a sub-agent that may
+    /// start does so as soon as one of the four places is free.
+    fn start_task(&mut self, id: &str, env: &Env) -> Task<Message> {
+        let args: Value = {
+            let Some(c) = self.call_mut(id) else { return Task::none() };
+            match serde_json::from_str(if c.args.trim().is_empty() { "{}" } else { &c.args }) {
+                Ok(v) => v,
+                Err(_) => {
+                    c.state = CallState::Done { ok: false, output: "The arguments are not valid JSON.".into() };
+                    c.sent = Some("Error: the arguments were not valid JSON. Call the tool again with a valid JSON object.".into());
+                    return Task::none();
+                }
+            }
+        };
+        let plan = match crate::subagents::plan_child(&args, &self.agents, self.mode == Mode::Plan, 0) {
+            Ok(plan) => plan,
+            Err(refusal) => {
+                if let Some(c) = self.call_mut(id) {
+                    c.state = CallState::Done { ok: false, output: refusal.output };
+                    c.sent = Some(refusal.reply);
+                }
+                return Task::none();
+            }
+        };
+        let mut tools = self.tools_for_model();
+        if let (Some(allowed), Some(list)) = (&plan.allowed, tools.as_array_mut()) {
+            list.retain(|t| t.pointer("/function/name").and_then(Value::as_str).is_some_and(|n| allowed.iter().any(|a| a == n)));
+        }
+        let system = format!("{}{}", self.system_prompt(env.extra), plan.system_suffix);
+        if let Some(c) = self.call_mut(id) {
+            c.kid = Some(Box::new(KidView { agent_type: plan.agent_type.clone(), description: plan.description.clone(), progress: "starting".into(), items: Vec::new() }));
+        }
+        self.kids.push(Kid {
+            call_id: id.to_string(),
+            phase: KidPhase::Queued,
+            system,
+            tools,
+            messages: vec![WireMessage::new("user", plan.first_message.clone())],
+            budget: crate::subagents::child_budget(env.ctx_max),
+            step: 0,
+            wrap_up: false,
+            acc: Vec::new(),
+            text: String::new(),
+            calls: Vec::new(),
+            handle: None,
+            history: Vec::new(),
+            plan,
+        });
+        self.kid_pump(env)
+    }
+
+    /// Starts the sub-agents that wait, as far as the places go (`MAX_PARALLEL_CHILDREN`).
+    fn kid_pump(&mut self, env: &Env) -> Task<Message> {
+        let mut tasks = Vec::new();
+        loop {
+            let working = self.kids.iter().filter(|k| k.phase != KidPhase::Queued).count();
+            if working >= crate::subagents::MAX_PARALLEL_CHILDREN {
+                break;
+            }
+            let Some(next) = self.kids.iter().find(|k| k.phase == KidPhase::Queued).map(|k| k.call_id.clone()) else { break };
+            tasks.push(self.kid_step(&next, env));
+        }
+        Task::batch(tasks)
+    }
+
+    /// One step of a sub-agent's loop: the wrap-up check, the progress line, and the request.
+    fn kid_step(&mut self, call_id: &str, env: &Env) -> Task<Message> {
+        let Some(i) = self.kid_index(call_id) else { return Task::none() };
+        let Some(model) = self.kids[i].plan.model.clone().or_else(|| env.model.map(str::to_string)) else {
+            return self.kid_finish(call_id, Err(crate::subagents::ChildFailure::Error("No model is loaded.".into())), env);
+        };
+        let kid = &mut self.kids[i];
+        let fixed = crate::subagents::estimate_tokens(&kid.system) + crate::subagents::estimate_tokens(&kid.tools.to_string());
+        if !kid.wrap_up && crate::subagents::needs_wrap_up(kid.step, kid.plan.max_steps, fixed, crate::subagents::estimate_messages(&kid.messages), kid.budget) {
+            // out of steps or room: the report is asked for and further calls are ignored
+            kid.wrap_up = true;
+            kid.messages.push(WireMessage::new("user", crate::subagents::WRAP_UP_MESSAGE));
+        }
+        let progress = format!("step {}{}", kid.step + 1, if kid.wrap_up { ", writing report" } else { "" });
+        kid.acc.clear();
+        kid.text.clear();
+        kid.phase = KidPhase::Streaming;
+        let mut wire = vec![WireMessage::new("system", kid.system.clone())];
+        wire.extend(kid.messages.iter().cloned());
+        let (tools, id) = (kid.tools.clone(), kid.call_id.clone());
+        let events = api::chat_stream_with_tools(env.base.to_string(), model, wire, env.params.clone(), Some(tools));
+        let (task, handle) = Task::stream(events).map(move |ev| Message::Code(CodeMsg::KidStream(id.clone(), ev))).abortable();
+        self.kids[i].handle = Some(handle.abort_on_drop());
+        if let Some(view) = self.call_mut(call_id).and_then(|c| c.kid.as_mut()) {
+            view.progress = progress;
+            view.items.push(KidItem::Assistant(String::new()));
+        }
+        task
+    }
+
+    /// What a sub-agent's stream says.
+    fn kid_event(&mut self, call_id: &str, ev: StreamEvent, env: &Env) -> Task<Message> {
+        let Some(i) = self.kid_index(call_id) else { return Task::none() };
+        if !self.running || self.kids[i].phase != KidPhase::Streaming {
+            return Task::none();
+        }
+        match ev {
+            StreamEvent::Delta(s) => {
+                self.kids[i].text.push_str(&s);
+                if let Some(KidItem::Assistant(text)) = self.call_mut(call_id).and_then(|c| c.kid.as_mut()).and_then(|v| v.items.last_mut()) {
+                    text.push_str(&s);
+                }
+                Task::none()
+            }
+            StreamEvent::ToolCall { index, id, name, arguments } => {
+                let acc = &mut self.kids[i].acc;
+                while acc.len() <= index {
+                    acc.push(Partial::default());
+                }
+                let p = &mut acc[index];
+                if let Some(id) = id {
+                    p.id = id;
+                }
+                if let Some(n) = name {
+                    p.name = n;
+                }
+                p.args.push_str(&arguments);
+                Task::none()
+            }
+            StreamEvent::Done => self.kid_round(call_id, env),
+            StreamEvent::Error(e) => self.kid_finish(call_id, Err(crate::subagents::ChildFailure::Error(e)), env),
+            StreamEvent::Reasoning(_) | StreamEvent::Logprobs(_) | StreamEvent::Usage { .. } | StreamEvent::Timings { .. } => Task::none(),
+        }
+    }
+
+    /// The model has answered one step: no calls end the loop with this answer as the report,
+    /// calls become cards of the task, asked about and run like the conversation's own.
+    fn kid_round(&mut self, call_id: &str, env: &Env) -> Task<Message> {
+        let Some(i) = self.kid_index(call_id) else { return Task::none() };
+        let kid = &mut self.kids[i];
+        let partial: Vec<Partial> = std::mem::take(&mut kid.acc).into_iter().filter(|p| !p.name.is_empty()).collect();
+        // out of steps or room the calls are ignored (`wrapUp ? [] : result.calls`)
+        let partial = if kid.wrap_up { Vec::new() } else { partial };
+        let content = kid.text.clone();
+        if !content.is_empty() || !partial.is_empty() {
+            let mut m = WireMessage::new("assistant", content.clone());
+            if !partial.is_empty() {
+                m.tool_calls = Some(Value::Array(
+                    partial
+                        .iter()
+                        .enumerate()
+                        .map(|(n, p)| json!({"id": format!("{}~{}.{n}", kid.call_id, kid.step), "type": "function", "function": {"name": p.name, "arguments": if p.args.is_empty() { "{}" } else { p.args.as_str() }}}))
+                        .collect(),
+                ));
+            }
+            kid.messages.push(m);
+        }
+        if partial.is_empty() {
+            return self.kid_finish(call_id, Ok(content.trim().to_string()), env);
+        }
+        let step = kid.step;
+        let read_only = kid.plan.read_only;
+        if content.is_empty() {
+            // nothing to show of this step but its calls (`ctx.view.splice` of the page)
+            if let Some(view) = self.call_mut(call_id).and_then(|c| c.kid.as_mut()) {
+                if matches!(view.items.last(), Some(KidItem::Assistant(t)) if t.is_empty()) {
+                    view.items.pop();
+                }
+            }
+        }
+        let mut ids = Vec::new();
+        let mut run_ids = Vec::new();
+        let mut tasks = Vec::new();
+        for (n, p) in partial.into_iter().enumerate() {
+            let id = format!("{call_id}~{step}.{n}");
+            let tool = self.tool(&p.name).cloned();
+            let permission = tool.as_ref().map_or(Permission::Other, |t| t.permission);
+            let kind = tool.as_ref().map_or(ToolKind::Server, |t| t.kind.clone());
+            // what a sub-agent is refused before anything is asked (`runToolCall`, depth one)
+            let client = matches!(kind, ToolKind::Todo { .. } | ToolKind::Ask | ToolKind::Task | ToolKind::CreateAgent);
+            let denial = tool.as_ref().and_then(|_| {
+                crate::subagents::child_denial(&p.name, client, permission == Permission::Computer, permission == Permission::Read && kind == ToolKind::Server, read_only)
+            });
+            let (state, auto_note, sent) = match denial {
+                Some((card, reply)) => (CallState::Done { ok: false, output: card.into() }, None, Some(reply)),
+                None => {
+                    let (mut state, note) = self.starting_state(tool.is_some(), kind.clone(), permission, &p.name, &p.args, env.turbo);
+                    let mut sent = None;
+                    if !matches!(state, CallState::Done { .. }) && tool.is_some() {
+                        if let (Some(args), Some(i)) = (guard_args(&p.args), self.kid_index(call_id)) {
+                            if crate::loopguard::check(&mut self.kids[i].history, &p.name, &args) {
+                                state = CallState::Done { ok: false, output: crate::loopguard::REPEATED_CARD.into() };
+                                sent = Some(crate::loopguard::REPEATED_REPLY.to_string());
+                            }
+                        }
+                    }
+                    (state, note, sent)
+                }
+            };
+            let run_now = state == CallState::Running;
+            let waiting = state == CallState::Pending;
+            let tool_name = p.name.clone();
+            let call = Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note, check: None, sent, kid: None };
+            if let Some(view) = self.call_mut(call_id).and_then(|c| c.kid.as_mut()) {
+                view.items.push(KidItem::Call(Box::new(call)));
+            }
+            ids.push(id.clone());
+            if run_now {
+                run_ids.push(id);
+            }
+            if waiting && env.hooks.notification {
+                tasks.push(Task::perform(
+                    fire_hook(env.base.to_string(), "notification", "", json!({ "kind": "tool", "name": tool_name })),
+                    |_| Message::Code(CodeMsg::HookFired),
+                ));
+            }
+        }
+        if let Some(i) = self.kid_index(call_id) {
+            self.kids[i].calls = ids;
+            self.kids[i].phase = KidPhase::Calls;
+        }
+        for id in run_ids {
+            tasks.push(self.run(env.base, &id));
+        }
+        tasks.push(self.continue_if_done(env));
+        Task::batch(tasks)
+    }
+
+    /// The sub-agents whose calls are all answered go on: the answers are told to the model in
+    /// the order of the calls and the next step starts.
+    fn kids_continue(&mut self, env: &Env) -> Task<Message> {
+        if self.check_hold.is_some() || !self.running {
+            return Task::none();
+        }
+        let ready: Vec<String> = self
+            .kids
+            .iter()
+            .filter(|k| k.phase == KidPhase::Calls && k.calls.iter().all(|id| matches!(self.call_state(id), Some(CallState::Done { .. }))))
+            .map(|k| k.call_id.clone())
+            .collect();
+        let mut tasks = Vec::new();
+        for id in ready {
+            let Some(i) = self.kid_index(&id) else { continue };
+            let ids = self.kids[i].calls.clone();
+            let mut replies = Vec::new();
+            for call_id in &ids {
+                let reply = self.call_mut(call_id).map(|c| match (&c.sent, &c.state) {
+                    (Some(sent), _) => sent.clone(),
+                    (None, CallState::Done { ok: true, output }) => output.clone(),
+                    (None, CallState::Done { ok: false, output }) => format!("Error: {output}"),
+                    _ => "The call did not finish.".to_string(),
+                });
+                replies.push((call_id.clone(), reply.unwrap_or_default()));
+            }
+            let kid = &mut self.kids[i];
+            for (call_id, content) in replies {
+                let mut m = WireMessage::new("tool", content);
+                m.tool_call_id = Some(call_id);
+                kid.messages.push(m);
+            }
+            kid.calls.clear();
+            kid.step += 1;
+            if kid.step >= kid.plan.max_steps {
+                let last = kid.text.trim().to_string();
+                tasks.push(self.kid_finish(&id, Ok(last), env));
+            } else {
+                tasks.push(self.kid_step(&id, env));
+            }
+        }
+        Task::batch(tasks)
+    }
+
+    /// The sub-agent is done: its card gets the report and the model gets the reply
+    /// (`runSubAgent`'s end), and a place is free for the next one.
+    fn kid_finish(&mut self, call_id: &str, result: Result<String, crate::subagents::ChildFailure>, env: &Env) -> Task<Message> {
+        let Some(i) = self.kid_index(call_id) else { return Task::none() };
+        let kid = self.kids.remove(i);
+        let (status, output, reply) = crate::subagents::child_outcome(result, !self.running, &kid.plan.description, env.ctx_max);
+        if let Some(c) = self.call_mut(call_id) {
+            c.state = CallState::Done { ok: status == "ok", output };
+            c.sent = Some(reply);
+            if let Some(view) = c.kid.as_mut() {
+                view.progress.clear();
+                if matches!(view.items.last(), Some(KidItem::Assistant(t)) if t.is_empty()) {
+                    view.items.pop();
+                }
+            }
+        }
+        let pump = self.kid_pump(env);
+        Task::batch([pump, self.continue_if_done(env)])
     }
 }
 
@@ -2619,9 +3294,13 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
         CallState::Done { ok: true, .. } => text("Done").size(12).color(t.ok).into(),
         CallState::Done { ok: false, .. } => text("Failed").size(12).color(t.danger).into(),
     };
+    // a task is labelled as the page labels it: `Sub-agent (explore)` and the words of the job
+    let (verb, target) = if c.name == "task" { crate::subagents::task_label(&args) } else { (c.name.clone(), summary(&c.name, &args)) };
+    let progress = c.kid.as_ref().filter(|_| c.state == CallState::Running).map(|k| k.progress.clone()).unwrap_or_default();
     let header = row![
-        text(c.name.as_str()).size(13).font(Font { weight: iced::font::Weight::Semibold, ..Font::MONOSPACE }),
-        text(summary(&c.name, &args)).size(13).font(Font::MONOSPACE).color(t.fg_soft).width(Length::Fill).wrapping(text::Wrapping::None),
+        text(verb).size(13).font(Font { weight: iced::font::Weight::Semibold, ..Font::MONOSPACE }),
+        text(target).size(13).font(Font::MONOSPACE).color(t.fg_soft).width(Length::Fill).wrapping(text::Wrapping::None),
+        text(progress).size(12).color(t.muted),
         state_label,
     ]
     .spacing(10)
@@ -2636,8 +3315,42 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
         );
     }
 
+    if c.name == "task" {
+        // the job as it was given (the first 1500 characters), the conversation of the sub-agent
+        // under it, and its report when it is done
+        let prompt: String = args.get("prompt").and_then(Value::as_str).unwrap_or_default().chars().take(1500).collect();
+        body = body.push(mono_box(t, text(prompt).size(12).font(Font::MONOSPACE).color(t.fg_soft).into()));
+        let mut kids = column![].spacing(8);
+        let items = c.kid.as_ref().map(|k| k.items.as_slice()).unwrap_or_default();
+        if items.is_empty() {
+            kids = kids.push(text("Starting ...").size(12).color(t.muted));
+        }
+        for item in items {
+            kids = kids.push(match item {
+                // the answer that is on its way (the parent's own list draws the same dots)
+                KidItem::Assistant(words) if words.is_empty() => {
+                    if c.state == CallState::Running { text("…").size(13).color(t.muted).into() } else { Element::from(Space::new().height(0)) }
+                }
+                KidItem::Assistant(words) => text(words.as_str()).size(13).color(t.fg_soft).into(),
+                KidItem::Call(inner) => call_card(t, inner),
+            });
+        }
+        body = body.push(container(kids).padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 14.0 }).width(Length::Fill));
+        if let CallState::Done { output, ok } = &c.state {
+            if !output.is_empty() {
+                body = body.push(
+                    column![
+                        text("Report").size(11).font(Font { weight: iced::font::Weight::Semibold, ..Font::MONOSPACE }).color(t.muted),
+                        mono_box(t, text(output.as_str()).size(13).color(if *ok { t.fg } else { t.danger }).into()),
+                    ]
+                    .spacing(4),
+                );
+            }
+        }
+    }
+
     // a command is already in the header; an edit shows what it removes and adds, each line on a tinted band
-    let lines = if c.name == "bash" { Vec::new() } else { preview(&c.name, &args) };
+    let lines = if c.name == "bash" || c.name == "task" { Vec::new() } else { preview(&c.name, &args) };
     if !lines.is_empty() {
         let shown = column(lines.into_iter().map(|(kind, l)| {
             let (mark, color, band) = match kind {
@@ -2653,7 +3366,7 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
         }));
         body = body.push(container(shown).padding([6, 6]).width(Length::Fill).style(theme::inset(t)));
     }
-    if let CallState::Done { output, ok } = &c.state {
+    if let (CallState::Done { output, ok }, true) = (&c.state, c.name != "task") {
         let all: Vec<&str> = output.lines().collect();
         // a tab is not in the monospace font: four spaces show it
         let mut shown: String = all.iter().take(14).map(|l| l.replace('\t', "    ")).collect::<Vec<_>>().join("\n");

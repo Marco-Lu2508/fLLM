@@ -4389,7 +4389,8 @@ impl App {
                     format!("Saved \"{name}\".")
                 };
                 self.agent_editing = None;
-                self.agents_refresh()
+                // `load()`, then `fllmReloadAgents()`: the Code page offers it at once
+                Task::batch([self.agents_refresh(), self.code.reload_agents(&self.base)])
             }
             Message::AgentSaved(_, _, Err(e)) => {
                 if let Some(edit) = self.agent_editing.as_mut() {
@@ -4419,7 +4420,7 @@ impl App {
                 if self.agent_editing.as_ref().is_some_and(|edit| edit.original == name) {
                     self.agent_editing = None;
                 }
-                self.agents_refresh()
+                Task::batch([self.agents_refresh(), self.code.reload_agents(&self.base)])
             }
             Message::AgentDeleted(_, Err(e)) => {
                 self.agents_notice = e;

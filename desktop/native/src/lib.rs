@@ -27,6 +27,8 @@ pub mod autoapprove;
 pub mod commands;
 pub mod review;
 pub mod specs;
+pub mod loopguard;
+pub mod subagents;
 pub mod hooks;
 pub mod plugins;
 pub mod settingssearch;

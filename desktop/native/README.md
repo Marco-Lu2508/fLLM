@@ -404,7 +404,7 @@ call is answered is the page's decision: a rule of `/deny` blocks it before anyt
 an allow-rule, the mode or a key *Always* remembered on the card run it without a question (the
 button shows what it remembers, `Always (npm)` for a command, and a new session asks again),
 turbo answers everything, and plan mode refuses everything that does not read. The screen and
-input tools are not offered. Not yet: sub-agents (`task`). The conversation of each folder is kept (`code-sessions.json` next to the chats, the newest 200 items; a call that had not finished comes back as interrupted) and returns when the folder is opened again; *New session* forgets it.
+input tools are not offered. Sub-agents work: `task` starts `explore` (reads), `general` or a custom agent of the folder as a conversation of its own, up to four at a time, with its own cards inside the task's card and the same questions for what it changes; `create_agent` writes a new one. A call repeated three times in a row is refused. The conversation of each folder is kept (`code-sessions.json` next to the chats, the newest 200 items; a call that had not finished comes back as interrupted) and returns when the folder is opened again; *New session* forgets it.
 - Long chats: the conversation draws the newest 60 messages; *Show 60 earlier messages* adds the next older ones. Laying out every message on every
   frame of a stream cost 63 ms for 800 messages (release build, `cargo run --release --example view_bench -- 50 200 800`); with the window the
   build and layout of the view stay at about 6 ms however long the chat is (opening an 800-message chat still parses its markdown once, 124 ms).
@@ -419,7 +419,7 @@ input tools are not offered. Not yet: sub-agents (`task`). The conversation of e
 | Stage | Content |
 |---|---|
 | 2c | Load options (context, device), the measured prompt speed with the compact prompt, memory, web tools |
-| 3b | Code mode: sub-agents, a terminal view |
+| 3b | Code mode: a terminal view |
 | 4a | One download per system with the app and the engine side by side: the `native-bundle` workflow (started by hand with a release tag; it takes the engine of that release, checks its checksum, adds the app and, with `upload`, signs and attaches the archives) |
 | 4 | The engine inside the process (no second program; for now the app starts the server next to it, see above), installers per system that put both side by side, the tray, autostart, updates; then the Tauri app and the web Studio files can go |
 | later | Voice, artifacts, the command palette |

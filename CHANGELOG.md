@@ -7,6 +7,23 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **Sub-agents in the native app** (`runSubAgent`, `runLoop`, `create_agent` and the guard of
+  `runToolCall` in `code.js`). A `task` call starts a conversation of its own — its messages, its
+  stream, its steps (sixteen unless the agent says otherwise) — drawn inside the task's card with
+  the job, a progress line and the *Report*. `explore` only reads, `general` may change files
+  (and is `explore` in plan mode), a custom agent of `agents/*.md` runs with the tools it names, its
+  own instructions and model; the `task` tool lists them for the model. Its calls are asked
+  about like the conversation's (*Allow*, *Always*, *Deny*, a switch to plan mode), are refused
+  where the page refuses them (the window's own tools, the screen, a change by a read-only
+  agent), and four sub-agents work at a time while the rest wait. The last step or a full context
+  asks for the report. A stop ends them all, and the session keeps their conversation.
+  `create_agent` writes an agent through the agents route (for every folder it always asks), and
+  saving or deleting one on the Settings page reaches the Code page at once. **Also new, and
+  missing for the conversation as well:** the guard against a model that is stuck — the same call
+  three times in a row is refused with the page's words, for the conversation and each
+  sub-agent, with the page's signature of the arguments. Forty-one fixtures from the page's
+  own function, twenty-three window tests, three tests against a small server, seventy-four
+  mutations.
 - **Specs and steering files in the native app** (`specCommand`, `runSpecTask`, `loadSpecs` and
   `specsHtml` of `code.js`). `/spec` with no words reads the list and writes the listing;
   `/spec run NAME [N]` finds the spec (reading the list again when the name is missing, then
