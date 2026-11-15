@@ -245,6 +245,44 @@ pub struct CuView {
     pub gone: bool,
 }
 
+/// Everything the browser panel asks and answers (`browser.js`).
+#[derive(Debug, Clone)]
+pub enum BrMsg {
+    /// The Browser button of the header (`setOpen(!br.open)`).
+    Toggle,
+    Hide,
+    /// What `GET /api/studio/agent/browser` answered; `then_tick` when the panel was just opened.
+    Status { then_tick: bool, answer: Option<Value> },
+    Tick(u64),
+    TickDone { epoch: u64, status: Option<Option<Value>>, frame: Option<Value> },
+    /// `poke()`: look again now.
+    Poke,
+    Answered(crate::browser::Input, Result<Value, String>),
+    UrlEdit(String),
+    Submit,
+    Back,
+    Forward,
+    Reload,
+    CloseAsk,
+    CloseOk,
+    CloseCancel,
+    Comment,
+    /// Where the mouse is on the picture, and how big the picture is drawn.
+    Move(iced::Point, iced::Size),
+    Click,
+    Double,
+    Scroll(iced::mouse::ScrollDelta),
+    WheelFlush,
+    Key(crate::browser::KeyPress),
+    Pasted(Option<String>),
+    NoteEdit(iced::widget::text_editor::Action),
+    NoteAdd,
+    NoteCancel,
+    Del(usize),
+    SendComments,
+    OpenSettings,
+}
+
 /// What the server says of computer use (`GET /api/studio/agent/computer`).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CuStatus {
@@ -527,6 +565,10 @@ pub enum CodeMsg {
     AgentsLoaded(Option<Vec<crate::subagents::CustomAgent>>),
     /// An event of one sub-agent's stream (the id is the `task` call that started it).
     KidStream(String, StreamEvent),
+    /// The browser panel.
+    Br(BrMsg),
+    /// The browser settings were saved (`fllmBrowserChanged`): the panel reads its status again and the tools are asked for.
+    BrowserChanged,
     /// What the server says of computer use (a poll of the chain `epoch`).
     ComputerStatus(u64, Option<CuStatus>),
     /// The STOP of the banner, Esc three times, Ctrl+Alt+Shift+Esc (`stopComputer(why)`).
@@ -620,6 +662,8 @@ pub struct Env<'a> {
     pub hooks: HookGates,
     /// Whether the loaded model can look at pictures (a computer tool's screenshots go to it).
     pub vision: bool,
+    /// Whether the Code page is the one shown (the browser panel does not poll behind another page).
+    pub visible: bool,
 }
 
 /// What a command changed and the store has to keep (`saveCodeSettings` and the rules write of
@@ -735,6 +779,21 @@ pub struct CodeState {
     pub jobs: Vec<crate::jobs::Job>,
     /// Computer use: what the server says, the banner, the last screenshot.
     pub computer: Computer,
+    /// The browser panel (`br` of `browser.js`) and what the window adds to draw it.
+    pub browser: crate::browser::Panel,
+    pub br_epoch: u64,
+    br_sending: bool,
+    br_queue: std::collections::VecDeque<crate::browser::Input>,
+    br_handle: Option<iced::widget::image::Handle>,
+    br_src: String,
+    br_pointer: Option<(iced::Point, iced::Size)>,
+    pub br_focus: bool,
+    br_note: Content,
+    br_confirm_close: bool,
+    /// The comments the user left on the page, taken at the start of a task (`notes` of `agentRunNow`).
+    br_notes: String,
+    /// Whether the loaded model can look at pictures (a screenshot of the browser goes to it).
+    vision: bool,
 }
 
 /// Where one sub-agent's loop stands.
@@ -824,6 +883,18 @@ impl Default for CodeState {
             learn_refresh: false,
             jobs: Vec::new(),
             computer: Computer::default(),
+            browser: crate::browser::Panel::default(),
+            br_epoch: 0,
+            br_sending: false,
+            br_queue: std::collections::VecDeque::new(),
+            br_handle: None,
+            br_src: String::new(),
+            br_pointer: None,
+            br_focus: false,
+            br_note: Content::new(),
+            br_confirm_close: false,
+            br_notes: String::new(),
+            vision: true,
         }
     }
 }
@@ -1098,6 +1169,29 @@ pub async fn pick_folder(base: String) -> Result<Option<String>, String> {
     Ok(v.get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).map(str::to_string))
 }
 
+/// `GET /api/studio/agent/browser`: `None` when the server does not answer or has no such route.
+pub async fn fetch_browser(base: String) -> Option<Value> {
+    call(&base, reqwest::Method::GET, "/api/studio/agent/browser", None).await.ok()
+}
+
+/// One of the inputs of the panel (`post('/input', body)`): the answer's body whatever the status, an error only when nothing came.
+async fn post_browser(base: String, path: &'static str, body: Value) -> Result<Value, String> {
+    let resp = reqwest::Client::new().post(format!("{base}/api/studio/agent/browser{path}")).json(&body).send().await.map_err(|e| e.to_string())?;
+    Ok(resp.json().await.unwrap_or_else(|_| json!({})))
+}
+
+/// One tick of the panel: the status now and then, and the frame.
+async fn browser_tick(base: String, read_status: bool, since: String, enabled_hint: bool) -> (Option<Option<Value>>, Option<Value>) {
+    let status = if read_status { Some(fetch_browser(base.clone()).await) } else { None };
+    let enabled = match &status {
+        Some(Some(v)) => crate::browser::Status::parse(v).enabled,
+        Some(None) => false,
+        None => enabled_hint,
+    };
+    let frame = if enabled { post_browser(base, "/frame", json!({ "since": since })).await.ok() } else { None };
+    (status, frame)
+}
+
 /// `GET /api/studio/agent/computer`: `None` when the server does not answer or does not know it.
 pub async fn fetch_computer(base: String) -> Option<CuStatus> {
     let v = call(&base, reqwest::Method::GET, "/api/studio/agent/computer", None).await.ok()?;
@@ -1210,6 +1304,9 @@ pub fn fire_answer(value: &Value) -> HookFire {
         context: value.get("context").and_then(Value::as_str).unwrap_or_default().to_string(),
     }
 }
+
+/// `SHOT_MARK` of the page: how the message with a screenshot of the browser begins.
+const BROWSER_SHOT_MARK: &str = "[Screenshot of the browser page,";
 
 /// `dropOldImages(ctx.messages, 2)`: only the last two screenshot messages keep their pictures; an
 /// older one says the picture was taken out.
@@ -1650,6 +1747,15 @@ impl CodeState {
                         parts.extend(shots.iter().map(|(s, _)| json!({ "type": "image_url", "image_url": { "url": s.url } })));
                         wire.push(WireMessage::with_parts("user", content, parts));
                     }
+                    // `attachShots`: a screenshot of the browser tool goes to a model that can see as a user
+                    // message with the picture (a tool message cannot carry one); only the newest stays
+                    if self.vision {
+                        if let Some(shot) = calls.iter().rev().filter(|c| c.permission != Permission::Computer).find_map(|c| c.cu.as_ref()?.image.as_ref()) {
+                            let text = format!("{BROWSER_SHOT_MARK} taken by browser_screenshot]");
+                            let parts = vec![json!({ "type": "text", "text": text }), json!({ "type": "image_url", "image_url": { "url": shot.url } })];
+                            wire.push(WireMessage::with_parts("user", text, parts));
+                        }
+                    }
                     i += calls.len();
                 }
                 Item::Call(_) => {}
@@ -1657,6 +1763,12 @@ impl CodeState {
             i += 1;
         }
         drop_old_screenshots(&mut wire);
+        // only the newest picture of the browser stays in the conversation
+        let browser_shots: Vec<usize> = wire.iter().enumerate().filter(|(_, m)| m.parts.is_some() && m.content.starts_with(BROWSER_SHOT_MARK)).map(|(i, _)| i).collect();
+        for &i in browser_shots.iter().rev().skip(1) {
+            wire[i].content = "[an older screenshot of the browser was removed to save space]".into();
+            wire[i].parts = None;
+        }
         wire
     }
 
@@ -1707,7 +1819,7 @@ impl CodeState {
         if self.workspace.is_none() || env.model.is_none() || self.running {
             return Task::none();
         }
-        let mut sent_full = prompt.to_string();
+        let mut sent_full = format!("{}{prompt}", std::mem::take(&mut self.br_notes));
         if !self.pending.is_empty() {
             let shared = std::mem::take(&mut self.pending);
             sent_full = format!("{}\n\n{sent_full}", shared.join("\n\n"));
@@ -2168,6 +2280,8 @@ impl CodeState {
         // tool list follows the setting (the window does not wait for it)
         self.computer.last_shot = None;
         self.computer.busy.clear();
+        // the comments the user left on the browser page go with this message, once
+        self.br_notes = self.browser.take_comments();
         let begin = self.computer_begin(env);
         let started = if env.hooks.submit {
             Task::perform(
@@ -2225,7 +2339,16 @@ impl CodeState {
             ToolKind::Mcp { server, tool } => Some((server.as_str(), tool.as_str())),
             _ => None,
         };
-        let parsed: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+        let mut parsed: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+        // the browser tools without an address are judged by the page the browser is on, so that
+        // per-domain network rules cover them too
+        if permission == Permission::Network && name.starts_with("browser_") {
+            if let Some(o) = parsed.as_object_mut() {
+                if o.get("url").is_none_or(Value::is_null) && o.get("query").is_none_or(Value::is_null) {
+                    o.insert("url".into(), json!(self.browser.current_url()));
+                }
+            }
+        }
         let outcome = crate::commands::call_decision(
             turbo,
             &self.rules,
@@ -2554,6 +2677,7 @@ impl CodeState {
     }
 
     pub fn update(&mut self, msg: CodeMsg, env: &Env) -> Task<Message> {
+        self.vision = env.vision;
         match msg {
             CodeMsg::PathInput(s) => {
                 self.path_input = s;
@@ -2595,6 +2719,11 @@ impl CodeState {
                 Task::none()
             }
             CodeMsg::AgentsLoaded(None) => Task::none(),
+            CodeMsg::Br(m) => self.br_update(m, env),
+            CodeMsg::BrowserChanged => {
+                let tools = Task::perform(fetch_tools(env.base.to_string(), self.computer_on()), |r| Message::Code(CodeMsg::ToolsLoaded(r)));
+                Task::batch([self.br_status_task(env, false), tools])
+            }
             CodeMsg::ComputerStatus(epoch, status) => {
                 if epoch != self.computer.epoch || self.workspace.is_none() {
                     return Task::none();
@@ -2653,7 +2782,14 @@ impl CodeState {
                     }
                 }
                 self.computer.busy.clear();
-                self.update(CodeMsg::ToolDone(id, result), env)
+                // `fllmBrowserPoke`: a browser tool just did something, look at the page now
+                let poke = if self.call_mut(&id).is_some_and(|c| c.name.starts_with("browser_")) {
+                    Task::done(Message::Code(CodeMsg::Br(BrMsg::Poke)))
+                } else {
+                    Task::none()
+                };
+                let done = self.update(CodeMsg::ToolDone(id, result), env);
+                Task::batch([done, poke])
             }
             CodeMsg::JobOutput(id) => match crate::jobs::toggle_output(&mut self.jobs, &id) {
                 Some(true) => {
@@ -2905,6 +3041,7 @@ impl CodeState {
                 Task::batch([
                     Task::perform(fetch_tools(base.clone(), self.computer_on()), |r| Message::Code(CodeMsg::ToolsLoaded(r))),
                     self.computer_start_poll(&base),
+                    self.br_status_task(env, false),
                     Task::perform(fetch_changes(base.clone()), |r| Message::Code(CodeMsg::ChangesLoaded(r))),
                     Task::perform(fetch_context(base.clone()), |r| Message::Code(CodeMsg::ContextLoaded(r))),
                     // the custom commands of the folder come with it (`loadCustomCommands`
@@ -3458,6 +3595,265 @@ impl CodeState {
         Task::perform(crate::learn::after_run(env.base.to_string(), body), move |queued| Message::Code(CodeMsg::LearnQueued(queued, since)))
     }
 
+    /// The pause of `schedule(ms)`: the tick of this chain comes after it.
+    fn br_schedule(&mut self, ms: u64) -> Task<Message> {
+        self.br_epoch += 1;
+        let epoch = self.br_epoch;
+        Task::perform(
+            async move {
+                if ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                }
+            },
+            move |()| Message::Code(CodeMsg::Br(BrMsg::Tick(epoch))),
+        )
+    }
+
+    /// The next input goes to the server when none is on its way (the page chains them so that fast typing arrives in order).
+    fn br_pump(&mut self, env: &Env) -> Task<Message> {
+        if self.br_sending {
+            return Task::none();
+        }
+        let Some(input) = self.br_queue.pop_front() else { return Task::none() };
+        self.br_sending = true;
+        let base = env.base.to_string();
+        let body = input.body();
+        Task::perform(post_browser(base, "/input", body), move |r| Message::Code(CodeMsg::Br(BrMsg::Answered(input.clone(), r))))
+    }
+
+    fn br_send(&mut self, input: crate::browser::Input, env: &Env) -> Task<Message> {
+        self.br_queue.push_back(input);
+        self.br_pump(env)
+    }
+
+    fn br_status_task(&self, env: &Env, then_tick: bool) -> Task<Message> {
+        Task::perform(fetch_browser(env.base.to_string()), move |answer| Message::Code(CodeMsg::Br(BrMsg::Status { then_tick, answer })))
+    }
+
+    /// The picture of a frame as the stage draws it.
+    fn br_take_picture(&mut self) {
+        match &self.browser.image {
+            None => {
+                self.br_handle = None;
+                self.br_src.clear();
+            }
+            Some(src) if *src != self.br_src => {
+                self.br_src = src.clone();
+                let data = src.split_once(',').map_or(src.as_str(), |(_, d)| d);
+                self.br_handle = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).ok().map(iced::widget::image::Handle::from_bytes);
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// The stage as the window draws it: where it is and how big (the picture starts at its corner).
+    fn br_rect(&self) -> Option<(crate::browser::Rect, (f64, f64))> {
+        let (p, size) = self.br_pointer?;
+        let rect = crate::browser::Rect { left: 0.0, top: 0.0, width: f64::from(size.width), height: f64::from(size.height) };
+        Some((rect, (f64::from(p.x), f64::from(p.y))))
+    }
+
+    fn br_update(&mut self, m: BrMsg, env: &Env) -> Task<Message> {
+        match m {
+            BrMsg::Toggle => {
+                self.browser.open = !self.browser.open;
+                if self.browser.open {
+                    self.br_status_task(env, true)
+                } else {
+                    // the timer ends
+                    self.br_epoch += 1;
+                    Task::none()
+                }
+            }
+            BrMsg::Hide => {
+                self.browser.open = false;
+                self.br_epoch += 1;
+                Task::none()
+            }
+            BrMsg::Status { then_tick, answer } => {
+                self.browser.apply_status(answer.as_ref());
+                if then_tick && self.browser.open { self.br_schedule(0) } else { Task::none() }
+            }
+            BrMsg::Tick(epoch) => {
+                if epoch != self.br_epoch || !self.browser.open {
+                    return Task::none();
+                }
+                if !env.visible {
+                    return self.br_schedule(1500);
+                }
+                let read = self.browser.tick_reads_status();
+                let since = self.browser.key.clone();
+                let hint = self.browser.tick_asks_frame();
+                Task::perform(browser_tick(env.base.to_string(), read, since, hint), move |(status, frame)| Message::Code(CodeMsg::Br(BrMsg::TickDone { epoch, status, frame })))
+            }
+            BrMsg::TickDone { epoch, status, frame } => {
+                if epoch != self.br_epoch || !self.browser.open {
+                    return Task::none();
+                }
+                if let Some(answer) = status {
+                    self.browser.apply_status(answer.as_ref());
+                }
+                if let Some(data) = frame {
+                    self.browser.apply_frame(&data);
+                    self.br_take_picture();
+                }
+                let pause = self.browser.tick_pause_ms();
+                self.br_schedule(pause)
+            }
+            BrMsg::Poke => {
+                if self.browser.open { self.br_schedule(0) } else { self.br_status_task(env, false) }
+            }
+            BrMsg::Answered(input, answer) => {
+                self.br_sending = false;
+                let was_locate = matches!(input, crate::browser::Input::Locate { .. });
+                if let Some(toast) = self.browser.input_answered(&input, answer) {
+                    self.pending_toast = Some(toast);
+                }
+                if was_locate && self.browser.draft.is_some() {
+                    self.br_note = Content::new();
+                }
+                let mut tasks = vec![self.br_pump(env)];
+                match input {
+                    crate::browser::Input::Close => {
+                        self.browser.closed();
+                        self.br_take_picture();
+                        tasks.push(self.br_status_task(env, false));
+                    }
+                    other => {
+                        // `setTimeout(poke, 120)`, and a new address is followed by `loadStatus()`
+                        tasks.push(Task::perform(async { tokio::time::sleep(std::time::Duration::from_millis(120)).await }, |()| Message::Code(CodeMsg::Br(BrMsg::Poke))));
+                        if matches!(other, crate::browser::Input::Navigate(_)) {
+                            tasks.push(self.br_status_task(env, false));
+                        }
+                    }
+                }
+                Task::batch(tasks)
+            }
+            BrMsg::UrlEdit(v) => {
+                self.browser.url_input = v;
+                self.browser.url_focused = true;
+                self.br_focus = false;
+                Task::none()
+            }
+            BrMsg::Submit => {
+                self.browser.url_focused = false;
+                match self.browser.submit() {
+                    Some(i) => self.br_send(i, env),
+                    None => Task::none(),
+                }
+            }
+            BrMsg::Back => self.br_send(crate::browser::Input::Back, env),
+            BrMsg::Forward => self.br_send(crate::browser::Input::Forward, env),
+            BrMsg::Reload => self.br_send(crate::browser::Input::Reload, env),
+            BrMsg::CloseAsk => {
+                self.br_confirm_close = true;
+                Task::none()
+            }
+            BrMsg::CloseCancel => {
+                self.br_confirm_close = false;
+                Task::none()
+            }
+            BrMsg::CloseOk => {
+                self.br_confirm_close = false;
+                self.br_send(crate::browser::Input::Close, env)
+            }
+            BrMsg::Comment => {
+                self.browser.toggle_commenting();
+                if !self.browser.commenting {
+                    self.br_note = Content::new();
+                }
+                Task::none()
+            }
+            BrMsg::Move(point, size) => {
+                self.br_pointer = Some((point, size));
+                Task::none()
+            }
+            BrMsg::Click => {
+                let Some((rect, at)) = self.br_rect() else { return Task::none() };
+                match self.browser.click(at, rect, false) {
+                    Some(input) => {
+                        // `stage.focus()`: the keys go to the page now
+                        self.br_focus = true;
+                        self.browser.url_focused = false;
+                        self.br_send(input, env)
+                    }
+                    None => Task::none(),
+                }
+            }
+            BrMsg::Double => {
+                let Some((rect, at)) = self.br_rect() else { return Task::none() };
+                match self.browser.dblclick(at, rect) {
+                    Some(input) => self.br_send(input, env),
+                    None => Task::none(),
+                }
+            }
+            BrMsg::Scroll(delta) => {
+                let Some((rect, at)) = self.br_rect() else { return Task::none() };
+                // the window's wheel turns the other way round: up is positive there, down on the web
+                let (d, unit) = match delta {
+                    iced::mouse::ScrollDelta::Lines { x, y } => ((-f64::from(x), -f64::from(y)), crate::browser::WheelUnit::Lines),
+                    iced::mouse::ScrollDelta::Pixels { x, y } => ((-f64::from(x), -f64::from(y)), crate::browser::WheelUnit::Pixels),
+                };
+                if self.browser.wheel(at, rect, d, unit) {
+                    Task::perform(async { tokio::time::sleep(std::time::Duration::from_millis(50)).await }, |()| Message::Code(CodeMsg::Br(BrMsg::WheelFlush)))
+                } else {
+                    Task::none()
+                }
+            }
+            BrMsg::WheelFlush => match self.browser.flush_wheel() {
+                Some(input) => self.br_send(input, env),
+                None => Task::none(),
+            },
+            BrMsg::Key(press) => {
+                if !self.br_focus || !self.browser.open || !env.visible {
+                    return Task::none();
+                }
+                // the paste shortcut is handled by the paste event, which has the text
+                if (press.ctrl || press.meta) && !press.alt && press.key.to_lowercase() == "v" && self.browser.running {
+                    return iced::clipboard::read().map(|text| Message::Code(CodeMsg::Br(BrMsg::Pasted(text))));
+                }
+                match self.browser.key(&press) {
+                    Some(input) => self.br_send(input, env),
+                    None => Task::none(),
+                }
+            }
+            BrMsg::Pasted(text) => match text.and_then(|t| self.browser.paste(&t)) {
+                Some(input) => self.br_send(input, env),
+                None => Task::none(),
+            },
+            BrMsg::NoteEdit(action) => {
+                self.br_focus = false;
+                self.br_note.perform(action);
+                Task::none()
+            }
+            BrMsg::NoteAdd => {
+                let note = self.br_note.text();
+                if self.browser.add_comment(&note) {
+                    self.br_note = Content::new();
+                }
+                Task::none()
+            }
+            BrMsg::NoteCancel => {
+                self.browser.cancel_note();
+                self.br_note = Content::new();
+                Task::none()
+            }
+            BrMsg::Del(i) => {
+                self.browser.delete_comment(i);
+                Task::none()
+            }
+            BrMsg::SendComments => {
+                // the box gets the sentence when it is empty, and the message goes
+                if self.editor.text().trim().is_empty() {
+                    let sentence = self.browser.send_text("");
+                    self.editor = Content::with_text(&sentence);
+                }
+                self.update(CodeMsg::Send, env)
+            }
+            BrMsg::OpenSettings => Task::done(Message::Go(crate::app::View::Settings)),
+        }
+    }
+
     /// `computerOn()`.
     pub fn computer_on(&self) -> bool {
         self.computer.status.as_ref().is_some_and(|s| s.enabled && s.available)
@@ -3856,6 +4252,8 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
         crate::subagents::task_label(&args)
     } else if let Some(label) = crate::computer::tool_label(&c.name, &args).filter(|_| c.permission == Permission::Computer) {
         label
+    } else if let Some(label) = crate::browser::tool_label(&c.name, &args) {
+        label
     } else {
         (c.name.clone(), summary(&c.name, &args))
     };
@@ -3953,7 +4351,7 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
             .spacing(4),
         );
     }
-    if c.permission == Permission::Computer {
+    if c.permission == Permission::Computer || c.cu.as_ref().is_some_and(|v| v.image.is_some()) {
         if let Some(picture) = computer_body(t, c, &args) {
             body = body.push(picture);
         }
@@ -4098,11 +4496,18 @@ pub fn page<'a>(
     let header = row![
         container(column![row![text(w.name.as_str()).size(15).font(bold()), text(branch).size(12).color(t.muted).font(Font::MONOSPACE)].spacing(8).align_y(Alignment::Center), text(w.root.as_str()).size(12).color(t.muted).font(Font::MONOSPACE).wrapping(text::Wrapping::None)].spacing(2)).clip(true).width(Length::Fill),
         mode,
-        button(text("New session").size(13)).on_press_maybe((!s.running).then_some(Message::Code(CodeMsg::NewSession))).padding([5, 14]).style(theme::secondary_button(t)),
-        button(text("Other folder").size(13)).on_press_maybe((!s.running).then_some(Message::Code(CodeMsg::Close))).padding([5, 14]).style(theme::secondary_button(t)),
+        button(text(if s.browser.running { "Browser ●" } else { "Browser" }).size(13).wrapping(text::Wrapping::None))
+            .on_press(Message::Code(CodeMsg::Br(BrMsg::Toggle)))
+            .padding([5, 14])
+            .style(pick_style(t, s.browser.open, false)),
+        button(text("New session").size(13).wrapping(text::Wrapping::None)).on_press_maybe((!s.running).then_some(Message::Code(CodeMsg::NewSession))).padding([5, 14]).style(theme::secondary_button(t)),
+        button(text("Other folder").size(13).wrapping(text::Wrapping::None)).on_press_maybe((!s.running).then_some(Message::Code(CodeMsg::Close))).padding([5, 14]).style(theme::secondary_button(t)),
     ]
     .spacing(10)
-    .align_y(Alignment::Center);
+    .align_y(Alignment::Center)
+    // with the Browser panel open the column is narrow: what does not fit goes to the next line
+    .wrap()
+    .vertical_spacing(6);
     let header = container(container(header).max_width(820).width(Length::Fill)).center_x(Length::Fill).padding([10, 24]);
 
     let mut bar = column![].spacing(6);
@@ -4178,7 +4583,159 @@ pub fn page<'a>(
         main = main.push(banner);
     }
     let main = main.push(header).push(rule(t)).push(timeline(s, t, theme, tint)).push(bar).push(composer);
-    row![main, side_settings(s, t)].align_y(Alignment::Start).width(Length::Fill).height(Length::Fill).into()
+    let mut layout = row![main].align_y(Alignment::Start).width(Length::Fill).height(Length::Fill);
+    if s.browser.open {
+        layout = layout.push(browser_panel(s, t));
+    }
+    layout.push(side_settings(s, t)).into()
+}
+
+/// The primary style when `primary`, else the ghost one (`ghost`) or the secondary one.
+fn pick_style(t: Tokens, primary: bool, ghost: bool) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |th, st| match (primary, ghost) {
+        (true, _) => theme::primary_button(t)(th, st),
+        (false, true) => theme::ghost_button(t)(th, st),
+        (false, false) => theme::secondary_button(t)(th, st),
+    }
+}
+
+/// The width of the browser panel and of the picture in it.
+const BROWSER_PANEL: f32 = 380.0;
+
+/// *Browser* of the Code page (`codeBrowser`): the live page, the address bar, the comments.
+fn browser_panel<'a>(s: &'a CodeState, t: Tokens) -> Element<'a, Message> {
+    let b = &s.browser;
+    let v = b.view();
+    let bold = Font { weight: iced::font::Weight::Bold, ..Font::default() };
+    let small = |label: &'a str, msg: Option<BrMsg>, active: bool| {
+        button(text(label).size(12))
+            .on_press_maybe(msg.map(|m| Message::Code(CodeMsg::Br(m))))
+            .padding([3, 9])
+            .style(pick_style(t, active, true))
+    };
+    let running = v.back_enabled;
+    let head = row![
+        text("Browser").size(14).font(bold),
+        text(v.state.clone()).size(12).color(t.muted),
+        Space::new().width(Length::Fill),
+        small("Comment", running.then_some(BrMsg::Comment), v.commenting),
+        small("Close browser", running.then_some(BrMsg::CloseAsk), false),
+        small("Hide", Some(BrMsg::Hide), false),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    let url = {
+        let input = text_input("Address, for example localhost:3000", &v.url_input).size(13).padding([5, 9]).on_submit(Message::Code(CodeMsg::Br(BrMsg::Submit)));
+        if v.url_enabled { input.on_input(|x| Message::Code(CodeMsg::Br(BrMsg::UrlEdit(x)))) } else { input }
+    };
+    let bar = row![
+        small("‹", running.then_some(BrMsg::Back), false),
+        small("›", running.then_some(BrMsg::Forward), false),
+        small("↻", running.then_some(BrMsg::Reload), false),
+        url,
+        button(text("Go").size(12)).on_press_maybe(v.url_enabled.then_some(Message::Code(CodeMsg::Br(BrMsg::Submit)))).padding([4, 10]).style(theme::secondary_button(t)),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    let width = BROWSER_PANEL - 28.0;
+    let stage: Element<'a, Message> = match (&s.br_handle, v.show_image) {
+        (Some(handle), true) => {
+            let height = width * (b.view.1 / b.view.0) as f32;
+            let size = iced::Size::new(width, height);
+            let picture = iced::widget::image(handle.clone()).width(width).height(height);
+            let layered: Element<'a, Message> = match b.pin(f64::from(width)) {
+                Some([x, y, w, h]) => {
+                    let frame = container(Space::new()).width(w as f32).height(h as f32).style(move |_| container::Style { border: iced::Border { width: 2.0, color: t.primary, radius: 2.0.into() }, ..Default::default() });
+                    iced::widget::stack![picture, container(frame).padding(iced::Padding { top: y as f32, right: 0.0, bottom: 0.0, left: x as f32 })].into()
+                }
+                None => picture.into(),
+            };
+            let area = iced::widget::mouse_area(layered)
+                .on_move(move |p| Message::Code(CodeMsg::Br(BrMsg::Move(p, size))))
+                .on_press(Message::Code(CodeMsg::Br(BrMsg::Click)))
+                .on_double_click(Message::Code(CodeMsg::Br(BrMsg::Double)))
+                .on_scroll(|d| Message::Code(CodeMsg::Br(BrMsg::Scroll(d))));
+            let ring = if s.br_focus { t.primary } else if v.commenting { t.danger } else { t.separator };
+            container(area).style(move |_| container::Style { border: iced::Border { width: 2.0, color: ring, radius: 4.0.into() }, ..Default::default() }).into()
+        }
+        _ => {
+            let mut empty = column![text(v.empty.text.clone()).size(13).color(t.muted)].spacing(10);
+            if let Some((label, primary)) = v.empty.button {
+                empty = empty.push(button(text(label).size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::OpenSettings))).padding([4, 10]).style(pick_style(t, primary, false)));
+            }
+            container(empty).padding(12).width(Length::Fill).style(move |_| container::Style { border: iced::Border { width: 1.0, color: t.separator, radius: 6.0.into() }, ..Default::default() }).into()
+        }
+    };
+
+    let mut body = column![head, bar, stage].spacing(8);
+    if s.br_confirm_close {
+        body = body.push(
+            column![
+                text("Close the browser? Pages that are open are lost; logins stay in its profile.").size(12),
+                row![
+                    button(text("Close").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::CloseOk))).padding([3, 10]).style(theme::primary_button(t)),
+                    button(text("Cancel").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::CloseCancel))).padding([3, 10]).style(theme::ghost_button(t)),
+                ]
+                .spacing(6),
+            ]
+            .spacing(6),
+        );
+    }
+    if b.draft.is_some() {
+        let note = text_editor(&s.br_note)
+            .placeholder("What should be changed or checked here?")
+            .on_action(|a| Message::Code(CodeMsg::Br(BrMsg::NoteEdit(a))))
+            .padding(6)
+            .size(12)
+            .height(Length::Fixed(70.0))
+            .style(crate::skills::editor_style(t));
+        body = body.push(
+            column![
+                text(b.note_parts().map(|(h, _)| h).unwrap_or_default()).size(12).font(Font::MONOSPACE),
+                text(b.note_parts().map(|(_, x)| x).unwrap_or_default()).size(11).color(t.muted),
+                note,
+                row![
+                    Space::new().width(Length::Fill),
+                    button(text("Cancel").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::NoteCancel))).padding([3, 10]).style(theme::ghost_button(t)),
+                    button(text("Add comment").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::NoteAdd))).padding([3, 10]).style(theme::primary_button(t)),
+                ]
+                .spacing(6),
+            ]
+            .spacing(6),
+        );
+    }
+    if !b.comments.is_empty() {
+        let mut list = column![text(format!("Comments for the agent ({})", b.comments.len())).size(12).font(bold)].spacing(4);
+        for (i, c) in b.comments.iter().enumerate() {
+            let name = if c.name.is_empty() { String::new() } else { format!(" \"{}\"", crate::computer::slice_units(&c.name, 40)) };
+            list = list.push(
+                row![
+                    column![text(format!("{}{}", c.role, name)).size(11).font(Font::MONOSPACE), text(c.note.clone()).size(12)].spacing(1).width(Length::Fill),
+                    small("×", Some(BrMsg::Del(i)), false),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            );
+        }
+        list = list.push(
+            row![
+                button(text("Send to the agent").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::SendComments))).padding([3, 10]).style(theme::primary_button(t)),
+                text("They are also added to your next message.").size(11).color(t.muted),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+        body = body.push(list);
+    }
+    if !v.foot.is_empty() {
+        body = body.push(text(v.foot.clone()).size(11).color(t.muted));
+    }
+    container(scrollable(body.padding(14)))
+        .width(Length::Fixed(BROWSER_PANEL))
+        .height(Length::Fill)
+        .style(move |_| container::Style { background: Some(iced::Background::Color(t.surface)), border: iced::Border { width: 1.0, color: t.separator, ..Default::default() }, ..Default::default() })
+        .into()
 }
 
 /// The banner on top while computer use is on (`renderComputerBanner`): what the agent is doing
@@ -4514,6 +5071,7 @@ mod tests {
             ctx_max: 8192,
             hooks: HookGates::default(),
             vision: true,
+            visible: true,
         }
     }
 

@@ -27,6 +27,8 @@ pub mod autoapprove;
 pub mod commands;
 pub mod review;
 pub mod specs;
+pub mod browser;
+pub mod browsercards;
 pub mod computer;
 pub mod jobs;
 pub mod learn;

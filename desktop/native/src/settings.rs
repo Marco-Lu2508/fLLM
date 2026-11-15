@@ -1141,6 +1141,7 @@ pub fn page<'a>(
     engine: Element<'a, Message>,
     personal: PersonalView<'a>,
     learn_cards: Element<'a, Message>,
+    browser_cards: Element<'a, Message>,
     voice: VoiceView<'a>,
     usage: UsageView<'a>,
     look: LookView<'a>,
@@ -1805,6 +1806,11 @@ pub fn page<'a>(
             content = content.push(crate::settingssearch::marker(t));
         }
         content = content.push(crate::agents::section(t, agents));
+    }
+        // Settings > Browser: the three cards `browser.js` appends to the menu (the page's search has
+        // no entry for them, so they show only while nothing is searched)
+    if crate::settingssearch::keep("browser", query) {
+        content = content.push(browser_cards);
     }
     if crate::settingssearch::keep("usage", query) {
         if hit == Some("usage") {

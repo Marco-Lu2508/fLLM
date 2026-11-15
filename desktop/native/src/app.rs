@@ -443,6 +443,8 @@ pub struct App {
     pub ln_confirm: Option<crate::skills::LnConfirm>,
     /// What the three learning cards of Personalization hold and ask.
     pub lp: crate::learncards::LearnPane,
+    /// Settings > Browser (`browser.js`).
+    pub bp: crate::browsercards::BrowserPane,
     /// Every entry of the log (the Personalization card shows all, the Skills card only its own).
     pub ln_all: Vec<crate::skills::LearnEntry>,
     /// What waits for a decision, the last step, the feed and the rows of *Skills with a history*.
@@ -674,6 +676,8 @@ pub enum Message {
     Esc,
     /// Esc held down: it repeats, and the repeats do not count as presses of computer use.
     EscHeld,
+    /// A key the window did not use itself: the browser panel passes it on to the page when it has the focus.
+    BrKey(crate::browser::KeyPress),
     /// Ctrl+Alt+Shift+Esc: stops computer use (`isPanicChord`).
     Panic,
     /// The reasoning of a message is shown or folded away (the `details` box of the Studio).
@@ -1144,6 +1148,7 @@ pub enum Message {
     LnConsolidated(Result<serde_json::Value, String>),
     /// The three learning cards of Settings > Personalization.
     Lp(crate::learncards::LpMsg),
+    Bp(crate::browsercards::BpMsg),
     /// The task form: its eight fields, its two buttons and the preview of what the schedule means.
     ScName(String),
     ScPrompt(iced::widget::text_editor::Action),
@@ -1550,6 +1555,7 @@ impl App {
             sk_current: None,
             ln_confirm: None,
             lp: crate::learncards::LearnPane::default(),
+            bp: crate::browsercards::BrowserPane::default(),
             ln_all: Vec::new(),
             ln_pending: String::new(),
             ln_last: String::new(),
@@ -2056,6 +2062,7 @@ impl App {
                     session_file: &session_file,
                     ctx_max: self.model_info().max_context as usize,
                     vision: self.model_info().vision,
+                    visible: self.page == View::Code,
                     hooks: code::HookGates {
                         submit: self.code.hook_events.iter().any(|e| e == "user_prompt_submit"),
                         stop: self.code.hook_events.iter().any(|e| e == "stop"),
@@ -3194,6 +3201,12 @@ impl App {
                 // a finished run keeps its output under the block until the next one starts
                 if let Some(run) = self.runs.get_mut(&code) {
                     run.apply(ev);
+                }
+                Task::none()
+            }
+            Message::BrKey(press) => {
+                if self.page == View::Code && self.code.br_focus {
+                    return self.update(Message::Code(code::CodeMsg::Br(code::BrMsg::Key(press))));
                 }
                 Task::none()
             }
@@ -5104,6 +5117,16 @@ impl App {
                 }
                 task
             }
+            Message::Bp(m) => {
+                let saved = matches!(m, crate::browsercards::BpMsg::Saved(_));
+                let task = self.bp.update(m, &self.base);
+                if saved && std::mem::take(&mut self.bp.changed) {
+                    // `fllmBrowserChanged`: the panel reads its status again and the tools are asked for
+                    let changed = self.update(Message::Code(code::CodeMsg::BrowserChanged));
+                    return Task::batch([task, changed]);
+                }
+                task
+            }
             Message::LnUndo(id) => {
                 Task::perform(models::learn_undo(self.base.clone(), id), Message::LnUndoDone)
             }
@@ -6708,6 +6731,8 @@ impl App {
                     let sk = self.sk_refresh();
                     let ln = self.ln_refresh();
                     let sc = self.sc_refresh();
+                    // the Browser pane reads its settings when its button is clicked
+                    let bp = crate::browsercards::BrowserPane::refresh(&self.base);
                     // the skills that come with the app are read once, when the pane is built
                     // (`load()` at the end of `skilllibrary.js`)
                     let lib = if self.lib_loaded {
@@ -6763,6 +6788,7 @@ impl App {
                             sk,
                             ln,
                             sc,
+                            bp,
                             lib,
                             logs,
                             keys,
@@ -7399,7 +7425,14 @@ impl App {
             }
             _ => None,
         });
-        Subscription::batch([retry, poll, hero, inbox, dropped])
+        // the keys nothing in the window used go to the page of the browser panel when it has the focus
+        let browser_keys = iced::event::listen_with(|event, status, _id| match event {
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modified_key, modifiers, .. }) if status == iced::event::Status::Ignored => {
+                crate::browser::key_press(&key, &modified_key, modifiers, false).map(Message::BrKey)
+            }
+            _ => None,
+        });
+        Subscription::batch([retry, poll, hero, inbox, dropped, browser_keys])
     }
 
     // ---- view ------------------------------------------------------------------------------------------------------------
@@ -7586,6 +7619,10 @@ impl App {
                 Message::ScDeleteCancel,
             ));
         }
+        if self.bp.confirming {
+            // the `confirmDialog` of `browser.js` before the browser is switched on
+            layers = layers.push(backdrop(Message::Bp(crate::browsercards::BpMsg::EnableCancel))).push(crate::browsercards::dialog_window(t));
+        }
         if let Some(dialog) = self.lp.dialog.as_ref() {
             // the `askDialog` of `learn.js` before a profile or a memory entry goes
             layers = layers
@@ -7718,6 +7755,7 @@ impl App {
                 engine_settings::view(t, &self.engine, !matches!(self.server, Server::Down(_))),
                 self.personal_view(),
                 crate::learncards::view(t, &self.lp, &self.ln_pending, &self.ln_last, &self.ln_all),
+                crate::browsercards::view(t, &self.bp),
                 settings::VoiceView {
                     voices: &self.voice_names,
                     can_notify: self.voice_can_notify,

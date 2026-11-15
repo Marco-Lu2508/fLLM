@@ -7,6 +7,12 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **The browser panel in the native app** (`browser.js`). The Code page can show the page the
+  agent's browser has, live: click, scroll, type and paste into it, go to an address, go back,
+  reload, close it, and comment on elements — the comments ride in front of your next message.
+  Settings > Browser has the switch (asked first), how it runs and the browser program. The browser
+  tools have their page labels, their screenshots are on the cards and go to a model that can see.
+  The behaviour is compared with the page's own script (26 scenarios, about 190 steps), 21 window tests.
 - **Computer use in the native app** (`computer.js`). While the server has it on, the Code page shows
   the banner with STOP, offers the screen and input tools to the model and asks before every action
   that operates the machine (nothing lifts that but turbo). Cards draw the screenshot with the mark
