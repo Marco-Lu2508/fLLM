@@ -585,6 +585,19 @@ pub async fn chat_once(
     Ok((crate::research::clean(&text), refused))
 }
 
+/// The title of a chat from the model (`maybeTitle` of chat.js): no stream, a low temperature, a
+/// small budget, and the thinking switched off so that the budget is not used up by reasoning.
+pub async fn complete_title(base: String, model: String, messages: Vec<(&'static str, String)>) -> Result<String, String> {
+    let wire: Vec<WireMessage> = messages.into_iter().map(|(role, content)| WireMessage::new(role, content)).collect();
+    let body = serde_json::json!({ "model": model, "messages": wire, "stream": false, "temperature": 0.3, "max_tokens": 40, "chat_template_kwargs": { "enable_thinking": false } });
+    let resp = reqwest::Client::new().post(format!("{base}/v1/chat/completions")).json(&body).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("The server answered with error {}", resp.status().as_u16()));
+    }
+    let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(data.pointer("/choices/0/message/content").and_then(|c| c.as_str()).unwrap_or("").to_string())
+}
+
 /// How a chat asks the server for its web tools: the routes of the Studio
 /// (`/api/studio/web/search` and `/api/studio/web/fetch`).
 pub struct EngineFetcher {

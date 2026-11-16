@@ -28,6 +28,7 @@ pub mod commands;
 pub mod review;
 pub mod specs;
 pub mod browser;
+pub mod generalcards;
 pub mod sessions;
 pub mod browsercards;
 pub mod desktop;

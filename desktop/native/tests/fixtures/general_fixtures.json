@@ -1,0 +1,52 @@
+{
+ "cases": [
+  {
+   "model": {
+    "name": "qwen",
+    "max_context": 8192,
+    "max_sequences": 4,
+    "aliases": [
+     "q",
+     "qq"
+    ]
+   },
+   "cli": "fllm-rs serve --model \"qwen.gguf\" \\\n  --host 127.0.0.1 --port 8000 \\\n  --ctx 8192 --max-seqs 4 \\\n  --model-name \"qwen,q,qq\"",
+   "toml": "[server]\nmodel = \"qwen.gguf\"\nhost = \"127.0.0.1\"\nport = 8000\nctx = 8192\nmax_seqs = 4\n"
+  },
+  {
+   "model": {
+    "name": "llama-3",
+    "max_context": 0,
+    "aliases": []
+   },
+   "cli": "fllm-rs serve --model \"llama-3.gguf\" \\\n  --host 127.0.0.1 --port 8000 \\\n  --ctx 512 --max-seqs 8 \\\n  --model-name \"llama-3\"",
+   "toml": "[server]\nmodel = \"llama-3.gguf\"\nhost = \"127.0.0.1\"\nport = 8000\nctx = 512\nmax_seqs = 8\n"
+  },
+  {
+   "model": {},
+   "cli": "fllm-rs serve --model \"fllm-studio-demo.gguf\" \\\n  --host 127.0.0.1 --port 8000 \\\n  --ctx 512 --max-seqs 8 \\\n  --model-name \"fllm-studio-demo\"",
+   "toml": "[server]\nmodel = \"fllm-studio-demo.gguf\"\nhost = \"127.0.0.1\"\nport = 8000\nctx = 512\nmax_seqs = 8\n"
+  },
+  {
+   "model": {
+    "name": "m",
+    "max_context": 512,
+    "max_sequences": 0
+   },
+   "cli": "fllm-rs serve --model \"m.gguf\" \\\n  --host 127.0.0.1 --port 8000 \\\n  --ctx 512 --max-seqs 8 \\\n  --model-name \"m\"",
+   "toml": "[server]\nmodel = \"m.gguf\"\nhost = \"127.0.0.1\"\nport = 8000\nctx = 512\nmax_seqs = 8\n"
+  },
+  {
+   "model": {
+    "name": "Ünï",
+    "max_context": 131072,
+    "max_sequences": 16,
+    "aliases": [
+     "a"
+    ]
+   },
+   "cli": "fllm-rs serve --model \"Ünï.gguf\" \\\n  --host 127.0.0.1 --port 8000 \\\n  --ctx 131072 --max-seqs 16 \\\n  --model-name \"Ünï,a\"",
+   "toml": "[server]\nmodel = \"Ünï.gguf\"\nhost = \"127.0.0.1\"\nport = 8000\nctx = 131072\nmax_seqs = 16\n"
+  }
+ ]
+}

@@ -324,6 +324,12 @@ pub struct Status {
     pub parameter_size: String,
     pub quantization: String,
     pub max_context: u64,
+    /// `model.max_sequences`, the parallel sequences the server runs.
+    pub max_sequences: u64,
+    /// The other names the model answers to (`model.aliases`).
+    pub aliases: Vec<String>,
+    /// `build_info` of the route: the version of the server and how it was built.
+    pub build_info: String,
     pub uptime_secs: f64,
     pub generated_tokens_total: u64,
     pub slots_running: u64,
@@ -364,6 +370,9 @@ pub fn parse_status(v: &Value) -> Status {
         parameter_size: v.pointer("/model/parameter_size").and_then(Value::as_str).unwrap_or_default().to_string(),
         quantization: v.pointer("/model/quantization").and_then(Value::as_str).unwrap_or_default().to_string(),
         max_context: v.pointer("/model/max_context").and_then(Value::as_u64).unwrap_or(0),
+        max_sequences: v.pointer("/model/max_sequences").and_then(Value::as_u64).unwrap_or(0),
+        aliases: v.pointer("/model/aliases").and_then(Value::as_array).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+        build_info: v.get("build_info").and_then(Value::as_str).unwrap_or_default().to_string(),
         uptime_secs: v.pointer("/metrics/uptime_secs").and_then(Value::as_f64).unwrap_or(0.0),
         generated_tokens_total: v.pointer("/metrics/generated_tokens_total").and_then(Value::as_u64).unwrap_or(0),
         slots_running: v.pointer("/metrics/slots_running").and_then(Value::as_u64).unwrap_or(0),

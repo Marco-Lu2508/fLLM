@@ -132,6 +132,10 @@ pub struct ChatRecord {
     /// The rewinds that can still be taken back, newest last (the Studio's `t.rewinds`).
     #[serde(default)]
     pub rewinds: Vec<Rewind>,
+    /// The model still has to name this chat after its first answer (`t.autoTitle` of the Studio);
+    /// a chat from before it was kept, and a chat you renamed, have it off.
+    #[serde(default)]
+    pub auto_title: bool,
 }
 
 /// A rewind of the chat: the messages after some message are out of the row until it is taken
@@ -424,6 +428,9 @@ pub struct Prefs {
     /// way in `fllm.studio.coderules.v1`.
     #[serde(default)]
     pub code_rules: std::collections::BTreeMap<String, crate::commands::Rules>,
+    /// *Name new chats automatically* of Settings > General (`state.autoTitle`, on by default).
+    #[serde(default = "auto_approve_on")]
+    pub auto_title: bool,
     /// How the agent talks in the Code page (`/personality`, its `PERSONALITIES` table).
     #[serde(default = "default_personality")]
     pub code_personality: String,
@@ -613,7 +620,7 @@ fn default_top_p() -> f32 {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { auto_approve: true, auto_review: false, auto_check: false, learn: true, code_rules: std::collections::BTreeMap::new(), code_personality: default_personality(), personal: Personal::default(), personal_loaded: false, tour_seen: false, shortcut_overrides: std::collections::HashMap::new(), voice: VoicePrefs::default(), saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
+        Prefs { auto_approve: true, auto_review: false, auto_check: false, learn: true, code_rules: std::collections::BTreeMap::new(), auto_title: true, code_personality: default_personality(), personal: Personal::default(), personal_loaded: false, tour_seen: false, shortcut_overrides: std::collections::HashMap::new(), voice: VoicePrefs::default(), saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
     }
 }
 

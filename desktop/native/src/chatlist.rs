@@ -267,6 +267,8 @@ impl ChatList {
                 if keep && !name.is_empty() {
                     if let Some(c) = store.chat_mut(id) {
                         c.title = name.to_string();
+                        // a name you chose stays (`t.autoTitle = false`)
+                        c.auto_title = false;
                         return Effect::Save;
                     }
                 }

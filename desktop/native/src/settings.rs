@@ -1143,6 +1143,7 @@ pub fn page<'a>(
     learn_cards: Element<'a, Message>,
     browser_cards: Element<'a, Message>,
     desktop_cards: Element<'a, Message>,
+    general_cards: Vec<(&'static str, Element<'a, Message>)>,
     voice: VoiceView<'a>,
     usage: UsageView<'a>,
     look: LookView<'a>,
@@ -1671,7 +1672,10 @@ pub fn page<'a>(
         if hit == Some("general") {
             content = content.push(crate::settingssearch::marker(t));
         }
-        content = content.push(card(t, "General", general.into()));
+        let _ = general;
+        for (title, body) in general_cards {
+            content = content.push(card(t, title, body));
+        }
     }
     if crate::settingssearch::keep("answers", query) {
         if hit == Some("answers") {

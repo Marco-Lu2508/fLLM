@@ -291,6 +291,10 @@ pub struct App {
     mem_edit: Option<(String, String)>,
     /// The dialog that forgets everything, and the dialog of the *Remember* button.
     mem_clear: bool,
+    /// The dialog *Delete all chats?* of Settings > General.
+    chats_delete: bool,
+    /// The chat the model has to name (set when its first answer ended).
+    title_wanted: Option<u64>,
     remember: Option<usize>,
     remember_text: String,
     /// The menu under a "/" in the box: which saved prompts are listed and which one is highlighted.
@@ -863,6 +867,17 @@ pub enum Message {
     MemClear,
     MemClearOk,
     MemClearCancel,
+    /// Settings > General: the refresh of the version line, *Delete all chats* (asked first) and
+    /// *Name new chats automatically*.
+    GeneralRefresh,
+    ChatsDeleteAsk,
+    ChatsDeleteOk,
+    ChatsDeleteCancel,
+    AutoTitle(bool),
+    /// A *Copy* button of a code card: the text goes to the clipboard and the toast says so.
+    CopyWithToast(String, &'static str),
+    /// The model named a chat after its first answer.
+    ChatTitled(u64, Result<String, String>),
     /// The *Remember* button under a message (prjDecorateMessages).
     RememberOpen(usize),
     RememberEdit(String),
@@ -1469,6 +1484,8 @@ impl App {
             mem_new: String::new(),
             mem_edit: None,
             mem_clear: false,
+            chats_delete: false,
+            title_wanted: None,
             remember: None,
             remember_text: String::new(),
             slash: Vec::new(),
@@ -1937,6 +1954,7 @@ impl App {
             let seed = if !prompt.trim().is_empty() { prompt.clone() } else { seed_name.unwrap_or_default() };
             if let Some(chat) = self.store.chat_mut(id) {
                 chat.title = store::title_from(&seed);
+                chat.auto_title = true;
             }
         }
         self.sync_current();
@@ -2906,6 +2924,51 @@ impl App {
             }
             Message::MemClearCancel => {
                 self.mem_clear = false;
+                Task::none()
+            }
+            Message::GeneralRefresh => {
+                self.toast = Some("Refreshed from the server".into());
+                self.update(Message::HeroPoll)
+            }
+            Message::ChatsDeleteAsk => {
+                if !self.store.chats.is_empty() {
+                    self.chats_delete = true;
+                }
+                Task::none()
+            }
+            Message::ChatsDeleteCancel => {
+                self.chats_delete = false;
+                Task::none()
+            }
+            Message::ChatsDeleteOk => {
+                self.chats_delete = false;
+                if self.live.is_some() {
+                    self.toast = Some("Stop the answer first.".into());
+                    return Task::none();
+                }
+                self.store.chats.clear();
+                self.current = None;
+                self.messages.clear();
+                self.save();
+                self.toast = Some("All chats deleted".into());
+                Task::none()
+            }
+            Message::AutoTitle(on) => {
+                self.store.prefs.auto_title = on;
+                self.save();
+                Task::none()
+            }
+            Message::CopyWithToast(text, toast) => {
+                self.toast = Some(toast.to_string());
+                iced::clipboard::write(text)
+            }
+            Message::ChatTitled(id, raw) => {
+                if let Some(title) = raw.ok().and_then(|r| prompts::clean_title(&r)) {
+                    if let Some(chat) = self.store.chat_mut(id) {
+                        chat.title = title;
+                        self.save();
+                    }
+                }
                 Task::none()
             }
             Message::MemClearOk => {
@@ -6632,7 +6695,12 @@ impl App {
                 if self.live.as_ref().map(|l| l.chat) != Some(chat) {
                     return Task::none();
                 }
-                self.on_event(ev).unwrap_or_else(Task::none)
+                let task = self.on_event(ev).unwrap_or_else(Task::none);
+                // the model names the chat after its first answer
+                match self.title_wanted.take().and_then(|id| self.title_task(id)) {
+                    Some(title) => Task::batch([task, title]),
+                    None => task,
+                }
             }
             Message::Copy(i) => match self.messages.get(i) {
                 // what you can see in the answer, without the Markdown marks (plainTextOf)
@@ -7390,6 +7458,9 @@ impl App {
                 chat.forget_duplicates();
             }
             self.save();
+            if self.store.prefs.auto_title && self.error.is_none() {
+                self.title_wanted = self.current.filter(|id| self.store.chat_mut(*id).is_some_and(|c| c.auto_title));
+            }
             // watchRun of voice.js: what it does when a run ends
             self.after_run(ms);
         }
@@ -7594,6 +7665,9 @@ impl App {
             layers = layers
                 .push(backdrop(Message::PrjDeleteCancel))
                 .push(self.prj_delete_window(t));
+        }
+        if self.chats_delete {
+            layers = layers.push(backdrop(Message::ChatsDeleteCancel)).push(crate::generalcards::delete_all_window(t, self.store.chats.len()));
         }
         if self.mem_clear {
             layers = layers
@@ -7821,6 +7895,14 @@ impl App {
                 crate::learncards::view(t, &self.lp, &self.ln_pending, &self.ln_last, &self.ln_all),
                 crate::browsercards::view(t, &self.bp),
                 crate::desktopcards::view(t, &self.dk, crate::desktop::log_folder().display().to_string()),
+                crate::generalcards::view(
+                    t,
+                    &crate::generalcards::GeneralView {
+                        build_info: self.hero.as_ref().map_or("", |s| s.build_info.as_str()),
+                        auto_title: self.store.prefs.auto_title,
+                        model: self.model_facts(),
+                    },
+                ),
                 settings::VoiceView {
                     voices: &self.voice_names,
                     can_notify: self.voice_can_notify,
@@ -10249,6 +10331,37 @@ impl App {
             return Task::none();
         }
         self.update(Message::LoadModel(reference))
+    }
+
+    /// The facts of the model that runs, for the command of Settings > General.
+    fn model_facts(&self) -> crate::generalcards::ModelFacts {
+        match &self.hero {
+            Some(s) if !s.model_name.is_empty() => crate::generalcards::ModelFacts { name: s.model_name.clone(), max_context: s.max_context, max_sequences: s.max_sequences, aliases: s.aliases.clone() },
+            _ => match &self.server {
+                Server::Ready(m) => crate::generalcards::ModelFacts { name: m.id.clone(), max_context: m.max_context, ..Default::default() },
+                _ => crate::generalcards::ModelFacts::default(),
+            },
+        }
+    }
+
+    /// `maybeTitle(t)`: the model gives a new chat a short title from its first question and answer.
+    fn title_task(&mut self, id: u64) -> Option<Task<Message>> {
+        let Server::Ready(model) = &self.server else { return None };
+        let model = model.id.clone();
+        let base = self.base.clone();
+        let chat = self.store.chat_mut(id)?;
+        if !chat.auto_title {
+            return None;
+        }
+        let first = chat.messages.iter().find(|m| m.role == Role::User)?.content.clone();
+        let reply = chat.messages.iter().find(|m| m.role == Role::Assistant && !m.content.is_empty())?.content.clone();
+        chat.auto_title = false;
+        let question = crate::sessions::answer_of(&first);
+        let question = if question.is_empty() { first } else { question };
+        let answer = crate::sessions::answer_of(&reply);
+        let answer = if answer.is_empty() { reply } else { answer };
+        self.save();
+        Some(Task::perform(api::complete_title(base, model, prompts::title_messages(&question, &answer)), move |r| Message::ChatTitled(id, r)))
     }
 
     /// The system prompt the next request carries: built from the facts about the model and the computer,
