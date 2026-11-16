@@ -333,6 +333,12 @@ pub enum BrMsg {
     /// The Browser button of the header (`setOpen(!br.open)`).
     Toggle,
     Hide,
+    /// *Wider* / *Narrower* of the panel.
+    Wide,
+    /// Ctrl+L: into the address box.
+    FocusAddress,
+    /// One of the addresses under *Nothing is open yet* (`localhost:3000`).
+    Quick(String),
     /// What `GET /api/studio/agent/browser` answered; `then_tick` when the panel was just opened.
     Status { then_tick: bool, answer: Option<Value> },
     Tick(u64),
@@ -940,6 +946,8 @@ pub struct CodeState {
     br_src: String,
     br_pointer: Option<(iced::Point, iced::Size)>,
     pub br_focus: bool,
+    /// The wide panel (*Wider*) instead of the narrow one.
+    pub br_wide: bool,
     br_note: Content,
     br_confirm_close: bool,
     /// The comments the user left on the page, taken at the start of a task (`notes` of `agentRunNow`).
@@ -1074,6 +1082,7 @@ impl Default for CodeState {
             br_src: String::new(),
             br_pointer: None,
             br_focus: false,
+            br_wide: false,
             br_note: Content::new(),
             br_confirm_close: false,
             br_notes: String::new(),
@@ -4016,6 +4025,25 @@ impl CodeState {
                 self.br_epoch += 1;
                 Task::none()
             }
+            BrMsg::Wide => {
+                self.br_wide = !self.br_wide;
+                Task::none()
+            }
+            BrMsg::FocusAddress => {
+                if !self.browser.open {
+                    return Task::none();
+                }
+                self.br_focus = false;
+                iced::widget::operation::focus(iced::widget::Id::new("br-address"))
+            }
+            BrMsg::Quick(address) => {
+                self.browser.url_input = address;
+                self.browser.url_focused = false;
+                match self.browser.submit() {
+                    Some(i) => self.br_send(i, env),
+                    None => Task::none(),
+                }
+            }
             BrMsg::Status { then_tick, answer } => {
                 self.browser.apply_status(answer.as_ref());
                 if then_tick && self.browser.open { self.br_schedule(0) } else { Task::none() }
@@ -4997,128 +5025,358 @@ fn pick_style(t: Tokens, primary: bool, ghost: bool) -> impl Fn(&iced::Theme, bu
     }
 }
 
-/// The width of the browser panel and of the picture in it.
-const BROWSER_PANEL: f32 = 380.0;
+/// The width of the browser panel: the narrow one next to the conversation, or the wide one for a page that needs room.
+fn browser_width(s: &CodeState) -> f32 {
+    if s.br_wide {
+        660.0
+    } else {
+        400.0
+    }
+}
+
+/// An icon of the panel in one color.
+fn br_svg<'a>(bytes: &'static [u8], size: f32, color: iced::Color) -> Element<'a, Message> {
+    iced::widget::svg(crate::app::icon(bytes)).width(size).height(size).style(move |_, _| iced::widget::svg::Style { color: Some(color) }).into()
+}
+
+/// A round icon button with a tip under it; gray and silent while there is nothing it can do.
+fn br_icon_button<'a>(t: Tokens, bytes: &'static [u8], tip: &'static str, msg: Option<BrMsg>, active: bool) -> Element<'a, Message> {
+    let color = if msg.is_none() {
+        iced::Color { a: 0.45, ..t.muted }
+    } else if active {
+        t.primary
+    } else {
+        t.fg_soft
+    };
+    let face = container(br_svg(bytes, 18.0, color)).center_x(Length::Fill).center_y(Length::Fill);
+    let b = button(face).width(34).height(34).padding(0).on_press_maybe(msg.map(|m| Message::Code(CodeMsg::Br(m)))).style(move |th, st| {
+        let mut s = theme::ghost_button(t)(th, st);
+        s.border.radius = 10.0.into();
+        if active && !matches!(st, button::Status::Hovered | button::Status::Pressed) {
+            s.background = Some(iced::Background::Color(t.primary_soft));
+        }
+        s
+    });
+    iced::widget::tooltip(b, text(tip).size(11), iced::widget::tooltip::Position::Bottom).gap(4).into()
+}
+
+/// A pill with an icon and a word (*Comment*, *Close browser*).
+fn br_pill<'a>(t: Tokens, bytes: &'static [u8], label: &'a str, msg: Option<BrMsg>, active: bool, danger: bool) -> Element<'a, Message> {
+    let color = if msg.is_none() {
+        iced::Color { a: 0.45, ..t.muted }
+    } else if active {
+        t.primary
+    } else if danger {
+        t.danger
+    } else {
+        t.fg_soft
+    };
+    button(row![br_svg(bytes, 13.0, color), text(label).size(12)].spacing(6).align_y(Alignment::Center))
+        .padding([5, 12])
+        .on_press_maybe(msg.map(|m| Message::Code(CodeMsg::Br(m))))
+        .style(move |th, st| {
+            let mut s = theme::secondary_button(t)(th, st);
+            s.text_color = color;
+            if active {
+                s.background = Some(iced::Background::Color(t.primary_soft));
+                s.border = iced::Border { width: 1.0, color: t.primary, radius: 999.0.into() };
+            }
+            s
+        })
+        .into()
+}
+
+/// What the agent is doing in the browser right now (a browser tool that runs or waits for you), in the words of its card.
+fn br_agent_action(s: &CodeState) -> Option<(bool, String)> {
+    s.items.iter().rev().find_map(|it| match it {
+        Item::Call(c) if c.name.starts_with("browser_") && matches!(c.state, CallState::Running | CallState::Pending) => {
+            let args: Value = serde_json::from_str(&c.args).unwrap_or(Value::Null);
+            let (what, more) = crate::browser::tool_label(&c.name, &args)?;
+            let line = if more.is_empty() { what } else { format!("{what} {}", crate::computer::slice_units(&more, 48)) };
+            Some((matches!(c.state, CallState::Pending), line))
+        }
+        _ => None,
+    })
+}
+
+/// The host of an address for the caption under the picture.
+fn br_host(url: &str) -> String {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    rest.split(['/', '?', '#']).next().unwrap_or("").trim_start_matches("www.").to_string()
+}
 
 /// *Browser* of the Code page (`codeBrowser`): the live page, the address bar, the comments.
 fn browser_panel<'a>(s: &'a CodeState, t: Tokens) -> Element<'a, Message> {
     let b = &s.browser;
     let v = b.view();
     let bold = Font { weight: iced::font::Weight::Bold, ..Font::default() };
-    let small = |label: &'a str, msg: Option<BrMsg>, active: bool| {
-        button(text(label).size(12))
-            .on_press_maybe(msg.map(|m| Message::Code(CodeMsg::Br(m))))
-            .padding([3, 9])
-            .style(pick_style(t, active, true))
-    };
+    let semibold = Font { weight: iced::font::Weight::Semibold, ..Font::default() };
+    let panel_width = browser_width(s);
     let running = v.back_enabled;
+    let agent = br_agent_action(s);
+
+    // the head: what it is, whether it runs, and the two things you do with the panel itself
+    let logo = container(br_svg(ICON_BR_GLOBE, 16.0, t.primary)).padding(7).style(move |_| container::Style {
+        background: Some(iced::Background::Color(t.primary_soft)),
+        border: iced::border::rounded(10),
+        ..Default::default()
+    });
+    let dot_color = if v.live_dot { t.ok } else { iced::Color { a: 0.6, ..t.muted } };
+    let dot = container(Space::new()).width(7).height(7).style(move |_| container::Style { background: Some(iced::Background::Color(dot_color)), border: iced::border::rounded(999), ..Default::default() });
+    let title = column![text("Browser").size(14).font(bold), row![dot, text(v.state.clone()).size(11).color(t.muted)].spacing(5).align_y(Alignment::Center)].spacing(1);
     let head = row![
-        text("Browser").size(14).font(bold),
-        text(v.state.clone()).size(12).color(t.muted),
+        logo,
+        title,
         Space::new().width(Length::Fill),
-        small("Comment", running.then_some(BrMsg::Comment), v.commenting),
-        small("Close browser", running.then_some(BrMsg::CloseAsk), false),
-        small("Hide", Some(BrMsg::Hide), false),
+        br_icon_button(t, ICON_BR_EXPAND_OR_SHRINK[s.br_wide as usize], if s.br_wide { "Narrower" } else { "Wider" }, Some(BrMsg::Wide), false),
+        br_icon_button(t, ICON_BR_X, "Hide the panel", Some(BrMsg::Hide), false),
     ]
-    .spacing(6)
-    .align_y(Alignment::Center);
-    let url = {
-        let input = text_input("Address, for example localhost:3000", &v.url_input).size(13).padding([5, 9]).on_submit(Message::Code(CodeMsg::Br(BrMsg::Submit)));
-        if v.url_enabled { input.on_input(|x| Message::Code(CodeMsg::Br(BrMsg::UrlEdit(x)))) } else { input }
-    };
-    let bar = row![
-        small("‹", running.then_some(BrMsg::Back), false),
-        small("›", running.then_some(BrMsg::Forward), false),
-        small("↻", running.then_some(BrMsg::Reload), false),
-        url,
-        button(text("Go").size(12)).on_press_maybe(v.url_enabled.then_some(Message::Code(CodeMsg::Br(BrMsg::Submit)))).padding([4, 10]).style(theme::secondary_button(t)),
-    ]
-    .spacing(6)
+    .spacing(8)
     .align_y(Alignment::Center);
 
-    let width = BROWSER_PANEL - 28.0;
+    // navigation and the address in one pill
+    let secure = v.url_input.starts_with("https://");
+    let lead = br_svg(if secure { ICON_BR_LOCK } else { ICON_BR_GLOBE }, 14.0, if secure { t.ok } else { t.muted });
+    let input = {
+        let input = text_input("Search or enter an address, for example localhost:3000", &v.url_input)
+            .id("br-address")
+            .size(13)
+            .padding([6, 4])
+            .on_submit(Message::Code(CodeMsg::Br(BrMsg::Submit)))
+            .style(move |th, st| {
+                let mut s = iced::widget::text_input::default(th, st);
+                s.background = iced::Background::Color(iced::Color::TRANSPARENT);
+                s.border = iced::Border { width: 0.0, color: iced::Color::TRANSPARENT, radius: 0.0.into() };
+                s.value = t.fg;
+                s.placeholder = t.muted;
+                s.selection = t.primary_soft;
+                s
+            });
+        if v.url_enabled { input.on_input(|x| Message::Code(CodeMsg::Br(BrMsg::UrlEdit(x)))) } else { input }
+    };
+    let go = button(container(br_svg(ICON_BR_ARROW, 14.0, t.on_primary)).center_x(Length::Fill).center_y(Length::Fill))
+        .width(26)
+        .height(26)
+        .padding(0)
+        .on_press_maybe(v.url_enabled.then_some(Message::Code(CodeMsg::Br(BrMsg::Submit))))
+        .style(move |th, st| {
+            let mut s = theme::primary_button(t)(th, st);
+            s.border.radius = 999.0.into();
+            s
+        });
+    let focused = b.url_focused;
+    let pill = container(row![lead, input, go].spacing(6).align_y(Alignment::Center))
+        .padding(iced::Padding { top: 2.0, right: 3.0, bottom: 2.0, left: 10.0 })
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(iced::Background::Color(t.fill)),
+            border: iced::Border { width: 1.0, color: if focused { t.primary } else { iced::Color::TRANSPARENT }, radius: 999.0.into() },
+            ..Default::default()
+        });
+    let bar = row![
+        br_icon_button(t, ICON_BR_BACK, "Back", running.then_some(BrMsg::Back), false),
+        br_icon_button(t, ICON_BR_FORWARD, "Forward", running.then_some(BrMsg::Forward), false),
+        br_icon_button(t, ICON_BR_RELOAD, "Reload", running.then_some(BrMsg::Reload), false),
+        pill,
+    ]
+    .spacing(2)
+    .align_y(Alignment::Center);
+
+    // what the agent is doing
+    let activity: Option<Element<'a, Message>> = agent.as_ref().map(|(waits, line)| {
+        let colour = if *waits { t.danger } else { t.primary };
+        let words = if *waits { format!("Waiting for you: {line}") } else { format!("The agent: {line}") };
+        container(row![br_svg(ICON_BR_BOT, 14.0, colour), text(words).size(12).color(t.fg).wrapping(text::Wrapping::None)].spacing(8).align_y(Alignment::Center))
+            .padding([6, 12])
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(t.primary_soft)),
+                border: iced::Border { width: 1.0, color: iced::Color { a: 0.5, ..colour }, radius: 999.0.into() },
+                ..Default::default()
+            })
+            .into()
+    });
+
+    // the picture of the page, in a card
+    let width = panel_width - 28.0;
+    let busy = agent.is_some();
     let stage: Element<'a, Message> = match (&s.br_handle, v.show_image) {
         (Some(handle), true) => {
-            let height = width * (b.view.1 / b.view.0) as f32;
-            let size = iced::Size::new(width, height);
-            let picture = iced::widget::image(handle.clone()).width(width).height(height);
-            let layered: Element<'a, Message> = match b.pin(f64::from(width)) {
+            let inner = width - 4.0;
+            let height = inner * (b.view.1 / b.view.0) as f32;
+            let size = iced::Size::new(inner, height);
+            let picture = iced::widget::image(handle.clone()).width(inner).height(height);
+            let layered: Element<'a, Message> = match b.pin(f64::from(inner)) {
                 Some([x, y, w, h]) => {
-                    let frame = container(Space::new()).width(w as f32).height(h as f32).style(move |_| container::Style { border: iced::Border { width: 2.0, color: t.primary, radius: 2.0.into() }, ..Default::default() });
+                    let frame = container(Space::new()).width(w as f32).height(h as f32).style(move |_| container::Style {
+                        background: Some(iced::Background::Color(iced::Color { a: 0.14, ..t.primary })),
+                        border: iced::Border { width: 2.0, color: t.primary, radius: 3.0.into() },
+                        ..Default::default()
+                    });
                     iced::widget::stack![picture, container(frame).padding(iced::Padding { top: y as f32, right: 0.0, bottom: 0.0, left: x as f32 })].into()
                 }
                 None => picture.into(),
+            };
+            let layered: Element<'a, Message> = if v.commenting {
+                let chip = container(text("Comment mode: click an element").size(11).color(t.on_primary))
+                    .padding([3, 10])
+                    .style(move |_| container::Style { background: Some(iced::Background::Color(t.danger)), border: iced::border::rounded(999), ..Default::default() });
+                iced::widget::stack![layered, container(chip).padding(10).width(Length::Fill).height(Length::Fill).align_x(Alignment::Center).align_y(iced::alignment::Vertical::Bottom)].into()
+            } else {
+                layered
             };
             let area = iced::widget::mouse_area(layered)
                 .on_move(move |p| Message::Code(CodeMsg::Br(BrMsg::Move(p, size))))
                 .on_press(Message::Code(CodeMsg::Br(BrMsg::Click)))
                 .on_double_click(Message::Code(CodeMsg::Br(BrMsg::Double)))
-                .on_scroll(|d| Message::Code(CodeMsg::Br(BrMsg::Scroll(d))));
-            let ring = if s.br_focus { t.primary } else if v.commenting { t.danger } else { t.separator };
-            container(area).style(move |_| container::Style { border: iced::Border { width: 2.0, color: ring, radius: 4.0.into() }, ..Default::default() }).into()
+                .on_scroll(|d| Message::Code(CodeMsg::Br(BrMsg::Scroll(d))))
+                .interaction(if v.commenting { iced::mouse::Interaction::Crosshair } else { iced::mouse::Interaction::Pointer });
+            let ring = if s.br_focus {
+                t.primary
+            } else if v.commenting {
+                t.danger
+            } else if busy {
+                iced::Color { a: 0.7, ..t.primary }
+            } else {
+                t.separator
+            };
+            let ring_width = if s.br_focus || v.commenting || busy { 2.0 } else { 1.0 };
+            let mut card = column![container(area).style(move |_| container::Style { border: iced::Border { radius: 8.0.into(), ..Default::default() }, ..Default::default() }).clip(true)];
+            let host = br_host(&b.url);
+            if !b.title.is_empty() || !host.is_empty() {
+                let mut caption = row![].spacing(8).align_y(Alignment::Center);
+                caption = caption.push(text(crate::computer::slice_units(&b.title, 46)).size(12).font(semibold).wrapping(text::Wrapping::None));
+                if !host.is_empty() {
+                    caption = caption.push(text(host).size(11).color(t.muted).wrapping(text::Wrapping::None));
+                }
+                caption = caption.push(Space::new().width(Length::Fill));
+                if s.br_focus {
+                    caption = caption.push(text("you are typing in the page").size(11).color(t.primary));
+                }
+                card = card.push(container(caption).padding([7, 10]).width(Length::Fill));
+            }
+            container(card.spacing(0))
+                .width(Length::Fill)
+                .padding(1)
+                .clip(true)
+                .style(move |_| container::Style {
+                    background: Some(iced::Background::Color(t.bg)),
+                    border: iced::Border { width: ring_width, color: ring, radius: 10.0.into() },
+                    ..Default::default()
+                })
+                .into()
         }
         _ => {
-            let mut empty = column![text(v.empty.text.clone()).size(13).color(t.muted)].spacing(10);
+            let (icon, headline) = if !running { (ICON_BR_GLOBE, "") } else { (ICON_BR_POINTER, "") };
+            let _ = headline;
+            let mut empty = column![br_svg(icon, 34.0, iced::Color { a: 0.55, ..t.muted }), text(v.empty.text.clone()).size(13).color(t.muted).align_x(iced::alignment::Horizontal::Center)]
+                .spacing(12)
+                .align_x(Alignment::Center);
             if let Some((label, primary)) = v.empty.button {
-                empty = empty.push(button(text(label).size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::OpenSettings))).padding([4, 10]).style(pick_style(t, primary, false)));
+                empty = empty.push(button(text(label).size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::OpenSettings))).padding([5, 14]).style(pick_style(t, primary, false)));
             }
-            container(empty).padding(12).width(Length::Fill).style(move |_| container::Style { border: iced::Border { width: 1.0, color: t.separator, radius: 6.0.into() }, ..Default::default() }).into()
+            if running && b.url.is_empty() && v.url_enabled {
+                let mut chips = row![].spacing(6);
+                for quick in ["localhost:3000", "localhost:5173", "localhost:8080"] {
+                    chips = chips.push(button(text(quick).size(11)).on_press(Message::Code(CodeMsg::Br(BrMsg::Quick(quick.to_string())))).padding([3, 10]).style(theme::secondary_button(t)));
+                }
+                empty = empty.push(chips);
+            }
+            container(empty)
+                .padding(24)
+                .width(Length::Fill)
+                .center_x(Length::Fill)
+                .style(move |_| container::Style {
+                    background: Some(iced::Background::Color(t.bg)),
+                    border: iced::Border { width: 1.0, color: t.separator, radius: 10.0.into() },
+                    ..Default::default()
+                })
+                .into()
         }
     };
 
-    let mut body = column![head, bar, stage].spacing(8);
+    let mut body = column![head, bar].spacing(12);
+    if let Some(a) = activity {
+        body = body.push(a);
+    }
+    body = body.push(stage);
+    body = body.push(
+        row![
+            br_pill(t, ICON_BR_COMMENT, "Comment", running.then_some(BrMsg::Comment), v.commenting, false),
+            br_pill(t, ICON_BR_POWER, "Close browser", running.then_some(BrMsg::CloseAsk), false, true),
+            Space::new().width(Length::Fill),
+            text(if v.show_image { format!("page {}×{}", b.view.0 as i64, b.view.1 as i64) } else { String::new() }).size(11).color(t.muted),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    );
     if s.br_confirm_close {
         body = body.push(
-            column![
-                text("Close the browser? Pages that are open are lost; logins stay in its profile.").size(12),
-                row![
-                    button(text("Close").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::CloseOk))).padding([3, 10]).style(theme::primary_button(t)),
-                    button(text("Cancel").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::CloseCancel))).padding([3, 10]).style(theme::ghost_button(t)),
+            container(
+                column![
+                    text("Close the browser? Pages that are open are lost; logins stay in its profile.").size(12),
+                    row![
+                        button(text("Close").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::CloseOk))).padding([4, 12]).style(theme::primary_button(t)),
+                        button(text("Cancel").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::CloseCancel))).padding([4, 12]).style(theme::ghost_button(t)),
+                    ]
+                    .spacing(6),
                 ]
-                .spacing(6),
-            ]
-            .spacing(6),
+                .spacing(8),
+            )
+            .padding(12)
+            .width(Length::Fill)
+            .style(move |_| container::Style { background: Some(iced::Background::Color(t.fill)), border: iced::border::rounded(10), ..Default::default() }),
         );
     }
     if b.draft.is_some() {
         let note = text_editor(&s.br_note)
             .placeholder("What should be changed or checked here?")
             .on_action(|a| Message::Code(CodeMsg::Br(BrMsg::NoteEdit(a))))
-            .padding(6)
+            .padding(8)
             .size(12)
-            .height(Length::Fixed(70.0))
+            .height(Length::Fixed(76.0))
             .style(crate::skills::editor_style(t));
         body = body.push(
-            column![
-                text(b.note_parts().map(|(h, _)| h).unwrap_or_default()).size(12).font(Font::MONOSPACE),
-                text(b.note_parts().map(|(_, x)| x).unwrap_or_default()).size(11).color(t.muted),
-                note,
-                row![
-                    Space::new().width(Length::Fill),
-                    button(text("Cancel").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::NoteCancel))).padding([3, 10]).style(theme::ghost_button(t)),
-                    button(text("Add comment").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::NoteAdd))).padding([3, 10]).style(theme::primary_button(t)),
+            container(
+                column![
+                    text(b.note_parts().map(|(h, _)| h).unwrap_or_default()).size(12).font(Font::MONOSPACE),
+                    text(b.note_parts().map(|(_, x)| x).unwrap_or_default()).size(11).color(t.muted),
+                    note,
+                    row![
+                        Space::new().width(Length::Fill),
+                        button(text("Cancel").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::NoteCancel))).padding([4, 12]).style(theme::ghost_button(t)),
+                        button(text("Add comment").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::NoteAdd))).padding([4, 12]).style(theme::primary_button(t)),
+                    ]
+                    .spacing(6),
                 ]
                 .spacing(6),
-            ]
-            .spacing(6),
+            )
+            .padding(12)
+            .width(Length::Fill)
+            .style(move |_| container::Style { border: iced::Border { width: 1.0, color: t.danger, radius: 10.0.into() }, ..Default::default() }),
         );
     }
     if !b.comments.is_empty() {
-        let mut list = column![text(format!("Comments for the agent ({})", b.comments.len())).size(12).font(bold)].spacing(4);
-        for (i, c) in b.comments.iter().enumerate() {
-            let name = if c.name.is_empty() { String::new() } else { format!(" \"{}\"", crate::computer::slice_units(&c.name, 40)) };
+        let mut list = column![text(format!("Comments for the agent ({})", b.comments.len())).size(12).font(bold)].spacing(6);
+        for (i, cm) in b.comments.iter().enumerate() {
+            let name = if cm.name.is_empty() { String::new() } else { format!(" \"{}\"", crate::computer::slice_units(&cm.name, 40)) };
             list = list.push(
-                row![
-                    column![text(format!("{}{}", c.role, name)).size(11).font(Font::MONOSPACE), text(c.note.clone()).size(12)].spacing(1).width(Length::Fill),
-                    small("×", Some(BrMsg::Del(i)), false),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center),
+                container(
+                    row![
+                        column![text(format!("{}{}", cm.role, name)).size(11).font(Font::MONOSPACE).color(t.muted), text(cm.note.clone()).size(12)].spacing(2).width(Length::Fill),
+                        br_icon_button(t, ICON_BR_X, "Remove", Some(BrMsg::Del(i)), false),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                )
+                .padding([6, 10])
+                .width(Length::Fill)
+                .style(move |_| container::Style { background: Some(iced::Background::Color(t.fill)), border: iced::border::rounded(10), ..Default::default() }),
             );
         }
         list = list.push(
             row![
-                button(text("Send to the agent").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::SendComments))).padding([3, 10]).style(theme::primary_button(t)),
+                button(text("Send to the agent").size(12)).on_press(Message::Code(CodeMsg::Br(BrMsg::SendComments))).padding([4, 12]).style(theme::primary_button(t)),
                 text("They are also added to your next message.").size(11).color(t.muted),
             ]
             .spacing(8)
@@ -5129,12 +5387,25 @@ fn browser_panel<'a>(s: &'a CodeState, t: Tokens) -> Element<'a, Message> {
     if !v.foot.is_empty() {
         body = body.push(text(v.foot.clone()).size(11).color(t.muted));
     }
-    container(scrollable(body.padding(14)))
-        .width(Length::Fixed(BROWSER_PANEL))
+    container(scrollable(body.padding(14).spacing(12)))
+        .width(Length::Fixed(panel_width))
         .height(Length::Fill)
         .style(move |_| container::Style { background: Some(iced::Background::Color(t.surface)), border: iced::Border { width: 1.0, color: t.separator, ..Default::default() }, ..Default::default() })
         .into()
 }
+
+const ICON_BR_GLOBE: &[u8] = include_bytes!("../icons/globe.svg");
+const ICON_BR_X: &[u8] = include_bytes!("../icons/x.svg");
+const ICON_BR_LOCK: &[u8] = include_bytes!("../icons/lock.svg");
+const ICON_BR_ARROW: &[u8] = include_bytes!("../icons/arrow-right.svg");
+const ICON_BR_BACK: &[u8] = include_bytes!("../icons/chevron-left.svg");
+const ICON_BR_FORWARD: &[u8] = include_bytes!("../icons/chevron-right.svg");
+const ICON_BR_RELOAD: &[u8] = include_bytes!("../icons/reload.svg");
+const ICON_BR_COMMENT: &[u8] = include_bytes!("../icons/comment.svg");
+const ICON_BR_POWER: &[u8] = include_bytes!("../icons/power.svg");
+const ICON_BR_BOT: &[u8] = include_bytes!("../icons/bot.svg");
+const ICON_BR_POINTER: &[u8] = include_bytes!("../icons/pointer.svg");
+const ICON_BR_EXPAND_OR_SHRINK: [&[u8]; 2] = [include_bytes!("../icons/expand.svg"), include_bytes!("../icons/shrink.svg")];
 
 /// The banner on top while computer use is on (`renderComputerBanner`): what the agent is doing
 /// or that it is allowed to, how many actions are used, and the STOP button.
@@ -5318,7 +5589,7 @@ fn side_settings<'a>(s: &'a CodeState, t: Tokens) -> Element<'a, Message> {
     ]
     .spacing(10);
     let side = column![side_views::tasks_block(s, t), side_views::changes_block(s, t), specs, jobs_block(s, t), side_views::sessions_block(s, t), side_views::memory_block(s, t), side_views::permissions_block(s, t), block].spacing(22);
-    container(scrollable(side))
+    container(scrollable(container(side).padding(Padding { top: 0.0, right: 12.0, bottom: 0.0, left: 0.0 })))
         .width(Length::Fixed(272.0))
         .padding([18.0, 16.0])
         .style(move |_| container::Style {

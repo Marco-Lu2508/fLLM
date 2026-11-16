@@ -3568,6 +3568,10 @@ impl App {
                 Task::none()
             }
             Message::BrKey(press) => {
+                // Ctrl+L / Cmd+L: into the address box, as in any browser
+                if self.page == View::Code && !self.code.br_focus && self.code.browser.open && (press.ctrl || press.meta) && !press.alt && press.key.to_lowercase() == "l" {
+                    return self.update(Message::Code(code::CodeMsg::Br(code::BrMsg::FocusAddress)));
+                }
                 if self.page == View::Code && self.code.br_focus {
                     return self.update(Message::Code(code::CodeMsg::Br(code::BrMsg::Key(press))));
                 }
