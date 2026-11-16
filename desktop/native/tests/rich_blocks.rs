@@ -343,3 +343,18 @@ fn the_model_is_told_about_the_formats_unless_you_switch_it_off_or_replace_the_p
     let _ = app.update(Message::SystemCustom(true));
     assert!(!app.system_prompt().contains("```chart") || !app.system_prompt().starts_with("You are"), "a custom prompt is not the built-in one");
 }
+
+#[test]
+fn the_agent_of_the_code_page_is_told_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chats.json");
+    fllm_app::store::Store::default().save(&path).unwrap();
+    let (mut app, _task) = fllm_app::app::App::with("http://127.0.0.1:9".into(), path);
+    assert!(app.code().system_prompt(None).contains("```chart"), "on by default");
+    let _ = app.update(Message::RichAnswers(false));
+    assert!(!app.code().system_prompt(None).contains("```chart"), "switched off in General");
+    let _ = app.update(Message::RichAnswers(true));
+    assert!(app.code().system_prompt(None).contains("```mermaid"));
+    // the plain state of the Code page (what the fixtures of the page's prompt are made with) says nothing of it
+    assert!(!fllm_app::code::CodeState::default().system_prompt(None).contains("```chart"));
+}

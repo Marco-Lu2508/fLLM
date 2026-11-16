@@ -916,6 +916,8 @@ pub struct CodeState {
     pub skill_asking: bool,
     /// Messages typed while the agent was busy: each is sent when the run has ended (`code.queue`).
     pub queue: Vec<String>,
+    /// The agent is told that the window draws charts, diagrams and math (*Charts, diagrams and math in answers*; the app sets it).
+    pub rich_answers: bool,
     /// The first request of a run waits for the answer of `computer/begin`.
     pub beginning: bool,
     /// Whether the server answered `GET /api/studio/agent/changes` (the page: `code.changes === null`).
@@ -1012,6 +1014,7 @@ impl Default for CodeState {
             skill: None,
             skill_asking: false,
             queue: Vec::new(),
+            rich_answers: false,
             beginning: false,
             pending_toast: None,
             pending: Vec::new(),
@@ -1935,6 +1938,10 @@ impl CodeState {
         if !style.is_empty() {
             system.push_str("\n\n");
             system.push_str(style);
+        }
+        if self.rich_answers {
+            system.push_str("\n\n");
+            system.push_str(crate::rich::INSTRUCTIONS);
         }
         let context = self.context.prompt();
         if !context.is_empty() {

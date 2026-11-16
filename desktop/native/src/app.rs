@@ -1767,6 +1767,7 @@ impl App {
         app.code.learn = app.store.prefs.learn;
         app.code.auto_check = app.store.prefs.auto_check;
         app.code.personality = app.store.prefs.code_personality.clone();
+        app.code.rich_answers = app.store.prefs.rich_answers;
         if let Some(first) = app.store.chats.first().map(|c| c.id) {
             app.open(first);
         }
@@ -3220,6 +3221,7 @@ impl App {
             }
             Message::RichAnswers(on) => {
                 self.store.prefs.rich_answers = on;
+                self.code.rich_answers = on;
                 self.save();
                 Task::none()
             }
