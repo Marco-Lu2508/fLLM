@@ -967,9 +967,8 @@ mod tests {
     /// (`JSON.stringify(JSON.parse(txt), null, 2)` of `btnRunRouteTest`).
     #[test]
     fn an_answer_is_pretty_when_it_is_json_and_raw_when_not() {
-        // the keys come out in the order of Rust's JSON parser, not in the order JavaScript keeps
-        // (`JSON.parse` of the Studio would answer `b` before `a` here)
-        assert_eq!(pretty_answer("{\"b\":1,\"a\":2}"), "{\n  \"a\": 2,\n  \"b\": 1\n}");
+        // the keys keep the order they came in, as `JSON.parse` keeps them (`preserve_order`)
+        assert_eq!(pretty_answer("{\"b\":1,\"a\":2}"), "{\n  \"b\": 1,\n  \"a\": 2\n}");
         assert_eq!(pretty_answer("not json at all"), "not json at all");
         assert_eq!(pretty_answer(""), "");
         // a plain number is JSON too, and a broken object falls back on the text

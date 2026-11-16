@@ -142,7 +142,7 @@ fn the_page_draws_with_the_engine_cards_and_a_choice_sends_its_message() {
     for theme in ["light", "dark"] {
         let (mut app, _dir) = app(theme);
         let _ = app.update(Message::EngineSet("state_cache".into(), json!(true))); // shows the restart bar too
-        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 1700.0), app.view());
+        let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 4200.0), app.view());
         let shot = ui.snapshot(&app.theme()).unwrap();
         let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ui-snapshots");
         std::fs::create_dir_all(&dir).unwrap();
@@ -153,10 +153,10 @@ fn the_page_draws_with_the_engine_cards_and_a_choice_sends_its_message() {
         shot.matches_image(dir.join(format!("{name}.png"))).unwrap();
     }
     let (app, _dir) = app("light");
-    let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 1700.0), app.view());
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 4200.0), app.view());
     ui.click("Move to RAM").unwrap();
     assert!(ui.into_messages().any(|m| matches!(m, Message::EngineSet(k, v) if k == "preemption" && v == "swap")));
-    let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 1700.0), app.view());
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 4200.0), app.view());
     ui.find("Fixed by the environment of the server.").expect("the locked option says why it cannot be changed");
     ui.find("Reset engine options").expect("the reset button");
 }

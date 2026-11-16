@@ -420,7 +420,7 @@ impl Panel {
         let first = self.status.is_none();
         let n = self.ticks;
         self.ticks += 1;
-        first || n % 12 == 0
+        first || n.is_multiple_of(12)
     }
 
     /// Whether a frame is asked for after that (`br.status && br.status.settings.enabled`).

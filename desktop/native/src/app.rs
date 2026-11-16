@@ -445,6 +445,12 @@ pub struct App {
     pub lp: crate::learncards::LearnPane,
     /// Settings > Browser (`browser.js`).
     pub bp: crate::browsercards::BrowserPane,
+    /// Settings > Desktop app (`desktop.js`).
+    pub dk: crate::desktopcards::DesktopPane,
+    /// The hotkey and the tray (made on the first tick of the clock, after the window exists; never in a test).
+    shell: Option<crate::shell::Shell>,
+    /// Whether this is the program itself (the clock for the shell runs only then).
+    desktop_live: bool,
     /// Every entry of the log (the Personalization card shows all, the Skills card only its own).
     pub ln_all: Vec<crate::skills::LearnEntry>,
     /// What waits for a decision, the last step, the feed and the rows of *Skills with a history*.
@@ -1149,6 +1155,11 @@ pub enum Message {
     /// The three learning cards of Settings > Personalization.
     Lp(crate::learncards::LpMsg),
     Bp(crate::browsercards::BpMsg),
+    Dk(crate::desktopcards::DkMsg),
+    /// The clock the hotkey and the tray are looked at with.
+    ShellTick,
+    /// The close button of the window (`exit_on_close_request` is off, so the app decides).
+    CloseRequested(iced::window::Id),
     /// The task form: its eight fields, its two buttons and the preview of what the schedule means.
     ScName(String),
     ScPrompt(iced::widget::text_editor::Action),
@@ -1376,7 +1387,15 @@ impl App {
         app.sidecar_note = note;
         // a server the app just started needs a moment: look every second until it answers
         app.switching = app.sidecar.is_some();
+        app.desktop_live = true;
         (app, task)
+    }
+
+    /// Brings the window back from the tray or from behind other windows.
+    fn show_window(&self) -> Task<Message> {
+        iced::window::oldest().and_then(|id| {
+            Task::batch([iced::window::set_mode(id, iced::window::Mode::Windowed), iced::window::minimize(id, false), iced::window::gain_focus(id)])
+        })
     }
 
     /// Whether this app started the server it talks to.
@@ -1386,6 +1405,7 @@ impl App {
 
     pub fn with(base: String, data_file: PathBuf) -> (App, Task<Message>) {
         let store = Store::load(&data_file);
+        let dk = crate::desktopcards::DesktopPane::load(&data_file.with_file_name("desktop.json"));
         let system_dark = std::env::var("FLLM_THEME").map(|v| v == "dark").unwrap_or(false);
         let mut app = App {
             plugins: Vec::new(),
@@ -1556,6 +1576,9 @@ impl App {
             ln_confirm: None,
             lp: crate::learncards::LearnPane::default(),
             bp: crate::browsercards::BrowserPane::default(),
+            dk,
+            shell: None,
+            desktop_live: false,
             ln_all: Vec::new(),
             ln_pending: String::new(),
             ln_last: String::new(),
@@ -5117,6 +5140,42 @@ impl App {
                 }
                 task
             }
+            Message::Dk(m) => self.dk.update(m, self.shell.as_mut()),
+            Message::ShellTick => {
+                if self.shell.is_none() {
+                    // the first look: the system is asked for the hotkey and the tray now that the window is there
+                    let mut shell = crate::shell::Shell::new();
+                    if let Err(e) = shell.set_hotkey(&self.dk.s.quick_entry) {
+                        self.dk.status = e;
+                    }
+                    self.shell = Some(shell);
+                }
+                let events = self.shell.as_mut().map(crate::shell::Shell::poll).unwrap_or_default();
+                let mut tasks = Vec::new();
+                for event in events {
+                    tasks.push(match event {
+                        crate::shell::ShellEvent::QuickEntry => {
+                            // the window comes to the front with a new chat
+                            let new_chat = self.update(Message::NewChat);
+                            self.page = View::Chat;
+                            Task::batch([self.show_window(), new_chat])
+                        }
+                        crate::shell::ShellEvent::Open => self.show_window(),
+                        crate::shell::ShellEvent::Restart => self.update(Message::RestartServer),
+                        crate::shell::ShellEvent::Logs => self.update(Message::Dk(crate::desktopcards::DkMsg::Logs)),
+                        crate::shell::ShellEvent::Quit => iced::exit(),
+                    });
+                }
+                Task::batch(tasks)
+            }
+            Message::CloseRequested(id) => {
+                // with the tray the window is hidden and the program goes on; without it the close button quits
+                if self.dk.s.keep_in_tray && self.shell.as_ref().is_some_and(crate::shell::Shell::has_tray) {
+                    iced::window::set_mode(id, iced::window::Mode::Hidden)
+                } else {
+                    iced::exit()
+                }
+            }
             Message::Bp(m) => {
                 let saved = matches!(m, crate::browsercards::BpMsg::Saved(_));
                 let task = self.bp.update(m, &self.base);
@@ -6303,6 +6362,9 @@ impl App {
                 Task::none()
             }
             Message::Key(key, modifiers) => {
+                if self.dk.key(&key, modifiers, self.shell.as_mut()) {
+                    return Task::none();
+                }
                 let is_mac = cfg!(target_os = "macos");
                 let combo = shortcuts::combo_of_key(&key, modifiers, is_mac);
                 if combo.is_empty() {
@@ -6733,6 +6795,7 @@ impl App {
                     let sc = self.sc_refresh();
                     // the Browser pane reads its settings when its button is clicked
                     let bp = crate::browsercards::BrowserPane::refresh(&self.base);
+                    let dk = crate::desktopcards::DesktopPane::refresh();
                     // the skills that come with the app are read once, when the pane is built
                     // (`load()` at the end of `skilllibrary.js`)
                     let lib = if self.lib_loaded {
@@ -6789,6 +6852,7 @@ impl App {
                             ln,
                             sc,
                             bp,
+                            dk,
                             lib,
                             logs,
                             keys,
@@ -7432,7 +7496,10 @@ impl App {
             }
             _ => None,
         });
-        Subscription::batch([retry, poll, hero, inbox, dropped, browser_keys])
+        let closes = iced::window::close_requests().map(Message::CloseRequested);
+        // the hotkey and the tray are looked at four times a second
+        let shell = if self.desktop_live { iced::time::every(std::time::Duration::from_millis(250)).map(|_| Message::ShellTick) } else { Subscription::none() };
+        Subscription::batch([retry, poll, hero, inbox, dropped, browser_keys, closes, shell])
     }
 
     // ---- view ------------------------------------------------------------------------------------------------------------
@@ -7756,6 +7823,7 @@ impl App {
                 self.personal_view(),
                 crate::learncards::view(t, &self.lp, &self.ln_pending, &self.ln_last, &self.ln_all),
                 crate::browsercards::view(t, &self.bp),
+                crate::desktopcards::view(t, &self.dk, crate::desktop::log_folder().display().to_string()),
                 settings::VoiceView {
                     voices: &self.voice_names,
                     can_notify: self.voice_can_notify,
@@ -11627,9 +11695,14 @@ pub fn run() -> iced::Result {
         .default_font(UI_FONT)
         .theme(App::theme)
         .subscription(App::subscription)
-        .window_size((1280.0, 820.0))
+        .window(iced::window::Settings { size: iced::Size::new(1280.0, 820.0), exit_on_close_request: false, ..Default::default() })
         .antialiasing(true)
         .run()
+}
+
+/// The clock in milliseconds (`Date.now()`), for the presses of Esc.
+fn now_ms() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64)
 }
 
 #[cfg(test)]
@@ -11717,9 +11790,4 @@ mod tests {
         assert_eq!(estimate_tokens(&[m(&"a".repeat(40))]), 14);
         assert_eq!(estimate_tokens(&[]), 0);
     }
-}
-
-/// The clock in milliseconds (`Date.now()`), for the presses of Esc.
-fn now_ms() -> f64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64)
 }

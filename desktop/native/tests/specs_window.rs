@@ -527,10 +527,10 @@ fn the_side_with_specs_is_drawn() {
 
 /// Opening a folder reads its specs along with the rest (`loadSpecs` runs with the other loads
 /// of `openWorkspace`): one more request in the batch than before this row (row 77 added the
-/// custom agents, `loadAgents`, as the sixth).
+/// custom agents, `loadAgents`, as the sixth; rows 88 to 85 added the learning status, the computer use poll and the browser status).
 #[test]
 fn opening_a_folder_reads_the_specs_too() {
     let (mut app, _dir) = app("light");
     let task = app.update(Message::Code(CodeMsg::Opened(Ok(Workspace { root: FOLDER.into(), name: "fllm".into(), branch: Some("main".into()) }))));
-    assert_eq!(task.units(), 7, "the loads of an opened folder, the specs, the custom agents and the learning status among them");
+    assert_eq!(task.units(), 9, "the loads of an opened folder: the specs, the custom agents, the learning status, the state of the browser and of computer use among them");
 }

@@ -7,6 +7,11 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **The desktop app's own settings in the native app.** Settings > Desktop app: keep running in the
+  tray, start when you sign in, a quick-entry hotkey that brings the window up with a new chat, the
+  server's log folder and its restart. The tool cards of the Code page are named and shaped as the
+  Studio's (*Read file*, *Check code*, …), open and close, cut long diffs and outputs with *Show all*,
+  and the arguments of a call keep the order the model wrote them.
 - **The browser panel in the native app** (`browser.js`). The Code page can show the page the
   agent's browser has, live: click, scroll, type and paste into it, go to an address, go back,
   reload, close it, and comment on elements — the comments ride in front of your next message.

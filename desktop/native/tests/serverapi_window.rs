@@ -26,7 +26,7 @@ fn app(theme: &str) -> (App, tempfile::TempDir) {
 }
 
 fn sim(app: &App) -> Simulator<'_, Message> {
-    Simulator::with_size(settings(), Size::new(1280.0, 3000.0), app.view())
+    Simulator::with_size(settings(), Size::new(1280.0, 6000.0), app.view())
 }
 
 /// The answer of `GET /api/studio/keys`: one key with a limit, one without.

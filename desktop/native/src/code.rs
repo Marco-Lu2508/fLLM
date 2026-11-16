@@ -171,6 +171,40 @@ pub struct Call {
     pub kid: Option<Box<KidView>>,
     /// A computer tool's card: the pictures (`item.image`, `item.shot`).
     pub cu: Option<Box<CuView>>,
+    /// The user opened or closed the card (`item.open`); `None` leaves it to `defaultOpen`.
+    pub open: Option<bool>,
+    /// *Show all* / *Show n more lines* was pressed (`item.expanded`).
+    pub expanded: bool,
+}
+
+impl Call {
+    /// The state of the card as the page names it (`item.status`).
+    pub fn status(&self) -> crate::toolcard::Status {
+        use crate::toolcard::Status;
+        match &self.state {
+            CallState::Pending => Status::Pending,
+            CallState::Running => Status::Running,
+            CallState::Done { ok: true, .. } => Status::Ok,
+            CallState::Done { ok: false, output } => {
+                // the cards the page marks `denied`: refused by a rule, the mode, the user or the kind of agent
+                const DENIED: [&str; 5] = ["Not available to sub-agents.", "This sub-agent is read-only.", "Blocked by a permission rule.", "You denied this.", "Stopped."];
+                if DENIED.contains(&output.as_str()) || output.starts_with("Plan mode only allows reading") || output.starts_with("The user declined") {
+                    Status::Denied
+                } else {
+                    Status::Error
+                }
+            }
+        }
+    }
+
+    /// Whether the card is open: what the user chose, else `defaultOpen`.
+    pub fn is_open(&self) -> bool {
+        self.open.unwrap_or_else(|| {
+            let has_output = matches!(&self.state, CallState::Done { output, .. } if !output.is_empty());
+            let cu = self.cu.as_ref();
+            crate::toolcard::default_open(&self.name, self.status(), has_output, cu.is_some_and(|v| v.image.is_some()), cu.is_some_and(|v| v.shot.is_some()), self.check.is_some())
+        })
+    }
 }
 
 /// What the card of a `task` call keeps of its sub-agent: its type, the words of the job, the
@@ -401,7 +435,7 @@ fn restored_call(saved: Saved) -> Call {
             })
             .collect(),
     }));
-    Call { id, name, args, permission: Permission::parse(&permission), kind: ToolKind::Server, state: CallState::Done { ok, output }, auto_note: None, check: None, sent, kid, cu: gone.then(|| Box::new(CuView { gone: true, ..Default::default() })) }
+    Call { id, name, args, permission: Permission::parse(&permission), kind: ToolKind::Server, state: CallState::Done { ok, output }, auto_note: None, check: None, sent, kid, cu: gone.then(|| Box::new(CuView { gone: true, ..Default::default() })), open: None, expanded: false }
 }
 
 /// The most items kept per folder: the newest ones.
@@ -565,6 +599,9 @@ pub enum CodeMsg {
     AgentsLoaded(Option<Vec<crate::subagents::CustomAgent>>),
     /// An event of one sub-agent's stream (the id is the `task` call that started it).
     KidStream(String, StreamEvent),
+    /// The header of a card was pressed (`item.open`), or *Show all* / *Show n more lines* (`item.expanded`).
+    ToggleCard(String),
+    ExpandCard(String),
     /// The browser panel.
     Br(BrMsg),
     /// The browser settings were saved (`fllmBrowserChanged`): the panel reads its status again and the tools are asked for.
@@ -1848,6 +1885,8 @@ impl CodeState {
         let call = Call {
             kid: None,
             cu: None,
+            open: None,
+            expanded: false,
             id: id.clone(),
             name: "bash".into(),
             args: serde_json::json!({ "command": command }).to_string(),
@@ -1889,6 +1928,8 @@ impl CodeState {
             sent: None,
             kid: None,
             cu: None,
+            open: None,
+            expanded: false,
         }));
         let base = env.base.to_string();
         Task::perform(
@@ -2470,7 +2511,7 @@ impl CodeState {
             let waiting = state == CallState::Pending;
             let tool_name = p.name.clone();
             let activity = (permission == Permission::Computer && matches!(state, CallState::Pending | CallState::Running)).then_some(waiting);
-            self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note, check: None, sent, kid: None, cu }));
+            self.items.push(Item::Call(Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note, check: None, sent, kid: None, cu, open: None, expanded: false }));
             if let Some(waiting) = activity {
                 self.computer_activity(&id, waiting);
             }
@@ -2719,6 +2760,18 @@ impl CodeState {
                 Task::none()
             }
             CodeMsg::AgentsLoaded(None) => Task::none(),
+            CodeMsg::ToggleCard(id) => {
+                if let Some(c) = self.call_mut(&id) {
+                    c.open = Some(!c.is_open());
+                }
+                Task::none()
+            }
+            CodeMsg::ExpandCard(id) => {
+                if let Some(c) = self.call_mut(&id) {
+                    c.expanded = true;
+                }
+                Task::none()
+            }
             CodeMsg::Br(m) => self.br_update(m, env),
             CodeMsg::BrowserChanged => {
                 let tools = Task::perform(fetch_tools(env.base.to_string(), self.computer_on()), |r| Message::Code(CodeMsg::ToolsLoaded(r)));
@@ -4142,7 +4195,7 @@ impl CodeState {
             let run_now = state == CallState::Running;
             let waiting = state == CallState::Pending;
             let tool_name = p.name.clone();
-            let call = Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note, check: None, sent, kid: None, cu: None };
+            let call = Call { id: id.clone(), name: p.name, args: p.args, permission, kind, state, auto_note, check: None, sent, kid: None, cu: None, open: None, expanded: false };
             if let Some(view) = self.call_mut(call_id).and_then(|c| c.kid.as_mut()) {
                 view.items.push(KidItem::Call(Box::new(call)));
             }
@@ -4241,24 +4294,30 @@ fn mono_box<'a>(t: Tokens, body: Element<'a, Message>) -> Element<'a, Message> {
 
 fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
     let args: Value = serde_json::from_str(&c.args).unwrap_or(Value::Null);
+    let status = c.status();
+    let open = c.is_open();
+    let (glyph, glyph_colour) = match status {
+        crate::toolcard::Status::Pending => ("?", t.primary),
+        crate::toolcard::Status::Running => ("…", t.muted),
+        crate::toolcard::Status::Ok => ("✓", t.ok),
+        crate::toolcard::Status::Error => ("✗", t.danger),
+        crate::toolcard::Status::Denied => ("⊘", t.muted),
+    };
     let state_label: Element<'a, Message> = match &c.state {
         CallState::Pending => text("Waiting for you").size(12).color(t.primary).into(),
         CallState::Running => text("Running…").size(12).color(t.muted).into(),
         CallState::Done { ok: true, .. } => text("Done").size(12).color(t.ok).into(),
         CallState::Done { ok: false, .. } => text("Failed").size(12).color(t.danger).into(),
     };
-    // a task is labelled as the page labels it: `Sub-agent (explore)` and the words of the job
-    let (verb, target) = if c.name == "task" {
-        crate::subagents::task_label(&args)
-    } else if let Some(label) = crate::computer::tool_label(&c.name, &args).filter(|_| c.permission == Permission::Computer) {
-        label
-    } else if let Some(label) = crate::browser::tool_label(&c.name, &args) {
-        label
-    } else {
-        (c.name.clone(), summary(&c.name, &args))
+    // every card is named as the page names it (`toolLabel`): `Read file`, `Check code`, `Sub-agent (explore)` …
+    let mcp = match &c.kind {
+        ToolKind::Mcp { server, tool } => Some((server.as_str(), tool.as_str())),
+        _ => None,
     };
+    let (verb, target) = crate::toolcard::label(&c.name, &args, mcp);
     let progress = c.kid.as_ref().filter(|_| c.state == CallState::Running).map(|k| k.progress.clone()).unwrap_or_default();
     let header = row![
+        text(glyph).size(13).color(glyph_colour).width(14),
         text(verb).size(13).font(Font { weight: iced::font::Weight::Semibold, ..Font::MONOSPACE }),
         text(target).size(13).font(Font::MONOSPACE).color(t.fg_soft).width(Length::Fill).wrapping(text::Wrapping::None),
         text(progress).size(12).color(t.muted),
@@ -4266,6 +4325,8 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
     ]
     .spacing(10)
     .align_y(Alignment::Center);
+    // the summary of the page's `<details>`: a press opens or closes the card
+    let header = button(header).on_press(Message::Code(CodeMsg::ToggleCard(c.id.clone()))).padding(0).width(Length::Fill).style(|_, _| button::Style::default());
     let mut body = column![header].spacing(8);
     if let Some(reason) = &c.auto_note {
         // `tool-auto` of the page: its own line over the body of the card
@@ -4276,7 +4337,7 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
         );
     }
 
-    if c.name == "task" {
+    if open && c.name == "task" {
         // the job as it was given (the first 1500 characters), the conversation of the sub-agent
         // under it, and its report when it is done
         let prompt: String = args.get("prompt").and_then(Value::as_str).unwrap_or_default().chars().take(1500).collect();
@@ -4310,35 +4371,50 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
         }
     }
 
-    // a command is already in the header; an edit shows what it removes and adds, each line on a tinted band
-    let lines = if c.name == "bash" || c.name == "task" { Vec::new() } else { preview(&c.name, &args) };
-    if !lines.is_empty() {
-        let shown = column(lines.into_iter().map(|(kind, l)| {
-            let (mark, color, band) = match kind {
-                Line::Add => ("+ ", t.ok, Some(iced::Color { a: 0.14, ..t.ok })),
-                Line::Del => ("- ", t.danger, Some(iced::Color { a: 0.14, ..t.danger })),
-                Line::Plain => ("  ", t.fg_soft, None),
-            };
-            container(text(format!("{mark}{}", l.replace('\t', "    "))).size(12).font(Font::MONOSPACE).color(color))
-                .width(Length::Fill)
-                .padding([1, 6])
-                .style(move |_| container::Style { background: band.map(iced::Background::Color), ..Default::default() })
-                .into()
-        }));
-        body = body.push(container(shown).padding([6, 6]).width(Length::Fill).style(theme::inset(t)));
-    }
-    if let (CallState::Done { output, ok }, true) = (&c.state, c.name != "task") {
-        let all: Vec<&str> = output.lines().collect();
-        // a tab is not in the monospace font: four spaces show it
-        let mut shown: String = all.iter().take(14).map(|l| l.replace('\t', "    ")).collect::<Vec<_>>().join("\n");
-        if all.len() > 14 {
-            shown.push_str(&format!("\n… {} more lines", all.len() - 14));
+    if open {
+        // a command stands in its card as the page draws it (`tool-cmd`)
+        if c.name == "bash" {
+            body = body.push(mono_box(t, text(format!("$ {}", crate::computer::text_or_empty(args.get("command").filter(|v| crate::jobs::truthy(Some(v)))))).size(12).font(Font::MONOSPACE).color(t.fg).into()));
         }
-        if !shown.trim().is_empty() {
-            body = body.push(mono_box(t, text(shown).size(12).font(Font::MONOSPACE).color(if *ok { t.fg_soft } else { t.danger }).into()));
+        // an edit shows what it removes and adds, each line on a tinted band, sixty lines at first
+        let rows = crate::toolcard::diff_rows(&c.name, &args);
+        if !rows.is_empty() {
+            let shown_n = if c.expanded { rows.len() } else { rows.len().min(crate::toolcard::DIFF_LINES) };
+            let more = rows.len() - shown_n;
+            let mut lines = column![].spacing(0);
+            for (kind, l) in rows.into_iter().take(shown_n) {
+                let (mark, color, band) = match kind {
+                    crate::toolcard::Kind::Add => ("+ ", t.ok, Some(iced::Color { a: 0.14, ..t.ok })),
+                    crate::toolcard::Kind::Del => ("− ", t.danger, Some(iced::Color { a: 0.14, ..t.danger })),
+                    crate::toolcard::Kind::More => ("  ", t.muted, None),
+                    crate::toolcard::Kind::Ctx => ("  ", t.fg_soft, None),
+                };
+                lines = lines.push(
+                    container(text(format!("{mark}{}", l.replace('\t', "    "))).size(12).font(Font::MONOSPACE).color(color))
+                        .width(Length::Fill)
+                        .padding([1, 6])
+                        .style(move |_| container::Style { background: band.map(iced::Background::Color), ..Default::default() }),
+                );
+            }
+            if more > 0 {
+                lines = lines.push(button(text(format!("Show {more} more lines")).size(11)).on_press(Message::Code(CodeMsg::ExpandCard(c.id.clone()))).padding([2, 8]).style(theme::ghost_button(t)));
+            }
+            body = body.push(container(lines).padding([6, 6]).width(Length::Fill).style(theme::inset(t)));
+        }
+        if let (CallState::Done { output, ok }, true) = (&c.state, c.name != "task") {
+            if !output.is_empty() {
+                let (shown, more) = crate::toolcard::output_view(output, c.expanded);
+                // a tab is not in the monospace font: four spaces show it
+                let shown = shown.replace('\t', "    ");
+                let mut out = column![text(shown).size(12).font(Font::MONOSPACE).color(if *ok { t.fg_soft } else { t.danger })].spacing(4);
+                if let Some(label) = more {
+                    out = out.push(button(text(label).size(11)).on_press(Message::Code(CodeMsg::ExpandCard(c.id.clone()))).padding([2, 8]).style(theme::ghost_button(t)));
+                }
+                body = body.push(mono_box(t, out.into()));
+            }
         }
     }
-    if let Some(problems) = &c.check {
+    if let (true, Some(problems)) = (open, &c.check) {
         // `tool-check` of the page: a block of its own — *Automatic check* over the findings
         body = body.push(
             column![
@@ -4351,7 +4427,7 @@ fn call_card<'a>(t: Tokens, c: &'a Call) -> Element<'a, Message> {
             .spacing(4),
         );
     }
-    if c.permission == Permission::Computer || c.cu.as_ref().is_some_and(|v| v.image.is_some()) {
+    if open && (c.permission == Permission::Computer || c.cu.as_ref().is_some_and(|v| v.image.is_some())) {
         if let Some(picture) = computer_body(t, c, &args) {
             body = body.push(picture);
         }
@@ -5012,10 +5088,8 @@ mod tests {
         assert_eq!(subject("command", "bash", serde_json::json!({ "command": "ls -la" })), ["ls -la"]);
         assert_eq!(
             subject("command", "bash", serde_json::json!({ "pattern": "todo", "path": "." })),
-            ["bash . todo"],
-            "without a command the words of the arguments follow the name — in the order the JSON \
-             parser of the window keeps them, where the page walks its own insertion order (the \
-             difference shows only in this case, which a call with a `command` never reaches)"
+            ["bash todo ."],
+            "without a command the words of the arguments follow the name, in the order they were written (the page walks its insertion order)"
         );
         assert_eq!(
             subject("edit", "edit_file", serde_json::json!({ "path": "a" })),

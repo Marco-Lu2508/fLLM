@@ -1142,6 +1142,7 @@ pub fn page<'a>(
     personal: PersonalView<'a>,
     learn_cards: Element<'a, Message>,
     browser_cards: Element<'a, Message>,
+    desktop_cards: Element<'a, Message>,
     voice: VoiceView<'a>,
     usage: UsageView<'a>,
     look: LookView<'a>,
@@ -1811,6 +1812,9 @@ pub fn page<'a>(
         // no entry for them, so they show only while nothing is searched)
     if crate::settingssearch::keep("browser", query) {
         content = content.push(browser_cards);
+    }
+    if crate::settingssearch::keep("desktop", query) {
+        content = content.push(desktop_cards);
     }
     if crate::settingssearch::keep("usage", query) {
         if hit == Some("usage") {

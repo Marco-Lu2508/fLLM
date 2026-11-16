@@ -481,6 +481,8 @@ fn the_card_shows_the_job_the_sub_agent_and_its_report() {
     }
     code(&mut app, CodeMsg::ToolDone("t1~0.0".into(), Ok("src/api.rs:1: parse".into())));
     kid_says(&mut app, "t1", "It is in src/api.rs.");
+    // a finished card is closed as the page closes it; its header opens it
+    code(&mut app, CodeMsg::ToggleCard("t1".into()));
     let mut ui = sim(&app);
     assert!(ui.find("Report").is_ok(), "the report has its heading");
     assert!(ui.find("step 2").is_err(), "the progress is gone when it is over");
