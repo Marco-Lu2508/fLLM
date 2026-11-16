@@ -44,7 +44,18 @@ pub enum SessMsg {
     RulesEditDeny(Action),
     RulesSave,
     Personality(String),
+    /// `/skill`: the model's reply, the fields of the dialog, and the answer of the save.
+    SkillWritten(Result<String, String>),
+    SkillName(String),
+    SkillScope(bool),
+    SkillEdit(Action),
+    SkillSave,
+    SkillSaved(Result<(), String>),
+    SkillDiscard,
 }
+
+/// What stays of a session when it is cut before a message: its items, its tasks, its marks and the title.
+type Prefix = (Vec<Saved>, Vec<SavedTodo>, Vec<Mark>, String);
 
 /// `new Date(time).toLocaleString()` the way an English page shows it.
 pub fn locale_time(ms: f64) -> String {
@@ -63,14 +74,19 @@ async fn undo_call(base: String, body: Value) -> Result<Value, String> {
 
 /// One answer of the model that is no stream (`codeChat` with `stream: false`).
 async fn ask_once(base: String, model: String, messages: Vec<WireMessage>, max_tokens: usize) -> Result<String, String> {
-    let body = json!({ "model": model, "messages": messages, "stream": false, "temperature": 0.2, "max_tokens": max_tokens });
+    ask_raw(base, model, messages, max_tokens, 0.2).await.map(|text| sessions::answer_of(&text).trim().to_string())
+}
+
+/// One request without a stream; the reply exactly as the model wrote it.
+pub(super) async fn ask_raw(base: String, model: String, messages: Vec<WireMessage>, max_tokens: usize, temperature: f64) -> Result<String, String> {
+    let body = json!({ "model": model, "messages": messages, "stream": false, "temperature": temperature, "max_tokens": max_tokens });
     let resp = reqwest::Client::new().post(format!("{base}/v1/chat/completions")).json(&body).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("The server answered with error {}", resp.status().as_u16()));
     }
     let data: Value = resp.json().await.map_err(|e| e.to_string())?;
     let text = data.pointer("/choices/0/message/content").and_then(Value::as_str).unwrap_or("");
-    Ok(sessions::answer_of(text).trim().to_string())
+    Ok(text.to_string())
 }
 
 fn export_dir() -> std::path::PathBuf {
@@ -114,7 +130,7 @@ impl CodeState {
     }
 
     /// `cutBefore(view, messages, itemId)`: the session as it was before the message at `item`.
-    fn cut_prefix(&self, item: usize) -> Option<(Vec<Saved>, Vec<SavedTodo>, Vec<Mark>, String)> {
+    fn cut_prefix(&self, item: usize) -> Option<Prefix> {
         if !self.turn_allowed(item) {
             return None;
         }
@@ -511,6 +527,66 @@ impl CodeState {
     pub(super) fn sess_update(&mut self, m: SessMsg, env: &Env) -> Task<Message> {
         match m {
             SessMsg::Nop => Task::none(),
+            SessMsg::SkillWritten(result) => {
+                self.skill_asking = false;
+                match result {
+                    Err(e) => self.pending_toast = Some(format!("Could not write a skill: {e}")),
+                    Ok(raw) => match crate::skills::parse_proposal(&raw) {
+                        Err(message) => self.pending_toast = Some(message),
+                        Ok(p) => self.skill = Some(super::SkillDraft { name: p.name, workspace: false, editor: Content::with_text(&p.content), busy: false }),
+                    },
+                }
+                Task::none()
+            }
+            SessMsg::SkillName(name) => {
+                if let Some(d) = &mut self.skill {
+                    d.name = name;
+                }
+                Task::none()
+            }
+            SessMsg::SkillScope(workspace) => {
+                let has = self.workspace.is_some();
+                if let Some(d) = &mut self.skill {
+                    d.workspace = workspace && has;
+                }
+                Task::none()
+            }
+            SessMsg::SkillEdit(action) => {
+                if let Some(d) = &mut self.skill {
+                    d.editor.perform(action);
+                }
+                Task::none()
+            }
+            SessMsg::SkillSave => {
+                let root = self.workspace.as_ref().map(|w| w.root.clone()).unwrap_or_default();
+                let Some(d) = &mut self.skill else { return Task::none() };
+                let name = d.name.trim().to_string();
+                if !crate::skills::valid_name(&name) {
+                    self.pending_toast = Some("The name uses lowercase letters, digits, - and _.".into());
+                    return Task::none();
+                }
+                d.busy = true;
+                let scope = if d.workspace { "workspace" } else { "user" }.to_string();
+                let content = d.editor.text();
+                Task::perform(crate::models::write_skill(env.base.to_string(), name, scope, root, content), |r| Message::Code(CodeMsg::Sess(SessMsg::SkillSaved(r.map(|_| ())))))
+            }
+            SessMsg::SkillSaved(Ok(())) => {
+                let name = self.skill.take().map(|d| d.name.trim().to_string()).unwrap_or_default();
+                self.pending_toast = Some(format!("Skill \"{name}\" saved"));
+                self.note("Skill saved.");
+                Task::none()
+            }
+            SessMsg::SkillSaved(Err(e)) => {
+                if let Some(d) = &mut self.skill {
+                    d.busy = false;
+                }
+                self.pending_toast = Some(e);
+                Task::none()
+            }
+            SessMsg::SkillDiscard => {
+                self.skill = None;
+                Task::none()
+            }
             SessMsg::Choice(at, row) => {
                 let Some(set) = self.choices.get(at).cloned() else { return Task::none() };
                 let Some((_, data)) = set.rows.get(row).cloned() else { return Task::none() };

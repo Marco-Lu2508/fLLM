@@ -730,6 +730,9 @@ pub enum Message {
     LoadModel(String),
     UnloadModel,
     Pull(String),
+    /// The text of the card *Add a model*, and the dialog *Choose a model* behind it.
+    LocalPath(String),
+    Mp(crate::modelpicker::MpMsg),
     DownloadAction(u64, &'static str),
     /// A load, unload, download or download action is done (or failed with this message).
     ModelAction(Result<String, String>),
@@ -751,6 +754,18 @@ pub enum Message {
     SavePrefs,
     ResetPrefs,
     EngineLoaded(Result<(engine_settings::EngineData, engine_settings::ServerData), String>),
+    /// The live numbers of the running server, and the controls that act on it.
+    EngineLive(engine_settings::Live),
+    EngineAsk(engine_settings::Ask),
+    EngineAskOk,
+    EngineAskCancel,
+    EngineCacheClear,
+    EngineCacheCleared(Result<u64, String>),
+    EngineKvCleared(Result<u64, String>),
+    EnginePrefixClear,
+    EnginePrefixCleared(Result<u64, String>),
+    EngineDrain(bool),
+    EngineDrained(Result<bool, String>),
     /// A switch or a choice changed: written at once.
     EngineSet(String, serde_json::Value),
     EngineDraft(String, String),
@@ -1952,9 +1967,12 @@ impl App {
         if first {
             // the Studio names a chat after its first attachment when the question is empty
             let seed = if !prompt.trim().is_empty() { prompt.clone() } else { seed_name.unwrap_or_default() };
+            let level = self.store.prefs.thinking_level.clone();
             if let Some(chat) = self.store.chat_mut(id) {
                 chat.title = store::title_from(&seed);
                 chat.auto_title = true;
+                // the chat remembers the level it was started with
+                chat.thinking_level = level.clone();
             }
         }
         self.sync_current();
@@ -2302,7 +2320,12 @@ impl App {
             }
             Message::CycleThinking => {
                 let m = self.model_info();
-                self.store.prefs.thinking_level = m.thinking.next(&m.thinking.level_for(&self.store.prefs.thinking_level));
+                let next = m.thinking.next(&m.thinking.level_for(&self.wanted_thinking()));
+                self.store.prefs.thinking_level = next.clone();
+                // `setThinkingLevel`: the open chat keeps it too
+                if let Some(chat) = self.current.and_then(|id| self.store.chat_mut(id)) {
+                    chat.thinking_level = next;
+                }
                 self.save();
                 Task::none()
             }
@@ -6937,6 +6960,61 @@ impl App {
                 self.engine.loaded = true;
                 self.engine.error = None;
                 self.engine.drafts.clear();
+                Task::perform(engine_settings::fetch_live(self.base.clone()), Message::EngineLive)
+            }
+            Message::EngineLive(live) => {
+                self.engine.live = engine_settings::live_texts(&live);
+                Task::none()
+            }
+            Message::EngineAsk(ask) => {
+                self.engine.ask = Some(ask);
+                Task::none()
+            }
+            Message::EngineAskCancel => {
+                self.engine.ask = None;
+                Task::none()
+            }
+            Message::EngineAskOk => match self.engine.ask.take() {
+                Some(engine_settings::Ask::Reset) => self.update(Message::EngineReset),
+                Some(engine_settings::Ask::KvClear) => Task::perform(engine_settings::admin_delete(self.base.clone(), "/admin/kv-tier", "removed"), Message::EngineKvCleared),
+                None => Task::none(),
+            },
+            Message::EngineCacheClear => Task::perform(engine_settings::admin_delete(self.base.clone(), "/admin/cache", "cleared"), Message::EngineCacheCleared),
+            Message::EnginePrefixClear => Task::perform(engine_settings::admin_delete(self.base.clone(), "/admin/prefix-cache", "dropped"), Message::EnginePrefixCleared),
+            Message::EngineCacheCleared(r) => {
+                self.toast = Some(match r {
+                    Ok(n) => format!("{n} saved answers removed."),
+                    Err(_) => "The cache could not be emptied.".into(),
+                });
+                Task::perform(engine_settings::fetch_live(self.base.clone()), Message::EngineLive)
+            }
+            Message::EngineKvCleared(r) => {
+                self.toast = Some(match r {
+                    Ok(n) => format!("{n} blocks deleted."),
+                    Err(_) => "The blocks could not be deleted.".into(),
+                });
+                Task::perform(engine_settings::fetch_live(self.base.clone()), Message::EngineLive)
+            }
+            Message::EnginePrefixCleared(r) => {
+                self.toast = Some(match r {
+                    Ok(n) => format!("{n} shared prompts forgotten."),
+                    Err(_) => "The cache could not be emptied.".into(),
+                });
+                Task::none()
+            }
+            Message::EngineDrain(on) => {
+                self.engine.live.draining = on;
+                Task::perform(engine_settings::admin_drain(self.base.clone(), on), Message::EngineDrained)
+            }
+            Message::EngineDrained(r) => {
+                match r {
+                    Ok(on) => self.toast = Some(if on { "The server takes no new requests.".into() } else { "The server takes requests again.".into() }),
+                    Err(_) => {
+                        // the switch goes back to what the server has
+                        self.engine.live.draining = !self.engine.live.draining;
+                        self.toast = Some("The server did not accept that.".into());
+                    }
+                }
                 Task::none()
             }
             Message::EngineLoaded(Err(e)) => {
@@ -7061,6 +7139,23 @@ impl App {
                 Task::none()
             }
             Message::DownloadsLoaded(Ok(list)) => {
+                // *Download and load*: the download of the dialog is loaded as soon as it is done
+                if let Some(id) = self.models.pending_load {
+                    match list.iter().find(|d| d.id == id) {
+                        None => self.models.pending_load = None, // cancelled
+                        Some(d) if d.state == "failed" => {
+                            self.models.pending_load = None;
+                            self.toast = Some(if d.error.is_empty() { "The download failed.".into() } else { d.error.clone() });
+                        }
+                        Some(d) if d.state == "done" => {
+                            self.models.pending_load = None;
+                            let reference = if d.reference.is_empty() { d.model.clone() } else { d.reference.clone() };
+                            self.models.downloads = list;
+                            return Task::batch([Task::perform(models::fetch_overview(self.base.clone()), Message::OverviewLoaded), self.update(Message::LoadModel(reference))]);
+                        }
+                        Some(_) => {}
+                    }
+                }
                 // a download that finished: the file is in the list of this computer now
                 let finished = self.models.downloads.iter().any(|old| old.active() && list.iter().any(|d| d.id == old.id && d.state == "done"));
                 self.models.downloads = list;
@@ -7074,6 +7169,11 @@ impl App {
                 self.models.filter = text;
                 Task::none()
             }
+            Message::LocalPath(text) => {
+                self.models.local_path = text;
+                Task::none()
+            }
+            Message::Mp(m) => self.mp_update(m),
             Message::PickQuant(id, quant) => {
                 self.models.quant.insert(id, quant);
                 Task::none()
@@ -7665,6 +7765,15 @@ impl App {
             layers = layers
                 .push(backdrop(Message::PrjDeleteCancel))
                 .push(self.prj_delete_window(t));
+        }
+        if let Some(window) = self.code.skill_window(t) {
+            layers = layers.push(backdrop(Message::Code(crate::code::CodeMsg::Sess(crate::code::SessMsg::SkillDiscard)))).push(window);
+        }
+        if let Some(ask) = self.engine.ask {
+            layers = layers.push(backdrop(Message::EngineAskCancel)).push(engine_settings::ask_window(t, ask));
+        }
+        if self.models.picker.open {
+            layers = layers.push(backdrop(Message::Mp(crate::modelpicker::MpMsg::Cancel))).push(crate::modelpicker::view(t, &self.models.picker));
         }
         if self.chats_delete {
             layers = layers.push(backdrop(Message::ChatsDeleteCancel)).push(crate::generalcards::delete_all_window(t, self.store.chats.len()));
@@ -8531,7 +8640,7 @@ impl App {
         .padding(16)
         .width(460)
         .style(theme::card(t, theme::R_LG, false));
-        container(window).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
+        container(iced::widget::opaque(window)).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
     }
 
     /// The welcome tour of the Studio (`tourModal` of `shell.html`, the steps and buttons of
@@ -8690,7 +8799,7 @@ impl App {
             .padding(16)
             .width(460)
             .style(theme::card(t, theme::R_LG, false));
-        container(window)
+        container(iced::widget::opaque(window))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .width(Length::Fill)
@@ -8836,7 +8945,7 @@ impl App {
             .padding(12)
             .width(600)
             .style(theme::card(t, theme::R_LG, false));
-        container(window)
+        container(iced::widget::opaque(window))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .width(Length::Fill)
@@ -8964,7 +9073,7 @@ impl App {
             .padding(16)
             .width(520)
             .style(theme::card(t, theme::R_LG, false));
-        container(window)
+        container(iced::widget::opaque(window))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .width(Length::Fill)
@@ -8998,7 +9107,7 @@ impl App {
         .padding(16)
         .width(400)
         .style(theme::card(t, theme::R_LG, false));
-        container(window).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
+        container(iced::widget::opaque(window)).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
     }
 
     /// The dialog that asks before a project goes away (the Studio's askDialog for `prjDelete`).
@@ -9037,7 +9146,7 @@ impl App {
         .padding(16)
         .width(420)
         .style(theme::card(t, theme::R_LG, false));
-        container(window).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
+        container(iced::widget::opaque(window)).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
     }
 
     /// The dialog before a temporary chat with messages is gone for good (the Studio's
@@ -9066,7 +9175,7 @@ impl App {
         .padding(16)
         .width(420)
         .style(theme::card(t, theme::R_LG, false));
-        container(window).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
+        container(iced::widget::opaque(window)).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
     }
 
     /// The dialog in front of *Remove the runtime* (the `confirmDialog` of `npu.js`: the sentence
@@ -9095,7 +9204,7 @@ impl App {
         .padding(16)
         .width(420)
         .style(theme::card(t, theme::R_LG, false));
-        container(window).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
+        container(iced::widget::opaque(window)).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
     }
 
     /// The small window to choose the project of a move (the Studio's pickModal).
@@ -9137,7 +9246,7 @@ impl App {
         .padding(16)
         .width(380)
         .style(theme::card(t, theme::R_LG, false));
-        container(window).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
+        container(iced::widget::opaque(window)).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
     }
 
     /// The assistant menu under the name in the top bar (the Studio's presetMenu): every assistant with
@@ -9388,7 +9497,7 @@ impl App {
             .width(560)
             .max_height(840)
             .style(theme::card(t, theme::R_LG, false));
-        container(window)
+        container(iced::widget::opaque(window))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .width(Length::Fill)
@@ -9855,7 +9964,7 @@ impl App {
         let p = &self.store.prefs;
         let mut extra = if p.manual_sampling { p.sampling.fields() } else { serde_json::Map::new() };
         let model = self.model_info();
-        for (k, v) in model.thinking.fields(&model.thinking.level_for(&p.thinking_level)) {
+        for (k, v) in model.thinking.fields(&model.thinking.level_for(&self.wanted_thinking())) {
             extra.insert(k, v);
         }
         api::ChatParams {
@@ -9889,7 +9998,13 @@ impl App {
 
     /// The level of the thinking chip for the loaded model.
     pub fn thinking_level(&self) -> String {
-        self.model_info().thinking.level_for(&self.store.prefs.thinking_level)
+        self.model_info().thinking.level_for(&self.wanted_thinking())
+    }
+
+    /// The level that is wanted: the open chat's own, else the last choice (`t.thinkingLevel || state.thinkingLevel`).
+    pub fn wanted_thinking(&self) -> String {
+        let own = self.current.and_then(|id| self.store.chats.iter().find(|c| c.id == id)).map(|c| c.thinking_level.clone()).filter(|l| !l.is_empty());
+        own.unwrap_or_else(|| self.store.prefs.thinking_level.clone())
     }
 
     /// How fast the model read its last prompt (tokens per second; 0 when unknown).
@@ -10333,6 +10448,129 @@ impl App {
         self.update(Message::LoadModel(reference))
     }
 
+    /// The dialog *Choose a model* (`modelpicker.js`).
+    fn mp_update(&mut self, m: crate::modelpicker::MpMsg) -> Task<Message> {
+        use crate::modelpicker::{self as mp, Facts, MpMsg};
+        let base = self.base.clone();
+        match m {
+            MpMsg::Open(text) => {
+                self.models.picker = mp::Picker { open: true, path: text.clone(), ..Default::default() };
+                if text.trim().is_empty() {
+                    Task::none()
+                } else {
+                    self.mp_update(MpMsg::Check)
+                }
+            }
+            MpMsg::Edit(text) => {
+                self.models.picker.path = text;
+                Task::none()
+            }
+            MpMsg::CheckPath(path) => {
+                self.models.picker.path = path;
+                self.mp_update(MpMsg::Check)
+            }
+            MpMsg::Check => {
+                let value = mp::clean_path_text(&self.models.picker.path);
+                self.models.picker.path = value.clone();
+                if value.is_empty() {
+                    self.models.picker.facts = None;
+                    return Task::none();
+                }
+                self.models.picker.busy = true;
+                Task::perform(mp::inspect(base, value.clone()), move |r| Message::Mp(MpMsg::Checked(value.clone(), r)))
+            }
+            MpMsg::Checked(path, result) => {
+                if path != self.models.picker.path {
+                    return Task::none(); // an older check
+                }
+                self.models.picker.busy = false;
+                self.models.picker.facts = Some(match result {
+                    Ok(f) => f,
+                    Err(e) => Facts { ok: false, kind: "not_a_model".into(), problem: format!("The model could not be checked: {e}"), fix: "The server may be restarting. Try again in a moment.".into(), ..Default::default() },
+                });
+                Task::none()
+            }
+            MpMsg::Pick(kind) => Task::perform(mp::pick(base, kind), |r| Message::Mp(MpMsg::Picked(r))),
+            MpMsg::Picked(Ok(Some(path))) => self.mp_update(MpMsg::CheckPath(path)),
+            MpMsg::Picked(Ok(None)) => Task::none(),
+            MpMsg::Picked(Err(e)) => {
+                self.toast = Some(e);
+                Task::none()
+            }
+            MpMsg::Browse => {
+                let p = &mut self.models.picker;
+                p.browsing = !p.browsing;
+                if !p.browsing {
+                    return Task::none();
+                }
+                let typed = mp::clean_path_text(&p.path);
+                let absolute = typed.starts_with(['/', '\\']) || typed.chars().nth(1) == Some(':') && typed.chars().next().is_some_and(|c| c.is_ascii_alphabetic());
+                let dir = if absolute { typed.rsplit_once(['/', '\\']).map(|(head, _)| head.to_string()).filter(|h| !h.is_empty()).unwrap_or(typed.clone()) } else { String::new() };
+                p.listing = None;
+                p.list_note.clear();
+                Task::perform(mp::browse(base, dir), |r| Message::Mp(MpMsg::Listed(r)))
+            }
+            MpMsg::Dir(dir) => {
+                self.models.picker.listing = None;
+                self.models.picker.list_note.clear();
+                Task::perform(mp::browse(base, dir), |r| Message::Mp(MpMsg::Listed(r)))
+            }
+            MpMsg::Listed(Ok(l)) => {
+                self.models.picker.listing = Some(l);
+                Task::none()
+            }
+            MpMsg::Listed(Err(e)) => {
+                self.models.picker.list_note = e;
+                Task::none()
+            }
+            MpMsg::UseFolder => {
+                let Some(l) = &self.models.picker.listing else { return Task::none() };
+                self.models.picker.path = l.path.clone();
+                self.mp_update(MpMsg::Check)
+            }
+            MpMsg::Add => {
+                let Some(f) = self.models.picker.facts.clone().filter(|f| f.ok && f.kind != "repo") else { return Task::none() };
+                Task::perform(mp::add_local(base, f.path), |r| Message::Mp(MpMsg::Added(r)))
+            }
+            MpMsg::Added(Ok(_)) => {
+                self.models.picker.open = false;
+                self.toast = Some("Model added".into());
+                Task::perform(models::fetch_overview(self.base.clone()), Message::OverviewLoaded)
+            }
+            MpMsg::Added(Err(e)) => {
+                self.toast = Some(e);
+                Task::none()
+            }
+            MpMsg::Load => {
+                let Some(f) = self.models.picker.facts.clone().filter(|f| f.ok) else { return Task::none() };
+                self.models.picker.open = false;
+                if f.kind == "repo" {
+                    Task::perform(mp::pull_id(base, f.path), |r| Message::Mp(MpMsg::Pulled(r)))
+                } else {
+                    Task::perform(mp::add_local(base, f.path), |r| Message::Mp(MpMsg::LoadAdded(r)))
+                }
+            }
+            MpMsg::LoadAdded(result) => {
+                let path = self.models.picker.facts.as_ref().map(|f| f.path.clone()).unwrap_or_default();
+                let reference = result.ok().flatten().unwrap_or(path);
+                Task::batch([Task::perform(models::fetch_overview(self.base.clone()), Message::OverviewLoaded), self.update(Message::LoadModel(reference))])
+            }
+            MpMsg::Pulled(Ok(id)) => {
+                self.toast = Some("Added to the downloads".into());
+                self.models.pending_load = Some(id);
+                Task::perform(models::fetch_downloads(base), Message::DownloadsLoaded)
+            }
+            MpMsg::Pulled(Err(e)) => {
+                self.toast = Some(e);
+                Task::none()
+            }
+            MpMsg::Cancel => {
+                self.models.picker.open = false;
+                Task::none()
+            }
+        }
+    }
+
     /// The facts of the model that runs, for the command of Settings > General.
     fn model_facts(&self) -> crate::generalcards::ModelFacts {
         match &self.hero {
@@ -10374,7 +10612,7 @@ impl App {
         let held = self.clock.filter(|(c, _)| Some(*c) == self.current).map(|(_, t)| t);
         let now = prompts::local_time(prompts::frozen_clock(held, now_secs));
         let locale = Self::locale();
-        let level = model.thinking.level_for(&p.thinking_level);
+        let level = model.thinking.level_for(&self.wanted_thinking());
         let facts = prompts::Facts {
             size: prompts::size(model.max_context, model.detail.parameters, p.prompt_length, self.last_prompt_speed()),
             family: prompts::family(&model.detail),

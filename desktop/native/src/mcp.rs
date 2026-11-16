@@ -429,7 +429,7 @@ pub fn remove_window<'a>(t: Tokens, name: &str) -> Element<'a, Message> {
     .padding(16)
     .width(460)
     .style(theme::card(t, theme::R_LG, false));
-    container(window)
+    container(iced::widget::opaque(window))
         .center_x(Length::Fill)
         .center_y(Length::Fill)
         .width(Length::Fill)

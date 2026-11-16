@@ -1,0 +1,688 @@
+{
+ "scenarios": {
+  "full": {
+   "routes": {
+    "/api/studio/engine": {
+     "defaults": {},
+     "values": {}
+    },
+    "/admin/config": {
+     "output_cache": {
+      "entries": 12,
+      "bytes": 1048576,
+      "hits": 5,
+      "misses": 7,
+      "saved_prompt_tokens": 900
+     },
+     "coalescing": {
+      "followers": 3
+     },
+     "telemetry": {
+      "enabled": true,
+      "sent": 20,
+      "dropped": 1
+     },
+     "draining": true
+    },
+    "/admin/kv-tier": {
+     "enabled": true,
+     "dir": "/fast",
+     "used_bytes": 5242880,
+     "max_bytes": 1073741824,
+     "ram_max_bytes": 268435456,
+     "ram_used_bytes": 1048576,
+     "ram_blocks": 4,
+     "ram_hits": 2,
+     "hits": 9,
+     "spills": 8,
+     "drops": 1
+    },
+    "/admin/prefix-cache": {
+     "state_checkpoints": {
+      "enabled": true,
+      "entries": 3,
+      "bytes": 314572800,
+      "budget_bytes": 1073741824,
+      "hits": 6,
+      "tokens_skipped": 12000
+     }
+    }
+   },
+   "cacheStats": {
+    "text": "now: 12 saved answers, 1.0 MB · answered from the cache 5 times, computed 7 times, 900 prompt tokens saved · identical requests shared: 3",
+    "checked": false,
+    "disabled": false
+   },
+   "otelStats": {
+    "text": "sending traces · 20 batches sent, 1 dropped",
+    "checked": false,
+    "disabled": false
+   },
+   "kvStats": {
+    "text": "now: 5.0 MB of 1.0 GB on disk · 1.0 MB of 256.0 MB in memory (4 blocks, 2 read from there) · 9 blocks read back, 8 written, 1 skipped",
+    "checked": false,
+    "disabled": false
+   },
+   "stateStats": {
+    "text": "now: 3 copies, 300.0 MB of 1.0 GB · 6 messages continued from one, 12000 prompt tokens not read again",
+    "checked": false,
+    "disabled": false
+   },
+   "drain": {
+    "text": "",
+    "checked": true,
+    "disabled": false
+   },
+   "cacheClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "kvClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "prefixClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   }
+  },
+  "no_coalescing_no_ram": {
+   "routes": {
+    "/api/studio/engine": {
+     "defaults": {},
+     "values": {}
+    },
+    "/admin/config": {
+     "output_cache": {},
+     "telemetry": {},
+     "draining": false
+    },
+    "/admin/kv-tier": {
+     "enabled": true,
+     "dir": "",
+     "hits": 0,
+     "spills": 0,
+     "drops": 0
+    },
+    "/admin/prefix-cache": {
+     "state_checkpoints": {
+      "enabled": true,
+      "entries": 3,
+      "bytes": 314572800,
+      "budget_bytes": 1073741824,
+      "hits": 6,
+      "tokens_skipped": 12000
+     }
+    }
+   },
+   "cacheStats": {
+    "text": "now: 0 saved answers, 0 B · answered from the cache 0 times, computed 0 times, 0 prompt tokens saved",
+    "checked": false,
+    "disabled": false
+   },
+   "otelStats": {
+    "text": "telemetry is off",
+    "checked": false,
+    "disabled": false
+   },
+   "kvStats": {
+    "text": "now: no folder · 0 blocks read back, 0 written, 0 skipped",
+    "checked": false,
+    "disabled": false
+   },
+   "stateStats": {
+    "text": "now: 3 copies, 300.0 MB of 1.0 GB · 6 messages continued from one, 12000 prompt tokens not read again",
+    "checked": false,
+    "disabled": false
+   },
+   "drain": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "cacheClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "kvClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "prefixClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   }
+  },
+  "kv_off": {
+   "routes": {
+    "/api/studio/engine": {
+     "defaults": {},
+     "values": {}
+    },
+    "/admin/config": {
+     "output_cache": {
+      "entries": 12,
+      "bytes": 1048576,
+      "hits": 5,
+      "misses": 7,
+      "saved_prompt_tokens": 900
+     },
+     "coalescing": {
+      "followers": 3
+     },
+     "telemetry": {
+      "enabled": true,
+      "sent": 20,
+      "dropped": 1
+     },
+     "draining": true
+    },
+    "/admin/kv-tier": {
+     "enabled": false
+    },
+    "/admin/prefix-cache": {
+     "state_checkpoints": {
+      "enabled": true,
+      "entries": 3,
+      "bytes": 314572800,
+      "budget_bytes": 1073741824,
+      "hits": 6,
+      "tokens_skipped": 12000
+     }
+    }
+   },
+   "cacheStats": {
+    "text": "now: 12 saved answers, 1.0 MB · answered from the cache 5 times, computed 7 times, 900 prompt tokens saved · identical requests shared: 3",
+    "checked": false,
+    "disabled": false
+   },
+   "otelStats": {
+    "text": "sending traces · 20 batches sent, 1 dropped",
+    "checked": false,
+    "disabled": false
+   },
+   "kvStats": {
+    "text": "The disk copy is off.",
+    "checked": false,
+    "disabled": false
+   },
+   "stateStats": {
+    "text": "now: 3 copies, 300.0 MB of 1.0 GB · 6 messages continued from one, 12000 prompt tokens not read again",
+    "checked": false,
+    "disabled": false
+   },
+   "drain": {
+    "text": "",
+    "checked": true,
+    "disabled": false
+   },
+   "cacheClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "kvClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "prefixClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   }
+  },
+  "state_off": {
+   "routes": {
+    "/api/studio/engine": {
+     "defaults": {},
+     "values": {}
+    },
+    "/admin/config": {
+     "output_cache": {
+      "entries": 12,
+      "bytes": 1048576,
+      "hits": 5,
+      "misses": 7,
+      "saved_prompt_tokens": 900
+     },
+     "coalescing": {
+      "followers": 3
+     },
+     "telemetry": {
+      "enabled": true,
+      "sent": 20,
+      "dropped": 1
+     },
+     "draining": true
+    },
+    "/admin/kv-tier": {
+     "enabled": true,
+     "dir": "/fast",
+     "used_bytes": 5242880,
+     "max_bytes": 1073741824,
+     "ram_max_bytes": 268435456,
+     "ram_used_bytes": 1048576,
+     "ram_blocks": 4,
+     "ram_hits": 2,
+     "hits": 9,
+     "spills": 8,
+     "drops": 1
+    },
+    "/admin/prefix-cache": {
+     "state_checkpoints": {
+      "enabled": false
+     }
+    }
+   },
+   "cacheStats": {
+    "text": "now: 12 saved answers, 1.0 MB · answered from the cache 5 times, computed 7 times, 900 prompt tokens saved · identical requests shared: 3",
+    "checked": false,
+    "disabled": false
+   },
+   "otelStats": {
+    "text": "sending traces · 20 batches sent, 1 dropped",
+    "checked": false,
+    "disabled": false
+   },
+   "kvStats": {
+    "text": "now: 5.0 MB of 1.0 GB on disk · 1.0 MB of 256.0 MB in memory (4 blocks, 2 read from there) · 9 blocks read back, 8 written, 1 skipped",
+    "checked": false,
+    "disabled": false
+   },
+   "stateStats": {
+    "text": "This model does not need copies of its state (or they are off).",
+    "checked": false,
+    "disabled": false
+   },
+   "drain": {
+    "text": "",
+    "checked": true,
+    "disabled": false
+   },
+   "cacheClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "kvClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "prefixClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   }
+  },
+  "state_missing": {
+   "routes": {
+    "/api/studio/engine": {
+     "defaults": {},
+     "values": {}
+    },
+    "/admin/config": {
+     "output_cache": {
+      "entries": 12,
+      "bytes": 1048576,
+      "hits": 5,
+      "misses": 7,
+      "saved_prompt_tokens": 900
+     },
+     "coalescing": {
+      "followers": 3
+     },
+     "telemetry": {
+      "enabled": true,
+      "sent": 20,
+      "dropped": 1
+     },
+     "draining": true
+    },
+    "/admin/kv-tier": {
+     "enabled": true,
+     "dir": "/fast",
+     "used_bytes": 5242880,
+     "max_bytes": 1073741824,
+     "ram_max_bytes": 268435456,
+     "ram_used_bytes": 1048576,
+     "ram_blocks": 4,
+     "ram_hits": 2,
+     "hits": 9,
+     "spills": 8,
+     "drops": 1
+    },
+    "/admin/prefix-cache": {}
+   },
+   "cacheStats": {
+    "text": "now: 12 saved answers, 1.0 MB · answered from the cache 5 times, computed 7 times, 900 prompt tokens saved · identical requests shared: 3",
+    "checked": false,
+    "disabled": false
+   },
+   "otelStats": {
+    "text": "sending traces · 20 batches sent, 1 dropped",
+    "checked": false,
+    "disabled": false
+   },
+   "kvStats": {
+    "text": "now: 5.0 MB of 1.0 GB on disk · 1.0 MB of 256.0 MB in memory (4 blocks, 2 read from there) · 9 blocks read back, 8 written, 1 skipped",
+    "checked": false,
+    "disabled": false
+   },
+   "stateStats": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "drain": {
+    "text": "",
+    "checked": true,
+    "disabled": false
+   },
+   "cacheClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "kvClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "prefixClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   }
+  },
+  "state_route_404": {
+   "routes": {
+    "/api/studio/engine": {
+     "defaults": {},
+     "values": {}
+    },
+    "/admin/config": {
+     "output_cache": {
+      "entries": 12,
+      "bytes": 1048576,
+      "hits": 5,
+      "misses": 7,
+      "saved_prompt_tokens": 900
+     },
+     "coalescing": {
+      "followers": 3
+     },
+     "telemetry": {
+      "enabled": true,
+      "sent": 20,
+      "dropped": 1
+     },
+     "draining": true
+    },
+    "/admin/kv-tier": {
+     "enabled": true,
+     "dir": "/fast",
+     "used_bytes": 5242880,
+     "max_bytes": 1073741824,
+     "ram_max_bytes": 268435456,
+     "ram_used_bytes": 1048576,
+     "ram_blocks": 4,
+     "ram_hits": 2,
+     "hits": 9,
+     "spills": 8,
+     "drops": 1
+    }
+   },
+   "cacheStats": {
+    "text": "now: 12 saved answers, 1.0 MB · answered from the cache 5 times, computed 7 times, 900 prompt tokens saved · identical requests shared: 3",
+    "checked": false,
+    "disabled": false
+   },
+   "otelStats": {
+    "text": "sending traces · 20 batches sent, 1 dropped",
+    "checked": false,
+    "disabled": false
+   },
+   "kvStats": {
+    "text": "now: 5.0 MB of 1.0 GB on disk · 1.0 MB of 256.0 MB in memory (4 blocks, 2 read from there) · 9 blocks read back, 8 written, 1 skipped",
+    "checked": false,
+    "disabled": false
+   },
+   "stateStats": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "drain": {
+    "text": "",
+    "checked": true,
+    "disabled": false
+   },
+   "cacheClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "kvClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "prefixClear": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   }
+  },
+  "no_model": {
+   "routes": {
+    "/api/studio/engine": {
+     "defaults": {},
+     "values": {}
+    }
+   },
+   "cacheStats": {
+    "text": "Load a model to see the live numbers of the cache.",
+    "checked": false,
+    "disabled": false
+   },
+   "otelStats": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "kvStats": {
+    "text": "Load a model to see the live numbers.",
+    "checked": false,
+    "disabled": false
+   },
+   "stateStats": null,
+   "drain": {
+    "text": "",
+    "checked": false,
+    "disabled": true
+   },
+   "cacheClear": {
+    "text": "",
+    "checked": false,
+    "disabled": true
+   },
+   "kvClear": {
+    "text": "",
+    "checked": false,
+    "disabled": true
+   },
+   "prefixClear": {
+    "text": "",
+    "checked": false,
+    "disabled": true
+   }
+  },
+  "network_down": {
+   "routes": {
+    "/api/studio/engine": "throw",
+    "/admin/config": "throw",
+    "/admin/kv-tier": "throw",
+    "/admin/prefix-cache": "throw"
+   },
+   "cacheStats": {
+    "text": "Load a model to see the live numbers of the cache.",
+    "checked": false,
+    "disabled": false
+   },
+   "otelStats": {
+    "text": "",
+    "checked": false,
+    "disabled": false
+   },
+   "kvStats": {
+    "text": "Load a model to see the live numbers.",
+    "checked": false,
+    "disabled": false
+   },
+   "stateStats": null,
+   "drain": {
+    "text": "",
+    "checked": false,
+    "disabled": true
+   },
+   "cacheClear": {
+    "text": "",
+    "checked": false,
+    "disabled": true
+   },
+   "kvClear": {
+    "text": "",
+    "checked": false,
+    "disabled": true
+   },
+   "prefixClear": {
+    "text": "",
+    "checked": false,
+    "disabled": true
+   }
+  }
+ },
+ "rows": [
+  {
+   "title": "Remember identical answers",
+   "desc": "When the same request with temperature 0 comes again, the saved answer is returned at once instead of being computed again. Requests with a temperature above 0, with images, tools or streaming never use it.",
+   "id": "engOutputCache"
+  },
+  {
+   "title": "Memory for saved answers",
+   "desc": "The cache never grows beyond this size; the oldest answers go first.",
+   "id": "engCacheMb"
+  },
+  {
+   "title": "Keep answers for",
+   "desc": "After this time a saved answer is dropped.",
+   "id": "engCacheTtl"
+  },
+  {
+   "title": "Who shares saved answers",
+   "desc": "“Everyone” shares one cache. “Per key and user” keeps the answers of each API key (and the user field of the request) apart; a request that has neither is not saved. Use it when several people use the server.",
+   "id": "engCacheScope"
+  },
+  {
+   "title": "Share the start of prompts",
+   "desc": "Requests that begin with the same text (a system prompt, a long document) reuse the work already done for it. Turn it off if people on this server must not share anything.",
+   "id": "engPrefixCache"
+  },
+  {
+   "title": "Remember the start of a conversation (Qwen3.5, Mamba, RWKV)",
+   "desc": "Models with recurrent layers cannot point at old work like other models, so they read the whole conversation again on every message. With this on, the server keeps a copy of the model’s state at the end of each prompt and continues from it when the next prompt starts the same way. Automatic: on. Turn it off to save memory.",
+   "id": "engStateCache"
+  },
+  {
+   "title": "Memory for those copies",
+   "desc": "One copy of a 9B model takes about 100 MB. The oldest copy goes first when the limit is reached.",
+   "id": "engStateMb"
+  },
+  {
+   "title": "Separate this installation",
+   "desc": "A text that keeps the shared prompt blocks of this server apart from those of another server. Leave it empty unless you run several.",
+   "id": "engPrefixSalt"
+  },
+  {
+   "title": "When memory runs out",
+   "desc": "“Recompute” drops the work of a waiting request and does it again later (saves memory). “Move to RAM” keeps it in the main memory (faster to continue, needs RAM).",
+   "id": "engPreemption"
+  },
+  {
+   "title": "Keep shared prompt blocks on disk",
+   "desc": "A folder where the work done for long shared prompts (system prompts, documents) is saved, so a restart does not have to redo it. Empty means off. Use a fast disk; the folder is never read from another program.",
+   "id": "engKvDir"
+  },
+  {
+   "title": "Disk space for them",
+   "desc": "The oldest blocks are removed when the folder is full.",
+   "id": "engKvMb"
+  },
+  {
+   "title": "Keep the most recent ones in memory",
+   "desc": "Blocks that were used lately are kept in the main memory as well; reading them is much faster than reading the disk. They are gone after a restart. 0 means off. Works without the folder above.",
+   "id": "engKvRam"
+  },
+  {
+   "title": "Send traces to",
+   "desc": "The address of an OpenTelemetry collector (for example http://127.0.0.1:4318). Nothing is sent while it is empty. Only timings and sizes are sent, never the text of a conversation.",
+   "id": "engOtelEndpoint"
+  },
+  {
+   "title": "Name of this server",
+   "desc": "How the server is called in the traces.",
+   "id": "engOtelService"
+  },
+  {
+   "title": "Who may administer",
+   "desc": "This computer always may. Another computer needs an API key with the <b>Admin</b> right (Settings > Server and API). A key made for chatting never opens these controls.",
+   "id": null
+  },
+  {
+   "title": "Stop taking new requests",
+   "desc": "The server finishes what it is doing and answers new requests with “busy”. Used before a restart or an update, so nobody loses an answer. Takes effect at once.",
+   "id": "engDrain"
+  }
+ ],
+ "cards": [
+  "Answers that were given before",
+  "Speed and memory",
+  "Prompt blocks on disk",
+  "Telemetry",
+  "Administration"
+ ],
+ "buttons": [
+  [
+   "engCacheClear",
+   "Empty the cache now"
+  ],
+  [
+   "engKvClear",
+   "Delete the blocks on disk"
+  ],
+  [
+   "engPrefixClear",
+   "Forget the shared prompts in memory"
+  ],
+  [
+   "engSave",
+   "Save"
+  ],
+  [
+   "engRestart",
+   "Restart the server now"
+  ],
+  [
+   "engReset",
+   "Back to the defaults"
+  ]
+ ]
+}

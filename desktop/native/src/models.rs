@@ -76,6 +76,8 @@ pub struct Download {
     pub mb_per_s: f64,
     pub eta_seconds: u64,
     pub error: String,
+    /// What `models/load` takes once the download is done.
+    pub reference: String,
 }
 
 impl Download {
@@ -103,6 +105,12 @@ pub struct ModelsState {
     pub busy: Option<String>,
     pub error: Option<String>,
     pub fetched: bool,
+    /// The text of the card *Add a model*.
+    pub local_path: String,
+    /// The dialog *Choose a model*.
+    pub picker: crate::modelpicker::Picker,
+    /// A download that is loaded as soon as it is done (*Download and load*).
+    pub pending_load: Option<u64>,
 }
 
 impl ModelsState {
@@ -227,6 +235,7 @@ pub fn parse_downloads(v: &Value) -> Vec<Download> {
             mb_per_s: d.get("mb_per_s").and_then(Value::as_f64).unwrap_or(0.0),
             eta_seconds: number_of(d, "eta_seconds"),
             error: text_of(d, "error"),
+            reference: text_of(d, "reference"),
         })
         .collect()
 }
@@ -1561,6 +1570,33 @@ pub fn page<'a>(s: &'a ModelsState, t: Tokens, nothing_loaded: bool) -> Element<
         here = here.push(line(t, m.name.clone(), size(m.bytes), action));
     }
     content = content.push(card(t, "On this computer", here.into()));
+
+    // add a model of this computer (`localFileCard`): the dialog checks it before anything is loaded
+    let local = column![
+        text("Already have one? Choose a GGUF file, a Hugging Face model folder (config.json with .safetensors files), or type a Hugging Face name such as owner/name. Files stay where they are; fLLM shows what it found before anything is loaded.").size(12).color(t.muted),
+        row![
+            text_input("C:\\Models\\model.gguf, a model folder, or owner/name", &s.local_path)
+                .on_input(Message::LocalPath)
+                .on_submit(Message::Mp(crate::modelpicker::MpMsg::Open(s.local_path.clone())))
+                .font(Font::MONOSPACE)
+                .size(13)
+                .padding([8, 12])
+                .style(move |_, status| text_input::Style {
+                    background: iced::Background::Color(t.surface_2),
+                    border: iced::Border { radius: 10.0.into(), width: 1.0, color: if matches!(status, text_input::Status::Focused { .. }) { t.fg_soft } else { t.separator } },
+                    icon: t.muted,
+                    placeholder: t.muted,
+                    value: t.fg,
+                    selection: t.primary_soft,
+                }),
+            small_button(t, "Choose…", Some(Message::Mp(crate::modelpicker::MpMsg::Open(s.local_path.clone()))), false),
+            small_button(t, "Check", Some(Message::Mp(crate::modelpicker::MpMsg::Open(s.local_path.clone()))), true),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(10);
+    content = content.push(card(t, "Add a model", local.into()));
 
     // the catalog
     let search = text_input("Search the catalog", &s.filter)

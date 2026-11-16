@@ -219,10 +219,10 @@ fn the_settings_page_draws_in_both_modes_and_its_buttons_send_their_messages() {
     }
     let (mut app, _dir) = app("light");
     let _ = app.update(Message::Go(View::Settings));
-    let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 4000.0), app.view());
     ui.click("Manual").unwrap();
     assert!(ui.into_messages().any(|m| matches!(m, Message::SamplingManual(true))));
-    let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 900.0), app.view());
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 4000.0), app.view());
     ui.click("Custom").unwrap();
     assert!(ui.into_messages().any(|m| matches!(m, Message::SystemCustom(true))));
 }

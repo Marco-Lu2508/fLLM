@@ -74,7 +74,9 @@ fn the_card_says_what_the_server_wrote() {
         .expect("the lines of the server in the box");
     drop(ui);
 
-    // *Copy* takes exactly that text to the clipboard (`btnCopyLogs` of `models.js`)
+    // *Copy* takes exactly that text to the clipboard (`btnCopyLogs` of `models.js`); the page of
+    // General has its own *Copy* buttons, so the search leaves only the logs standing
+    let _ = app.update(Message::SettingsQuery("server log".into()));
     let mut ui = sim(&app);
     ui.click("Copy").expect("the button of the header");
     let copied: Vec<String> = ui

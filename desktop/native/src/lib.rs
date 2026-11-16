@@ -29,6 +29,7 @@ pub mod review;
 pub mod specs;
 pub mod browser;
 pub mod generalcards;
+pub mod modelpicker;
 pub mod sessions;
 pub mod browsercards;
 pub mod desktop;

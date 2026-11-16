@@ -158,5 +158,5 @@ fn the_page_draws_with_the_engine_cards_and_a_choice_sends_its_message() {
     assert!(ui.into_messages().any(|m| matches!(m, Message::EngineSet(k, v) if k == "preemption" && v == "swap")));
     let mut ui = Simulator::with_size(settings(), iced::Size::new(1280.0, 4000.0), app.view());
     ui.find("Fixed by the environment of the server.").expect("the locked option says why it cannot be changed");
-    ui.find("Reset engine options").expect("the reset button");
+    ui.find("Back to the defaults").expect("the reset button");
 }

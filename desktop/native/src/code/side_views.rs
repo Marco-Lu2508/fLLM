@@ -318,9 +318,74 @@ impl CodeState {
     }
 
     /// `/skill`: the model writes a skill from this session; nothing is saved before you agree.
-    pub(super) fn skill_command(&mut self, _env: &Env) -> Task<Message> {
-        self.note("Writing a skill from a session is not built in this window yet.");
-        Task::none()
+    pub(super) fn skill_command(&mut self, env: &Env) -> Task<Message> {
+        if self.skill_asking || self.skill.is_some() {
+            return Task::none();
+        }
+        let messages: Vec<crate::skills::SessionMessage> = self
+            .wire(None)
+            .into_iter()
+            .map(|m| crate::skills::SessionMessage {
+                calls: m
+                    .tool_calls
+                    .as_ref()
+                    .and_then(|c| c.as_array())
+                    .map(|a| a.iter().map(|c| (c.pointer("/function/name").and_then(|n| n.as_str()).unwrap_or("undefined").to_string(), c.pointer("/function/arguments").and_then(|n| n.as_str()).unwrap_or("").to_string())).collect())
+                    .unwrap_or_default(),
+                role: m.role,
+                content: m.content,
+            })
+            .collect();
+        let transcript = crate::skills::transcript(&messages, 14000);
+        // the page says nothing at all when there is nothing to learn from yet
+        if transcript.trim().is_empty() {
+            return Task::none();
+        }
+        let Some(model) = env.model.map(str::to_string) else {
+            self.pending_toast = Some("Could not write a skill: no model is loaded".into());
+            return Task::none();
+        };
+        self.skill_asking = true;
+        let request = vec![WireMessage::new("user", crate::skills::proposal_prompt(&transcript))];
+        Task::perform(super::session_cmds::ask_raw(env.base.to_string(), model, request, 1600, 0.3), |r| Message::Code(CodeMsg::Sess(SessMsg::SkillWritten(r))))
+    }
+
+    /// The dialog *Save this as a skill?* (`skEnsureProposalModal`).
+    pub fn skill_window(&self, t: Tokens) -> Option<Element<'_, Message>> {
+        let draft = self.skill.as_ref()?;
+        let sess = |m: SessMsg| Message::Code(CodeMsg::Sess(m));
+        let scope = crate::settings::segmented(
+            t,
+            vec![
+                ("For every project", !draft.workspace, sess(SessMsg::SkillScope(false))),
+                ("This folder only", draft.workspace, sess(SessMsg::SkillScope(true))),
+            ],
+        );
+        let scope = if self.workspace.is_some() { scope } else { text("This folder only is not possible without a folder.").size(11).color(t.muted).into() };
+        let window = container(
+            column![
+                text("Save this as a skill?").size(16).font(semibold()),
+                text("The model wrote this skill from the session. Edit it if needed; it is only saved when you press Save.").size(12).color(t.muted),
+                row![
+                    iced::widget::text_input("name", &draft.name).on_input(move |s| Message::Code(CodeMsg::Sess(SessMsg::SkillName(s)))).font(iced::Font::MONOSPACE).size(13).padding([6, 10]),
+                    scope,
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+                iced::widget::text_editor(&draft.editor).on_action(move |a| Message::Code(CodeMsg::Sess(SessMsg::SkillEdit(a)))).font(iced::Font::MONOSPACE).size(12).height(Length::Fixed(300.0)).style(crate::skills::editor_style(t)),
+                row![
+                    Space::new().width(Length::Fill),
+                    button(text("Discard").size(13)).on_press(sess(SessMsg::SkillDiscard)).padding([6, 12]).style(crate::theme::ghost_button(t)),
+                    button(text(if draft.busy { "Saving…" } else { "Save skill" }).size(13)).on_press_maybe((!draft.busy).then(|| sess(SessMsg::SkillSave))).padding([6, 14]).style(crate::theme::primary_button(t)),
+                ]
+                .spacing(8),
+            ]
+            .spacing(10),
+        )
+        .padding(16)
+        .width(640)
+        .style(crate::theme::card(t, crate::theme::R_LG, false));
+        Some(container(iced::widget::opaque(window)).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into())
     }
 }
 

@@ -111,5 +111,5 @@ pub fn delete_all_window<'a>(t: Tokens, chats: usize) -> Element<'a, Message> {
     .padding(16)
     .width(400)
     .style(theme::card(t, theme::R_LG, false));
-    container(window).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
+    container(iced::widget::opaque(window)).center_x(Length::Fill).center_y(Length::Fill).width(Length::Fill).height(Length::Fill).padding(24).into()
 }

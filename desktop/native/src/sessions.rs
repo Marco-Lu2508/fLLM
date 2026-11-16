@@ -144,11 +144,11 @@ pub fn first_change_after(ids: &[u64], mark: u64) -> Option<u64> {
     ids.iter().copied().filter(|id| *id > mark).min()
 }
 
-fn utf16_len(s: &str) -> usize {
+pub(crate) fn utf16_len(s: &str) -> usize {
     s.encode_utf16().count()
 }
 
-fn utf16_slice(s: &str, from: usize, to: usize) -> String {
+pub(crate) fn utf16_slice(s: &str, from: usize, to: usize) -> String {
     let units: Vec<u16> = s.encode_utf16().collect();
     let to = to.min(units.len());
     let from = from.min(to);

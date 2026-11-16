@@ -256,6 +256,16 @@ pub enum Item {
 /// A notice with buttons (`pushChoices` of the page: sessions, rewind points, the models). It is
 /// not kept with the session; it stands below the conversation until a button is pressed or the
 /// next message is sent.
+/// The skill of `/skill` in its dialog (`fllmSkillShowProposal`): the name, the scope and the text, all of them yours to change.
+#[derive(Debug)]
+pub struct SkillDraft {
+    pub name: String,
+    /// *This folder only* (else *For every project*).
+    pub workspace: bool,
+    pub editor: iced::widget::text_editor::Content,
+    pub busy: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Choices {
     pub text: String,
@@ -817,7 +827,7 @@ pub struct CodeState {
     pub(crate) pending_prefs: Option<PendingPrefs>,
     /// A line for the toast of the window (`toast(...)` of the page) — `/agent` while the agent
     /// runs, and a memory that could not be saved.
-    pub(crate) pending_toast: Option<String>,
+    pub pending_toast: Option<String>,
     /// What `/status` and `/diff` ran: the output goes with the next message (`pending` of the
     /// page), never into the conversation itself.
     pub pending: Vec<String>,
@@ -896,6 +906,10 @@ pub struct CodeState {
     pub rename: Option<(String, String)>,
     /// The session that waits for the answer of *Delete this session?*.
     pub confirm_delete: Option<String>,
+    /// The skill the model wrote from the session, waiting for *Save skill* or *Discard*.
+    pub skill: Option<SkillDraft>,
+    /// `/skill` asked the model and the answer has not come yet.
+    pub skill_asking: bool,
     /// Whether the server answered `GET /api/studio/agent/changes` (the page: `code.changes === null`).
     pub changes_known: bool,
     /// A session the app has to write the file for (the page calls `saveCodeSession()` itself).
@@ -987,6 +1001,8 @@ impl Default for CodeState {
             personality: "default".into(),
             custom: Vec::new(),
             pending_prefs: None,
+            skill: None,
+            skill_asking: false,
             pending_toast: None,
             pending: Vec::new(),
             pending_turbo: None,

@@ -1,0 +1,309 @@
+{
+ "facts": [
+  {
+   "facts": null,
+   "mtp": "",
+   "rows": []
+  },
+  {
+   "facts": {
+    "speculation_blocked": "Not with this build."
+   },
+   "mtp": "Not with this build.",
+   "rows": []
+  },
+  {
+   "facts": {
+    "mtp": true
+   },
+   "mtp": "Built-in multi-token prediction heads were found. They can make answers faster (Load options, Speculative decoding), on the processor or a CUDA graphics card.",
+   "rows": []
+  },
+  {
+   "facts": {
+    "mtp": false
+   },
+   "mtp": "This model has no multi-token prediction heads (MTP), so that option cannot speed it up. Prompt lookup and a draft model work without them. Heads are part of the model files: a model converted without them cannot get them back.",
+   "rows": []
+  },
+  {
+   "facts": {},
+   "mtp": "Whether it has multi-token prediction heads (MTP) is known once the files are on this computer.",
+   "rows": []
+  },
+  {
+   "facts": {
+    "ok": false
+   },
+   "mtp": "Whether it has multi-token prediction heads (MTP) is known once the files are on this computer.",
+   "rows": []
+  },
+  {
+   "facts": {
+    "ok": true,
+    "format": "GGUF",
+    "size_bytes": 4831838208,
+    "files": 1,
+    "architecture": "qwen3",
+    "quantization": "Q4_K_M",
+    "context_length": 40960,
+    "fits": true
+   },
+   "mtp": "Whether it has multi-token prediction heads (MTP) is known once the files are on this computer.",
+   "rows": [
+    [
+     "Format",
+     "GGUF"
+    ],
+    [
+     "Size",
+     "4.5 GB"
+    ],
+    [
+     "Architecture",
+     "qwen3"
+    ],
+    [
+     "Quantization",
+     "Q4_K_M"
+    ],
+    [
+     "Context length",
+     "40,960 tokens"
+    ],
+    [
+     "Memory",
+     "Fits into the free memory"
+    ]
+   ]
+  },
+  {
+   "facts": {
+    "ok": true,
+    "format": "safetensors",
+    "size_bytes": 15032385536,
+    "files": 4,
+    "architecture": "llama",
+    "quantization": "BF16",
+    "context_length": 131072,
+    "fits": false
+   },
+   "mtp": "Whether it has multi-token prediction heads (MTP) is known once the files are on this computer.",
+   "rows": [
+    [
+     "Format",
+     "safetensors"
+    ],
+    [
+     "Size",
+     "14.0 GB in 4 files"
+    ],
+    [
+     "Architecture",
+     "llama"
+    ],
+    [
+     "Quantization",
+     "BF16"
+    ],
+    [
+     "Context length",
+     "131,072 tokens"
+    ],
+    [
+     "Memory",
+     "May not fit into the free memory"
+    ]
+   ]
+  },
+  {
+   "facts": {
+    "ok": true,
+    "format": "GGUF",
+    "size_bytes": 300000,
+    "files": 1
+   },
+   "mtp": "Whether it has multi-token prediction heads (MTP) is known once the files are on this computer.",
+   "rows": [
+    [
+     "Format",
+     "GGUF"
+    ],
+    [
+     "Size",
+     "1 MB"
+    ]
+   ]
+  },
+  {
+   "facts": {
+    "ok": true,
+    "format": "GGUF",
+    "size_bytes": 0,
+    "files": 0,
+    "architecture": "",
+    "quantization": "F16",
+    "context_length": 0
+   },
+   "mtp": "Whether it has multi-token prediction heads (MTP) is known once the files are on this computer.",
+   "rows": [
+    [
+     "Format",
+     "GGUF"
+    ],
+    [
+     "Quantization",
+     "F16"
+    ]
+   ]
+  },
+  {
+   "facts": {
+    "ok": true,
+    "format": "GGUF",
+    "size_bytes": 1073741824,
+    "files": 2,
+    "context_length": 512,
+    "fits": null
+   },
+   "mtp": "Whether it has multi-token prediction heads (MTP) is known once the files are on this computer.",
+   "rows": [
+    [
+     "Format",
+     "GGUF"
+    ],
+    [
+     "Size",
+     "1.0 GB in 2 files"
+    ],
+    [
+     "Context length",
+     "512 tokens"
+    ]
+   ]
+  },
+  {
+   "facts": {
+    "ok": true,
+    "format": "GGUF",
+    "size_bytes": 5242880,
+    "files": 1
+   },
+   "mtp": "Whether it has multi-token prediction heads (MTP) is known once the files are on this computer.",
+   "rows": [
+    [
+     "Format",
+     "GGUF"
+    ],
+    [
+     "Size",
+     "5 MB"
+    ]
+   ]
+  }
+ ],
+ "paths": [
+  {
+   "text": "  /models/a.gguf  ",
+   "got": "/models/a.gguf"
+  },
+  {
+   "text": "\"C:\\Models\\a.gguf\"",
+   "got": "C:\\Models\\a.gguf"
+  },
+  {
+   "text": "'/x y/z'",
+   "got": "/x y/z"
+  },
+  {
+   "text": "",
+   "got": ""
+  },
+  {
+   "text": "   ",
+   "got": ""
+  },
+  {
+   "text": "\"\"\"quoted\"\"\"",
+   "got": "quoted"
+  },
+  {
+   "text": "owner/name",
+   "got": "owner/name"
+  },
+  {
+   "text": "\" spaced \"",
+   "got": "spaced"
+  },
+  {
+   "text": null,
+   "got": ""
+  },
+  {
+   "text": "__undefined__",
+   "got": ""
+  },
+  {
+   "text": "'\"mixed'\"",
+   "got": "mixed"
+  }
+ ],
+ "bytes": [
+  {
+   "bytes": 0,
+   "got": "0 B"
+  },
+  {
+   "bytes": -5,
+   "got": "0 B"
+  },
+  {
+   "bytes": 1,
+   "got": "1 B"
+  },
+  {
+   "bytes": 1023,
+   "got": "1023 B"
+  },
+  {
+   "bytes": 1024,
+   "got": "1.0 KB"
+  },
+  {
+   "bytes": 1536,
+   "got": "1.5 KB"
+  },
+  {
+   "bytes": 1048576,
+   "got": "1.0 MB"
+  },
+  {
+   "bytes": 5242880,
+   "got": "5.0 MB"
+  },
+  {
+   "bytes": 4831838208,
+   "got": "4.5 GB"
+  },
+  {
+   "bytes": 1099511627776,
+   "got": "1.0 TB"
+  },
+  {
+   "bytes": 5000000000000000,
+   "got": "4547.5 TB"
+  },
+  {
+   "bytes": null,
+   "got": "0 B"
+  },
+  {
+   "bytes": "__undefined__",
+   "got": "0 B"
+  },
+  {
+   "bytes": "2048",
+   "got": "2.0 KB"
+  }
+ ]
+}

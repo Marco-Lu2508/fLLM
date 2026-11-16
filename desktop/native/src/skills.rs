@@ -71,12 +71,14 @@ pub fn parse(text: &str) -> Parsed {
         text = rest;
     }
     let bytes = text.as_bytes();
-    if bytes.len() < 8 || &bytes[..4] != b"---\n" {
+    // the page's `^---\r?\n`
+    let open = if bytes.starts_with(b"---\r\n") { 5 } else { 4 };
+    if bytes.len() < 8 || (!bytes.starts_with(b"---\n") && !bytes.starts_with(b"---\r\n")) {
         return Parsed { meta: Default::default(), body: text.to_string() };
     }
     // the front matter ends at a line that is `---` followed by nothing or by spaces and a newline
     let mut end = None;
-    let mut cursor = 4;
+    let mut cursor = open;
     while cursor < bytes.len() {
         let line_end = text[cursor..]
             .find('\n')
@@ -90,7 +92,7 @@ pub fn parse(text: &str) -> Parsed {
         cursor = line_end + 1;
     }
     let (front, rest) = match end {
-        Some(end) => (&text[4..end], &text[end..]),
+        Some(end) => (&text[open..end], &text[end..]),
         None => return Parsed { meta: Default::default(), body: text.to_string() },
     };
     let mut meta = std::collections::BTreeMap::new();
@@ -743,7 +745,7 @@ pub fn delete_window<'a>(
     .padding(16)
     .width(460)
     .style(theme::card(t, theme::R_LG, false));
-    container(window)
+    container(iced::widget::opaque(window))
         .center_x(Length::Fill)
         .center_y(Length::Fill)
         .width(Length::Fill)
@@ -779,7 +781,7 @@ pub fn confirm_window<'a>(t: Tokens, confirm: &LnConfirm) -> Element<'a, Message
     .padding(16)
     .width(460)
     .style(theme::card(t, theme::R_LG, false));
-    container(window)
+    container(iced::widget::opaque(window))
         .center_x(Length::Fill)
         .center_y(Length::Fill)
         .width(Length::Fill)
@@ -2018,4 +2020,113 @@ mod tests {
             "Your skills are saved in /home/m/.fllm/skills. Workspace skills are saved in <folder>/.fllm/skills/<name>/SKILL.md."
         );
     }
+}
+
+
+// ---- `/skill`: the model writes a skill from the session (`skTranscript`, `skProposalPrompt`, `skParseProposal`) ----
+
+/// A message of the session as the transcript reads it: the role, the text and the calls it made.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionMessage {
+    pub role: String,
+    pub content: String,
+    /// The name and the arguments of every call.
+    pub calls: Vec<(String, String)>,
+}
+
+/// The session as plain text for the model (`skTranscript`): each message clipped, the middle left out when it is long.
+pub fn transcript(messages: &[SessionMessage], max_chars: usize) -> String {
+    use crate::sessions::{utf16_len, utf16_slice};
+    let mut lines = Vec::new();
+    for m in messages {
+        if !matches!(m.role.as_str(), "user" | "assistant" | "tool") {
+            continue;
+        }
+        let calls = m.calls.iter().map(|(name, args)| format!("{name}({})", utf16_slice(args, 0, 200))).collect::<Vec<_>>().join(", ");
+        if m.content.trim().is_empty() && calls.is_empty() {
+            continue;
+        }
+        let len = utf16_len(&m.content);
+        let clipped = if len > 1200 { format!("{} ... {}", utf16_slice(&m.content, 0, 800), utf16_slice(&m.content, len - 300, len)) } else { m.content.clone() };
+        let role = if m.role == "tool" { "TOOL RESULT".to_string() } else { m.role.to_uppercase() };
+        lines.push(format!("{role}: {clipped}{}", if calls.is_empty() { String::new() } else { format!("\n[calls: {calls}]") }));
+    }
+    let all = lines.join("\n\n");
+    let len = utf16_len(&all);
+    if len <= max_chars {
+        return all;
+    }
+    let keep = max_chars / 2;
+    format!("{}\n\n[... the middle of the session is left out ...]\n\n{}", utf16_slice(&all, 0, keep), utf16_slice(&all, len - keep, len))
+}
+
+/// The instruction that asks the model to turn a finished session into a skill (`skProposalPrompt`).
+pub fn proposal_prompt(transcript: &str) -> String {
+    [
+        "Below is a session in which a task was completed. Turn what was learned into a reusable skill: a short procedure that would let someone do the same kind of task again without the discovery work.",
+        "",
+        "Answer with the SKILL.md file only, in exactly this form and nothing else:",
+        "---",
+        "name: short-lowercase-name-with-dashes",
+        "description: one sentence saying what the skill does",
+        "when: one sentence saying when to use it",
+        "---",
+        "# Title",
+        "",
+        "1. Numbered steps with exact commands, file names and settings that worked.",
+        "",
+        "## Pitfalls",
+        "- Things that failed and what to do instead.",
+        "",
+        "Leave out anything specific to this one run (dates, temporary paths, the names of people). If the session holds nothing reusable, answer with the single word NONE.",
+        "",
+        "=== SESSION ===",
+        transcript,
+        "=== END OF SESSION ===",
+    ]
+    .join("\n")
+}
+
+/// The skill the model wrote: its name and the text of its `SKILL.md`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Proposal {
+    pub name: String,
+    pub content: String,
+}
+
+/// `skParseProposal`: the proposal in the reply of the model, or the line that says why there is none.
+pub fn parse_proposal(reply: &str) -> Result<Proposal, String> {
+    let think = regex::Regex::new(r"(?s)<think>.*?</think>").expect("think");
+    let cleaned = think.replace_all(reply, "");
+    let mut t = cleaned.trim().to_string();
+    let none = t.eq_ignore_ascii_case("none") || t.eq_ignore_ascii_case("none.");
+    if t.is_empty() || none {
+        return Err("The model found nothing reusable in this session.".into());
+    }
+    let fenced = regex::Regex::new(r"(?is)^```[a-z]*\n(.*?)\n```\s*$").expect("fence");
+    if let Some(c) = fenced.captures(&t) {
+        t = c[1].trim().to_string();
+    }
+    // a line of talk before the file
+    if let Some(at) = t.find("---") {
+        if at > 0 {
+            t = t[at..].to_string();
+        }
+    }
+    let parsed = parse(&t);
+    let description = parsed.meta.get("description").cloned().unwrap_or_default();
+    if description.is_empty() || parsed.body.trim().is_empty() {
+        return Err("The model did not write a skill in the expected form.".into());
+    }
+    let named = parsed.meta.get("name").cloned().unwrap_or_default();
+    let name = if valid_name(&named) {
+        named
+    } else {
+        let source = if named.is_empty() { description.split(' ').take(5).collect::<Vec<_>>().join(" ") } else { named };
+        slug(&source)
+    };
+    if !valid_name(&name) {
+        return Err("The skill has no usable name.".into());
+    }
+    Ok(Proposal { name, content: format!("{}\n", t.trim_end()) })
 }

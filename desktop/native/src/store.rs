@@ -136,6 +136,9 @@ pub struct ChatRecord {
     /// a chat from before it was kept, and a chat you renamed, have it off.
     #[serde(default)]
     pub auto_title: bool,
+    /// The level of the thinking chip this chat remembers (`t.thinkingLevel`); empty: the last choice.
+    #[serde(default)]
+    pub thinking_level: String,
 }
 
 /// A rewind of the chat: the messages after some message are out of the row until it is taken
