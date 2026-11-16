@@ -493,8 +493,10 @@ button with a progress bar and a Cancel button, and **Remove the runtime** takes
 Models page (Advanced, *Run on*) lists the NPU. Be aware: it is experimental and was measured on one Core Ultra 5 235U only; it makes reading long prompts about twice as fast as the processor alone (not faster than the integrated graphics), does nothing for the answer, keeps a converted copy of the weights in memory and only dense models are accelerated. The card shows a status line while it works (calls, models compiled and still compiling, memory held); [intel-npu.md](intel-npu.md) has the details. The automatic choice never uses the NPU. If the NPU cannot
 take a model, the model runs on the processor and the card shows why. AMD and Qualcomm NPUs are shown as *detected, not supported yet*.
 
-**Updates.** The Studio asks GitHub for a newer release once per start. If there is one, the Models page offers to download the
-installer of this system and start it (Windows: the setup program, Linux: the AppImage or the package).
+**Updates.** The Studio asks GitHub for a newer release once per start and says so on the Models page, with the link to the release. Its
+*download the installer* button looks for a Windows setup program or a Linux AppImage/`.deb`, which releases since 0.2.3 no longer have (the
+desktop app became a native program), so it offers none: download the new archive from the release page, or let the desktop app update itself
+([desktop.md](desktop.md)).
 ## Settings
 
 The search box above the list of pages finds a setting by what it says (type "speed" and the pages that mention it stay in the list,

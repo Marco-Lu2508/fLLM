@@ -21,11 +21,11 @@ fLLM is young. Read [Status](#status) for what has actually run on which hardwar
 
 ## Quick start
 
-**1. Desktop app** (Windows and Linux): download the installer from the
-[latest release](https://github.com/Marco-Lu2508/fLLM/releases) (`fLLM_<version>_x64-setup.exe` or `.msi` on Windows;
-`.deb`, `.rpm` or `.AppImage` on Linux), install it and start it. On the first start the app shows your hardware and
-suggests models that fit into its memory; pick one and chat. No terminal needed. The installers are not signed yet,
-so Windows may show a warning ([docs/user/desktop.md](docs/user/desktop.md)). macOS is not packaged yet.
+**1. Desktop app** (Windows, Linux, macOS on Apple silicon): download the `fllm-desktop-<system>` archive from the
+[latest release](https://github.com/Marco-Lu2508/fLLM/releases) (a `-cuda` or `-rocm`/`-hip` one for NVIDIA or AMD GPUs), unpack it and start `fllm-app`.
+It is a native program (no web view) and brings the engine with it. On the first start it shows your hardware and
+suggests models that fit into its memory; pick one and chat. No terminal needed. The apps are not signed with a system
+certificate, so Windows may show a warning ([docs/user/desktop.md](docs/user/desktop.md)).
 
 **2. Release binary** (command line; Linux x86_64/aarch64, macOS aarch64/x86_64, Windows x86_64):
 
@@ -266,7 +266,7 @@ not a repeated benchmark or an AMD/multi-GPU result.
 ### Tools and clients
 
 `fllm-rs studio` starts the server and opens the Studio, the built-in browser app with chat, a coding agent and a
-model manager (the desktop app shows the same page in its own window): [docs/user/studio.md](docs/user/studio.md).
+model manager (the native desktop app has the same things in its own window, drawn by the program itself): [docs/user/studio.md](docs/user/studio.md).
 The model manager loads a GGUF file (also a split one), a Hugging Face folder with `.safetensors`, or an `owner/name` from Hugging Face, and tells you what it found before loading.
 Inside the Studio:
 
@@ -274,8 +274,8 @@ Inside the Studio:
 
 The page follows the light or dark setting of your system, works down to a phone-sized window, has a command palette (Ctrl+K) and a
 settings search, and its footer and Hardware page show which device runs the model and how full each device's memory is
-([screenshots](docs/user/studio.md)). The desktop app has the same page in its own window, with a loading page that offers a restart and
-the log folder when the engine does not start.
+([screenshots](docs/user/studio.md)). The native desktop app has the same things in its own window; when the engine does not start it says why and offers a retry
+and the log folder.
 
 - **Chat**: projects, assistants, documents, web access and research, sampling controls, thinking levels.
 - **Coding agent** (Code page): reads, searches and edits files and runs commands in one folder, with permission

@@ -51,7 +51,7 @@ def main() -> None:
         f"curl -fsSL https://raw.githubusercontent.com/{REPO}/{tag}/install.sh | sh   # Linux, macOS",
         "```",
         "",
-        "Windows: `install.ps1` from the same tag; desktop installers (fLLM and fLLM-cuda), the Docker images and every archive are in the assets below, "
+        "Windows: `install.ps1` from the same tag; the desktop app (`fllm-desktop-<system>` archives; unpack and start `fllm-app`), the Docker images and every archive are in the assets below, "
         "each with a `.sha256` file and a keyless cosign bundle (`.sigstore.json`).",
         "",
         f"The complete list of changes of this version is in the [changelog](https://github.com/{REPO}/blob/{tag}/CHANGELOG.md), section {version}.",

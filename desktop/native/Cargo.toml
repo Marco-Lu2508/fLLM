@@ -1,6 +1,6 @@
 [package]
 name = "fllm-app"
-version = "0.2.2"
+version = "0.2.3"
 description = "fLLM desktop app, native: the Studio written in Rust (iced), no web view"
 edition = "2021"
 license = "Apache-2.0"
@@ -8,7 +8,7 @@ repository = "https://github.com/Marco-Lu2508/fLLM"
 rust-version = "1.90"
 publish = false
 
-# not part of the engine workspace (like desktop/src-tauri): the GUI has its own dependencies and lock file
+# not part of the engine workspace (like the old Tauri app that it replaced): the GUI has its own dependencies and lock file
 [workspace]
 
 [dependencies]

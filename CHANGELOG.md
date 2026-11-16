@@ -6,7 +6,22 @@ behaviour between versions).
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-16
+
+The first release of the native desktop app. The old Tauri app (the web Studio in a web view) is gone: the releases carry the native program instead, one bundle per system and per engine build.
+
+### Highlights
+- **The desktop app is a native Rust program** (`desktop/native`, iced; no web view, no Chromium). Chat, the coding agent with its browser, computer use, sub-agents, skills and MCP, projects, memory, the model manager and the settings of the Studio, compared case by case with the Studio's own scripts. Every release now has `fllm-desktop-<system>[-cuda|-rocm|-hip]` archives that hold the app and the engine of that release: unpack it, start `fllm-app`.
+- **It updates itself with the same build.** A CUDA app fetches the CUDA bundle of a newer release, an AMD app the AMD one, a standard app the standard one; the download is checked against its `.sha256` and installed with *Restart to update*. A release without your build is never replaced by another build.
+- **Charts, diagrams and math in answers.** LaTeX is typeset like TeX (display and inline), ```` ```chart ```` blocks (bar, line, area, pie, doughnut, scatter, radar) and Mermaid diagrams are drawn in the colors of the theme, SVG blocks are shown; the model is told about the formats (Settings, General).
+- **A browser panel that is checked against a real Chromium** and computer use that is checked against a real X server; mutation runs of both.
+
+
 ### Added
+- **Self-update of the native app** (`selfupdate.rs`): the bundle of the installed build (standard, CUDA, AMD) from the newest release, checked against its checksum, unpacked and put over the installation on a button, with a rollback when anything fails. Settings, Desktop app, Updates.
+- **Rich answers in the native app** (`rich.rs`): math, charts, Mermaid diagrams and SVG in chat and Code, as pictures in the theme's colors; the same switch tells the models about the formats.
+- **The browser panel got a new look**: a card with a header, round navigation buttons, the address in one pill (Ctrl+L), a wide mode, the page with its title and host, what the agent is doing over the page, comment mode with a crosshair, and quick addresses on an empty stage.
+- **The search of earlier chats, the message queue of the Code page, one window per user, the place of the window and pasting an image** in the native app.
 - **The desktop app's own settings in the native app.** Settings > Desktop app: keep running in the
   tray, start when you sign in, a quick-entry hotkey that brings the window up with a new chat, the
   server's log folder and its restart. The tool cards of the Code page are named and shaped as the
@@ -747,6 +762,9 @@ behaviour between versions).
   line turns a test red.
 
 - **Assistants in the native desktop app: the presets of the Studio as one feature, and the engine's `pick-file` route learns `kind: "file"`.** The name under the model in the top bar opens the menu: six built-ins (Standard, Precise and brief, Creative, Programmer, Translator, Editor) with their icon, colour and four starter suggestions, your own ones below them, and *New* / *Import* / *Save current*. Choosing one stores it on the open chat and for new chats, sends its sampling values (temperature, top-p and top-k; the sampler switches to manual, because an assistant brings its own), loads its model when it is on this computer (a missing one keeps the current model and says so) and shows its suggestions on the empty chat. The editor window has the name, eight icons, twelve colours, the instructions, the three sampling values, the model as a select of this computer's models, up to four starters, and how the assistant treats the default system prompt (use the global setting, add to it or replace it with the assistant's own text, `{{date}}` / `{{time}}` / `{{language}}` filled in); *Export* writes `<name>.assistant.json` to the Downloads folder, *Import* reads one back through `POST /api/studio/pick-file`, whose new `kind: "file"` opens the dialog of this machine and answers the UTF-8 text of the file it chose (4 MiB limit; a closed dialog answers nothing and shows no line). A built-in is edited as a copy ("Copy of …"), deleting clears the choice, and an old chat file without the new fields loads unchanged. 10 window tests (the menu and the editor drawn to PNG, the assistant of a chat after a restart, the import messages) and 10 unit tests; removing the appended instructions, the manual sampler flag or the assistant of a new chat turns a test red.
+
+### Removed
+- **The Tauri desktop app** (`desktop/src-tauri`, `desktop/ui`, the `desktop` workflow and the installer jobs of the release workflow). The native app replaces it. The installers `fLLM_<version>_x64-setup.exe`, `.msi`, `.deb`, `.rpm`, `.AppImage` and `.dmg` are not built any more; the Studio's own *download the installer* button therefore finds nothing and points to the release page.
 
 ### Changed
 - **The switching overlay of the native app is a dialog over the dim, like the Studio's

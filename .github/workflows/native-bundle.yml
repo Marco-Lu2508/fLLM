@@ -1,7 +1,8 @@
 # The native desktop app (desktop/native) together with the engine, as one download per system: the app finds `fllm-rs` next to itself and
 # starts it when no server answers, so unpacking the archive is the whole installation.
 #
-# Started by hand with the tag of a release (the engine binaries of that release are used as they are, checked against their checksums).
+# Called by `release.yml` once the engine archives of a tag are uploaded, or started by hand with the tag of a release (the engine binaries of that
+# release are used as they are, checked against their checksums).
 # A bundle is built for every engine build the release has (standard, CUDA, AMD); the app's own update fetches the bundle of its build,
 # so a bundle of a build that the release lacks has to be left out of the run (the update then says there is none for that build).
 # Without `upload` the archives are only kept as workflow artifacts, to try them first; with it they are signed like the engine archives and
@@ -20,6 +21,15 @@ on:
         required: true
         type: boolean
         default: false
+  # `release.yml` calls it after the engine archives of a tag are uploaded: that is how a release gets its desktop app
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      upload:
+        required: true
+        type: boolean
 
 permissions:
   contents: read

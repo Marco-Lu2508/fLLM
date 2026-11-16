@@ -1,8 +1,8 @@
 # fLLM app, native (Rust, no web view)
 
 The Studio as a real desktop program: one Rust binary, drawn by [iced](https://iced.rs) (wgpu, with a software renderer as fallback),
-no Chromium, no Electron and no web view. The Tauri app in `../src-tauri` shows the web Studio in the system web view; this one
-replaces it step by step.
+no Chromium, no Electron and no web view. It replaced the Tauri app, which showed the web Studio in the system web view and is no longer part of the repository
+or of the releases (git history has it).
 
 Opening the app is enough: when no server answers, it starts `fllm-rs studio` itself (found by `FLLM_RS`, next to the app, or on the PATH) on a free
 port and stops it when the window closes; a server that is already there (`FLLM_URL`, a Docker container, one on port 8080) is used as it is and left

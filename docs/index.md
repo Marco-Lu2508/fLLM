@@ -15,7 +15,7 @@ Start with the [README](../README.md) for what fLLM is and its current status. T
 * [Studio: the browser app (chat, coding agent, models)](user/studio.md)
 * [Code mode compared with Hermes Agent, Claude Code, Codex CLI, Kiro, Pi and OpenClaw](code-mode-gap.md)
 * [Specs, steering, hooks, auto mode, heartbeat, routes, RPC mode and review around the coding agent](user/agent-workflows.md)
-* [Desktop app (installer for Windows and Linux)](user/desktop.md)
+* [Desktop app (native program for Windows, Linux and macOS)](user/desktop.md)
 * [Clients: SDKs, editors, chat front-ends](user/clients.md)
 * [Coding tools: Claude Code, Codex, OpenCode, Aider, Continue (`fllm-rs connect`)](user/coding.md)
 * [Configuration: flags and environment variables](configuration.md)

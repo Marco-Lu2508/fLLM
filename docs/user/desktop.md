@@ -1,88 +1,62 @@
 # Desktop app
 
-The desktop app is the [Studio](studio.md) in its own window, with the server built in. Install it like any other program, start it
-from the menu, and pick a model on the first start. No terminal is needed.
+The desktop app is a native program written in Rust ([iced](https://iced.rs): no web view, no Chromium). It has the chat, the coding agent
+(browser, computer use, sub-agents, skills, MCP), the model manager and the settings of the [Studio](studio.md), and it comes with the server.
+Unpack it, start `fllm-app`, and pick a model on the first start. No terminal is needed.
 
-* **Windows:** run the setup (`.exe`) or the `.msi`.
-* **Linux:** install the `.deb` or `.rpm`, or make the `.AppImage` executable and start it.
-* **macOS:** the installer (`.dmg`, Apple silicon) is built by the `desktop` workflow and by the release workflow; it has not been run on a Mac yet and is not signed or notarized, so macOS asks you to confirm the first start (right click, Open).
+## Download
 
-The installers are attached to every [release](https://github.com/Marco-Lu2508/fLLM/releases); the `desktop` workflow builds them for every change (Actions, then the artifacts of a run). They are not signed yet, so
-Windows may show a warning on the first start.
+One archive per system and build, attached to every [release](https://github.com/Marco-Lu2508/fLLM/releases):
 
-How it works: the app starts the `fllm-rs` program that is installed next to it (`fllm-rs studio` on a fixed local port, only reachable from
-your computer) and shows its page. Closing the app stops the server. Models, chats and settings are kept between starts; the models are
-stored in the usual fLLM model folder, shared with the command line.
-
-## The native app (in progress)
-
-`desktop/native` is the same program written entirely in Rust (iced, no web view); the installers above stay the supported app until it
-has caught up. Stage 1, the chat with streaming Markdown answers, saved chats and the design of the Studio, is built and tested without a
-display; Models, Settings, Code mode, the server inside the process and installers are not. What is built, what is not and how to try
-it: [desktop/native/README.md](../../desktop/native/README.md).
-
-## Server builds (variants)
-
-The server program comes in builds for different graphics backends:
-
-| Variant | Program | Backends | Where |
+| System | Standard (CPU, Vulkan, DirectX, Metal) | NVIDIA CUDA | AMD |
 |---|---|---|---|
-| CPU + Vulkan + DirectX (`base`) | `fllm-rs` | processor, Vulkan, DirectX 12 | every installer |
-| CUDA + Vulkan (`cuda`) | `fllm-rs-cuda` | NVIDIA CUDA kernels (static CUDA runtime, only the NVIDIA driver is needed), Vulkan, processor | the `fLLM-cuda...` installers (Windows, Linux x86_64) |
+| Windows x86_64 | `fllm-desktop-windows-x86_64.zip` | `fllm-desktop-windows-x86_64-cuda.zip` | `fllm-desktop-windows-x86_64-hip.zip` |
+| Linux x86_64 | `fllm-desktop-linux-x86_64.tar.gz` | `fllm-desktop-linux-x86_64-cuda.tar.gz` | `fllm-desktop-linux-x86_64-rocm.tar.gz` |
+| macOS (Apple silicon) | `fllm-desktop-macos-aarch64.tar.gz` | | |
 
-Releases carry both kinds of installer. The `fLLM-cuda` one holds both programs and is larger: roughly the base installer plus the
-CUDA archive of the release (the Linux one is about 360 MB with all architectures; the app build covers the NVIDIA RTX 20 series and
-newer, sm_75 to sm_120, data centre GPUs included, with PTX for newer ones, so it is somewhat less). Pascal and Volta cards (GTX 10 series, V100)
-are not in the app build: choose CPU + Vulkan for them, or use the `fllm-windows-x86_64-msvc-cuda.zip` or Linux CUDA archive of the release.
+Every archive holds the app (`fllm-app`), the engine of the same release (`fllm-rs`) and a `README.txt`; unpacking it is the whole installation.
+A `.sha256` and a signature (`.sigstore.json`, cosign keyless) lie beside each archive. The apps are not signed with a system certificate, so
+Windows may show a warning on the first start and macOS asks you to confirm it (right click, Open). The CUDA and AMD builds exist when the
+release has the matching engine; the AMD kernels are untested on AMD GPUs. Pascal and Volta cards (GTX 10 series, V100) are not in the CUDA
+build: the standard one drives them through Vulkan.
 
-At every start the app picks the best installed variant whose hardware is present, with cheap checks that load no GPU software: the NVIDIA
-driver library exists (`nvcuda.dll` in the Windows system folder; `libcuda.so.1` in the usual library folders or the loader cache on Linux)
-and, on Linux, an NVIDIA display device is listed among the PCI devices. Otherwise the base variant runs.
+How it works: when no server answers, the app starts `fllm-rs studio` (next to the app, or `FLLM_RS`, or on the PATH) on a free local port and
+stops it when the window closes. A server that is already there (`FLLM_URL`, a Docker container, port 8080) is used as it is and left alone.
+If the server cannot start, the screen says why, and `server.log` in the data folder has its output. Models are kept in the usual fLLM
+model folder, shared with the command line; chats and settings of the app are in `~/.local/share/fllm-app` (Windows and macOS: the data folder of
+the system; `FLLM_APP_DATA` moves it).
 
-* **Choose by hand:** Settings, Desktop app, "Graphics backends" (Automatic, CPU + Vulkan + DirectX, CUDA + Vulkan); it takes effect when the server restarts.
-  The environment variable `FLLM_DESKTOP_VARIANT=<auto|cuda|base>` (also `cpu`, `vulkan`) beats the saved choice and is useful for a test.
-* **Fallback:** if the chosen variant stops right after the start (driver missing or too old, a library error), the app starts the base
-  variant instead, once. The loading page says so, and `server.log` in the log folder starts each run with a `[desktop]` line naming the variant (and the reason for a fallback).
-* **Which one runs:** shown in the same settings section and under Settings, Hardware.
+## Updates
 
-Build notes: `tauri.conf.json` lists only the base program, so a plain build needs nothing else. `tauri.cuda.conf.json` adds `fllm-rs-cuda`;
-build with `cargo tauri build --config tauri.cuda.conf.json` after copying the CUDA build of `fllm-rs` to
-`desktop/src-tauri/binaries/fllm-rs-cuda-<target triple>[.exe]`. A new variant (for example HIP) is one more entry in the table in
-`desktop/src-tauri/src/variants.rs` plus its own config file and release job; the steps are written at the top of that file.
+*Settings, Desktop app, Updates* looks at the releases (at the start and on a button) and, when a newer one has the bundle of **your build** (a
+standard app gets the standard bundle, a CUDA app the CUDA one, an AMD app the AMD one), downloads it, checks it against its `.sha256`, unpacks it
+and offers *Restart to update*. A release without your build is not replaced by another one: the app says so and opens the release page.
+*Update automatically* (on by default) only downloads; installing is always your button. The check finds damaged downloads; it does not prove who
+made the file, because the cosign signature is not verified by the app yet.
 
 ## Features
 
-* **One window:** starting the app again brings the open window to the front instead of starting a second server.
-* **Tray icon:** a menu with Open fLLM, Restart server, Open log folder and Quit. Left click on the icon opens the window.
-* **Keep running in the tray:** off by default. When on, closing the window hides it and the server keeps running; use Quit in the tray menu to end the app.
-* **Start fLLM when I sign in:** off by default. When it is on together with the tray option, the app starts hidden in the tray.
-* **Quick entry hotkey:** a global hotkey (default Ctrl+Alt+Space) that works from any program: it brings the window to the front (also
-  from the tray) and opens a new chat with the cursor in the message field. Change or switch it off in Settings, Desktop app: click the
-  field and press the keys (Ctrl, Alt or Cmd is required). If another program already uses the combination the page says so and keeps
-  the old hotkey. Some Linux desktops (Wayland) do not allow global hotkeys.
-* **Window place:** size and position are remembered between starts.
-* **If the server stops,** the window shows the loading page with the reason and two buttons, *Restart the engine* and *Open the log folder*
-  (`server.log`); the tray menu has the same two entries. While the engine starts the page shows a quiet progress bar and, for a long model
-  load, the seconds so far.
-* **Links to other sites** (sources under an answer, links in a reply) open in your default browser; only `http`, `https` and `mailto`
-  links are handed to the system. The window never leaves the Studio.
-* **Light or dark:** the loading page and the Studio follow the system setting until you choose a theme.
+* **One window:** starting the app again brings the open window to the front instead of starting a second one.
+* **Tray icon and keeping running** (off by default), **start when I sign in** (off), a global **quick entry hotkey** (default Ctrl+Alt+Space) that
+  opens a new chat with the cursor in the message field. Settings, Desktop app. Some Linux desktops (Wayland) do not allow global hotkeys, and on
+  GNOME the tray needs an app-indicator extension.
+* **Window place:** size and position are remembered. A maximized window comes back as a window of the screen's size.
+* **Browser and computer use** of the coding agent: [studio.md](studio.md). The browser panel shows the page live and takes your clicks and keys;
+  computer use asks before every action and stops with STOP, Esc three times or Ctrl+Alt+Shift+Esc.
+* **Answers with pictures:** math in LaTeX, charts (```` ```chart ````), Mermaid diagrams and SVG are drawn in the answer (Settings, General,
+  *Charts, diagrams and math in answers*).
+* **Pasting:** an image on the clipboard is attached to the message, a very long text becomes a file.
+* **Links to other sites** open in your default browser.
+* **Light or dark:** follows the system until you choose a theme.
 
-![The loading page while the engine starts](../img/desktop-loading.webp)
-![The loading page when the engine did not start](../img/desktop-error.webp)
+The behaviour of every part is compared with the web Studio's own scripts in `desktop/native/tests`; what is built, what was only tried without
+a display and what is not done is listed in [desktop/native/PARITY.md](../../desktop/native/PARITY.md) and [desktop/native/README.md](../../desktop/native/README.md).
 
-The options are in the Studio under Settings, Desktop app (the section only exists inside the app). The same page has the buttons
-Open log folder and Restart server.
+## Build it yourself
 
-Where things are kept: the options are in `settings.json` in the config folder of the app (Windows `%APPDATA%\io.github.marco-lu2508.fllm`,
-Linux `~/.config/io.github.marco-lu2508.fllm`, macOS `~/Library/Application Support/io.github.marco-lu2508.fllm`); the page shows the exact folders. The start at sign-in is
-registered with the system (a Run entry on Windows, an autostart `.desktop` file on Linux, a launch agent on macOS), and the window place is kept by the window-state plugin in the same config folder. On
-Linux the tray icon needs an app-indicator extension on some desktops (for example GNOME).
+```sh
+cargo build --release --locked        # in desktop/native; needs no system library besides the graphics driver
+FLLM_RS=/path/to/fllm-rs ./target/release/fllm-app
+```
 
-Security: the page of the local server may call exactly seven commands of the app (read the options, set the tray option, set the
-start at sign-in, set the quick entry hotkey, set the server variant, open the log folder, restart the server), and only when it is shown from `http://127.0.0.1` in the app window (a Tauri 2
-remote capability, `desktop/src-tauri/capabilities/studio-page.json`). No file, shell or network access of the app is exposed.
-
-The source is in `desktop/` (Tauri 2). To build it yourself, build `fllm-rs`, copy it to
-`desktop/src-tauri/binaries/fllm-rs-<target triple>`, then run `cargo tauri icon ../app-icon.png` and `cargo tauri build` in
-`desktop/src-tauri`.
+The release workflow (`release.yml`) builds the engine archives for a tag and then the bundles (`native-bundle.yml`, also startable by hand with a tag).

@@ -49,7 +49,7 @@ What is checked on which hardware (2026-10-30):
   * RTX 2070 Super (or any NVIDIA card): `fllm-windows-x86_64-msvc-cuda.zip` (needs only the NVIDIA driver).
   * Ryzen AI Max 365 (Radeon 8060S): `fllm-windows-x86_64-msvc.zip` (CPU, Vulkan, DirectX 12; works with the normal AMD driver) and, to try the HIP route,
     `fllm-windows-x86_64-msvc-hip.zip` (contains the HIP runtime DLLs; `gfx1151` is in its architecture list).
-  * Anyone: `fllm-windows-x86_64-msvc.zip`, or the desktop installer `fLLM_<version>_x64-setup.exe`.
+  * Anyone: `fllm-windows-x86_64-msvc.zip`, or the desktop app `fllm-desktop-windows-x86_64.zip` (a native program; unpack and start `fllm-app`).
   * Check the download against its `.sha256` file. The binary is unsigned: right-click the zip, Properties, Unblock, then extract.
 * Newer than the release: workflow artifacts (needs a GitHub login; `gh run download <run id>` works too). Workflows:
   `windows-package` (artifact `fllm-windows-x86_64-msvc`, CPU + Vulkan, about 10 minutes), `windows-cuda-package` (artifact
@@ -123,7 +123,7 @@ Cross-built `fllm-rs.exe` (features `avx512,computer-use,npu-openvino,rust-gpu,v
 | `amd-npu status` | `no_npu`, with the install hint for FastFlowLM |
 | speed | [benchmarks.md](benchmarks.md), Intel Core Ultra 5 235U section: Qwen2.5-0.5B Q4_K_M decode 49 tokens/s on the iGPU against 21 to 29 on the CPU |
 
-Not run: the CUDA and HIP builds (no such hardware), Windows on ARM, the desktop installer.
+Not run: the CUDA and HIP builds (no such hardware), Windows on ARM, the desktop app on a real Windows PC.
 
 ## Building from source
 
