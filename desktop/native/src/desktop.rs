@@ -22,11 +22,48 @@ pub struct Desktop {
     pub keep_in_tray: bool,
     /// The global hotkey (`""` = off).
     pub quick_entry: String,
+    /// Where the window was and how big when the app was closed (`window-state` of the old shell).
+    pub window: Option<WindowState>,
+    /// Look for a newer version on GitHub when the app starts (off until you switch it on: nothing is sent without it).
+    pub check_updates: bool,
 }
 
 impl Default for Desktop {
     fn default() -> Self {
-        Desktop { keep_in_tray: false, quick_entry: DEFAULT_QUICK_ENTRY.to_string() }
+        Desktop { keep_in_tray: false, quick_entry: DEFAULT_QUICK_ENTRY.to_string(), window: None, check_updates: false }
+    }
+}
+
+/// The size and place of the window, in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowState {
+    pub width: f32,
+    pub height: f32,
+    pub x: Option<f32>,
+    pub y: Option<f32>,
+}
+
+impl WindowState {
+    /// What of a remembered window may be used: a size that is not tiny or absurd, and a place that is not far outside any screen.
+    pub fn usable(&self) -> Option<WindowState> {
+        let ok = |v: f32, lo: f32, hi: f32| v.is_finite() && v >= lo && v <= hi;
+        if !ok(self.width, 480.0, 16000.0) || !ok(self.height, 320.0, 16000.0) {
+            return None;
+        }
+        let place = match (self.x, self.y) {
+            (Some(x), Some(y)) if ok(x, -16000.0, 16000.0) && ok(y, -16000.0, 16000.0) => (Some(x), Some(y)),
+            _ => (None, None),
+        };
+        Some(WindowState { width: self.width, height: self.height, x: place.0, y: place.1 })
+    }
+
+    /// The settings the window is made with.
+    pub fn settings(&self) -> (iced::Size, iced::window::Position) {
+        let position = match (self.x, self.y) {
+            (Some(x), Some(y)) => iced::window::Position::Specific(iced::Point::new(x, y)),
+            _ => iced::window::Position::Default,
+        };
+        (iced::Size::new(self.width, self.height), position)
     }
 }
 
@@ -218,14 +255,14 @@ mod tests {
     fn the_settings_start_with_the_hotkey_on_and_the_tray_off_and_survive_a_restart() {
         let d = tempfile::tempdir().unwrap();
         let file = d.path().join("sub/desktop.json");
-        assert_eq!(Desktop::load(&file), Desktop { keep_in_tray: false, quick_entry: "Ctrl+Alt+Space".into() });
-        Desktop { keep_in_tray: true, quick_entry: String::new() }.save(&file).unwrap();
-        assert_eq!(Desktop::load(&file), Desktop { keep_in_tray: true, quick_entry: String::new() });
+        assert_eq!(Desktop::load(&file), Desktop { keep_in_tray: false, quick_entry: "Ctrl+Alt+Space".into(), ..Default::default() });
+        Desktop { keep_in_tray: true, quick_entry: String::new(), ..Default::default() }.save(&file).unwrap();
+        assert_eq!(Desktop::load(&file), Desktop { keep_in_tray: true, quick_entry: String::new(), ..Default::default() });
         // a damaged file is the defaults, and a file with only one setting keeps the other's default
         std::fs::write(&file, "{ not json").unwrap();
         assert_eq!(Desktop::load(&file), Desktop::default());
         std::fs::write(&file, r#"{"keep_in_tray": true}"#).unwrap();
-        assert_eq!(Desktop::load(&file), Desktop { keep_in_tray: true, quick_entry: "Ctrl+Alt+Space".into() });
+        assert_eq!(Desktop::load(&file), Desktop { keep_in_tray: true, quick_entry: "Ctrl+Alt+Space".into(), ..Default::default() });
     }
 
     #[test]

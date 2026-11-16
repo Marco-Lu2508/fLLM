@@ -54,6 +54,10 @@ fn status(app: &mut App, on: bool, steps: u64) {
 fn say(app: &mut App, text: &str) {
     let _ = code(app, CodeMsg::Edit(Action::Edit(Edit::Paste(Arc::new(text.to_string())))));
     let _ = code(app, CodeMsg::Send);
+    // with computer use on, the run waits for the answer of `computer/begin` (a server of its own is not here)
+    if app.code().beginning {
+        let _ = code(app, CodeMsg::ComputerBegun { prompt: text.to_string(), display: text.to_string() });
+    }
 }
 
 fn model_calls(app: &mut App, calls: &[(&str, &str, Value)]) {
@@ -333,6 +337,23 @@ fn a_model_that_cannot_see_is_told_once() {
     }
     let notes = app.code().items.iter().filter(|i| matches!(i, fllm_app::code::Item::Note(n) if n.starts_with("The loaded model cannot look at pictures"))).count();
     assert_eq!(notes, 1);
+}
+
+#[test]
+fn a_model_of_a_provider_is_not_warned_about_pictures() {
+    // the page skips the warning for a remote model (`fllmRemoteSelected`): nothing is known about what it can see
+    let (mut app, _dir) = app();
+    let mut remote = ModelInfo::new("remote:openai/gpt-4o", 8192);
+    remote.vision = false;
+    let _ = app.update(Message::Connected(Ok(remote)));
+    open_folder(&mut app);
+    status(&mut app, true, 0);
+    say(&mut app, "look");
+    model_calls(&mut app, &[("s0", "computer_screenshot", json!({}))]);
+    let _ = code(&mut app, CodeMsg::Always("s0".into(), "computer:look".into()));
+    let _ = code(&mut app, CodeMsg::ToolReply("s0".into(), Ok("ok".into()), Some(shot())));
+    assert!(!app.code().items.iter().any(|i| matches!(i, fllm_app::code::Item::Note(n) if n.starts_with("The loaded model cannot look at pictures"))));
+    assert!(!app.code().computer.warned_vision);
 }
 
 #[test]

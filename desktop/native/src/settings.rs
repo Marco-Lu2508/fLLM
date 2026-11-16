@@ -1144,6 +1144,7 @@ pub fn page<'a>(
     browser_cards: Element<'a, Message>,
     desktop_cards: Element<'a, Message>,
     general_cards: Vec<(&'static str, Element<'a, Message>)>,
+    past_card: Element<'a, Message>,
     voice: VoiceView<'a>,
     usage: UsageView<'a>,
     look: LookView<'a>,
@@ -1789,7 +1790,7 @@ pub fn page<'a>(
         if hit == Some("skills") {
             content = content.push(crate::settingssearch::marker(t));
         }
-        content = content.push(crate::skills::section(t, skills));
+        content = content.push(crate::skills::section(t, skills, past_card));
     }
         // Settings > Plugins, where the table has this row
     if crate::settingssearch::keep("plugins", query) {

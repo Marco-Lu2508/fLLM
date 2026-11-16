@@ -18,6 +18,7 @@ use crate::md;
 use crate::prompts;
 use crate::code::{self, CodeState};
 use crate::engine_settings::{self, EngineState};
+use crate::sessions;
 use crate::models::{self, ModelsState};
 use crate::settings;
 use crate::theme::{self, Tokens};
@@ -293,6 +294,21 @@ pub struct App {
     mem_clear: bool,
     /// The dialog *Delete all chats?* of Settings > General.
     chats_delete: bool,
+    /// The window is minimized: the browser panel does not poll.
+    minimized: bool,
+    /// Where the window is and how big (kept in `desktop.json` when it stops changing and when it closes).
+    win: Option<crate::desktop::WindowState>,
+    win_seq: u64,
+    /// Set by a second start of the program: the window comes to the front.
+    instance: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// *Search of past chats*: what was typed, which question is the newest, its hits and whether they came.
+    past_query: String,
+    past_seq: u64,
+    past_hits: Vec<crate::pastsearch::Hit>,
+    past_answered: bool,
+    past_info: String,
+    past_busy: bool,
+    past_clear: bool,
     /// The chat the model has to name (set when its first answer ended).
     title_wanted: Option<u64>,
     remember: Option<usize>,
@@ -885,6 +901,33 @@ pub enum Message {
     /// Settings > General: the refresh of the version line, *Delete all chats* (asked first) and
     /// *Name new chats automatically*.
     GeneralRefresh,
+    /// Whether the window is minimized (the page checks `document.hidden` before it polls the browser panel).
+    MinimizedProbe,
+    /// Ctrl+V / Cmd+V: look whether a picture is on the clipboard.
+    PasteKey,
+    /// Ctrl+V in the chat box: the text of the clipboard is read first.
+    ChatPaste,
+    ChatPasted(Option<String>),
+    PasteImage(Result<Option<Vec<u8>>, String>),
+    WinMoved(iced::Point),
+    WinResized(iced::Size),
+    WinSave(u64),
+    InstanceTick,
+    Minimized(bool),
+    /// *Search of past chats* (`sessions.js`): the box, the hits, the copy on the computer.
+    PastQuery(String),
+    PastRun(u64),
+    PastHits(u64, Vec<crate::pastsearch::Hit>),
+    PastOpen(usize),
+    PastIndexOn(bool),
+    PastNow,
+    PastNowDone(std::collections::BTreeMap<String, f64>, usize),
+    PastPush,
+    PastPushed(std::collections::BTreeMap<String, f64>, usize),
+    PastClearAsk,
+    PastClearOk,
+    PastClearCancel,
+    PastCleared(Result<(), String>),
     ChatsDeleteAsk,
     ChatsDeleteOk,
     ChatsDeleteCancel,
@@ -1418,6 +1461,9 @@ impl App {
         // a server the app just started needs a moment: look every second until it answers
         app.switching = app.sidecar.is_some();
         app.desktop_live = true;
+        app.win = app.dk.s.window;
+        // the look for a newer version, when it was asked for
+        let task = if app.dk.s.check_updates { Task::batch([task, Task::done(Message::Dk(crate::desktopcards::DkMsg::UpdateCheck))]) } else { task };
         (app, task)
     }
 
@@ -1500,6 +1546,17 @@ impl App {
             mem_edit: None,
             mem_clear: false,
             chats_delete: false,
+            minimized: false,
+            win: None,
+            win_seq: 0,
+            instance: INSTANCE.get().cloned(),
+            past_query: String::new(),
+            past_seq: 0,
+            past_hits: Vec::new(),
+            past_answered: false,
+            past_info: String::new(),
+            past_busy: false,
+            past_clear: false,
             title_wanted: None,
             remember: None,
             remember_text: String::new(),
@@ -2123,7 +2180,7 @@ impl App {
                     session_file: &session_file,
                     ctx_max: self.model_info().max_context as usize,
                     vision: self.model_info().vision,
-                    visible: self.page == View::Code,
+                    visible: self.browser_visible(),
                     hooks: code::HookGates {
                         submit: self.code.hook_events.iter().any(|e| e == "user_prompt_submit"),
                         stop: self.code.hook_events.iter().any(|e| e == "stop"),
@@ -2947,6 +3004,179 @@ impl App {
             }
             Message::MemClearCancel => {
                 self.mem_clear = false;
+                Task::none()
+            }
+            Message::PastQuery(q) => {
+                self.past_query = q.clone();
+                self.past_seq += 1;
+                self.past_answered = false;
+                if q.trim().is_empty() {
+                    self.past_hits.clear();
+                    return Task::none();
+                }
+                let seq = self.past_seq;
+                // a quarter of a second after the last key, as the page waits
+                Task::perform(async { tokio::time::sleep(std::time::Duration::from_millis(250)).await }, move |_| Message::PastRun(seq))
+            }
+            Message::PastRun(seq) => {
+                if seq != self.past_seq {
+                    return Task::none();
+                }
+                let docs = self.past_docs();
+                Task::perform(crate::pastsearch::search_all(self.base.clone(), docs, self.past_query.trim().to_string(), 12, self.store.prefs.session_index), move |h| Message::PastHits(seq, h))
+            }
+            Message::PastHits(seq, hits) => {
+                if seq == self.past_seq {
+                    self.past_hits = hits;
+                    self.past_answered = true;
+                }
+                Task::none()
+            }
+            Message::PastOpen(i) => {
+                let Some(hit) = self.past_hits.get(i).cloned() else { return Task::none() };
+                if hit.kind == "chat" && !hit.from_copy {
+                    if let Some(id) = hit.id.parse::<u64>().ok().filter(|id| self.store.chats.iter().any(|c| c.id == *id)) {
+                        let a = self.update(Message::Go(View::Chat));
+                        let b = self.update(Message::OpenChat(id));
+                        return Task::batch([a, b]);
+                    }
+                }
+                self.toast = Some(if hit.from_copy { "This session is only in the copy on the computer; it is not in this app.".into() } else { "Open the Code page to continue this session.".into() });
+                Task::none()
+            }
+            Message::PastIndexOn(on) => {
+                self.store.prefs.session_index = on;
+                self.save();
+                self.refresh_past_info();
+                if on {
+                    return self.update(Message::PastPush);
+                }
+                Task::none()
+            }
+            Message::PastPush => {
+                if self.past_busy || !self.store.prefs.session_index || matches!(self.server, Server::Down(_)) {
+                    return Task::none();
+                }
+                let plan = self.past_plan(Some((4, 2)));
+                self.past_busy = true;
+                Task::perform(crate::pastsearch::run_push(self.base.clone(), plan), |(done, n)| Message::PastPushed(done, n))
+            }
+            Message::PastPushed(done, _) => {
+                self.past_busy = false;
+                if self.store.prefs.session_sent != done {
+                    self.store.prefs.session_sent = done;
+                    self.save();
+                }
+                self.refresh_past_info();
+                Task::none()
+            }
+            Message::PastNow => {
+                if self.past_busy {
+                    return Task::none();
+                }
+                let plan = self.past_plan(None);
+                self.past_busy = true;
+                Task::perform(crate::pastsearch::run_push(self.base.clone(), plan), |(done, n)| Message::PastNowDone(done, n))
+            }
+            Message::PastNowDone(done, n) => {
+                self.past_busy = false;
+                self.store.prefs.session_sent = done;
+                self.save();
+                self.refresh_past_info();
+                self.toast = Some(format!("{n} sessions copied"));
+                Task::none()
+            }
+            Message::PastClearAsk => {
+                self.past_clear = true;
+                Task::none()
+            }
+            Message::PastClearCancel => {
+                self.past_clear = false;
+                Task::none()
+            }
+            Message::PastClearOk => {
+                self.past_clear = false;
+                Task::perform(crate::pastsearch::delete_copy(self.base.clone()), Message::PastCleared)
+            }
+            Message::PastCleared(r) => {
+                match r {
+                    Ok(()) => {
+                        self.store.prefs.session_sent.clear();
+                        self.save();
+                        self.toast = Some("Copy deleted".into());
+                    }
+                    Err(e) => self.toast = Some(e),
+                }
+                self.refresh_past_info();
+                Task::none()
+            }
+            Message::MinimizedProbe => iced::window::oldest()
+                .and_then(iced::window::is_minimized)
+                .map(|m| Message::Minimized(m.unwrap_or(false))),
+            Message::ChatPaste => iced::clipboard::read().map(Message::ChatPasted),
+            Message::ChatPasted(text) => {
+                let Some(text) = text.filter(|t| !t.is_empty()) else { return Task::none() };
+                let length = crate::sessions::utf16_len(&text);
+                if length > PASTE_AS_FILE {
+                    self.rag_place("Pasted text.txt".into(), text, length as u64, None, false);
+                    self.toast = Some("Long text attached as a file".into());
+                    return Task::none();
+                }
+                self.update(Message::Edit(iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Paste(std::sync::Arc::new(text)))))
+            }
+            Message::PasteKey => {
+                // only the chat box takes pictures
+                if self.page != View::Chat {
+                    return Task::none();
+                }
+                Task::perform(async { tokio::task::spawn_blocking(crate::clipboard_image::read).await.unwrap_or_else(|e| Err(e.to_string())) }, Message::PasteImage)
+            }
+            Message::PasteImage(result) => match result {
+                Ok(Some(png)) => Task::perform(
+                    async move { shrink_image(&png).map(|data_url| ("image.png".to_string(), data_url)).map_err(|e| format!("image.png: {e}")) },
+                    Message::ImageReady,
+                ),
+                // text or nothing: the box has taken care of it
+                Ok(None) => Task::none(),
+                Err(e) => {
+                    self.toast = Some(e);
+                    Task::none()
+                }
+            },
+            Message::WinMoved(p) => {
+                let w = self.win.get_or_insert(crate::desktop::WindowState { width: 1280.0, height: 820.0, x: None, y: None });
+                (w.x, w.y) = (Some(p.x), Some(p.y));
+                self.win_seq += 1;
+                let seq = self.win_seq;
+                Task::perform(async { tokio::time::sleep(std::time::Duration::from_millis(1500)).await }, move |()| Message::WinSave(seq))
+            }
+            Message::WinResized(s) => {
+                let w = self.win.get_or_insert(crate::desktop::WindowState { width: s.width, height: s.height, x: None, y: None });
+                (w.width, w.height) = (s.width, s.height);
+                self.win_seq += 1;
+                let seq = self.win_seq;
+                Task::perform(async { tokio::time::sleep(std::time::Duration::from_millis(1500)).await }, move |()| Message::WinSave(seq))
+            }
+            Message::WinSave(seq) => {
+                // only the last change of a series is written
+                if seq == self.win_seq {
+                    self.save_window();
+                }
+                Task::none()
+            }
+            Message::InstanceTick => {
+                if self.instance.as_ref().is_some_and(|f| f.swap(false, std::sync::atomic::Ordering::SeqCst)) {
+                    return self.show_window();
+                }
+                Task::none()
+            }
+            Message::Minimized(m) => {
+                let was = self.minimized;
+                self.minimized = m;
+                // the poll of the panel was waiting: look again as the window comes back
+                if was && !m && self.page == View::Code {
+                    return self.update(Message::Code(crate::code::CodeMsg::Br(crate::code::BrMsg::Poke)));
+                }
                 Task::none()
             }
             Message::GeneralRefresh => {
@@ -5252,6 +5482,7 @@ impl App {
                 Task::batch(tasks)
             }
             Message::CloseRequested(id) => {
+                self.save_window();
                 // with the tray the window is hidden and the program goes on; without it the close button quits
                 if self.dk.s.keep_in_tray && self.shell.as_ref().is_some_and(crate::shell::Shell::has_tray) {
                     iced::window::set_mode(id, iced::window::Mode::Hidden)
@@ -6798,6 +7029,9 @@ impl App {
             Message::Go(page) => {
                 self.page = page;
                 self.picker_open = false;
+                if page == View::Settings {
+                    self.refresh_past_info();
+                }
                 if page == View::Models {
                     return self.refresh_models();
                 }
@@ -7665,9 +7899,24 @@ impl App {
             _ => None,
         });
         let closes = iced::window::close_requests().map(Message::CloseRequested);
+        let paste = iced::event::listen_with(|event, _status, _id| match event {
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) if modifiers.command() && !modifiers.alt() && key.as_ref() == iced::keyboard::Key::Character("v") => Some(Message::PasteKey),
+            _ => None,
+        });
+        let place = iced::event::listen_with(|event, _status, _id| match event {
+            iced::Event::Window(iced::window::Event::Moved(p)) => Some(Message::WinMoved(p)),
+            iced::Event::Window(iced::window::Event::Resized(s)) => Some(Message::WinResized(s)),
+            _ => None,
+        });
+        // a second start of the program asks this one to come to the front
+        let instance = if self.instance.is_some() { iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::InstanceTick) } else { Subscription::none() };
         // the hotkey and the tray are looked at four times a second
         let shell = if self.desktop_live { iced::time::every(std::time::Duration::from_millis(250)).map(|_| Message::ShellTick) } else { Subscription::none() };
-        Subscription::batch([retry, poll, hero, inbox, dropped, browser_keys, closes, shell])
+        // while the panel of the browser is open the window is asked whether it is minimized
+        let minimized = if self.page == View::Code && self.code.browser.open { iced::time::every(std::time::Duration::from_secs(2)).map(|_| Message::MinimizedProbe) } else { Subscription::none() };
+        // the copy on the computer is brought up to date every twenty seconds (`ssPush`)
+        let past = if self.store.prefs.session_index && !matches!(self.server, Server::Down(_)) { iced::time::every(std::time::Duration::from_secs(20)).map(|_| Message::PastPush) } else { Subscription::none() };
+        Subscription::batch([retry, poll, hero, inbox, dropped, browser_keys, closes, shell, past, minimized, place, instance, paste])
     }
 
     // ---- view ------------------------------------------------------------------------------------------------------------
@@ -7774,6 +8023,9 @@ impl App {
         }
         if self.models.picker.open {
             layers = layers.push(backdrop(Message::Mp(crate::modelpicker::MpMsg::Cancel))).push(crate::modelpicker::view(t, &self.models.picker));
+        }
+        if self.past_clear {
+            layers = layers.push(backdrop(Message::PastClearCancel)).push(crate::pastsearch::clear_window(t));
         }
         if self.chats_delete {
             layers = layers.push(backdrop(Message::ChatsDeleteCancel)).push(crate::generalcards::delete_all_window(t, self.store.chats.len()));
@@ -8012,6 +8264,7 @@ impl App {
                         model: self.model_facts(),
                     },
                 ),
+                crate::pastsearch::card(t, crate::pastsearch::PastView { query: &self.past_query, hits: &self.past_hits, answered: self.past_answered, enabled: self.store.prefs.session_index, info: self.past_info.clone() }),
                 settings::VoiceView {
                     voices: &self.voice_names,
                     can_notify: self.voice_can_notify,
@@ -10571,6 +10824,55 @@ impl App {
         }
     }
 
+    /// The place and size of the window go into `desktop.json`.
+    pub fn save_window(&mut self) {
+        if let Some(w) = self.win.and_then(|w| w.usable()) {
+            if self.dk.s.window != Some(w) {
+                self.dk.s.window = Some(w);
+                let _ = self.dk.s.save(&self.dk.file);
+            }
+        }
+    }
+
+    /// The flag a second start of the program raises (`instance.rs`).
+    pub fn watch_instance(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.instance = Some(flag);
+    }
+
+    /// The window as it is now (for the tests).
+    pub fn window_state(&self) -> Option<crate::desktop::WindowState> {
+        self.win
+    }
+
+    /// Whether the panel of the browser is looked at: the Code page is shown and the window is not minimized.
+    pub fn browser_visible(&self) -> bool {
+        self.page == View::Code && !self.minimized
+    }
+
+    /// Every searchable document of this window: the chats that are not temporary and the saved code sessions.
+    pub fn past_docs(&self) -> Vec<crate::pastsearch::Doc> {
+        let mut docs: Vec<crate::pastsearch::Doc> = self.store.chats.iter().filter(|c| !c.temporary).map(crate::pastsearch::chat_doc).collect();
+        let sessions = sessions::Sessions::load(&self.data_file.with_file_name("code-sessions.json"));
+        for (root, list) in &sessions.0 {
+            docs.extend(list.iter().map(|s| crate::pastsearch::code_doc(s, root)));
+        }
+        docs
+    }
+
+    /// `ssPush`: what has to go to the copy on the computer (`limits`: how many chats and sessions at most).
+    fn past_plan(&self, limits: Option<(usize, usize)>) -> crate::pastsearch::PushPlan {
+        let sessions = sessions::Sessions::load(&self.data_file.with_file_name("code-sessions.json"));
+        let codes: Vec<(String, &sessions::Record)> = sessions.0.iter().flat_map(|(root, list)| list.iter().map(move |s| (root.clone(), s))).collect();
+        let chats: Vec<&store::ChatRecord> = self.store.chats.iter().collect();
+        let streaming = if self.live.is_some() { self.current } else { None };
+        crate::pastsearch::push_plan(&chats, &codes, &self.store.prefs.session_sent, streaming, limits)
+    }
+
+    /// The line under the search box (`fllmSessionIndexInfo`).
+    fn refresh_past_info(&mut self) {
+        self.past_info = crate::pastsearch::info_line(self.past_docs().len(), self.store.prefs.session_sent.len(), self.store.prefs.session_index);
+    }
+
     /// The facts of the model that runs, for the command of Settings > General.
     fn model_facts(&self) -> crate::generalcards::ModelFacts {
         match &self.hero {
@@ -11527,6 +11829,8 @@ impl App {
                 }
                 match kp.key.as_ref() {
                     keyboard::Key::Named(keyboard::key::Named::Enter) if !kp.modifiers.shift() && matches!(kp.status, Status::Focused { .. }) => Some(Binding::Custom(Message::Send)),
+                    // a long text is not pasted into the box: it is attached as a file (the `paste` of the page)
+                    keyboard::Key::Character("v") if kp.modifiers.command() && !kp.modifiers.alt() && matches!(kp.status, Status::Focused { .. }) => Some(Binding::Custom(Message::ChatPaste)),
                     _ => Binding::from_key_press(kp),
                 }
             })
@@ -12014,7 +12318,7 @@ pub fn primary_style(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::St
 }
 
 /// Opens a link in the system browser.
-fn open_link(uri: &str) {
+pub(crate) fn open_link(uri: &str) {
     if !(uri.starts_with("http://") || uri.starts_with("https://")) {
         return;
     }
@@ -12027,7 +12331,30 @@ fn open_link(uri: &str) {
     let _ = std::process::Command::new(cmd).arg(uri).spawn();
 }
 
+/// A pasted text longer than this (UTF-16 units, as `text.length` of the page) is attached as a file (`PASTE_AS_FILE`).
+pub const PASTE_AS_FILE: usize = 6000;
+
+/// The flag the first start of the program shares with its listener (`instance.rs`).
+static INSTANCE: std::sync::OnceLock<std::sync::Arc<std::sync::atomic::AtomicBool>> = std::sync::OnceLock::new();
+
 pub fn run() -> iced::Result {
+    // one fLLM at a time: a second start brings the first to the front and ends
+    if std::env::var_os("FLLM_ALLOW_SECOND_INSTANCE").is_none() {
+        let dir = store::data_file().parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+        match crate::instance::acquire(crate::instance::port_for(&dir)) {
+            crate::instance::Role::Second => {
+                eprintln!("fLLM is already running; it was brought to the front.");
+                return Ok(());
+            }
+            crate::instance::Role::First(flag) => {
+                let _ = INSTANCE.set(flag);
+            }
+        }
+    }
+    let (size, position) = crate::desktop::Desktop::load(&store::data_file().with_file_name("desktop.json"))
+        .window
+        .and_then(|w| w.usable())
+        .map_or((iced::Size::new(1280.0, 820.0), iced::window::Position::Default), |w| w.settings());
     // the base size of the text is what the appearance card set (the `selFontSize` of the Studio)
     let look = Store::load(&store::data_file());
     iced::application(App::new, App::update, App::view)
@@ -12043,7 +12370,7 @@ pub fn run() -> iced::Result {
         .default_font(UI_FONT)
         .theme(App::theme)
         .subscription(App::subscription)
-        .window(iced::window::Settings { size: iced::Size::new(1280.0, 820.0), exit_on_close_request: false, ..Default::default() })
+        .window(iced::window::Settings { size, position, exit_on_close_request: false, ..Default::default() })
         .antialiasing(true)
         .run()
 }

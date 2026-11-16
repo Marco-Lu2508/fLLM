@@ -640,6 +640,8 @@ pub enum CodeMsg {
     /// What `user_prompt_submit` answered: the turn starts with its context in the prompt
     /// (`submitted.context` of `submitText`).
     SubmitHookDone { prompt: String, display: String, answer: HookFire },
+    /// `computerBegin` was answered: the first request of the run goes out now.
+    ComputerBegun { prompt: String, display: String },
     /// What the stop hook answered after the review (`fireHook('stop', …)` there).
     StopHookDone(HookFire),
     /// A `notification` hook was fired for a waiting card; nothing comes of it.
@@ -704,6 +706,8 @@ pub enum CodeMsg {
     SpecFailed { message: String, toast: bool },
     /// A checkbox of the side panel (`specAction` with `tick` or `untick`).
     SpecTick { name: String, index: u64, done: bool },
+    /// The × of a queued message.
+    QueueDrop(usize),
     /// The *Run next task* button of the side panel (`specAction` with `task_prompt`).
     SpecRunTask { name: String, index: u64 },
     /// What `/worktree` and `/batch` asked the server: what the answer does (switch the
@@ -910,6 +914,10 @@ pub struct CodeState {
     pub skill: Option<SkillDraft>,
     /// `/skill` asked the model and the answer has not come yet.
     pub skill_asking: bool,
+    /// Messages typed while the agent was busy: each is sent when the run has ended (`code.queue`).
+    pub queue: Vec<String>,
+    /// The first request of a run waits for the answer of `computer/begin`.
+    pub beginning: bool,
     /// Whether the server answered `GET /api/studio/agent/changes` (the page: `code.changes === null`).
     pub changes_known: bool,
     /// A session the app has to write the file for (the page calls `saveCodeSession()` itself).
@@ -1003,6 +1011,8 @@ impl Default for CodeState {
             pending_prefs: None,
             skill: None,
             skill_asking: false,
+            queue: Vec::new(),
+            beginning: false,
             pending_toast: None,
             pending: Vec::new(),
             pending_turbo: None,
@@ -1770,6 +1780,7 @@ impl CodeState {
         self.compaction = None;
         self.reverted = None;
         self.choices.clear();
+        self.queue.clear();
     }
 
     /// A session of the list as the conversation (`applySession`).
@@ -2397,6 +2408,14 @@ impl CodeState {
     fn stop_now(&mut self, env: &Env) -> Task<Message> {
         self.handle = None;
         self.running = false;
+        self.beginning = false;
+        // what was queued is yours again (the page puts it back in the box)
+        if !self.queue.is_empty() {
+            let back = self.queue.join("\n\n");
+            self.queue.clear();
+            self.editor = Content::with_text(&back);
+            self.items.push(Item::Note("Stopped. The messages you had queued are back in the input.".into()));
+        }
         self.acc.clear();
         // the sub-agents stop with the conversation: their streams end, their calls and the
         // `task` calls that started them are closed
@@ -2561,7 +2580,7 @@ impl CodeState {
     /// `user_prompt_submit` hook the turn waits for its answer — `context` arrives in the
     /// prompt, the words of the box stay as they were typed.
     fn begin_run(&mut self, prompt: String, display: String, env: &Env) -> Task<Message> {
-        if self.workspace.is_none() || env.model.is_none() || self.running {
+        if self.workspace.is_none() || env.model.is_none() || self.running || self.beginning {
             return Task::none();
         }
         self.change_mark = self.changes.iter().map(|c| c.id).max().unwrap_or(0);
@@ -2573,25 +2592,27 @@ impl CodeState {
         self.computer.busy.clear();
         // the comments the user left on the browser page go with this message, once
         self.br_notes = self.browser.take_comments();
-        let begin = self.computer_begin(env);
-        let started = if env.hooks.submit {
+        if env.hooks.submit {
             Task::perform(
                 fire_hook(env.base.to_string(), "user_prompt_submit", "", json!({ "prompt": prompt.clone() })),
                 move |answer| Message::Code(CodeMsg::SubmitHookDone { prompt, display, answer }),
             )
         } else {
-            self.run_prompt(&prompt, &display, env)
-        };
-        Task::batch([begin, started])
+            self.run_after_begin(prompt, display, env)
+        }
     }
 
-    /// `computerBegin` of the page: when computer use is on, the server counts its actions from here.
-    fn computer_begin(&mut self, env: &Env) -> Task<Message> {
+    /// `await computerBegin()` of the page, which comes after the submit hook and before the first
+    /// request: when computer use is on, the server starts counting its actions, and only when it
+    /// has answered does the run go on (a server that does not answer counts anyway).
+    fn run_after_begin(&mut self, prompt: String, display: String, env: &Env) -> Task<Message> {
         if !self.computer_on() {
-            return Task::none();
+            return self.run_prompt(&prompt, &display, env);
         }
+        // nothing else starts a run in the meantime
+        self.beginning = true;
         let base = env.base.to_string();
-        Task::perform(post_computer(base, "begin"), |()| Message::Code(CodeMsg::HookFired))
+        Task::perform(post_computer(base, "begin"), move |()| Message::Code(CodeMsg::ComputerBegun { prompt: prompt.clone(), display: display.clone() }))
     }
 
     /// The state one call starts in, and the words under its card when it ran without a
@@ -2811,13 +2832,18 @@ impl CodeState {
         self.running = false;
         self.handle = None;
         let learn = self.learn_after_run(env, false);
-        Task::batch([
-            Task::perform(
-                crate::specs::fetch_specs(env.base.to_string()),
-                |r| Message::Code(CodeMsg::SpecsLoaded(r.unwrap_or_default())),
-            ),
-            learn,
-        ])
+        let specs = Task::perform(
+            crate::specs::fetch_specs(env.base.to_string()),
+            |r| Message::Code(CodeMsg::SpecsLoaded(r.unwrap_or_default())),
+        );
+        // the next queued message goes out now that this run has returned (the runs are chained)
+        if !self.queue.is_empty() {
+            let next = self.queue.remove(0);
+            self.editor = Content::with_text(&next);
+            let go = self.update(CodeMsg::Send, env);
+            return Task::batch([specs, learn, go]);
+        }
+        Task::batch([specs, learn])
     }
 
     /// The tail of a turn in the page's order (`submitText`): the self-review of row 81 first —
@@ -3080,7 +3106,7 @@ impl CodeState {
                     }
                     if computer && result.is_ok() {
                         self.computer.last_shot = Some(shot);
-                        if !self.computer.warned_vision && !env.vision {
+                        if !self.computer.warned_vision && !env.vision && !env.model.is_some_and(|m| m.starts_with(crate::providers::REMOTE_PREFIX)) {
                             self.computer.warned_vision = true;
                             self.items.push(Item::Note("The loaded model cannot look at pictures, so it will not see the screenshots. Choose a vision model (the model list marks them with \"vision\"), or use a provider model that can see images.".into()));
                         }
@@ -3459,14 +3485,14 @@ impl CodeState {
                     return self.update(CodeMsg::Answer(id, typed), env);
                 }
                 // while the agent works: `/stop` stops it, and an empty line does too (the page's
-                // `submitCode`); everything else waits in the box, where the page queues it —
-                // this window has no queue
-                if self.running {
+                // `submitCode`); everything else waits in the queue and is sent when the run is over
+                if self.running || self.beginning {
                     let stop = typed.is_empty() || typed.eq_ignore_ascii_case("/stop");
+                    self.editor = Content::new();
                     if !stop {
+                        self.queue.push(typed);
                         return Task::none();
                     }
-                    self.editor = Content::new();
                     return self.update(CodeMsg::Stop, env);
                 }
                 // every command of the page is answered here — the switch of `/autoapprove`
@@ -3484,6 +3510,12 @@ impl CodeState {
                 self.begin_run(prompt.clone(), prompt, env)
             }
             CodeMsg::Stop => self.stop_now(env),
+            CodeMsg::QueueDrop(i) => {
+                if i < self.queue.len() {
+                    self.queue.remove(i);
+                }
+                Task::none()
+            }
             CodeMsg::Stream(ev) => {
                 if !self.running {
                     return Task::none();
@@ -3628,6 +3660,13 @@ impl CodeState {
                 } else {
                     format!("{prompt}\n\n[hooks]\n{}", answer.context)
                 };
+                self.run_after_begin(prompt, display, env)
+            }
+            CodeMsg::ComputerBegun { prompt, display } => {
+                // a stop in the meantime has taken the run back
+                if !std::mem::take(&mut self.beginning) {
+                    return Task::none();
+                }
                 self.run_prompt(&prompt, &display, env)
             }
             CodeMsg::StopHookDone(answer) => {
@@ -4912,7 +4951,19 @@ pub fn page<'a>(
     } else {
         button(text("Send").size(13)).on_press_maybe((can_send && !s.editor.text().trim().is_empty()).then_some(Message::Code(CodeMsg::Send))).padding([6, 16]).style(theme::primary_button(t))
     };
-    let composer = container(column![editor, row![text("Enter sends, Shift+Enter adds a new line").size(12).color(t.muted), Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 8.0, left: 16.0 })])
+    // the messages that wait for the run to end, each with its ×
+    let mut waiting = row![].spacing(6);
+    for (i, q) in s.queue.iter().enumerate() {
+        let line: String = q.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(60).collect();
+        waiting = waiting.push(
+            container(row![text(line).size(12).color(t.fg_soft), button(text("×").size(12)).on_press(Message::Code(CodeMsg::QueueDrop(i))).padding([0, 4]).style(theme::ghost_button(t))].spacing(4).align_y(Alignment::Center))
+                .padding([3, 10])
+                .style(theme::chip(t)),
+        );
+    }
+    let queue_row: Element<'_, Message> = if s.queue.is_empty() { Space::new().height(0).into() } else { container(waiting).padding(Padding { top: 8.0, right: 16.0, bottom: 0.0, left: 16.0 }).into() };
+    let hint = if s.running { "The agent is working. Enter queues your message, Esc stops it." } else { "Enter sends, Shift+Enter adds a new line" };
+    let composer = container(column![queue_row, editor, row![text(hint).size(12).color(t.muted), Space::new().width(Length::Fill), action].align_y(Alignment::Center).padding(Padding { top: 0.0, right: 10.0, bottom: 8.0, left: 16.0 })])
         .style(theme::card(t, theme::R_XL, false))
         .max_width(820);
     let composer = container(composer).width(Length::Fill).center_x(Length::Fill).padding(Padding { top: 8.0, right: 24.0, bottom: 20.0, left: 24.0 });

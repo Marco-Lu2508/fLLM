@@ -21,6 +21,9 @@ pub const HOTKEY_TEXT: &str = "Works from any program: brings fLLM to the front 
 pub const VARIANT_TITLE: &str = "Graphics backends";
 pub const VARIANT_TEXT: &str = "This installation holds one server build only.";
 pub const LOG_TITLE: &str = "Server log";
+pub const UPDATE_TITLE: &str = "Updates";
+pub const UPDATE_AUTO_TITLE: &str = "Look for updates at the start";
+pub const UPDATE_AUTO_TEXT: &str = "Asks GitHub which version is the newest when the app starts. Nothing else is sent, and nothing is asked while this is off. A newer version is installed from its download page.";
 pub const SERVER_TITLE: &str = "Server";
 pub const SERVER_TEXT: &str = "Stops the server and starts it again. The page reloads when it is ready.";
 
@@ -35,6 +38,8 @@ pub struct DesktopPane {
     pub status: String,
     /// Where the file of settings is kept.
     pub file: std::path::PathBuf,
+    /// What the look for a newer version found.
+    pub update: crate::updates::State,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +53,11 @@ pub enum DkMsg {
     Off,
     Default,
     Logs,
+    /// The *Check for updates* button.
+    UpdateCheck,
+    Updated(Result<Option<crate::updates::Release>, String>),
+    UpdateOpen,
+    UpdateAuto(bool),
 }
 
 impl DesktopPane {
@@ -143,6 +153,25 @@ impl DesktopPane {
                 self.set_quick_entry(desktop::DEFAULT_QUICK_ENTRY, shell);
                 Task::none()
             }
+            DkMsg::UpdateCheck => {
+                self.update = crate::updates::State::Checking;
+                Task::perform(async { crate::updates::check(crate::updates::RELEASES_URL).await }, |r| Message::Dk(DkMsg::Updated(r)))
+            }
+            DkMsg::Updated(r) => {
+                self.update = crate::updates::State::of(r, env!("CARGO_PKG_VERSION"));
+                Task::none()
+            }
+            DkMsg::UpdateOpen => {
+                if let crate::updates::State::Available(r) = &self.update {
+                    crate::app::open_link(&r.url);
+                }
+                Task::none()
+            }
+            DkMsg::UpdateAuto(on) => {
+                self.s.check_updates = on;
+                self.save();
+                Task::none()
+            }
             DkMsg::Logs => {
                 let folder = desktop::log_folder();
                 let _ = std::fs::create_dir_all(&folder);
@@ -198,12 +227,20 @@ pub fn view<'a>(t: Tokens, pane: &'a DesktopPane, log_folder: String) -> Element
         .width(230)
         .style(move |_| container::Style { border: iced::Border { width: 1.0, color: t.separator, radius: 6.0.into() }, ..Default::default() })
         .into();
+    let checking = pane.update == crate::updates::State::Checking;
+    let mut update_actions = row![button(text("Check for updates").size(12)).on_press_maybe((!checking).then_some(Message::Dk(DkMsg::UpdateCheck))).padding([4, 10]).style(theme::secondary_button(t))].spacing(6);
+    if matches!(pane.update, crate::updates::State::Available(_)) {
+        update_actions = update_actions.push(button(text("Open the download page").size(12)).on_press(Message::Dk(DkMsg::UpdateOpen)).padding([4, 10]).style(theme::primary_button(t)));
+    }
+    let update_actions: Element<'a, Message> = update_actions.into();
     let mut body = column![
         item(t, TRAY_TITLE, TRAY_TEXT.to_string(), tray_box.into()),
         item(t, AUTOSTART_TITLE, AUTOSTART_TEXT.into(), checkbox(pane.autostart).on_toggle(|on| Message::Dk(DkMsg::Autostart(on))).into()),
         item(t, HOTKEY_TITLE, HOTKEY_TEXT.into(), hotkey.into()),
         item(t, VARIANT_TITLE, VARIANT_TEXT.into(), variants),
         item(t, LOG_TITLE, log_folder, button(text("Open log folder").size(12)).on_press(Message::Dk(DkMsg::Logs)).padding([4, 10]).style(theme::secondary_button(t)).into()),
+        item(t, UPDATE_TITLE, pane.update.line(env!("CARGO_PKG_VERSION")), update_actions),
+        item(t, UPDATE_AUTO_TITLE, UPDATE_AUTO_TEXT.into(), checkbox(pane.s.check_updates).on_toggle(|on| Message::Dk(DkMsg::UpdateAuto(on))).into()),
         item(t, SERVER_TITLE, SERVER_TEXT.into(), button(text("Restart server").size(12)).on_press(Message::RestartServer).padding([4, 10]).style(theme::secondary_button(t)).into()),
     ]
     .spacing(14);

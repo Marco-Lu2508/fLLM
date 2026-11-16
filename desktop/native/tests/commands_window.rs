@@ -198,8 +198,8 @@ fn plan_mode_refuses_a_memory_tool_the_way_the_page_does() {
     assert!(refused, "a memory tool is not reading in plan mode (state: {s:?})");
 }
 
-/// `/stop` stops a running agent, an empty line does too, and everything else waits in the box
-/// where the page queues it — this window has no queue, so the words stay until you send them.
+/// `/stop` stops a running agent, an empty line does too, and everything else waits in the queue
+/// (`code.queue` of the page) and goes out when the run has returned.
 #[test]
 fn while_the_agent_works_only_stop_is_answered() {
     let (mut app, _dir) = app("light");
@@ -213,14 +213,11 @@ fn while_the_agent_works_only_stop_is_answered() {
     say(&mut app, "Fix it.");
     assert!(app.code().running);
     say(&mut app, "one more thing");
-    assert_eq!(
-        app.code().editor.text().trim(),
-        "one more thing",
-        "the words wait in the box instead of being queued"
-    );
+    assert_eq!(app.code().queue, ["one more thing"], "the words wait in the queue");
+    assert!(app.code().editor.text().trim().is_empty(), "the box is free again");
     assert!(
         !app.code().items.iter().any(|i| matches!(i, fllm_app::code::Item::User { text, .. } if text == "one more thing")),
-        "and they did not become a message"
+        "and they did not become a message yet"
     );
 }
 
@@ -532,11 +529,11 @@ fn help_lists_the_table_and_agent_waits_while_it_runs() {
     assert!(help.contains("/sandbox, /autoapprove, /turbo, /sandbox,"), "sandbox stands twice, as on the page");
     assert!(help.ends_with("Alt+B switches between the build and plan agent."), "…the tail");
 
-    // while it runs, `/agent` waits in the box like every other word (the page queues it); the
+    // while it runs, `/agent` waits in the queue like every other word (the page queues it); the
     // guard toast of `toggleAgent` belongs to Alt+B, which the command itself never reaches
     say(&mut app, "work on it");
     let mode_before = app.code().mode;
     say(&mut app, "/agent");
-    assert_eq!(app.code().editor.text().trim(), "/agent", "it waits in the box");
+    assert_eq!(app.code().queue, ["/agent"], "it waits in the queue");
     assert_eq!(app.code().mode, mode_before, "and the mode did not change");
 }

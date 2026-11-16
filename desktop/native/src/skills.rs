@@ -1737,7 +1737,7 @@ fn installable_row<'a>(
 }
 
 /// The seven cards of `spane-skills`, in the order the page builds them.
-pub fn section<'a>(t: Tokens, v: SkillsView<'a>) -> Element<'a, Message> {
+pub fn section<'a>(t: Tokens, v: SkillsView<'a>, past: Element<'a, Message>) -> Element<'a, Message> {
     column![
         skills_card(t, &v),
         improvements_card(t, &v),
@@ -1746,6 +1746,7 @@ pub fn section<'a>(t: Tokens, v: SkillsView<'a>) -> Element<'a, Message> {
         task_form_card(t, &v),
         library_card(t, &v),
         finder_card(t, &v),
+        past,
     ]
     .spacing(14)
     .into()
