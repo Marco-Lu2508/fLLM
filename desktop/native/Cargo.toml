@@ -34,7 +34,7 @@ tokio = { version = "1", features = ["net", "io-util", "macros", "rt-multi-threa
 global-hotkey = "0.10"
 tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
 # a picture on the clipboard (a screenshot) is attached by Ctrl+V as the page attaches it
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
 sha2 = "0.10"

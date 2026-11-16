@@ -183,7 +183,7 @@ pub fn unpack(archive: &Path, dest: &Path) -> Result<(), String> {
         let mut zip = zip::ZipArchive::new(std::fs::File::open(archive).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
-            let Some(rel) = entry.enclosed_name() else { return Err(format!("the archive has a file outside its folder: {}", entry.name())) };
+            let Some(rel) = entry.enclosed_name() else { return Err(format!("the archive has a file outside its folder: {}", entry.name().map(|n| n.to_string()).unwrap_or_default())) };
             let out = dest.join(rel);
             if entry.is_dir() {
                 std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
