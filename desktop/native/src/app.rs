@@ -690,6 +690,8 @@ pub enum Message {
     /// The answer read aloud by the computer's own voice (the Studio's speak).
     Speak(usize),
     CopyText(String),
+    /// *Save SVG* of a chart, diagram or formula.
+    SaveRich { name: String, svg: std::sync::Arc<str> },
     /// The conversation ends at this message; nothing is deleted, Undo brings the rest back.
     RewindTo(usize),
     RewindUndo,
@@ -905,6 +907,8 @@ pub enum Message {
     MinimizedProbe,
     /// Ctrl+V / Cmd+V: look whether a picture is on the clipboard.
     PasteKey,
+    /// *Restart to update*: the unpacked version is put in place and the app starts again.
+    UpdateInstall,
     /// Ctrl+V in the chat box: the text of the clipboard is read first.
     ChatPaste,
     ChatPasted(Option<String>),
@@ -932,6 +936,8 @@ pub enum Message {
     ChatsDeleteOk,
     ChatsDeleteCancel,
     AutoTitle(bool),
+    /// *Charts, diagrams and math in answers*.
+    RichAnswers(bool),
     /// A *Copy* button of a code card: the text goes to the clipboard and the toast says so.
     CopyWithToast(String, &'static str),
     /// The model named a chat after its first answer.
@@ -1463,7 +1469,7 @@ impl App {
         app.desktop_live = true;
         app.win = app.dk.s.window;
         // the look for a newer version, when it was asked for
-        let task = if app.dk.s.check_updates { Task::batch([task, Task::done(Message::Dk(crate::desktopcards::DkMsg::UpdateCheck))]) } else { task };
+        let task = if app.dk.s.check_updates { Task::batch([task, Task::done(Message::Dk(crate::desktopcards::DkMsg::UpdateCheck { auto: true }))]) } else { task };
         (app, task)
     }
 
@@ -3124,6 +3130,12 @@ impl App {
                 }
                 self.update(Message::Edit(iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Paste(std::sync::Arc::new(text)))))
             }
+            Message::UpdateInstall => {
+                let (Some(stage), Ok(exe)) = (self.dk.stage.clone(), std::env::current_exe()) else { return Task::none() };
+                let Some(install) = exe.parent().map(std::path::Path::to_path_buf) else { return Task::none() };
+                let name = crate::selfupdate::exe_name(&exe);
+                self.install_update(&stage, &install, &name, true)
+            }
             Message::PasteKey => {
                 // only the chat box takes pictures
                 if self.page != View::Chat {
@@ -3204,6 +3216,11 @@ impl App {
                 self.messages.clear();
                 self.save();
                 self.toast = Some("All chats deleted".into());
+                Task::none()
+            }
+            Message::RichAnswers(on) => {
+                self.store.prefs.rich_answers = on;
+                self.save();
                 Task::none()
             }
             Message::AutoTitle(on) => {
@@ -3511,6 +3528,14 @@ impl App {
                 }
                 Task::none()
             }
+            Message::SaveRich { name, svg } => {
+                let path = chatlist::export_dir().join(&name);
+                match std::fs::write(&path, svg.as_bytes()) {
+                    Ok(()) => self.toast = Some("Saved to your downloads.".into()),
+                    Err(e) => self.toast = Some(format!("The picture could not be saved: {e}")),
+                }
+                Task::none()
+            }
             Message::RunCode(code) => {
                 if self.runs.contains_key(&code) {
                     // the same button stops a run that is going (`runBlock` toggles like this)
@@ -3732,6 +3757,7 @@ impl App {
                     let built = crate::gpucheck::fallback_notice(status.device_fallbacks.as_ref());
                     built.show.then_some(built)
                 };
+                self.dk.build_info = status.build_info.clone();
                 self.hero = Some(status);
                 // the models on this computer are asked once for the start screen (heroHubAsked)
                 if setup && !self.hero_hub_asked {
@@ -8261,6 +8287,7 @@ impl App {
                     &crate::generalcards::GeneralView {
                         build_info: self.hero.as_ref().map_or("", |s| s.build_info.as_str()),
                         auto_title: self.store.prefs.auto_title,
+                        rich_answers: self.store.prefs.rich_answers,
                         model: self.model_facts(),
                     },
                 ),
@@ -10824,6 +10851,31 @@ impl App {
         }
     }
 
+    /// Puts the unpacked new version over the installation and starts it (`relaunch`). The engine is
+    /// stopped only when the files are in place, so a failure leaves everything as it was.
+    pub fn install_update(&mut self, stage: &std::path::Path, install: &std::path::Path, exe_name: &str, relaunch: bool) -> Task<Message> {
+        match crate::selfupdate::apply(stage, install, exe_name) {
+            Ok(_) => {
+                // dropping the engine this app started stops it, before the new one is started
+                self.sidecar = None;
+                self.dk.stage = None;
+                if relaunch {
+                    let started = std::process::Command::new(install.join(exe_name)).env("FLLM_RELAUNCH", "1").spawn();
+                    if let Err(e) = started {
+                        self.dk.update = crate::updates::State::Failed(format!("The update is installed, but the app could not be started again: {e}. Start it by hand."));
+                        return Task::none();
+                    }
+                    return iced::exit();
+                }
+                Task::none()
+            }
+            Err(e) => {
+                self.dk.update = crate::updates::State::Failed(e);
+                Task::none()
+            }
+        }
+    }
+
     /// The place and size of the window go into `desktop.json`.
     pub fn save_window(&mut self) {
         if let Some(w) = self.win.and_then(|w| w.usable()) {
@@ -10960,6 +11012,11 @@ impl App {
                     personal_parts.push(block);
                 }
             }
+        }
+        // the formats the window draws (charts, diagrams, math); an override of the default prompt is the user's own
+        // (it goes right behind the built-in prompt, so what you or the assistant add still comes last)
+        if p.rich_answers && !matches!(choices.first(), Some((prompts::Mode::Override, _))) {
+            choices.insert(0, (prompts::Mode::Append, crate::rich::INSTRUCTIONS));
         }
         for part in &personal_parts {
             choices.push((prompts::Mode::Append, part));
@@ -12341,7 +12398,18 @@ pub fn run() -> iced::Result {
     // one fLLM at a time: a second start brings the first to the front and ends
     if std::env::var_os("FLLM_ALLOW_SECOND_INSTANCE").is_none() {
         let dir = store::data_file().parent().map(std::path::Path::to_path_buf).unwrap_or_default();
-        match crate::instance::acquire(crate::instance::port_for(&dir)) {
+        // started again by an update: the program that started it is still closing, so it is waited for
+        let mut role = crate::instance::acquire(crate::instance::port_for(&dir));
+        if std::env::var_os("FLLM_RELAUNCH").is_some() {
+            for _ in 0..40 {
+                if matches!(role, crate::instance::Role::First(_)) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                role = crate::instance::acquire(crate::instance::port_for(&dir));
+            }
+        }
+        match role {
             crate::instance::Role::Second => {
                 eprintln!("fLLM is already running; it was brought to the front.");
                 return Ok(());
@@ -12349,6 +12417,12 @@ pub fn run() -> iced::Result {
             crate::instance::Role::First(flag) => {
                 let _ = INSTANCE.set(flag);
             }
+        }
+    }
+    // the files an earlier update moved aside and the downloads that are not newer are deleted
+    if let (Ok(exe), Some(data)) = (std::env::current_exe(), store::data_file().parent().map(std::path::Path::to_path_buf)) {
+        if let Some(install) = exe.parent() {
+            crate::selfupdate::clean_up(install, &data.join("update"), env!("CARGO_PKG_VERSION"));
         }
     }
     let (size, position) = crate::desktop::Desktop::load(&store::data_file().with_file_name("desktop.json"))

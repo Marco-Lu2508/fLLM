@@ -24,13 +24,13 @@ pub struct Desktop {
     pub quick_entry: String,
     /// Where the window was and how big when the app was closed (`window-state` of the old shell).
     pub window: Option<WindowState>,
-    /// Look for a newer version on GitHub when the app starts (off until you switch it on: nothing is sent without it).
+    /// Look for a newer version on GitHub when the app starts and fetch it (nothing is sent while this is off).
     pub check_updates: bool,
 }
 
 impl Default for Desktop {
     fn default() -> Self {
-        Desktop { keep_in_tray: false, quick_entry: DEFAULT_QUICK_ENTRY.to_string(), window: None, check_updates: false }
+        Desktop { keep_in_tray: false, quick_entry: DEFAULT_QUICK_ENTRY.to_string(), window: None, check_updates: true }
     }
 }
 

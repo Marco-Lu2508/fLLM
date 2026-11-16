@@ -4,7 +4,8 @@
 use fllm_app::api::ModelInfo;
 use fllm_app::app::{App, Message, View};
 use fllm_app::desktop::{Desktop, WindowState};
-use fllm_app::desktopcards::DkMsg;
+use fllm_app::desktopcards::{DkMsg, UpdEvent};
+use fllm_app::selfupdate;
 use fllm_app::store::Store;
 use fllm_app::updates::{self, Release, State};
 use iced_test::Simulator;
@@ -83,36 +84,176 @@ fn page(app: &App) -> Simulator<'_, Message> {
     Simulator::with_size(settings(), iced::Size::new(1300.0, 20000.0), app.view())
 }
 
+fn release(tag: &str, assets: &[&str]) -> Release {
+    Release {
+        tag: tag.into(),
+        url: format!("https://github.com/x/y/releases/tag/{tag}"),
+        version: updates::parse_version(tag).unwrap(),
+        assets: assets.iter().map(|n| updates::Asset { name: n.to_string(), url: format!("http://127.0.0.1:9/{n}"), size: 1000 }).collect(),
+    }
+}
+
+fn updated(app: &mut App, auto: bool, r: Option<Release>) {
+    let _ = app.update(Message::Dk(DkMsg::Updated { auto, result: Ok(r) }));
+}
+
 #[test]
 fn the_card_asks_for_updates_and_shows_what_it_found() {
     let (mut app, _dir) = app();
     let _ = app.update(Message::Go(View::Settings));
     let v = env!("CARGO_PKG_VERSION");
     let mut ui = page(&app);
-    for words in ["Updates", "Check for updates", "Look for updates at the start"] {
+    for words in ["Updates", "Check for updates", "Update automatically", "Installed build"] {
         assert!(ui.find(words).is_ok(), "{words}");
     }
     assert!(ui.find(format!("This is version {v}.")).is_ok());
-    assert!(ui.find("Open the download page").is_err(), "nothing is there yet");
+    assert!(ui.find("standard Updates fetch the bundle of this build.").is_ok(), "the build of this installation");
+    assert!(ui.find("Open the download page").is_err() && ui.find("Download and install").is_err(), "nothing is there yet");
     drop(ui);
-    let _ = app.update(Message::Dk(DkMsg::UpdateCheck));
+    let _ = app.update(Message::Dk(DkMsg::UpdateCheck { auto: false }));
     assert_eq!(app.dk.update, State::Checking);
     assert!(page(&app).find("Looking for a newer version ...").is_ok());
-    let newer = Release { tag: "v99.0.0".into(), url: "https://github.com/x/y/releases/tag/v99.0.0".into(), version: (99, 0, 0) };
-    let _ = app.update(Message::Dk(DkMsg::Updated(Ok(Some(newer)))));
+    // a manual look finds a newer one and waits for you
+    updated(&mut app, false, Some(release("v99.0.0", &[])));
     let mut ui = page(&app);
     assert!(ui.find(format!("Version 99.0.0 is there; you have {v}.")).is_ok());
-    assert!(ui.find("Open the download page").is_ok());
+    assert!(ui.find("Download and install").is_ok() && ui.find("Open the download page").is_ok());
     drop(ui);
-    let same = Release { tag: format!("v{v}"), url: "u".into(), version: updates::parse_version(v).unwrap() };
-    let _ = app.update(Message::Dk(DkMsg::Updated(Ok(Some(same)))));
+    updated(&mut app, false, Some(release(&format!("v{v}"), &[])));
     assert!(page(&app).find(format!("You have the newest version ({v}).")).is_ok());
-    let _ = app.update(Message::Dk(DkMsg::Updated(Err("Could not look for updates: GitHub answered 403".into()))));
+    let _ = app.update(Message::Dk(DkMsg::Updated { auto: false, result: Err("Could not look for updates: GitHub answered 403".into()) }));
     assert!(page(&app).find("Could not look for updates: GitHub answered 403").is_ok());
-    // the switch is kept
-    assert!(!app.dk.s.check_updates);
-    let _ = app.update(Message::Dk(DkMsg::UpdateAuto(true)));
-    assert!(Desktop::load(&app.dk.file).check_updates);
+    // the switch is kept; it is on until you turn it off
+    assert!(app.dk.s.check_updates);
+    let _ = app.update(Message::Dk(DkMsg::UpdateAuto(false)));
+    assert!(!Desktop::load(&app.dk.file).check_updates);
+}
+
+#[test]
+fn a_release_without_the_bundle_of_this_build_says_so_and_fetches_nothing() {
+    let (mut app, _dir) = app();
+    let _ = app.update(Message::Go(View::Settings));
+    // the build of this test program is the standard one: a release with only a CUDA bundle is no match
+    let os = std::env::consts::OS;
+    let only_cuda = selfupdate::asset_name(os, std::env::consts::ARCH, selfupdate::Variant::Cuda);
+    let names: Vec<String> = only_cuda.into_iter().collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    updated(&mut app, true, Some(release("v99.0.0", &refs)));
+    let State::Failed(e) = app.dk.update.clone() else { panic!("{:?}", app.dk.update) };
+    assert!(e.contains("Version 99.0.0 has no standard bundle") || e.contains("no ready-made"), "{e}");
+    let mut ui = page(&app);
+    assert!(ui.find("Open the download page").is_ok(), "the page of the release is still offered");
+}
+
+#[test]
+fn the_app_of_the_installation_fetches_unpacks_and_waits_for_the_restart() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (mut app, dir) = app();
+    let name = selfupdate::asset_name(std::env::consts::OS, std::env::consts::ARCH, selfupdate::Variant::Base);
+    let Some(name) = name else { return };
+    // a bundle of this system, served by a server of this test
+    let files: [(&str, &[u8]); 2] = [("fllm-app", b"new app"), ("fllm-rs", b"new engine")];
+    let bytes = if name.ends_with(".zip") {
+        use std::io::Write;
+        let mut out = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut out);
+            for (n, data) in files {
+                zip.start_file(n, zip::write::SimpleFileOptions::default()).unwrap();
+                zip.write_all(data).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        out.into_inner()
+    } else {
+        let mut out = Vec::new();
+        {
+            let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(&mut out, flate2::Compression::fast()));
+            for (n, data) in files {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(data.len() as u64);
+                h.set_mode(0o755);
+                h.set_cksum();
+                tar.append_data(&mut h, n, data).unwrap();
+            }
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        out
+    };
+    use sha2::Digest;
+    let sum = format!("{:x}  {name}\n", sha2::Sha256::digest(&bytes));
+    let base = rt.block_on(serve_files(vec![(format!("/{name}"), bytes.clone()), (format!("/{name}.sha256"), sum.clone().into_bytes())]));
+    let mut r = release("v99.0.0", &[&name, &format!("{name}.sha256")]);
+    for a in &mut r.assets {
+        a.url = format!("{base}/{}", a.name);
+    }
+    let _ = app.update(Message::Go(View::Settings));
+    updated(&mut app, false, Some(r.clone()));
+    assert_eq!(app.dk.update, State::Available, "found, not fetched yet");
+    // run the fetching as the card does and feed what it reports back, as the window would
+    let plan = selfupdate::plan(&r, std::env::consts::OS, std::env::consts::ARCH, selfupdate::Variant::Base).unwrap();
+    let root = app.dk.stage_root();
+    let mut phases = Vec::new();
+    let staged = rt.block_on(selfupdate::stage(&plan, &root, "99.0.0", |p| phases.push(p))).unwrap();
+    assert!(phases.contains(&selfupdate::Phase::Verify) && phases.contains(&selfupdate::Phase::Unpack));
+    assert!(matches!(phases.first(), Some(selfupdate::Phase::Download { .. })));
+    let _ = app.update(Message::Dk(DkMsg::UpdateEvent(UpdEvent::Done(Ok(staged.clone())))));
+    assert_eq!(app.dk.update, State::Ready);
+    let v = env!("CARGO_PKG_VERSION");
+    let mut ui = page(&app);
+    assert!(ui.find(format!("Version 99.0.0 is ready. Restart to use it; you have {v}.")).is_ok());
+    assert!(ui.find("Restart to update").is_ok());
+    drop(ui);
+    // the restart: the files go over the installation, nothing is started in a test
+    let install = dir.path().join("install");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join("fllm-app"), "old app").unwrap();
+    std::fs::write(install.join("fllm-rs"), "old engine").unwrap();
+    let _ = app.install_update(&staged, &install, "fllm-app", false);
+    assert_eq!(std::fs::read_to_string(install.join("fllm-app")).unwrap(), "new app");
+    assert_eq!(std::fs::read_to_string(install.join("fllm-rs")).unwrap(), "new engine");
+    assert!(app.dk.stage.is_none());
+    // a copy that is whole and waits is found again without a new download
+    let again = selfupdate::stage(&plan, &root, "99.0.0", |_| {});
+    let staged = rt.block_on(again).unwrap();
+    updated(&mut app, true, Some(r.clone()));
+    assert_eq!(app.dk.update, State::Ready, "the unpacked copy of an earlier look is used");
+    assert_eq!(app.dk.stage.as_deref(), Some(staged.as_path()));
+    // a wrong checksum throws the download away
+    let bad = rt.block_on(serve_files(vec![(format!("/{name}"), bytes), (format!("/{name}.sha256"), format!("{}  {name}\n", "0".repeat(64)).into_bytes())]));
+    let mut r2 = r;
+    for a in &mut r2.assets {
+        a.url = format!("{bad}/{}", a.name);
+    }
+    let plan = selfupdate::plan(&r2, std::env::consts::OS, std::env::consts::ARCH, selfupdate::Variant::Base).unwrap();
+    let err = rt.block_on(selfupdate::stage(&plan, &dir.path().join("other"), "99.0.0", |_| {})).unwrap_err();
+    assert!(err.contains("does not match the checksum"), "{err}");
+    assert!(!dir.path().join("other").join("99.0.0").exists() && !dir.path().join("other").join(&name).exists());
+}
+
+async fn serve_files(files: Vec<(String, Vec<u8>)>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let files = files.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let (status, body) = match files.iter().find(|(p, _)| *p == path) {
+                    Some((_, b)) => ("200 OK", b.clone()),
+                    None => ("404 Not Found", Vec::new()),
+                };
+                let _ = s.write_all(format!("HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).as_bytes()).await;
+                let _ = s.write_all(&body).await;
+            });
+        }
+    });
+    format!("http://{addr}")
 }
 
 #[tokio::test]

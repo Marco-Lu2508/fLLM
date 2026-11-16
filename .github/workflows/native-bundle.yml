@@ -2,6 +2,8 @@
 # starts it when no server answers, so unpacking the archive is the whole installation.
 #
 # Started by hand with the tag of a release (the engine binaries of that release are used as they are, checked against their checksums).
+# A bundle is built for every engine build the release has (standard, CUDA, AMD); the app's own update fetches the bundle of its build,
+# so a bundle of a build that the release lacks has to be left out of the run (the update then says there is none for that build).
 # Without `upload` the archives are only kept as workflow artifacts, to try them first; with it they are signed like the engine archives and
 # attached to that release.
 name: native-bundle
@@ -30,6 +32,8 @@ jobs:
     name: ${{ matrix.asset }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    # the GPU bundles need the GPU engine of the release, which a release may not have: that does not fail the run
+    continue-on-error: ${{ matrix.variant && true || false }}
     permissions:
       contents: write
       id-token: write
@@ -43,8 +47,28 @@ jobs:
             # the oldest runner that is offered: a program needs at least the glibc of the system it was built on
             os: ubuntu-24.04
             exe: ""
+          - asset: fllm-desktop-linux-x86_64-cuda.tar.gz
+            engine: fllm-linux-x86_64-cuda.tar.gz
+            variant: cuda
+            os: ubuntu-24.04
+            exe: ""
+          - asset: fllm-desktop-linux-x86_64-rocm.tar.gz
+            engine: fllm-linux-x86_64-rocm.tar.gz
+            variant: amd
+            os: ubuntu-24.04
+            exe: ""
           - asset: fllm-desktop-windows-x86_64.zip
             engine: fllm-windows-x86_64-msvc.zip
+            os: windows-2025
+            exe: ".exe"
+          - asset: fllm-desktop-windows-x86_64-cuda.zip
+            engine: fllm-windows-x86_64-msvc-cuda.zip
+            variant: cuda
+            os: windows-2025
+            exe: ".exe"
+          - asset: fllm-desktop-windows-x86_64-hip.zip
+            engine: fllm-windows-x86_64-msvc-hip.zip
+            variant: amd
             os: windows-2025
             exe: ".exe"
           - asset: fllm-desktop-macos-aarch64.tar.gz
@@ -59,6 +83,8 @@ jobs:
       ASSET: ${{ matrix.asset }}
       ENGINE: ${{ matrix.engine }}
       EXE: ${{ matrix.exe }}
+      # which engine is in the bundle: the app asks for the bundle of the same build when it updates itself
+      VARIANT: ${{ matrix.variant || 'base' }}
       # the app runs on the systems of the last few years, not only on the one it was built on
       MACOSX_DEPLOYMENT_TARGET: "13.0"
       GH_TOKEN: ${{ github.token }}
@@ -123,13 +149,15 @@ jobs:
           window is closed. A server that is already running (FLLM_URL, a Docker container, port 8080) is used as it is.
           The engine alone: fllm-rs --help
           TXT
+          echo "$VARIANT" > fllm-desktop/variant.txt
+          # the GPU builds load their driver library when they are used, not at the start: --help must still work without a GPU
           "fllm-desktop/fllm-rs$EXE" --help > /dev/null
 
       - name: Pack
         run: |
           set -e
           case "$ASSET" in
-            *.zip) python -c "import shutil; shutil.make_archive('fllm-desktop-windows-x86_64', 'zip', root_dir='fllm-desktop')" ;;
+            *.zip) python -c "import os, shutil; shutil.make_archive(os.environ['ASSET'][:-4], 'zip', root_dir='fllm-desktop')" ;;
             *) tar -czf "$ASSET" -C fllm-desktop . ;;
           esac
           ls -l "$ASSET"

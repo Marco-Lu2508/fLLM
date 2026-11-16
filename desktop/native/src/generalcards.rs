@@ -14,6 +14,7 @@ pub struct GeneralView<'a> {
     /// `build_info` of the server's status, empty until it answered.
     pub build_info: &'a str,
     pub auto_title: bool,
+    pub rich_answers: bool,
     /// The model that runs: its name, context, parallel sequences and aliases (`state.status.model`).
     pub model: ModelFacts,
 }
@@ -86,6 +87,12 @@ pub fn view<'a>(t: Tokens, v: &GeneralView<'a>) -> Vec<(&'static str, Element<'a
             "Name new chats automatically",
             "After the first answer the model gives a new chat a short title.",
             checkbox(v.auto_title).size(18).on_toggle(Message::AutoTitle).into()
+        ),
+        setting(
+            t,
+            "Charts, diagrams and math in answers",
+            "The model is told it can write math, charts, Mermaid diagrams and SVG pictures, and the app draws them. Turn it off to save a few lines of every request.",
+            checkbox(v.rich_answers).size(18).on_toggle(Message::RichAnswers).into()
         ),
     ]
     .spacing(14);

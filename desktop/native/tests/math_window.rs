@@ -79,8 +79,10 @@ fn save_png(app: &App, name: &str) {
     shot.matches_image(dir.join(format!("{name}.png"))).expect("the picture is written");
 }
 
-/// A display piece is a line of its own with the typeset source, an inline piece keeps its
-/// place between the words — the math is drawn, the dollars are not (the typeset of markdown).
+/// A display piece is a line of its own, an inline piece keeps its place between the words — the
+/// math is drawn as a picture (`rich::math`), the dollars are not. The pictures and the words around
+/// them are not text the simulator's selector walks: the PNG below is what they are checked against,
+/// and `tests/rich_blocks.rs` checks the pieces.
 #[test]
 fn the_math_of_an_answer_is_typeset_in_the_window() {
     let (mut app, _dir) = app_with(store_with(
@@ -88,24 +90,18 @@ fn the_math_of_an_answer_is_typeset_in_the_window() {
     ));
     let _ = app.update(Message::OpenChat(0));
     let mut ui = sim(&app);
-    // the display piece on its own line, typeset: the dollars are not drawn
-    // the display piece on its own line, typeset: the dollars are not drawn, the spaces of
-    // the Studio's typeset are not either (`x + y` is `<i>x</i>+<i>y</i>`). The slices of words
-    // around it are `rich_text`, which the simulator's text selector does not walk — the PNG
-    // below is what they are checked against.
-    ui.find("E=mc2").expect("the display piece is typeset, without the dollars");
+    assert!(ui.find("$$E=mc^2$$").is_err() && ui.find("E=mc^2").is_err(), "the source is not drawn as text");
+    drop(ui);
+    let t = fllm_app::theme::Tokens::new(false, "blue");
+    assert!(fllm_app::rich::math("E=mc^2", true, 18.0, t.fg).is_ok() && fllm_app::rich::math("a+b", false, 15.0, t.fg).is_ok());
     save_png(&app, "math-answer-typeset");
 }
 
-/// Something that will not typeset is shown as its source, exactly like the Studio's fallback
-/// (`math_source`: the source between the dollars of the chip).
+/// Something that will not typeset stays visible as its source (the Studio's fallback, in a quiet chip).
 #[test]
 fn a_piece_that_will_not_typeset_is_its_source() {
-    let (mut app, _dir) = app_with(store_with("Broken: $$not really math$$ done."));
+    let (mut app, _dir) = app_with(store_with("Broken: $$\\notacommand{x}$$ done."));
     let _ = app.update(Message::OpenChat(0));
-    let mut ui = sim(&app);
-    ui.find("notreallymath")
-        .expect("the source of the piece that would not typeset, without the dollars");
-    ui.find("Broken:").ok();
+    assert!(fllm_app::rich::math("\\notacommand{x}", true, 18.0, fllm_app::theme::Tokens::new(false, "blue").fg).is_err());
     save_png(&app, "math-source-fallback");
 }

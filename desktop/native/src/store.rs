@@ -434,6 +434,10 @@ pub struct Prefs {
     /// *Name new chats automatically* of Settings > General (`state.autoTitle`, on by default).
     #[serde(default = "auto_approve_on")]
     pub auto_title: bool,
+    /// *Charts, diagrams and math in answers* of Settings > General: the model is told it may write
+    /// them (on by default).
+    #[serde(default = "auto_approve_on")]
+    pub rich_answers: bool,
     /// *Keep a searchable copy on this computer* (`chkSessionIndex`, on by default).
     #[serde(default = "auto_approve_on")]
     pub session_index: bool,
@@ -629,7 +633,7 @@ fn default_top_p() -> f32 {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { auto_approve: true, auto_review: false, auto_check: false, learn: true, code_rules: std::collections::BTreeMap::new(), auto_title: true, session_index: true, session_sent: std::collections::BTreeMap::new(), code_personality: default_personality(), personal: Personal::default(), personal_loaded: false, tour_seen: false, shortcut_overrides: std::collections::HashMap::new(), voice: VoicePrefs::default(), saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
+        Prefs { auto_approve: true, auto_review: false, auto_check: false, learn: true, code_rules: std::collections::BTreeMap::new(), auto_title: true, rich_answers: true, session_index: true, session_sent: std::collections::BTreeMap::new(), code_personality: default_personality(), personal: Personal::default(), personal_loaded: false, tour_seen: false, shortcut_overrides: std::collections::HashMap::new(), voice: VoicePrefs::default(), saved_prompts: Vec::new(), manual_sampling: false, temperature: default_temperature(), top_p: default_top_p(), custom_system: false, system_prompt: String::new(), max_tokens: 0, recent_folders: Vec::new(), system_append: false, prompt_length: crate::prompts::Length::Full, sampling: Sampling::default(), thinking_level: String::new(), assistant: String::new() }
     }
 }
 
