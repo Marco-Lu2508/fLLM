@@ -706,6 +706,8 @@ pub struct CmdState {
     pub custom: Vec<CustomCommand>,
     /// The `/cost` summary of the window, none when nothing was counted.
     pub usage: Option<String>,
+    /// The models `/model` offers (`modelNames()` of the page).
+    pub models: Vec<String>,
 }
 
 // ---- the decision of one call ----------------------------------------------------------------
@@ -894,6 +896,28 @@ pub enum Step {
     SetPersonality(&'static str, String),
     /// Read a custom command file (or the plugin's) and run what it holds.
     CustomCommand { name: String, arg_text: String, source: String },
+    /// `/resume` and `/sessions`: the earlier sessions of this folder to pick from.
+    Sessions,
+    /// `/fork`: pick a message to fork before, or fork at the end when there is none.
+    Fork,
+    /// `/revert`: pick a message to go back to.
+    Revert,
+    /// `/rename <title>` sets the title; `/rename` asks for one.
+    Rename(Option<String>),
+    /// `/export`: the session as a Markdown file.
+    Export,
+    /// `/rewind`: pick the oldest file change to take back.
+    Rewind,
+    /// `/compact [focus]`: summarise the older turns.
+    Compact(String),
+    /// `/model`: pick the model for the agent among these.
+    PickModel(Vec<String>),
+    /// `/memory`: the memory block of the side, open.
+    Memory,
+    /// `/retry`: go back to your last message and send it again.
+    Retry,
+    /// `/skill`: the model writes a skill from the session.
+    Skill,
     /// `codeNotice(text)` — everything the cases only say.
     Notice(String),
     /// `toast(text)` — only `/agent` while the agent runs.
@@ -1294,6 +1318,23 @@ pub fn dispatch(text: &str, state: &CmdState) -> Option<Vec<Step>> {
             }
         }
         "insights" => vec![Step::Insights],
+        "skill" => vec![Step::Skill],
+        "rewind" => vec![Step::Rewind],
+        "compact" => {
+            if state.running {
+                vec![Step::Toast("Wait until the agent has finished.".to_string())]
+            } else {
+                vec![Step::Compact(arg_text.clone())]
+            }
+        }
+        "resume" | "sessions" => vec![Step::Sessions],
+        "fork" => vec![Step::Fork],
+        "revert" => vec![Step::Revert],
+        "rename" => vec![Step::Rename((!arg_text.is_empty()).then(|| arg_text.clone()))],
+        "export" => vec![Step::Export],
+        "model" => vec![Step::PickModel(state.models.clone())],
+        "memory" => vec![Step::Memory],
+        "retry" => vec![Step::Retry],
         "personality" => {
             if arg_text.is_empty() {
                 vec![Step::Notice(personality_info_notice())]

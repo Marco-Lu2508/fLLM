@@ -257,7 +257,7 @@ fn the_self_review_reads_the_work_and_sends_the_model_back_once() {
     // the run starts after a change that is already there: only what comes after it is reviewed
     code(
         &mut app,
-        CodeMsg::ChangesLoaded(Ok(vec![Change { id: 5, path: "old.rs".into(), kind: "edit".into() }])),
+        CodeMsg::ChangesLoaded(Ok(vec![Change { id: 5, path: "old.rs".into(), kind: "edit".into(), time: 0.0 }])),
     );
 
     say(&mut app, "fix the bug");
@@ -274,8 +274,8 @@ fn the_self_review_reads_the_work_and_sends_the_model_back_once() {
     code(
         &mut app,
         CodeMsg::ChangesLoaded(Ok(vec![
-            Change { id: 5, path: "old.rs".into(), kind: "edit".into() },
-            Change { id: 7, path: "src/lib.rs".into(), kind: "edit".into() },
+            Change { id: 5, path: "old.rs".into(), kind: "edit".into(), time: 0.0 },
+            Change { id: 7, path: "src/lib.rs".into(), kind: "edit".into(), time: 0.0 },
         ])),
     );
     code(
@@ -323,7 +323,7 @@ fn the_self_review_reads_the_work_and_sends_the_model_back_once() {
     code(&mut app, CodeMsg::Stream(fllm_app::api::StreamEvent::Done));
     code(
         &mut app,
-        CodeMsg::ChangesLoaded(Ok(vec![Change { id: 7, path: "src/lib.rs".into(), kind: "edit".into() }])),
+        CodeMsg::ChangesLoaded(Ok(vec![Change { id: 7, path: "src/lib.rs".into(), kind: "edit".into(), time: 0.0 }])),
     );
     code(&mut app, CodeMsg::ReviewTools(fllm_app::code::ReviewAnswers::default()));
     assert!(!app.code().running, "the second round with nothing to fix ends the run");
@@ -372,7 +372,7 @@ fn the_second_round_is_the_last_even_when_it_found_problems() {
 
     code(
         &mut app,
-        CodeMsg::ChangesLoaded(Ok(vec![Change { id: 7, path: "src/lib.rs".into(), kind: "edit".into() }])),
+        CodeMsg::ChangesLoaded(Ok(vec![Change { id: 7, path: "src/lib.rs".into(), kind: "edit".into(), time: 0.0 }])),
     );
     code(&mut app, CodeMsg::ReviewTools(fllm_app::code::ReviewAnswers::default()));
     assert_eq!(
@@ -385,7 +385,7 @@ fn the_second_round_is_the_last_even_when_it_found_problems() {
     code(&mut app, CodeMsg::Stream(fllm_app::api::StreamEvent::Done));
     code(
         &mut app,
-        CodeMsg::ChangesLoaded(Ok(vec![Change { id: 7, path: "src/lib.rs".into(), kind: "edit".into() }])),
+        CodeMsg::ChangesLoaded(Ok(vec![Change { id: 7, path: "src/lib.rs".into(), kind: "edit".into(), time: 0.0 }])),
     );
     code(
         &mut app,

@@ -51,7 +51,7 @@ fn session(app: &mut App) {
     tool_call(app, 2, "c3", "bash", r#"{"command":"cargo test -p tokenizer"}"#);
     code(app, CodeMsg::Stream(StreamEvent::Done));
     code(app, CodeMsg::ToolDone("c1".into(), Ok("     1\tfn tokenize(s: &str) {\n     2\t    for i in 0..=n {\n     3\t    }\n(end of file, 3 lines)".into())));
-    code(app, CodeMsg::ChangesLoaded(Ok(vec![Change { id: 1, path: "src/lib.rs".into(), kind: "edit".into() }, Change { id: 2, path: "src/tokenizer.rs".into(), kind: "edit".into() }])));
+    code(app, CodeMsg::ChangesLoaded(Ok(vec![Change { id: 1, path: "src/lib.rs".into(), kind: "edit".into(), time: 0.0 }, Change { id: 2, path: "src/tokenizer.rs".into(), kind: "edit".into(), time: 0.0 }])));
 }
 
 fn click(app: &App, label: &str) -> Vec<Message> {
@@ -195,15 +195,19 @@ fn a_session_is_kept_per_folder_and_comes_back_when_the_folder_is_opened_again()
     code(&mut app, CodeMsg::Close);
     code(&mut app, CodeMsg::Opened(Ok(Workspace { root: "/other".into(), name: "other".into(), branch: None })));
     assert!(app.code().items.is_empty());
-    // and a new session forgets the kept one
+    // a new session keeps the old one in the list of the folder (`newCodeSession` saves it first),
+    // and opening the folder again brings the newest saved session back, as `restoreCodeSession` does
     code(&mut app, CodeMsg::Close);
     open_folder(&mut app);
     assert!(!app.code().items.is_empty());
     code(&mut app, CodeMsg::NewSession);
+    assert!(app.code().items.is_empty());
+    assert_eq!(app.code().sessions.len(), 1, "the finished session is in the list");
     drop(app);
     let mut app = boot();
     open_folder(&mut app);
-    assert!(app.code().items.is_empty(), "a session that was cleared stays cleared");
+    assert_eq!(app.code().saved(), before, "the newest saved session is the conversation again");
+    assert_eq!(app.code().sessions.len(), 1);
 }
 
 #[test]

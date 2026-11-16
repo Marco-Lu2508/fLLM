@@ -2073,7 +2073,9 @@ impl App {
                 let usage = crate::usage::summary_text(&self.store.usage, &self.prices);
                 let sandbox = (!self.runtime.sandbox.is_empty()).then(|| self.runtime.sandbox.clone());
                 let session_file = self.data_file.with_file_name("code-sessions.json");
+                let model_names: Vec<String> = self.models.overview.installed.iter().map(|m| m.name.clone()).collect();
                 let env = code::Env {
+                    models: &model_names,
                     base: &base,
                     model: model.as_deref(),
                     params: self.chat_params(),
@@ -2192,26 +2194,21 @@ impl App {
                 // the conversation of a folder is kept: it comes back when the folder is opened again
                 let file = self.data_file.with_file_name("code-sessions.json");
                 if let Some(root) = opened {
-                    if let Some(saved) = code::Sessions::load(&file).0.remove(&root) {
-                        self.code.restore(saved);
-                    }
+                    self.code.open_sessions(&file, &root);
                     // the allow/deny rules of this folder (`loadRules` of `code.js` reads its own
                     // storage per workspace root)
                     self.code.rules = self.store.prefs.code_rules.get(&root).cloned().unwrap_or_default();
-                } else if ends_session || (was_running && !self.code.running) {
-                    if let Some(w) = &self.code.workspace {
-                        let mut all = code::Sessions::load(&file);
-                        let saved = self.code.saved();
-                        if saved.is_empty() {
-                            all.0.remove(&w.root);
-                        } else {
-                            all.0.insert(w.root.clone(), saved);
-                        }
-                        if let Err(e) = all.save(&file) {
-                            eprintln!("fllm-app: the code session could not be saved: {e}");
-                        }
-                    }
+                    self.code.sync_rule_editors();
+                } else if ends_session || (was_running && !self.code.running) || std::mem::take(&mut self.code.wants_save) {
+                    self.code.persist(&file);
                 }
+                // the model names the session after its first answer; `/model` picks the model of the agent
+                let title_task = if was_running && !self.code.running { self.code.title_task(&env) } else { Task::none() };
+                let model_task = match self.code.pending_model.take() {
+                    Some(name) => self.switch_model_of(&name),
+                    None => Task::none(),
+                };
+                let task = Task::batch([task, title_task, model_task]);
                 if posts.is_empty() {
                     task
                 } else {

@@ -285,7 +285,7 @@ fn a_spec_run_is_reviewed_like_any_run() {
     open_folder(&mut app);
     code(&mut app, CodeMsg::ToggleAutoReview(true));
     code(&mut app, CodeMsg::SetMode(Mode::AutoEdit));
-    code(&mut app, CodeMsg::ChangesLoaded(Ok(vec![Change { id: 5, path: "old.rs".into(), kind: "edit".into() }])));
+    code(&mut app, CodeMsg::ChangesLoaded(Ok(vec![Change { id: 5, path: "old.rs".into(), kind: "edit".into(), time: 0.0 }])));
 
     code(&mut app, CodeMsg::SpecPrompt { prompt: "Do task 2 of export.".into(), display: "/spec run export 2".into() });
     assert!(app.code().running);

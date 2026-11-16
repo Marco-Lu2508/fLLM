@@ -123,7 +123,7 @@ fn nothing_is_handed_over_while_learning_is_off() {
     code(&mut app, CodeMsg::Stream(StreamEvent::Delta("Hello.".into())));
     let end = task(&mut app, CodeMsg::Stream(StreamEvent::Done));
     assert!(app.code().learn_last.is_none());
-    assert_eq!(end.units(), 1, "only the specs are read");
+    assert_eq!(end.units(), 2, "the specs are read and the model is asked for a title of the session");
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn a_failed_run_is_learned_from_too() {
     say(&mut app, "hi");
     let end = task(&mut app, CodeMsg::Stream(StreamEvent::Error("context length exceeded".into())));
     assert!(app.code().learn_last.is_some(), "a run that ended in an error is handed over, as a failed one");
-    assert_eq!(end.units(), 1);
+    assert_eq!(end.units(), 2, "the specs and the title of the session come with it");
 }
 
 #[test]

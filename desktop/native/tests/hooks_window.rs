@@ -279,7 +279,7 @@ fn after_the_review_the_stop_hook_is_asked() {
     code(&mut app, CodeMsg::SetMode(Mode::AutoEdit));
     code(
         &mut app,
-        CodeMsg::ChangesLoaded(Ok(vec![fllm_app::code::Change { id: 5, path: "old.rs".into(), kind: "edit".into() }])),
+        CodeMsg::ChangesLoaded(Ok(vec![fllm_app::code::Change { id: 5, path: "old.rs".into(), kind: "edit".into(), time: 0.0 }])),
     );
 
     say(&mut app, "fix the bug");
@@ -297,7 +297,7 @@ fn after_the_review_the_stop_hook_is_asked() {
     code(&mut app, CodeMsg::Stream(fllm_app::api::StreamEvent::Done)); // the review begins
     code(
         &mut app,
-        CodeMsg::ChangesLoaded(Ok(vec![fllm_app::code::Change { id: 7, path: "src/lib.rs".into(), kind: "edit".into() }])),
+        CodeMsg::ChangesLoaded(Ok(vec![fllm_app::code::Change { id: 7, path: "src/lib.rs".into(), kind: "edit".into(), time: 0.0 }])),
     );
     code(&mut app, CodeMsg::ReviewTools(fllm_app::code::ReviewAnswers::default()));
     assert_eq!(
@@ -312,7 +312,7 @@ fn after_the_review_the_stop_hook_is_asked() {
     code(&mut app, CodeMsg::Stream(fllm_app::api::StreamEvent::Done));
     code(
         &mut app,
-        CodeMsg::ChangesLoaded(Ok(vec![fllm_app::code::Change { id: 7, path: "src/lib.rs".into(), kind: "edit".into() }])),
+        CodeMsg::ChangesLoaded(Ok(vec![fllm_app::code::Change { id: 7, path: "src/lib.rs".into(), kind: "edit".into(), time: 0.0 }])),
     );
     code(
         &mut app,

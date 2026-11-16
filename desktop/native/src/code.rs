@@ -15,8 +15,12 @@ use iced::widget::{button, checkbox, column, container, markdown, row, scrollabl
 use iced::{keyboard, task, Alignment, Element, Font, Length, Padding, Task};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::path::Path;
+
+mod session_cmds;
+mod side_views;
+pub use session_cmds::SessMsg;
+pub use side_views::{choices_view, meter_text};
 
 /// The most model calls one request of yours may take: a loop that never ends is stopped here.
 pub const MAX_STEPS: usize = 30;
@@ -139,6 +143,8 @@ pub struct Change {
     pub id: u64,
     pub path: String,
     pub kind: String,
+    /// When the server made it (`c.time` of the page: seconds or milliseconds), 0 when it says nothing.
+    pub time: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -245,6 +251,38 @@ pub enum Item {
     /// The message a blocked stop hook gives the model (`ctx.messages.push` there — the notice
     /// with the same words stands in the list): the view skips it, the wire sends it.
     StopHook(String),
+}
+
+/// A notice with buttons (`pushChoices` of the page: sessions, rewind points, the models). It is
+/// not kept with the session; it stands below the conversation until a button is pressed or the
+/// next message is sent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Choices {
+    pub text: String,
+    pub action: ChoiceAction,
+    pub rows: Vec<(String, String)>,
+}
+
+/// What a press on one of the buttons of a `Choices` notice does (`item.action` of the page).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChoiceAction {
+    Resume,
+    Rewind,
+    Fork,
+    Revert,
+    Unrevert,
+    Model,
+}
+
+/// What `/revert` took away (`code.reverted`), for *Undo the revert*.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reverted {
+    pub items: Vec<Saved>,
+    pub todos: Vec<crate::sessions::SavedTodo>,
+    pub marks: Vec<crate::sessions::Mark>,
+    pub compaction: Option<crate::sessions::Compaction>,
+    pub restored: usize,
+    pub title: String,
 }
 
 /// A screenshot a computer tool answered with (`r.image` of the page): the picture, the data URL
@@ -438,6 +476,29 @@ fn restored_call(saved: Saved) -> Call {
     Call { id, name, args, permission: Permission::parse(&permission), kind: ToolKind::Server, state: CallState::Done { ok, output }, auto_note: None, check: None, sent, kid, cu: gone.then(|| Box::new(CuView { gone: true, ..Default::default() })), open: None, expanded: false }
 }
 
+fn todo_saved(t: &Todo) -> crate::sessions::SavedTodo {
+    crate::sessions::SavedTodo {
+        content: t.content.clone(),
+        status: match t.status {
+            TodoStatus::Pending => "pending",
+            TodoStatus::InProgress => "in_progress",
+            TodoStatus::Completed => "completed",
+        }
+        .into(),
+    }
+}
+
+fn todo_loaded(t: &crate::sessions::SavedTodo) -> Todo {
+    Todo {
+        content: t.content.clone(),
+        status: match t.status.as_str() {
+            "completed" => TodoStatus::Completed,
+            "in_progress" => TodoStatus::InProgress,
+            _ => TodoStatus::Pending,
+        },
+    }
+}
+
 /// The most items kept per folder: the newest ones.
 pub const SAVED_ITEMS: usize = 200;
 
@@ -515,28 +576,7 @@ fn permission_name(p: Permission) -> &'static str {
     }
 }
 
-/// Sessions by folder, in one file next to the chats.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct Sessions(pub BTreeMap<String, Vec<Saved>>);
-
-impl Sessions {
-    pub fn load(path: &Path) -> Sessions {
-        let Ok(text) = std::fs::read_to_string(path) else { return Sessions::default() };
-        match serde_json::from_str(&text) {
-            Ok(s) => s,
-            Err(_) => {
-                let _ = std::fs::rename(path, path.with_extension("damaged.json"));
-                Sessions::default()
-            }
-        }
-    }
-
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(self).map_err(std::io::Error::other)?)?;
-        std::fs::rename(tmp, path)
-    }
-}
+pub use crate::sessions::Sessions;
 
 #[derive(Default)]
 struct Partial {
@@ -604,6 +644,8 @@ pub enum CodeMsg {
     ExpandCard(String),
     /// The browser panel.
     Br(BrMsg),
+    /// The sessions, the rewind and the compaction (row 79) and the blocks of the side that go with them.
+    Sess(SessMsg),
     /// The browser settings were saved (`fllmBrowserChanged`): the panel reads its status again and the tools are asked for.
     BrowserChanged,
     /// What the server says of computer use (a poll of the chain `epoch`).
@@ -701,6 +743,8 @@ pub struct Env<'a> {
     pub vision: bool,
     /// Whether the Code page is the one shown (the browser panel does not poll behind another page).
     pub visible: bool,
+    /// The names `/model` offers (`modelNames()` of the page: the models of the computer).
+    pub models: &'a [String],
 }
 
 /// What a command changed and the store has to keep (`saveCodeSettings` and the rules write of
@@ -808,8 +852,55 @@ pub struct CodeState {
     learn_from: Option<usize>,
     /// The skills of the last run that was handed over (`window.fllmLearnLast`): what a thumb is about.
     pub learn_last: Option<crate::learn::Last>,
-    /// What the server calls this conversation in its log (`code.sessionId`).
-    session_id: String,
+    /// What the server calls this conversation in its log (`code.sessionId`), and the title and the
+    /// lock of the title the sessions list shows (`code.title`, `code.titleLocked`).
+    pub session_id: String,
+    pub title: String,
+    pub title_locked: bool,
+    /// The moments of the messages of yours (`msgIndex`, `todosBefore` and `changeMark` of the
+    /// page's user items): a fork and a revert cut the conversation there.
+    pub marks: Vec<crate::sessions::Mark>,
+    /// What stands for the first messages after `/compact`.
+    pub compaction: Option<crate::sessions::Compaction>,
+    /// The summary is being written.
+    pub compacting: bool,
+    pub reverted: Option<Reverted>,
+    /// The notices with buttons below the conversation.
+    pub choices: Vec<Choices>,
+    /// `/retry` waits for the revert to finish before the message goes out again.
+    pub(crate) retry_pending: bool,
+    /// How many times this run already summarised the conversation (two at most, `compactions`).
+    compactions: u8,
+    /// The context of the loaded model, as the last update read it (`ctxMax()`).
+    pub ctx_max: usize,
+    /// The title of the session is being asked of the model.
+    titling: bool,
+    /// The side blocks *Memory* and *Permissions* are open (`code.sideOpen`).
+    pub mem_open: bool,
+    pub perms_open: bool,
+    /// The two boxes of *Memory* (one fact per line) and whether each was changed (`code.memDraft`).
+    pub mem_ws: Content,
+    pub mem_gl: Content,
+    pub mem_dirty: (bool, bool),
+    /// The two boxes of *Permissions* (`code.rulesDraft`).
+    pub rules_allow: Content,
+    pub rules_deny: Content,
+    pub rules_dirty: bool,
+    /// The model the agent was told to use with `/model` (the app switches to it).
+    pub(crate) pending_model: Option<String>,
+    /// The sessions of this folder, the newest first (`workspaceSessions()`): read from the file
+    /// when the folder opens and after every save.
+    pub sessions: Vec<crate::sessions::Record>,
+    pub session_query: String,
+    /// The session being renamed and the title typed so far.
+    pub rename: Option<(String, String)>,
+    /// The session that waits for the answer of *Delete this session?*.
+    pub confirm_delete: Option<String>,
+    /// Whether the server answered `GET /api/studio/agent/changes` (the page: `code.changes === null`).
+    pub changes_known: bool,
+    /// A session the app has to write the file for (the page calls `saveCodeSession()` itself).
+    pub(crate) wants_save: bool,
+
     /// A learning step ended: Settings > Personalization and Skills read their lists again.
     pub(crate) learn_refresh: bool,
     /// The commands the agent started in the background (`code.jobs`).
@@ -917,6 +1008,32 @@ impl Default for CodeState {
             learn_from: None,
             learn_last: None,
             session_id: String::new(),
+            title: String::new(),
+            title_locked: false,
+            marks: Vec::new(),
+            compaction: None,
+            compacting: false,
+            reverted: None,
+            choices: Vec::new(),
+            retry_pending: false,
+            compactions: 0,
+            ctx_max: 0,
+            titling: false,
+            mem_open: false,
+            perms_open: false,
+            mem_ws: Content::new(),
+            mem_gl: Content::new(),
+            mem_dirty: (false, false),
+            rules_allow: Content::new(),
+            rules_deny: Content::new(),
+            rules_dirty: false,
+            pending_model: None,
+            sessions: Vec::new(),
+            session_query: String::new(),
+            rename: None,
+            confirm_delete: None,
+            changes_known: false,
+            wants_save: false,
             learn_refresh: false,
             jobs: Vec::new(),
             computer: Computer::default(),
@@ -976,7 +1093,7 @@ pub fn parse_changes(v: &Value) -> Vec<Change> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .map(|c| Change { id: c.get("id").and_then(Value::as_u64).unwrap_or(0), path: c.get("path").and_then(Value::as_str).unwrap_or_default().to_string(), kind: c.get("kind").and_then(Value::as_str).unwrap_or("edit").to_string() })
+        .map(|c| Change { id: c.get("id").and_then(Value::as_u64).unwrap_or(0), path: c.get("path").and_then(Value::as_str).unwrap_or_default().to_string(), kind: c.get("kind").and_then(Value::as_str).unwrap_or("edit").to_string(), time: c.get("time").and_then(Value::as_f64).unwrap_or(0.0) })
         .collect()
 }
 
@@ -1554,8 +1671,19 @@ pub fn todo_text(todos: &[Todo]) -> String {
 impl CodeState {
     /// The session as it is kept on disk: a call that had not finished is kept as interrupted.
     pub fn saved(&self) -> Vec<Saved> {
-        let mut out: Vec<Saved> = self
-            .items
+        let mut out = self.saved_all();
+        if out.len() > SAVED_ITEMS {
+            out.drain(..out.len() - SAVED_ITEMS);
+            // a call without the answer that announced it would confuse the model: start at a message of yours
+            let first = out.iter().position(|i| matches!(i, Saved::User { .. })).unwrap_or(0);
+            out.drain(..first);
+        }
+        out
+    }
+
+    /// Every item that is kept, uncut (a revert keeps all of it for *Undo the revert*).
+    pub fn saved_all(&self) -> Vec<Saved> {
+        self.items
             .iter()
             .filter_map(|i| match i {
                 Item::User { text, sent } => Some(Saved::User {
@@ -1568,14 +1696,85 @@ impl CodeState {
                 Item::StopHook(t) => Some(Saved::StopHook { text: t.clone() }),
                 Item::Call(c) => Some(saved_call(c)),
             })
-            .collect();
-        if out.len() > SAVED_ITEMS {
-            out.drain(..out.len() - SAVED_ITEMS);
-            // a call without the answer that announced it would confuse the model: start at a message of yours
-            let first = out.iter().position(|i| matches!(i, Saved::User { .. })).unwrap_or(0);
-            out.drain(..first);
+            .collect()
+    }
+
+    /// The index an item has in `saved()` before the cut to `SAVED_ITEMS` (an empty answer and a
+    /// notice with buttons are not kept, so the later items move up).
+    fn saved_index(&self, item: usize) -> usize {
+        self.items[..item.min(self.items.len())]
+            .iter()
+            .filter(|i| !matches!(i, Item::Assistant { text, .. } if text.is_empty()))
+            .count()
+    }
+
+    /// The session as a record of the list (`saveCodeSession` of the page): `None` while there is
+    /// nothing to keep.
+    pub fn record(&mut self) -> Option<crate::sessions::Record> {
+        if self.items.is_empty() {
+            return None;
         }
-        out
+        if self.session_id.is_empty() {
+            self.session_id = crate::sessions::new_id();
+        }
+        let mut items = self.saved();
+        let all_len = self.items.iter().filter(|i| !matches!(i, Item::Assistant { text, .. } if text.is_empty())).count();
+        // `saved()` cut the oldest items off: the marks move with them
+        let dropped = all_len.saturating_sub(items.len());
+        let marks: Vec<crate::sessions::Mark> = self
+            .marks
+            .iter()
+            .filter_map(|m| {
+                let at = self.saved_index(m.item);
+                (at >= dropped).then(|| crate::sessions::Mark { item: at - dropped, ..m.clone() })
+            })
+            .collect();
+        let title = if self.title.is_empty() { crate::sessions::heuristic_title(crate::sessions::first_user_text(&items).as_deref()) } else { self.title.clone() };
+        let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64);
+        let todos = self.todos.iter().map(todo_saved).collect();
+        items.shrink_to_fit();
+        Some(crate::sessions::Record { id: self.session_id.clone(), title, title_locked: self.title_locked, time, items, todos, marks, compaction: self.compaction.clone().map(|mut c| {
+            c.from_item = self.saved_index(c.from_item).saturating_sub(dropped);
+            c
+        }) })
+    }
+
+    /// The conversation and everything that belongs to it, empty (`resetSessionState`).
+    pub fn reset_session(&mut self) {
+        self.items.clear();
+        self.todos.clear();
+        self.steps = 0;
+        self.history.clear();
+        self.always_allow.clear();
+        self.jobs.clear();
+        self.session_id = String::new();
+        self.title = String::new();
+        self.title_locked = false;
+        self.marks.clear();
+        self.compaction = None;
+        self.reverted = None;
+        self.choices.clear();
+    }
+
+    /// A session of the list as the conversation (`applySession`).
+    pub fn apply_record(&mut self, r: crate::sessions::Record) {
+        self.reset_session();
+        self.session_id = r.id;
+        self.title = r.title;
+        self.title_locked = r.title_locked;
+        self.marks = r.marks;
+        self.compaction = r.compaction;
+        self.restore(r.items);
+        self.todos = r.todos.iter().map(todo_loaded).collect();
+    }
+
+    /// The sessions of a folder are read (the file is the list), and the newest one is the
+    /// conversation again, as the page restores it when a folder opens.
+    pub fn open_sessions(&mut self, file: &Path, root: &str) {
+        self.sessions = Sessions::load(file).of(root).to_vec();
+        if let Some(first) = self.sessions.first().cloned() {
+            self.apply_record(first);
+        }
     }
 
     /// Takes a kept session back as the conversation.
@@ -1724,11 +1923,17 @@ impl CodeState {
 
     /// The messages of the next request: the agent's instructions, then the session with every call answered.
     pub fn wire(&self, extra: Option<&str>) -> Vec<WireMessage> {
+        self.wire_of(&self.items, extra)
+    }
+
+    /// The messages of the conversation up to `items` (the part before a message of yours, for a
+    /// fork or a revert). After `/compact` a summary stands for the first ones.
+    pub fn wire_of(&self, items: &[Item], extra: Option<&str>) -> Vec<WireMessage> {
         let system = self.system_prompt(extra);
         let mut wire = vec![WireMessage::new("system", system)];
         let mut i = 0;
-        while i < self.items.len() {
-            match &self.items[i] {
+        while i < items.len() {
+            match &items[i] {
                 Item::ReviewFeedback(text) | Item::StopHook(text) => {
                     // sent as it stands, and never drawn (the view skips these variants)
                     wire.push(WireMessage::new("user", text.clone()));
@@ -1742,7 +1947,7 @@ impl CodeState {
                 Item::Note(_) => {}
                 Item::Assistant { text, .. } => {
                     // the calls that follow this answer belong to it
-                    let calls: Vec<&Call> = self.items[i + 1..].iter().take_while(|n| matches!(n, Item::Call(_))).filter_map(|n| if let Item::Call(c) = n { Some(c) } else { None }).collect();
+                    let calls: Vec<&Call> = items[i + 1..].iter().take_while(|n| matches!(n, Item::Call(_))).filter_map(|n| if let Item::Call(c) = n { Some(c) } else { None }).collect();
                     let mut m = WireMessage::new("assistant", text.clone());
                     if !calls.is_empty() {
                         m.tool_calls = Some(Value::Array(calls.iter().map(|c| json!({"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.args}})).collect()));
@@ -1799,6 +2004,12 @@ impl CodeState {
             }
             i += 1;
         }
+        // `/compact`: a summary stands for the first messages
+        if let Some(c) = &self.compaction {
+            let covered = c.covered.min(wire.len() - 1);
+            let prefix: Vec<WireMessage> = c.prefix.iter().map(|(role, content)| WireMessage::new(role, content.clone())).collect();
+            wire.splice(1..1 + covered, prefix);
+        }
         drop_old_screenshots(&mut wire);
         // only the newest picture of the browser stays in the conversation
         let browser_shots: Vec<usize> = wire.iter().enumerate().filter(|(_, m)| m.parts.is_some() && m.content.starts_with(BROWSER_SHOT_MARK)).map(|(i, _)| i).collect();
@@ -1825,6 +2036,7 @@ impl CodeState {
             rules: self.rules.clone(),
             custom: self.custom.clone(),
             usage: env.usage.map(str::to_string),
+            models: env.models.to_vec(),
         }
     }
 
@@ -1864,9 +2076,17 @@ impl CodeState {
         let sent = (sent_full != display).then_some(sent_full);
         self.error = None;
         self.steps = 0;
+        self.compactions = 0;
+        self.choices.clear();
         self.history.clear();
         // the run begins where the conversation ends now (the page's `turn.msgIndex`)
         self.learn_from = Some(self.wire(None).len().saturating_sub(1));
+        // and the moment is kept: a fork or a revert goes back to before this message
+        self.marks.push(crate::sessions::Mark {
+            item: self.items.len(),
+            changes: self.changes.iter().map(|c| c.id).max().unwrap_or(0),
+            todos: self.todos.iter().map(todo_saved).collect(),
+        });
         self.items.push(Item::User {
             text: display.to_string(),
             sent,
@@ -2021,18 +2241,16 @@ impl CodeState {
             match step {
                 Step::Notice(text) => self.items.push(Item::Note(text)),
                 Step::Toast(text) => self.pending_toast = Some(text),
+                step @ (Step::Sessions | Step::Fork | Step::Revert | Step::Rename(_) | Step::Export | Step::Rewind | Step::Compact(_) | Step::PickModel(_) | Step::Memory | Step::Retry | Step::Skill) => {
+                    tasks.push(self.session_step(step, env))
+                }
                 Step::NewSession => {
                     // `newCodeSession` of the page: stop, save, reset
                     if self.running {
                         tasks.push(self.stop_now(env));
                     }
                     self.persist(env.session_file);
-                    self.items.clear();
-                    self.todos.clear();
-                    self.steps = 0;
-                    self.history.clear();
-                    self.always_allow.clear();
-                    self.jobs.clear();
+                    self.reset_session();
                 }
                 Step::Undo(steps) => {
                     // the page sends `{ steps }` above one, and one is the plain call
@@ -2183,22 +2401,38 @@ impl CodeState {
     }
 
     /// The session of this folder onto disk (the write of `app.rs` after a run or a new session,
-    /// here so a command can save before it clears the conversation).
-    pub fn persist(&self, file: &std::path::Path) {
-        let Some(w) = &self.workspace else { return };
+    /// here so a command can save before it clears the conversation): the record of this
+    /// session goes to the top of the list.
+    pub fn persist(&mut self, file: &std::path::Path) {
+        let Some(root) = self.workspace.as_ref().map(|w| w.root.clone()) else { return };
         let mut all = Sessions::load(file);
-        let saved = self.saved();
-        if saved.is_empty() {
-            all.0.remove(&w.root);
-        } else {
-            all.0.insert(w.root.clone(), saved);
+        match self.record() {
+            Some(rec) => all.put(&root, rec),
+            None => {
+                if !self.session_id.is_empty() {
+                    all.remove(&root, &self.session_id);
+                }
+            }
         }
         if let Err(e) = all.save(file) {
             eprintln!("fllm-app: the code session could not be saved: {e}");
         }
+        self.sessions = all.of(&root).to_vec();
     }
 
     fn start_stream(&mut self, env: &Env) -> Task<Message> {
+        // the conversation fills the context: the older part becomes a summary first (two times at most
+        // in one run, `compactions < 2` of the page's loop)
+        if self.compactions < 2 && env.model.is_some() && crate::sessions::needs_compaction(self.code_estimate(env.extra), env.ctx_max, crate::sessions::COMPACT_RATIO) {
+            self.compactions += 1;
+            if let Some(task) = self.begin_compaction(String::new(), env, true) {
+                return task;
+            }
+        }
+        self.start_stream_now(env)
+    }
+
+    fn start_stream_now(&mut self, env: &Env) -> Task<Message> {
         let Some(model) = env.model else {
             self.running = false;
             return Task::none();
@@ -2719,6 +2953,7 @@ impl CodeState {
 
     pub fn update(&mut self, msg: CodeMsg, env: &Env) -> Task<Message> {
         self.vision = env.vision;
+        self.ctx_max = env.ctx_max;
         match msg {
             CodeMsg::PathInput(s) => {
                 self.path_input = s;
@@ -2773,6 +3008,7 @@ impl CodeState {
                 Task::none()
             }
             CodeMsg::Br(m) => self.br_update(m, env),
+            CodeMsg::Sess(m) => self.sess_update(m, env),
             CodeMsg::BrowserChanged => {
                 let tools = Task::perform(fetch_tools(env.base.to_string(), self.computer_on()), |r| Message::Code(CodeMsg::ToolsLoaded(r)));
                 Task::batch([self.br_status_task(env, false), tools])
@@ -3516,12 +3752,7 @@ impl CodeState {
                 if self.running {
                     return Task::none();
                 }
-                self.items.clear();
-                self.todos.clear();
-                self.steps = 0;
-                self.history.clear();
-                self.always_allow.clear();
-                self.jobs.clear();
+                self.reset_session();
                 Task::none()
             }
         }
@@ -3639,7 +3870,7 @@ impl CodeState {
         // the skills are read from the reduced messages, as the page reads them (`lnSkillsRead(run)`)
         let skills = crate::learn::skills_read_run(&messages);
         if self.session_id.is_empty() {
-            self.session_id = format!("s{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis()));
+            self.session_id = crate::sessions::new_id();
         }
         let workspace = self.workspace.as_ref().map(|w| w.root.clone()).unwrap_or_default();
         self.learn_last = Some(crate::learn::Last { session: self.session_id.clone(), workspace: workspace.clone(), skills: skills.clone() });
@@ -4494,7 +4725,21 @@ fn timeline<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, tint: bool) ->
             // the feedback of the self-review and the words of a stop hook are for the model
             // only — they draw nothing
             Item::ReviewFeedback(_) | Item::StopHook(_) => Space::new().into(),
-            Item::User { text: text_, .. } => row![Space::new().width(Length::Fill), container(text(text_.as_str()).size(15)).padding([9, 15]).max_width(560).style(theme::bubble(t, tint))].into(),
+            Item::User { text: text_, .. } => {
+                let bubble = row![Space::new().width(Length::Fill), container(text(text_.as_str()).size(15)).padding([9, 15]).max_width(560).style(theme::bubble(t, tint))];
+                if !s.running && s.turn_allowed(i) {
+                    // `Fork` and `Revert` under one of your messages (`turn-actions` of the page)
+                    let acts = row![
+                        Space::new().width(Length::Fill),
+                        button(text("Fork").size(12)).on_press(Message::Code(CodeMsg::Sess(SessMsg::TurnFork(i)))).padding([2, 8]).style(theme::ghost_button(t)),
+                        button(text("Revert").size(12)).on_press(Message::Code(CodeMsg::Sess(SessMsg::TurnRevert(i)))).padding([2, 8]).style(theme::ghost_button(t)),
+                    ]
+                    .spacing(4);
+                    column![bubble, acts].spacing(2).into()
+                } else {
+                    bubble.into()
+                }
+            }
             Item::Assistant { text: body, md: content } => {
                 if body.is_empty() {
                     if s.running && i + 1 == s.items.len() { text("…").size(15).color(t.muted).into() } else { Space::new().height(0).into() }
@@ -4506,6 +4751,9 @@ fn timeline<'a>(s: &'a CodeState, t: Tokens, theme: &iced::Theme, tint: bool) ->
             Item::Note(n) => text(n.as_str()).size(13).color(t.muted).into(),
         };
         col = col.push(element);
+    }
+    for notice in side_views::choices_view(s, t) {
+        col = col.push(notice);
     }
     // the same column as the header and the composer
     let column_ = container(col).padding(Padding { top: 8.0, right: 24.0, bottom: 16.0, left: 24.0 }).max_width(868).width(Length::Fill);
@@ -4570,7 +4818,7 @@ pub fn page<'a>(
     let mode = segmented(t, vec![("Plan", s.mode == Mode::Plan, Message::Code(CodeMsg::SetMode(Mode::Plan))), ("Ask", s.mode == Mode::Ask, Message::Code(CodeMsg::SetMode(Mode::Ask))), ("Edit freely", s.mode == Mode::AutoEdit, Message::Code(CodeMsg::SetMode(Mode::AutoEdit))), ("Everything", s.mode == Mode::Auto, Message::Code(CodeMsg::SetMode(Mode::Auto)))]);
     let branch = w.branch.clone().unwrap_or_default();
     let header = row![
-        container(column![row![text(w.name.as_str()).size(15).font(bold()), text(branch).size(12).color(t.muted).font(Font::MONOSPACE)].spacing(8).align_y(Alignment::Center), text(w.root.as_str()).size(12).color(t.muted).font(Font::MONOSPACE).wrapping(text::Wrapping::None)].spacing(2)).clip(true).width(Length::Fill),
+        container(column![row![text(w.name.as_str()).size(15).font(bold()), text(branch).size(12).color(t.muted).font(Font::MONOSPACE), text(side_views::meter_text(s).unwrap_or_default()).size(12).color(t.muted).wrapping(text::Wrapping::None)].spacing(8).align_y(Alignment::Center), text(w.root.as_str()).size(12).color(t.muted).font(Font::MONOSPACE).wrapping(text::Wrapping::None)].spacing(2)).clip(true).width(Length::Fill),
         mode,
         button(text(if s.browser.running { "Browser ●" } else { "Browser" }).size(13).wrapping(text::Wrapping::None))
             .on_press(Message::Code(CodeMsg::Br(BrMsg::Toggle)))
@@ -4987,6 +5235,7 @@ fn side_settings<'a>(s: &'a CodeState, t: Tokens) -> Element<'a, Message> {
             .text_size(13)
             .on_toggle(|value| Message::Code(CodeMsg::LearnToggle(value))),
         text(crate::learn::SIDE_TEXT).size(12).color(t.muted),
+        side_views::style_row(s, t),
         row![
             button(text("Skills helped").size(12)).on_press(Message::Code(CodeMsg::LearnThumb("up"))).padding([4, 8]).style(theme::ghost_button(t)),
             button(text("Skills did not help").size(12)).on_press(Message::Code(CodeMsg::LearnThumb("down"))).padding([4, 8]).style(theme::ghost_button(t)),
@@ -4994,7 +5243,7 @@ fn side_settings<'a>(s: &'a CodeState, t: Tokens) -> Element<'a, Message> {
         .spacing(6),
     ]
     .spacing(10);
-    let side = column![specs, jobs_block(s, t), block].spacing(22);
+    let side = column![side_views::tasks_block(s, t), side_views::changes_block(s, t), specs, jobs_block(s, t), side_views::sessions_block(s, t), side_views::memory_block(s, t), side_views::permissions_block(s, t), block].spacing(22);
     container(scrollable(side))
         .width(Length::Fixed(272.0))
         .padding([18.0, 16.0])
@@ -5146,6 +5395,7 @@ mod tests {
             hooks: HookGates::default(),
             vision: true,
             visible: true,
+            models: &[],
         }
     }
 
@@ -5208,7 +5458,7 @@ mod tests {
         assert!(tool_result(&json!({})).is_err());
         assert_eq!(parse_workspace(&json!({"root": "/p", "name": "p", "git_branch": "main"})).unwrap().branch.as_deref(), Some("main"));
         assert_eq!(parse_workspace(&json!({"error": {"message": "not a folder"}})), Err("not a folder".into()));
-        assert_eq!(parse_changes(&json!({"changes": [{"id": 3, "path": "a.rs", "kind": "edit"}]})), vec![Change { id: 3, path: "a.rs".into(), kind: "edit".into() }]);
+        assert_eq!(parse_changes(&json!({"changes": [{"id": 3, "path": "a.rs", "kind": "edit"}]})), vec![Change { id: 3, path: "a.rs".into(), kind: "edit".into(), time: 0.0 }]);
     }
 
     #[test]

@@ -1,0 +1,1343 @@
+{
+ "ratio": 0.7,
+ "heuristic": [
+  {
+   "text": "Fix the bug in main.rs",
+   "title": "Fix the bug in main.rs"
+  },
+  {
+   "text": "   spaced   out\n words   here  ",
+   "title": "spaced out words here"
+  },
+  {
+   "text": "",
+   "title": "Session"
+  },
+  {
+   "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "title": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+   "text": "Ünï öööööööööööööööööööööööööööööööööööööööööööööööööööööööööööööööööööööö",
+   "title": "Ünï öööööööööööööööööööööööööööööööööööööööööööööööööööööööö"
+  },
+  {
+   "text": "look at this\n\nContents of @file.txt\nabc",
+   "title": "look at this"
+  },
+  {
+   "text": "[Summary of the earlier conversation] and more",
+   "title": "Session"
+  },
+  {
+   "text": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+   "title": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+  },
+  {
+   "text": "__none__",
+   "title": "Session"
+  },
+  {
+   "text": "__summary_then_real__",
+   "title": "Real question",
+   "second": "Real question"
+  }
+ ],
+ "clean": [
+  {
+   "text": "Title: Fix the bug",
+   "title": "Fix the bug"
+  },
+  {
+   "text": "\"Quoted title\"",
+   "title": "Quoted title"
+  },
+  {
+   "text": "**Bold**",
+   "title": "Bold"
+  },
+  {
+   "text": "# Heading",
+   "title": "Heading"
+  },
+  {
+   "text": "",
+   "title": ""
+  },
+  {
+   "text": "\n\n  second line first  \nthird",
+   "title": "second line first"
+  },
+  {
+   "text": "session : the thing.",
+   "title": "the thing"
+  },
+  {
+   "text": "Many words. ",
+   "title": "Many words"
+  },
+  {
+   "text": "'single'",
+   "title": "single"
+  },
+  {
+   "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "title": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+   "text": "Title:",
+   "title": ""
+  },
+  {
+   "text": "___",
+   "title": ""
+  },
+  {
+   "text": "`code`",
+   "title": "code"
+  },
+  {
+   "text": "ends with dots...",
+   "title": "ends with dots"
+  },
+  {
+   "text": "TITLE:   Upper",
+   "title": "Upper"
+  }
+ ],
+ "filter": [
+  {
+   "query": "",
+   "ids": [
+    "a",
+    "b",
+    "c"
+   ]
+  },
+  {
+   "query": "  ",
+   "ids": [
+    "a",
+    "b",
+    "c"
+   ]
+  },
+  {
+   "query": "parser",
+   "ids": [
+    "a"
+   ]
+  },
+  {
+   "query": "PARSER unicode",
+   "ids": [
+    "a"
+   ]
+  },
+  {
+   "query": "docs api",
+   "ids": [
+    "b"
+   ]
+  },
+  {
+   "query": "unicode",
+   "ids": [
+    "a"
+   ]
+  },
+  {
+   "query": "nothing",
+   "ids": []
+  },
+  {
+   "query": "fix unicode",
+   "ids": [
+    "a"
+   ]
+  }
+ ],
+ "filter_sessions": [
+  {
+   "id": "a",
+   "title": "Fix the parser",
+   "view": [
+    {
+     "kind": "user",
+     "text": "the parser crashes on unicode"
+    }
+   ]
+  },
+  {
+   "id": "b",
+   "title": "Write docs",
+   "view": [
+    {
+     "kind": "user",
+     "text": "document the API"
+    },
+    {
+     "kind": "assistant",
+     "content": "unicode"
+    }
+   ]
+  },
+  {
+   "id": "c",
+   "title": "",
+   "view": []
+  }
+ ],
+ "change": [
+  {
+   "ids": [],
+   "mark": null,
+   "got": null
+  },
+  {
+   "ids": [],
+   "mark": 0,
+   "got": null
+  },
+  {
+   "ids": [],
+   "mark": 2,
+   "got": null
+  },
+  {
+   "ids": [],
+   "mark": 4,
+   "got": null
+  },
+  {
+   "ids": [],
+   "mark": 9,
+   "got": null
+  },
+  {
+   "ids": [],
+   "mark": 100,
+   "got": null
+  },
+  {
+   "ids": [
+    3,
+    5,
+    9
+   ],
+   "mark": null,
+   "got": 3
+  },
+  {
+   "ids": [
+    3,
+    5,
+    9
+   ],
+   "mark": 0,
+   "got": 3
+  },
+  {
+   "ids": [
+    3,
+    5,
+    9
+   ],
+   "mark": 2,
+   "got": 3
+  },
+  {
+   "ids": [
+    3,
+    5,
+    9
+   ],
+   "mark": 4,
+   "got": 5
+  },
+  {
+   "ids": [
+    3,
+    5,
+    9
+   ],
+   "mark": 9,
+   "got": null
+  },
+  {
+   "ids": [
+    3,
+    5,
+    9
+   ],
+   "mark": 100,
+   "got": null
+  },
+  {
+   "ids": [
+    9,
+    2,
+    4
+   ],
+   "mark": null,
+   "got": 2
+  },
+  {
+   "ids": [
+    9,
+    2,
+    4
+   ],
+   "mark": 0,
+   "got": 2
+  },
+  {
+   "ids": [
+    9,
+    2,
+    4
+   ],
+   "mark": 2,
+   "got": 4
+  },
+  {
+   "ids": [
+    9,
+    2,
+    4
+   ],
+   "mark": 4,
+   "got": 9
+  },
+  {
+   "ids": [
+    9,
+    2,
+    4
+   ],
+   "mark": 9,
+   "got": null
+  },
+  {
+   "ids": [
+    9,
+    2,
+    4
+   ],
+   "mark": 100,
+   "got": null
+  }
+ ],
+ "markdown": [
+  {
+   "title": "Fix the bug",
+   "time": 1699990000000,
+   "root": "/w",
+   "view": [
+    {
+     "kind": "user",
+     "text": "please fix"
+    },
+    {
+     "kind": "assistant",
+     "content": "On it."
+    },
+    {
+     "kind": "tool",
+     "name": "read_file",
+     "args": {
+      "path": "src/main.rs"
+     },
+     "status": "ok",
+     "output": "x"
+    },
+    {
+     "kind": "tool",
+     "name": "bash",
+     "args": {
+      "command": "cargo test\nsecond"
+     },
+     "status": "error",
+     "output": "boom ``` fenced"
+    },
+    {
+     "kind": "notice",
+     "text": "Undone: x\nline two"
+    },
+    {
+     "kind": "assistant",
+     "content": ""
+    },
+    {
+     "kind": "assistant",
+     "content": "Done."
+    }
+   ],
+   "md": "# Fix the bug\n\nWorkspace: `/w`\n\nExported 2023-11-14 19:26 UTC\n\n## User\n\nplease fix\n\n## Assistant\n\nOn it.\n\n- Tool `read_file` `src/main.rs` (ok)\n- Tool `bash` `cargo test` (error)\n\n````\nboom ``` fenced\n````\n\n> Undone: x\n> line two\n\n## Assistant\n\nDone.\n"
+  },
+  {
+   "title": "",
+   "time": 1,
+   "root": "",
+   "view": [
+    {
+     "kind": "user",
+     "text": "hi"
+    }
+   ],
+   "md": "# Session\n\nExported 1970-01-01 00:00 UTC\n\n## User\n\nhi\n"
+  },
+  {
+   "title": "Sub",
+   "time": 1700000000000,
+   "root": "",
+   "view": [
+    {
+     "kind": "tool",
+     "name": "task",
+     "args": {
+      "description": "dig"
+     },
+     "status": "ok",
+     "output": "report\nmore",
+     "children": [
+      {
+       "kind": "assistant",
+       "content": "child says"
+      },
+      {
+       "kind": "tool",
+       "name": "bash",
+       "args": {
+        "command": "ls"
+       },
+       "status": "ok",
+       "output": "a\nb"
+      }
+     ]
+    },
+    {
+     "kind": "tool",
+     "name": "grep",
+     "args": {
+      "pattern": "foo",
+      "glob": "*.rs"
+     },
+     "status": "ok",
+     "output": ""
+    },
+    {
+     "kind": "tool",
+     "name": "web_fetch",
+     "args": {
+      "url": "https://x.y/z"
+     },
+     "status": "ok",
+     "output": ""
+    },
+    {
+     "kind": "tool",
+     "name": "weird",
+     "args": {},
+     "status": "error",
+     "output": ""
+    },
+    {
+     "kind": "tool",
+     "name": "bash",
+     "args": {
+      "command": "echo"
+     },
+     "status": "ok",
+     "output": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+    }
+   ],
+   "md": "# Sub\n\nExported 2023-11-14 22:13 UTC\n\n- Tool `task` `dig` (ok)\n**Sub-agent:**\n\nchild says\n\n- Tool `bash` `ls` (ok)\n\n```\na\nb\n```\n\n> report\n> more\n\n- Tool `grep` `foo` (ok)\n- Tool `web_fetch` `https://x.y/z` (ok)\n- Tool `weird` (error)\n- Tool `bash` `echo` (ok)\n\n```\nyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n... [500 characters cut from the middle] ...\nyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n```\n"
+  }
+ ],
+ "clip": [
+  {
+   "text": "short",
+   "max": 10,
+   "got": "short"
+  },
+  {
+   "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "max": 20,
+   "got": "xxxxxxxx\n... [10 characters cut from the middle] ...\nxxxxxxxxxxxx"
+  },
+  {
+   "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "max": 40,
+   "got": "aaaaaaaaaaaaaaaa\n... [60 characters cut from the middle] ...\nbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  {
+   "text": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+   "max": 16,
+   "got": "😀😀😀\n... [24 characters cut from the middle] ...\n😀😀😀😀😀"
+  },
+  {
+   "text": "",
+   "max": 5,
+   "got": ""
+  }
+ ],
+ "estimate": [
+  {
+   "text": "",
+   "got": 0
+  },
+  {
+   "text": "a",
+   "got": 1
+  },
+  {
+   "text": "abcd",
+   "got": 2
+  },
+  {
+   "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "got": 10
+  },
+  {
+   "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "got": 11
+  },
+  {
+   "text": "Ünï",
+   "got": 1
+  },
+  {
+   "text": "😀😀😀",
+   "got": 2
+  },
+  {
+   "text": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+   "got": 278
+  }
+ ],
+ "needs": [
+  {
+   "estimate": 0,
+   "max": 0,
+   "got": false
+  },
+  {
+   "estimate": 100,
+   "max": 0,
+   "got": false
+  },
+  {
+   "estimate": 71,
+   "max": 100,
+   "got": true
+  },
+  {
+   "estimate": 70,
+   "max": 100,
+   "got": false
+  },
+  {
+   "estimate": 70.0001,
+   "max": 100,
+   "got": true
+  },
+  {
+   "estimate": 5000,
+   "max": 4096,
+   "got": true
+  },
+  {
+   "estimate": 2000,
+   "max": 4096,
+   "got": false
+  },
+  {
+   "estimate": 2867,
+   "max": 4096,
+   "got": false
+  },
+  {
+   "estimate": 2868,
+   "max": 4096,
+   "got": true
+  }
+ ],
+ "split": [
+  {
+   "roles": "uatuatuatuat",
+   "start": 6,
+   "headLen": 6,
+   "tailLen": 6
+  },
+  {
+   "roles": "uatuat",
+   "start": null,
+   "headLen": null,
+   "tailLen": null
+  },
+  {
+   "roles": "uuuuuu",
+   "start": null,
+   "headLen": null,
+   "tailLen": null
+  },
+  {
+   "roles": "uattttttttttt",
+   "start": null,
+   "headLen": null,
+   "tailLen": null
+  },
+  {
+   "roles": "uatuatuatua",
+   "start": 4,
+   "headLen": 4,
+   "tailLen": 7
+  },
+  {
+   "roles": "uauauauauauauau",
+   "start": 9,
+   "headLen": 9,
+   "tailLen": 6
+  },
+  {
+   "roles": "uatttt",
+   "start": null,
+   "headLen": null,
+   "tailLen": null
+  },
+  {
+   "roles": "uatuatttttt",
+   "start": 4,
+   "headLen": 4,
+   "tailLen": 7
+  },
+  {
+   "roles": "",
+   "start": null,
+   "headLen": null,
+   "tailLen": null
+  }
+ ],
+ "split_custom": [
+  {
+   "roles": "uatuatuatuat",
+   "keepLast": 2,
+   "minHead": 1,
+   "start": 10
+  },
+  {
+   "roles": "uatuat",
+   "keepLast": 3,
+   "minHead": 3,
+   "start": 3
+  },
+  {
+   "roles": "uatuatuat",
+   "keepLast": 4,
+   "minHead": 5,
+   "start": null
+  }
+ ],
+ "build": [
+  {
+   "todos": [],
+   "files": [],
+   "tailRoles": [],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two"
+    ],
+    [
+     "assistant",
+     "Understood. I will continue from this summary."
+    ]
+   ]
+  },
+  {
+   "todos": [],
+   "files": [],
+   "tailRoles": [
+    "user",
+    "assistant",
+    "tool"
+   ],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two"
+    ],
+    [
+     "assistant",
+     "Understood. I will continue from this summary."
+    ]
+   ]
+  },
+  {
+   "todos": [],
+   "files": [],
+   "tailRoles": [
+    "assistant",
+    "tool",
+    "user"
+   ],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two"
+    ]
+   ]
+  },
+  {
+   "todos": [],
+   "files": [
+    "a.rs",
+    "b.rs"
+   ],
+   "tailRoles": [],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nFiles changed in this session: a.rs, b.rs"
+    ],
+    [
+     "assistant",
+     "Understood. I will continue from this summary."
+    ]
+   ]
+  },
+  {
+   "todos": [],
+   "files": [
+    "a.rs",
+    "b.rs"
+   ],
+   "tailRoles": [
+    "user",
+    "assistant",
+    "tool"
+   ],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nFiles changed in this session: a.rs, b.rs"
+    ],
+    [
+     "assistant",
+     "Understood. I will continue from this summary."
+    ]
+   ]
+  },
+  {
+   "todos": [],
+   "files": [
+    "a.rs",
+    "b.rs"
+   ],
+   "tailRoles": [
+    "assistant",
+    "tool",
+    "user"
+   ],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nFiles changed in this session: a.rs, b.rs"
+    ]
+   ]
+  },
+  {
+   "todos": [],
+   "files": [
+    "f0.rs",
+    "f1.rs",
+    "f2.rs",
+    "f3.rs",
+    "f4.rs",
+    "f5.rs",
+    "f6.rs",
+    "f7.rs",
+    "f8.rs",
+    "f9.rs",
+    "f10.rs",
+    "f11.rs",
+    "f12.rs",
+    "f13.rs",
+    "f14.rs",
+    "f15.rs",
+    "f16.rs",
+    "f17.rs",
+    "f18.rs",
+    "f19.rs",
+    "f20.rs",
+    "f21.rs",
+    "f22.rs",
+    "f23.rs",
+    "f24.rs",
+    "f25.rs",
+    "f26.rs",
+    "f27.rs",
+    "f28.rs",
+    "f29.rs",
+    "f30.rs",
+    "f31.rs",
+    "f32.rs",
+    "f33.rs",
+    "f34.rs",
+    "f35.rs",
+    "f36.rs",
+    "f37.rs",
+    "f38.rs",
+    "f39.rs",
+    "f40.rs",
+    "f41.rs",
+    "f42.rs",
+    "f43.rs",
+    "f44.rs"
+   ],
+   "tailRoles": [],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nFiles changed in this session: f0.rs, f1.rs, f2.rs, f3.rs, f4.rs, f5.rs, f6.rs, f7.rs, f8.rs, f9.rs, f10.rs, f11.rs, f12.rs, f13.rs, f14.rs, f15.rs, f16.rs, f17.rs, f18.rs, f19.rs, f20.rs, f21.rs, f22.rs, f23.rs, f24.rs, f25.rs, f26.rs, f27.rs, f28.rs, f29.rs, f30.rs, f31.rs, f32.rs, f33.rs, f34.rs, f35.rs, f36.rs, f37.rs, f38.rs, f39.rs"
+    ],
+    [
+     "assistant",
+     "Understood. I will continue from this summary."
+    ]
+   ]
+  },
+  {
+   "todos": [],
+   "files": [
+    "f0.rs",
+    "f1.rs",
+    "f2.rs",
+    "f3.rs",
+    "f4.rs",
+    "f5.rs",
+    "f6.rs",
+    "f7.rs",
+    "f8.rs",
+    "f9.rs",
+    "f10.rs",
+    "f11.rs",
+    "f12.rs",
+    "f13.rs",
+    "f14.rs",
+    "f15.rs",
+    "f16.rs",
+    "f17.rs",
+    "f18.rs",
+    "f19.rs",
+    "f20.rs",
+    "f21.rs",
+    "f22.rs",
+    "f23.rs",
+    "f24.rs",
+    "f25.rs",
+    "f26.rs",
+    "f27.rs",
+    "f28.rs",
+    "f29.rs",
+    "f30.rs",
+    "f31.rs",
+    "f32.rs",
+    "f33.rs",
+    "f34.rs",
+    "f35.rs",
+    "f36.rs",
+    "f37.rs",
+    "f38.rs",
+    "f39.rs",
+    "f40.rs",
+    "f41.rs",
+    "f42.rs",
+    "f43.rs",
+    "f44.rs"
+   ],
+   "tailRoles": [
+    "user",
+    "assistant",
+    "tool"
+   ],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nFiles changed in this session: f0.rs, f1.rs, f2.rs, f3.rs, f4.rs, f5.rs, f6.rs, f7.rs, f8.rs, f9.rs, f10.rs, f11.rs, f12.rs, f13.rs, f14.rs, f15.rs, f16.rs, f17.rs, f18.rs, f19.rs, f20.rs, f21.rs, f22.rs, f23.rs, f24.rs, f25.rs, f26.rs, f27.rs, f28.rs, f29.rs, f30.rs, f31.rs, f32.rs, f33.rs, f34.rs, f35.rs, f36.rs, f37.rs, f38.rs, f39.rs"
+    ],
+    [
+     "assistant",
+     "Understood. I will continue from this summary."
+    ]
+   ]
+  },
+  {
+   "todos": [],
+   "files": [
+    "f0.rs",
+    "f1.rs",
+    "f2.rs",
+    "f3.rs",
+    "f4.rs",
+    "f5.rs",
+    "f6.rs",
+    "f7.rs",
+    "f8.rs",
+    "f9.rs",
+    "f10.rs",
+    "f11.rs",
+    "f12.rs",
+    "f13.rs",
+    "f14.rs",
+    "f15.rs",
+    "f16.rs",
+    "f17.rs",
+    "f18.rs",
+    "f19.rs",
+    "f20.rs",
+    "f21.rs",
+    "f22.rs",
+    "f23.rs",
+    "f24.rs",
+    "f25.rs",
+    "f26.rs",
+    "f27.rs",
+    "f28.rs",
+    "f29.rs",
+    "f30.rs",
+    "f31.rs",
+    "f32.rs",
+    "f33.rs",
+    "f34.rs",
+    "f35.rs",
+    "f36.rs",
+    "f37.rs",
+    "f38.rs",
+    "f39.rs",
+    "f40.rs",
+    "f41.rs",
+    "f42.rs",
+    "f43.rs",
+    "f44.rs"
+   ],
+   "tailRoles": [
+    "assistant",
+    "tool",
+    "user"
+   ],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nFiles changed in this session: f0.rs, f1.rs, f2.rs, f3.rs, f4.rs, f5.rs, f6.rs, f7.rs, f8.rs, f9.rs, f10.rs, f11.rs, f12.rs, f13.rs, f14.rs, f15.rs, f16.rs, f17.rs, f18.rs, f19.rs, f20.rs, f21.rs, f22.rs, f23.rs, f24.rs, f25.rs, f26.rs, f27.rs, f28.rs, f29.rs, f30.rs, f31.rs, f32.rs, f33.rs, f34.rs, f35.rs, f36.rs, f37.rs, f38.rs, f39.rs"
+    ]
+   ]
+  },
+  {
+   "todos": [
+    {
+     "status": "pending",
+     "content": "one"
+    },
+    {
+     "status": "completed",
+     "content": "two"
+    }
+   ],
+   "files": [],
+   "tailRoles": [],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nTask list:\n- [pending] one\n- [completed] two"
+    ],
+    [
+     "assistant",
+     "Understood. I will continue from this summary."
+    ]
+   ]
+  },
+  {
+   "todos": [
+    {
+     "status": "pending",
+     "content": "one"
+    },
+    {
+     "status": "completed",
+     "content": "two"
+    }
+   ],
+   "files": [],
+   "tailRoles": [
+    "user",
+    "assistant",
+    "tool"
+   ],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nTask list:\n- [pending] one\n- [completed] two"
+    ],
+    [
+     "assistant",
+     "Understood. I will continue from this summary."
+    ]
+   ]
+  },
+  {
+   "todos": [
+    {
+     "status": "pending",
+     "content": "one"
+    },
+    {
+     "status": "completed",
+     "content": "two"
+    }
+   ],
+   "files": [],
+   "tailRoles": [
+    "assistant",
+    "tool",
+    "user"
+   ],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nTask list:\n- [pending] one\n- [completed] two"
+    ]
+   ]
+  },
+  {
+   "todos": [
+    {
+     "status": "pending",
+     "content": "one"
+    },
+    {
+     "status": "completed",
+     "content": "two"
+    }
+   ],
+   "files": [
+    "a.rs",
+    "b.rs"
+   ],
+   "tailRoles": [],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nTask list:\n- [pending] one\n- [completed] two\n\nFiles changed in this session: a.rs, b.rs"
+    ],
+    [
+     "assistant",
+     "Understood. I will continue from this summary."
+    ]
+   ]
+  },
+  {
+   "todos": [
+    {
+     "status": "pending",
+     "content": "one"
+    },
+    {
+     "status": "completed",
+     "content": "two"
+    }
+   ],
+   "files": [
+    "a.rs",
+    "b.rs"
+   ],
+   "tailRoles": [
+    "user",
+    "assistant",
+    "tool"
+   ],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nTask list:\n- [pending] one\n- [completed] two\n\nFiles changed in this session: a.rs, b.rs"
+    ],
+    [
+     "assistant",
+     "Understood. I will continue from this summary."
+    ]
+   ]
+  },
+  {
+   "todos": [
+    {
+     "status": "pending",
+     "content": "one"
+    },
+    {
+     "status": "completed",
+     "content": "two"
+    }
+   ],
+   "files": [
+    "a.rs",
+    "b.rs"
+   ],
+   "tailRoles": [
+    "assistant",
+    "tool",
+    "user"
+   ],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nTask list:\n- [pending] one\n- [completed] two\n\nFiles changed in this session: a.rs, b.rs"
+    ]
+   ]
+  },
+  {
+   "todos": [
+    {
+     "status": "pending",
+     "content": "one"
+    },
+    {
+     "status": "completed",
+     "content": "two"
+    }
+   ],
+   "files": [
+    "f0.rs",
+    "f1.rs",
+    "f2.rs",
+    "f3.rs",
+    "f4.rs",
+    "f5.rs",
+    "f6.rs",
+    "f7.rs",
+    "f8.rs",
+    "f9.rs",
+    "f10.rs",
+    "f11.rs",
+    "f12.rs",
+    "f13.rs",
+    "f14.rs",
+    "f15.rs",
+    "f16.rs",
+    "f17.rs",
+    "f18.rs",
+    "f19.rs",
+    "f20.rs",
+    "f21.rs",
+    "f22.rs",
+    "f23.rs",
+    "f24.rs",
+    "f25.rs",
+    "f26.rs",
+    "f27.rs",
+    "f28.rs",
+    "f29.rs",
+    "f30.rs",
+    "f31.rs",
+    "f32.rs",
+    "f33.rs",
+    "f34.rs",
+    "f35.rs",
+    "f36.rs",
+    "f37.rs",
+    "f38.rs",
+    "f39.rs",
+    "f40.rs",
+    "f41.rs",
+    "f42.rs",
+    "f43.rs",
+    "f44.rs"
+   ],
+   "tailRoles": [],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nTask list:\n- [pending] one\n- [completed] two\n\nFiles changed in this session: f0.rs, f1.rs, f2.rs, f3.rs, f4.rs, f5.rs, f6.rs, f7.rs, f8.rs, f9.rs, f10.rs, f11.rs, f12.rs, f13.rs, f14.rs, f15.rs, f16.rs, f17.rs, f18.rs, f19.rs, f20.rs, f21.rs, f22.rs, f23.rs, f24.rs, f25.rs, f26.rs, f27.rs, f28.rs, f29.rs, f30.rs, f31.rs, f32.rs, f33.rs, f34.rs, f35.rs, f36.rs, f37.rs, f38.rs, f39.rs"
+    ],
+    [
+     "assistant",
+     "Understood. I will continue from this summary."
+    ]
+   ]
+  },
+  {
+   "todos": [
+    {
+     "status": "pending",
+     "content": "one"
+    },
+    {
+     "status": "completed",
+     "content": "two"
+    }
+   ],
+   "files": [
+    "f0.rs",
+    "f1.rs",
+    "f2.rs",
+    "f3.rs",
+    "f4.rs",
+    "f5.rs",
+    "f6.rs",
+    "f7.rs",
+    "f8.rs",
+    "f9.rs",
+    "f10.rs",
+    "f11.rs",
+    "f12.rs",
+    "f13.rs",
+    "f14.rs",
+    "f15.rs",
+    "f16.rs",
+    "f17.rs",
+    "f18.rs",
+    "f19.rs",
+    "f20.rs",
+    "f21.rs",
+    "f22.rs",
+    "f23.rs",
+    "f24.rs",
+    "f25.rs",
+    "f26.rs",
+    "f27.rs",
+    "f28.rs",
+    "f29.rs",
+    "f30.rs",
+    "f31.rs",
+    "f32.rs",
+    "f33.rs",
+    "f34.rs",
+    "f35.rs",
+    "f36.rs",
+    "f37.rs",
+    "f38.rs",
+    "f39.rs",
+    "f40.rs",
+    "f41.rs",
+    "f42.rs",
+    "f43.rs",
+    "f44.rs"
+   ],
+   "tailRoles": [
+    "user",
+    "assistant",
+    "tool"
+   ],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nTask list:\n- [pending] one\n- [completed] two\n\nFiles changed in this session: f0.rs, f1.rs, f2.rs, f3.rs, f4.rs, f5.rs, f6.rs, f7.rs, f8.rs, f9.rs, f10.rs, f11.rs, f12.rs, f13.rs, f14.rs, f15.rs, f16.rs, f17.rs, f18.rs, f19.rs, f20.rs, f21.rs, f22.rs, f23.rs, f24.rs, f25.rs, f26.rs, f27.rs, f28.rs, f29.rs, f30.rs, f31.rs, f32.rs, f33.rs, f34.rs, f35.rs, f36.rs, f37.rs, f38.rs, f39.rs"
+    ],
+    [
+     "assistant",
+     "Understood. I will continue from this summary."
+    ]
+   ]
+  },
+  {
+   "todos": [
+    {
+     "status": "pending",
+     "content": "one"
+    },
+    {
+     "status": "completed",
+     "content": "two"
+    }
+   ],
+   "files": [
+    "f0.rs",
+    "f1.rs",
+    "f2.rs",
+    "f3.rs",
+    "f4.rs",
+    "f5.rs",
+    "f6.rs",
+    "f7.rs",
+    "f8.rs",
+    "f9.rs",
+    "f10.rs",
+    "f11.rs",
+    "f12.rs",
+    "f13.rs",
+    "f14.rs",
+    "f15.rs",
+    "f16.rs",
+    "f17.rs",
+    "f18.rs",
+    "f19.rs",
+    "f20.rs",
+    "f21.rs",
+    "f22.rs",
+    "f23.rs",
+    "f24.rs",
+    "f25.rs",
+    "f26.rs",
+    "f27.rs",
+    "f28.rs",
+    "f29.rs",
+    "f30.rs",
+    "f31.rs",
+    "f32.rs",
+    "f33.rs",
+    "f34.rs",
+    "f35.rs",
+    "f36.rs",
+    "f37.rs",
+    "f38.rs",
+    "f39.rs",
+    "f40.rs",
+    "f41.rs",
+    "f42.rs",
+    "f43.rs",
+    "f44.rs"
+   ],
+   "tailRoles": [
+    "assistant",
+    "tool",
+    "user"
+   ],
+   "prefix": [
+    [
+     "user",
+     "[Summary of the earlier conversation, written by you so that work can continue from it]\n\nA summary.\nline two\n\nTask list:\n- [pending] one\n- [completed] two\n\nFiles changed in this session: f0.rs, f1.rs, f2.rs, f3.rs, f4.rs, f5.rs, f6.rs, f7.rs, f8.rs, f9.rs, f10.rs, f11.rs, f12.rs, f13.rs, f14.rs, f15.rs, f16.rs, f17.rs, f18.rs, f19.rs, f20.rs, f21.rs, f22.rs, f23.rs, f24.rs, f25.rs, f26.rs, f27.rs, f28.rs, f29.rs, f30.rs, f31.rs, f32.rs, f33.rs, f34.rs, f35.rs, f36.rs, f37.rs, f38.rs, f39.rs"
+    ]
+   ]
+  }
+ ],
+ "file_safe": [
+  {
+   "text": "Fix the bug",
+   "got": "Fix the bug"
+  },
+  {
+   "text": "a/b\\c:d*e",
+   "got": "a_b_c_d_e"
+  },
+  {
+   "text": "Ünï cödé ok",
+   "got": "Ünï cödé ok"
+  },
+  {
+   "text": "",
+   "got": "chat"
+  },
+  {
+   "text": "???",
+   "got": "_"
+  },
+  {
+   "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "got": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+   "text": "dots.and-dashes ok",
+   "got": "dots.and-dashes ok"
+  }
+ ]
+}
