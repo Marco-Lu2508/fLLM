@@ -16,7 +16,9 @@
 #   RUST_FEATURES rust-gpu,cuda                         cargo features (wgpu paths plus the CUDA backend)
 #   TARGET_DIR    target-linux-cuda                     cargo target directory inside the repository
 #   OUT           dist-cuda                             output directory that receives fllm-rs
-#   JOBS          3                                     cargo job slots (nvcc parallelises its own work)
+#   JOBS          3                                     cargo job slots
+#   CUDA_JOBS     2                                     nvcc calls at once (FLLM_CUDA_JOBS of build.rs): one per core ran the 16 GB
+#                                                       runner out of memory (the kernel killed the build after a few minutes)
 #   NAME          fllm-linux-cuda-build                 container name
 set -eu
 
@@ -27,6 +29,7 @@ RUST_FEATURES=${RUST_FEATURES:-rust-gpu,cuda}
 TARGET_DIR=${TARGET_DIR:-target-linux-cuda}
 OUT=${OUT:-dist-cuda}
 JOBS=${JOBS:-3}
+CUDA_JOBS=${CUDA_JOBS:-2}
 NAME=${NAME:-fllm-linux-cuda-build}
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -43,6 +46,7 @@ docker run --rm --name "$NAME" \
     -v fllm-cargo-cache:/root/.cargo/registry \
     -e CARGO_TARGET_DIR="/src/$TARGET_DIR" \
     -e CARGO_BUILD_JOBS="$JOBS" \
+    -e FLLM_CUDA_JOBS="$CUDA_JOBS" \
     -e FLLM_CUDA_ARCHS="$CUDA_ARCHS" \
     -e RUST_FEATURES="$RUST_FEATURES" \
     -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
