@@ -6,6 +6,12 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Fixed
+- **Switching the model in the native app** showed the old model: the server accepts a load and keeps answering with the old model for a moment, and the window took that answer for the new one, closed its overlay and named the old model while the engine restarted. It now waits until the engine has gone away and is back, as the Studio does.
+
+### Added
+- **An icon of its own** for the native app: the window, the task bar, `fllm-app.exe` in the Explorer and the shortcuts.
+
 ## [0.2.3] - 2026-11-16
 
 The first release of the native desktop app. The old Tauri app (the web Studio in a web view) is gone: the releases carry the native program instead, one bundle per system and per engine build.

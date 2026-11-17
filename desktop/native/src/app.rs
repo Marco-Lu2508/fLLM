@@ -662,6 +662,8 @@ pub struct App {
     sidecar_note: Option<String>,
     /// A load, unload or restart is under way: the server is away for a moment and the window says so instead of "no server".
     switching: bool,
+    /// What a switch of the model waits for (`waitForRestart` of the Studio): the old engine goes away and the new one answers.
+    switch_wait: Option<SwitchWait>,
 }
 
 /// What the Code page asked of the runtime, so its answer can be noted there.
@@ -746,6 +748,8 @@ pub enum Message {
     Filter(String),
     PickQuant(String, String),
     LoadModel(String),
+    /// The status of the engine, asked every half second while a switch of the model waits for it.
+    SwitchProbe(Result<models::Status, String>),
     UnloadModel,
     Pull(String),
     /// The text of the card *Add a model*, and the dialog *Choose a model* behind it.
@@ -1752,6 +1756,7 @@ impl App {
             sampling_text: settings::SamplingTexts::default(),
             editing: None,
             switching: false,
+            switch_wait: None,
             sidecar: None,
             sidecar_note: None,
         };
@@ -3781,6 +3786,10 @@ impl App {
             }
             Message::HeroOverview(Err(_)) => Task::none(),
             Message::HeroLoad(reference) => {
+                // the same wait as a switch from the picker (`fllmLoadModelNow` of the Studio shows its overlay too)
+                self.models.busy = Some(reference.clone());
+                self.switching = true;
+                self.switch_wait = Some(SwitchWait::new(self.loaded_name(), false));
                 Task::perform(models::load(self.base.clone(), reference), Message::ModelAction)
             }
             Message::HeroDownload { model, quant } => {
@@ -7452,6 +7461,7 @@ impl App {
                 self.models.error = None;
                 self.picker_open = false;
                 self.switching = true;
+                self.switch_wait = Some(SwitchWait::new(self.loaded_name(), false));
                 Task::perform(models::load(self.base.clone(), reference), Message::ModelAction)
             }
             Message::UnloadModel => {
@@ -7462,6 +7472,7 @@ impl App {
                 self.models.error = None;
                 self.picker_open = false;
                 self.switching = true;
+                self.switch_wait = Some(SwitchWait::new(self.loaded_name(), true));
                 Task::perform(models::unload(self.base.clone()), Message::ModelAction)
             }
             Message::Pull(id) => {
@@ -7471,6 +7482,39 @@ impl App {
                 Task::perform(models::pull(self.base.clone(), id, quant), Message::ModelAction)
             }
             Message::DownloadAction(id, action) => Task::perform(models::download_action(self.base.clone(), id, action), Message::ModelAction),
+            // a load or an unload was accepted ("restarting"): the old engine still answers for a moment, so asking for the model
+            // now would read the model that is about to go. The window waits until the engine has gone away and is back, as the
+            // Studio does (`waitForRestart`), and only then reads the model.
+            Message::ModelAction(Ok(_)) if self.switch_wait.is_some() => {
+                self.models.busy = None;
+                if let Some(w) = self.switch_wait.as_mut() {
+                    w.started = std::time::Instant::now();
+                }
+                Task::perform(switch_probe(self.base.clone()), Message::SwitchProbe)
+            }
+            Message::SwitchProbe(answer) => {
+                let Some(wait) = self.switch_wait.as_mut() else { return Task::none() };
+                match &answer {
+                    Err(_) => wait.saw_down = true,
+                    Ok(status) => {
+                        // the model of the status is not the one that was there, or the server has no model any more (an unload)
+                        let changed = if wait.unload { status.setup } else { status.model_name != wait.before };
+                        // an engine that restarted faster than the polls could see is taken as back after a while
+                        if wait.saw_down || changed || wait.started.elapsed() > SWITCH_SETTLE {
+                            self.switch_wait = None;
+                            return self.after_switch();
+                        }
+                    }
+                }
+                if wait.started.elapsed() > SWITCH_GIVE_UP {
+                    self.switch_wait = None;
+                    self.switching = false;
+                    self.models.error = Some("The server did not come back. Check the log in the data folder, then try again.".into());
+                    self.server = Server::Down("the server did not come back after the switch of the model".into());
+                    return Task::none();
+                }
+                Task::perform(switch_probe(self.base.clone()), Message::SwitchProbe)
+            }
             Message::ModelAction(Ok(_)) => {
                 self.models.busy = None;
                 let base = self.base.clone();
@@ -7483,6 +7527,7 @@ impl App {
             Message::ModelAction(Err(e)) => {
                 self.models.busy = None;
                 self.switching = false;
+                self.switch_wait = None;
                 self.models.error = Some(e);
                 Task::none()
             }
@@ -7532,6 +7577,37 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    /// The name of the model the server runs now (what `status.model.name` says), for the switch that is about to start.
+    fn loaded_name(&self) -> String {
+        match &self.server {
+            Server::Ready(m) => m.detail.name.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// The engine is back after a switch: the overview, the downloads and the model are read again (the model ends the waiting).
+    fn after_switch(&mut self) -> Task<Message> {
+        let base = self.base.clone();
+        Task::batch([
+            Task::perform(models::fetch_overview(base.clone()), Message::OverviewLoaded),
+            Task::perform(models::fetch_downloads(base.clone()), Message::DownloadsLoaded),
+            Task::perform(async move { api::fetch_model(&base).await }, Message::Connected),
+        ])
+    }
+
+    /// Makes the wait of a switch look older than it is (a test cannot wait fifteen seconds).
+    #[doc(hidden)]
+    pub fn age_the_switch(&mut self, by: Duration) {
+        if let Some(w) = self.switch_wait.as_mut() {
+            w.started = std::time::Instant::now().checked_sub(by).unwrap_or(w.started);
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn waits_for_the_engine(&self) -> bool {
+        self.switch_wait.is_some()
     }
 
     fn refresh_models(&self) -> Task<Message> {
@@ -12450,9 +12526,48 @@ pub fn run() -> iced::Result {
         .default_font(UI_FONT)
         .theme(App::theme)
         .subscription(App::subscription)
-        .window(iced::window::Settings { size, position, exit_on_close_request: false, ..Default::default() })
+        .window(iced::window::Settings { size, position, exit_on_close_request: false, icon: window_icon(), ..Default::default() })
         .antialiasing(true)
         .run()
+}
+
+/// The icon of the window (the title bar, the task bar, Alt+Tab): the picture of the app, which is also the tray icon.
+fn window_icon() -> Option<iced::window::Icon> {
+    let image = image::load_from_memory(include_bytes!("../../app-icon.png")).ok()?.to_rgba8();
+    let (width, height) = image.dimensions();
+    iced::window::icon::from_rgba(image.into_raw(), width, height).ok()
+}
+
+/// What a switch of the model waits for.
+struct SwitchWait {
+    /// The model that is being left (`status.model.name`).
+    before: String,
+    /// An unload waits for the server without a model.
+    unload: bool,
+    /// The server stopped answering at least once: the new engine is the one that answers next.
+    saw_down: bool,
+    started: std::time::Instant,
+}
+
+impl SwitchWait {
+    fn new(before: String, unload: bool) -> SwitchWait {
+        SwitchWait { before, unload, saw_down: false, started: std::time::Instant::now() }
+    }
+}
+
+/// An engine that went down and came back between two polls is believed after this long.
+const SWITCH_SETTLE: Duration = Duration::from_secs(15);
+/// The longest a switch is waited for (a large model on a slow disk); the Studio waits four minutes.
+const SWITCH_GIVE_UP: Duration = Duration::from_secs(240);
+
+/// One look at the engine during a switch, half a second after the last one; an answer that does not come in four seconds counts as
+/// no answer (an engine that is starting accepts a connection and says nothing).
+async fn switch_probe(base: String) -> Result<models::Status, String> {
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    match tokio::time::timeout(Duration::from_secs(4), models::fetch_status(base)).await {
+        Ok(answer) => answer,
+        Err(_) => Err("no answer".into()),
+    }
 }
 
 /// The clock in milliseconds (`Date.now()`), for the presses of Esc.
@@ -12463,6 +12578,14 @@ fn now_ms() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The window and the shortcuts have the picture of the app, not the system's default.
+    #[test]
+    fn the_window_has_an_icon_of_the_app() {
+        assert!(window_icon().is_some(), "the picture decodes into an icon");
+        let ico = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/installer/fllm.ico")).unwrap();
+        assert_eq!(&ico[..4], &[0, 0, 1, 0], "the icon file that goes into the exe and the installer is an .ico");
+    }
 
     /// The dim behind a dialog is the colour of the Studio's `.modal-backdrop`, read out of its
     /// stylesheet instead of typed here: a change on either side turns this red.

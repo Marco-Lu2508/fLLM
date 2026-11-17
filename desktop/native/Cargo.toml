@@ -45,6 +45,10 @@ usvg = { version = "0.45", default-features = false }
 mermaid-rs-renderer = { version = "0.3", default-features = false }
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 
+[target.'cfg(windows)'.build-dependencies]
+# the icon of fllm-app.exe (build.rs)
+winresource = "0.1"
+
 [dev-dependencies]
 iced_test = "0.14"
 tempfile = "3"
