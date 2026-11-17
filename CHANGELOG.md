@@ -12,6 +12,8 @@ behaviour between versions).
 - **Switching the model in the native app** showed the old model: the server accepts a load and keeps answering with the old model for a moment, and the window took that answer for the new one, closed its overlay and named the old model while the engine restarted. It now waits until the engine has gone away and is back, as the Studio does.
 
 ### Added
+- **Settings > Model details** in the native app: the facts of the loaded model, other names for it (apps that ask for `gpt-4o-mini` get it) and its chat format, as in the Studio.
+- **Save as default** in the answer settings: the sampling values and the system prompt become the defaults of the server.
 - **Hugging Face account** in the native app (Models page): a token for private and gated models, as in the Studio.
 - **An icon of its own** for the native app: the window, the task bar, `fllm-app.exe` in the Explorer and the shortcuts.
 

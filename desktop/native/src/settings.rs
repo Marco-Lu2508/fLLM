@@ -1130,6 +1130,27 @@ fn price_input<'a>(
         .into()
 }
 
+/// What *Save as default* sends to `POST /api/studio/config` (`saveConfigToRust` of the Studio): the sampling values when they are
+/// Manual (Automatic leaves the values the model ships with, so nothing is sent for them) and the system prompt (empty while it is automatic).
+pub fn defaults_body(prefs: &Prefs) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    if prefs.manual_sampling {
+        let s = &prefs.sampling;
+        body.insert("temperature".into(), serde_json::json!(prefs.temperature));
+        body.insert("top_p".into(), serde_json::json!(prefs.top_p));
+        body.insert("top_k".into(), serde_json::json!(s.top_k));
+        body.insert("min_p".into(), serde_json::json!(s.min_p));
+        body.insert("repetition_penalty".into(), serde_json::json!(s.repetition_penalty));
+        body.insert("presence_penalty".into(), serde_json::json!(s.presence_penalty));
+        body.insert("frequency_penalty".into(), serde_json::json!(s.frequency_penalty));
+        body.insert("dry_multiplier".into(), serde_json::json!(s.dry_multiplier));
+        body.insert("mirostat".into(), serde_json::json!(s.mirostat));
+        body.insert("seed".into(), s.seed.filter(|v| *v >= 0).map_or(serde_json::Value::Null, |v| serde_json::json!(v)));
+    }
+    body.insert("system_prompt".into(), serde_json::json!(if prefs.custom_system { prefs.system_prompt.as_str() } else { "" }));
+    serde_json::Value::Object(body)
+}
+
 #[allow(clippy::too_many_arguments)] // a page draws from ten pieces of state
 pub fn page<'a>(
     t: Tokens,
@@ -1137,6 +1158,7 @@ pub fn page<'a>(
     system_editor: &'a Content,
     spec_editor: &'a Content,
     max_tokens_text: &'a str,
+    defaults_note: Option<&'a str>,
     sampling: &'a SamplingTexts,
     engine: Element<'a, Message>,
     personal: PersonalView<'a>,
@@ -1153,6 +1175,7 @@ pub fn page<'a>(
     providers: crate::providers::ProvidersView<'a>,
     server: crate::localapi::ServerView<'a>,
     logs_text: &'a str,
+    details: crate::modeldetails::View<'a>,
     tokenizer: crate::localapi::TokenizerView<'a>,
     connect: crate::connect::ConnectView<'a>,
     copied: &'a Option<String>,
@@ -1292,6 +1315,18 @@ pub fn page<'a>(
             selection: t.primary_soft,
         });
     answers = answers.push(setting(t, "Longest answer", "In tokens. Empty lets the server decide.", row![limit, text("tokens").size(12).color(t.muted).width(60)].spacing(8).align_y(Alignment::Center).into()));
+    // the buttons *Save as default* of the Studio's sampling popover and system prompt: what is set here becomes what the server uses
+    // for every app that sends no values of its own
+    answers = answers.push(rule(t));
+    answers = answers.push(setting(
+        t,
+        "Server default",
+        "Saves the sampling values (when they are Manual) and the system prompt as the defaults of the server, for the apps that use it without values of their own.",
+        button(text("Save as default").size(13)).on_press(Message::SaveDefaults).padding([5, 14]).style(theme::primary_button(t)).into(),
+    ));
+    if let Some(note) = defaults_note {
+        answers = answers.push(text(note).size(12).color(t.muted));
+    }
     answers = answers.push(
         row![
             Space::new().width(Length::Fill),
@@ -1746,6 +1781,14 @@ pub fn page<'a>(
             content = content.push(crate::settingssearch::marker(t));
         }
         content = content.push(crate::localapi::logs_card(t, logs_text));
+    }
+        // Settings > Model details: the facts, the other names and the chat format of the model (`spane-provider-fllm`),
+        // between the logs and the tokenizer like the Studio's menu
+    if crate::settingssearch::keep("model", query) {
+        if hit == Some("model") {
+            content = content.push(crate::settingssearch::marker(t));
+        }
+        content = content.push(crate::modeldetails::cards(t, details));
     }
         // Settings > Tokenizer: the two cards of `spane-tokenizer`, where the Studio's menu has
         // them (after the logs, before the panes the menu appends)

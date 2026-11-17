@@ -354,6 +354,11 @@ pub(crate) async fn post(base: &str, path: &str, body: Value) -> Result<Value, S
     Err(message.map(str::to_string).unwrap_or_else(|| format!("the server answered {status}")))
 }
 
+/// `POST /api/studio/config`: the sampling values and the system prompt the server uses when a request brings none.
+pub async fn save_defaults(base: String, body: Value) -> Result<(), String> {
+    post(&base, "/api/studio/config", body).await.map(|_| ())
+}
+
 pub async fn fetch_overview(base: String) -> Result<Overview, String> {
     get_json(&base, "/api/studio/models").await.map(|v| parse_overview(&v))
 }

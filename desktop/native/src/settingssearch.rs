@@ -78,6 +78,11 @@ pub const PAGES: &[Page] = &[
         text: "log lines refresh copy server output errors",
     },
     Page {
+        id: "model",
+        label: "Model details",
+        text: "model details facts architecture parameters quantization context length vocabulary word pieces other names aliases chat format template",
+    },
+    Page {
         id: "tokenizer",
         label: "Tokenizer",
         text: "tokenize tokens bytes jinja template messages chat template count",

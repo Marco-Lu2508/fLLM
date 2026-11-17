@@ -19,6 +19,7 @@ use crate::prompts;
 use crate::code::{self, CodeState};
 use crate::engine_settings::{self, EngineState};
 use crate::sessions;
+use crate::modeldetails;
 use crate::models::{self, ModelsState};
 use crate::settings;
 use crate::theme::{self, Tokens};
@@ -664,6 +665,10 @@ pub struct App {
     switching: bool,
     /// What a switch of the model waits for (`waitForRestart` of the Studio): the old engine goes away and the new one answers.
     switch_wait: Option<SwitchWait>,
+    /// Settings > Model details.
+    details: modeldetails::State,
+    /// What *Save as default* answered.
+    defaults_note: Option<String>,
     /// The program found no data file of its own when it started: the very first start. Spent by the first answer of the server.
     first_start: bool,
     /// The tour waits for the hardware that is being read (set by that first answer).
@@ -758,6 +763,11 @@ pub enum Message {
     Pull(String),
     /// The text of the card *Add a model*, and the dialog *Choose a model* behind it.
     LocalPath(String),
+    /// Settings > Model details.
+    Facts(modeldetails::FactsMsg),
+    /// *Save as default* of the answer settings, and its answer.
+    SaveDefaults,
+    DefaultsSaved(Result<(), String>),
     /// The server's answer: whose Hugging Face token it uses.
     HfAccount(Result<models::HfAccount, String>),
     /// The typed token.
@@ -1775,6 +1785,8 @@ impl App {
             editing: None,
             switching: false,
             switch_wait: None,
+            details: Default::default(),
+            defaults_note: None,
             first_start,
             tour_pending: false,
             sidecar: None,
@@ -7218,8 +7230,11 @@ impl App {
                         self.hooks_loaded = true;
                         Task::perform(models::fetch_hooks(self.base.clone()), Message::HooksLoaded)
                     };
+                    // the facts of the model come with the pane (`providerModelFacts` is filled by every status read)
+                    let facts = Task::perform(modeldetails::fetch(self.base.clone()), |r| Message::Facts(modeldetails::FactsMsg::Loaded(r)));
                     if !matches!(self.server, Server::Down(_)) {
                         return Task::batch(vec![
+                            facts,
                             voices,
                             prices,
                             devices,
@@ -7467,6 +7482,18 @@ impl App {
                 self.models.filter = text;
                 Task::none()
             }
+            Message::Facts(m) => self.facts_update(m),
+            Message::SaveDefaults => {
+                self.defaults_note = Some("Saving …".into());
+                Task::perform(models::save_defaults(self.base.clone(), settings::defaults_body(&self.store.prefs)), Message::DefaultsSaved)
+            }
+            Message::DefaultsSaved(answer) => {
+                self.defaults_note = Some(match answer {
+                    Ok(()) => "Saved as the engine default.".to_string(),
+                    Err(e) => format!("It could not be saved: {e}"),
+                });
+                Task::none()
+            }
             Message::LocalPath(text) => {
                 self.models.local_path = text;
                 Task::none()
@@ -7655,6 +7682,68 @@ impl App {
                 self.max_tokens_text.clear();
                 self.save();
                 Task::none()
+            }
+        }
+    }
+
+    /// Settings > Model details: the facts are read when the page opens and after every change of the names.
+    fn facts_update(&mut self, m: modeldetails::FactsMsg) -> Task<Message> {
+        use modeldetails::FactsMsg as F;
+        let base = self.base.clone();
+        let reload = |base: String| Task::perform(modeldetails::fetch(base), |r| Message::Facts(F::Loaded(r)));
+        match m {
+            F::Loaded(Ok(facts)) => {
+                self.details.facts = Some(facts);
+                self.details.error = None;
+                Task::none()
+            }
+            F::Loaded(Err(e)) => {
+                self.details.error = Some(e);
+                Task::none()
+            }
+            F::Alias(text) => {
+                self.details.alias = text;
+                self.details.note = None;
+                Task::none()
+            }
+            F::Add => {
+                let dest = self.details.alias.trim().to_string();
+                let source = match &self.details.facts {
+                    Some(Some(f)) => f.name.clone(),
+                    _ => String::new(),
+                };
+                if dest.is_empty() || self.details.busy {
+                    return Task::none();
+                }
+                if source.is_empty() {
+                    self.details.note = Some("Load a model first; another name points to the loaded model.".into());
+                    return Task::none();
+                }
+                self.details.busy = true;
+                self.details.note = None;
+                Task::perform(modeldetails::add_alias(base, source, dest), |r| Message::Facts(F::Done(r)))
+            }
+            F::Remove(name) => {
+                if self.details.busy {
+                    return Task::none();
+                }
+                self.details.busy = true;
+                self.details.note = None;
+                Task::perform(modeldetails::remove_alias(base, name), |r| Message::Facts(F::Done(r)))
+            }
+            F::Done(answer) => {
+                self.details.busy = false;
+                match answer {
+                    Ok(note) => {
+                        self.details.alias.clear();
+                        self.details.note = Some(note);
+                        reload(base)
+                    }
+                    Err(e) => {
+                        self.details.note = Some(e);
+                        Task::none()
+                    }
+                }
             }
         }
     }
@@ -8442,6 +8531,7 @@ impl App {
                 &self.system_editor,
                 &self.spec_editor,
                 &self.max_tokens_text,
+                self.defaults_note.as_deref(),
                 &self.sampling_text,
                 engine_settings::view(t, &self.engine, !matches!(self.server, Server::Down(_))),
                 self.personal_view(),
@@ -8541,6 +8631,7 @@ impl App {
                     metrics: &self.metrics,
                 },
                 &self.logs_text,
+                crate::modeldetails::View { state: &self.details },
                 crate::localapi::TokenizerView {
                     text: &self.tok_text,
                     stats: &self.tok_stats,

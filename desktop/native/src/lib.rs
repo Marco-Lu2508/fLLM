@@ -29,6 +29,7 @@ pub mod review;
 pub mod specs;
 pub mod browser;
 pub mod generalcards;
+pub mod modeldetails;
 pub mod modelpicker;
 pub mod clipboard_image;
 pub mod instance;
