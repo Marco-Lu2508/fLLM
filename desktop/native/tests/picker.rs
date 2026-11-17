@@ -133,3 +133,41 @@ fn the_switching_overlay_is_a_layer_of_the_window_and_not_of_the_chat_page() {
     let _ = app.update(Message::Connected(Ok(ModelInfo::new("my-model", 4096))));
     assert!(!app.switching(), "the engine is back, the overlay goes");
 }
+
+/// A window of 1100 pixels: the sidebar is 248 wide, the top bar is a column of 780 centred in the rest. The list hangs under the model
+/// name, which is the first thing of that column, and it ends with its footer even when there are many models.
+#[test]
+fn the_list_hangs_under_the_model_name_and_keeps_its_footer_with_many_models() {
+    let (mut app, _dir) = app("light");
+    let many: Vec<_> = (0..14)
+        .map(|i| json!({"name": format!("model-{i:02}-Q4_K_M"), "path": format!("/models/m{i}.gguf"), "size_bytes": 2_000_000_000u64}))
+        .collect();
+    let o = parse_overview(&json!({"loaded": {"name": "qwen2.5-0.5b-instruct"}, "local": many, "cached": [], "catalog": []}));
+    let _ = app.update(Message::OverviewLoaded(Ok(o)));
+    let _ = app.update(Message::TogglePicker);
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1100.0, 760.0), app.view());
+    let footer = ui.find("Manage models…").expect("the footer is there");
+    let b = footer.bounds();
+    let visible = footer.visible_bounds().expect("and drawn");
+    assert!(visible.height >= b.height - 0.5, "not cut off: {b:?} {visible:?}");
+    assert!(b.y + b.height <= 760.0, "inside the window: {b:?}");
+    // sidebar 248, column centred in the 852 that are left (780 wide), the panel pads 6 and the row 10
+    let expected = 248.0 + (852.0 - 780.0) / 2.0 + 6.0 + 10.0;
+    assert!((b.x - expected).abs() < 2.0, "the list starts under the model name (x {} against {expected})", b.x);
+    let first = ui.find("model-00-Q4_K_M").expect("the list starts");
+    let last_hidden = ui.find("model-13-Q4_K_M").ok().and_then(|t| t.visible_bounds());
+    assert!(first.visible_bounds().is_some());
+    assert!(last_hidden.is_none(), "the rows that do not fit are scrolled away, not drawn over the footer");
+}
+
+#[test]
+fn the_assistant_menu_hangs_under_the_assistant_not_under_the_model() {
+    let (mut app, _dir) = app("light");
+    let _ = app.update(Message::AsstMenuToggle);
+    let mut ui = Simulator::with_size(settings(), iced::Size::new(1100.0, 760.0), app.view());
+    let head = ui.find("Assistants").expect("the menu").bounds();
+    // the model pill is 24 + 15 + 8 + name + 8 + 13 wide, then a gap of 10
+    let name = "qwen2.5-0.5b-instruct".chars().count() as f32;
+    let expected = 248.0 + 36.0 + (24.0 + 15.0 + 8.0 + name * 7.8 + 8.0 + 13.0) + 10.0 + 8.0;
+    assert!((head.x - expected).abs() < 6.0, "x {} against {expected}", head.x);
+}

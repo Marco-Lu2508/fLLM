@@ -40,7 +40,10 @@ fn tour_loaded() -> Message {
 fn app_with(store: Store) -> (App, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chats.json");
-    store.save(&path).unwrap();
+    // a machine with nothing on it has no data file: that is the first start, the only one the tour comes at
+    if !store.chats.is_empty() {
+        store.save(&path).unwrap();
+    }
     let (mut app, _t) = App::with("http://127.0.0.1:9".into(), path);
     let _ = app.update(Message::Connected(Ok(ModelInfo::new("m", 4096))));
     (app, dir)

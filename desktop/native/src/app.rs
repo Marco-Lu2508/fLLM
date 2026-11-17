@@ -664,6 +664,10 @@ pub struct App {
     switching: bool,
     /// What a switch of the model waits for (`waitForRestart` of the Studio): the old engine goes away and the new one answers.
     switch_wait: Option<SwitchWait>,
+    /// The program found no data file of its own when it started: the very first start. Spent by the first answer of the server.
+    first_start: bool,
+    /// The tour waits for the hardware that is being read (set by that first answer).
+    tour_pending: bool,
 }
 
 /// What the Code page asked of the runtime, so its answer can be noted there.
@@ -754,6 +758,18 @@ pub enum Message {
     Pull(String),
     /// The text of the card *Add a model*, and the dialog *Choose a model* behind it.
     LocalPath(String),
+    /// The server's answer: whose Hugging Face token it uses.
+    HfAccount(Result<models::HfAccount, String>),
+    /// The typed token.
+    HfToken(String),
+    HfSignIn,
+    HfSignOut,
+    /// The answer to a sign in or sign out.
+    HfSaved(Result<models::HfAccount, String>),
+    /// The page on which Hugging Face makes tokens.
+    HfTokenPage,
+    /// The page was asked for (an error is shown under the field).
+    HfTokenOpened(Result<serde_json::Value, String>),
     Mp(crate::modelpicker::MpMsg),
     DownloadAction(u64, &'static str),
     /// A load, unload, download or download action is done (or failed with this message).
@@ -1490,6 +1506,8 @@ impl App {
     }
 
     pub fn with(base: String, data_file: PathBuf) -> (App, Task<Message>) {
+        // no data file yet: the very first start of the program
+        let first_start = !data_file.exists();
         let store = Store::load(&data_file);
         let dk = crate::desktopcards::DesktopPane::load(&data_file.with_file_name("desktop.json"));
         let system_dark = std::env::var("FLLM_THEME").map(|v| v == "dark").unwrap_or(false);
@@ -1757,6 +1775,8 @@ impl App {
             editing: None,
             switching: false,
             switch_wait: None,
+            first_start,
+            tour_pending: false,
             sidecar: None,
             sidecar_note: None,
         };
@@ -2144,9 +2164,12 @@ impl App {
             Message::Connected(Ok(model)) => {
                 self.server = Server::Ready(model);
                 self.switching = false;
-                // the first start shows the tour once, after the hardware is known (the Studio
-                // waits for it too); an existing user never sees it
-                if !self.store.prefs.tour_seen && self.store.chats.is_empty() {
+                // the first start of the program shows the tour, once, after the hardware is known (the Studio
+                // waits for it too). Only the first answer of the server since the start counts, and only when the program
+                // found no data of its own: a model that is switched, a server that comes back or a data file that was
+                // reset do not bring it again, and an existing user never sees it
+                if std::mem::take(&mut self.first_start) && !self.store.prefs.tour_seen && self.store.chats.is_empty() {
+                    self.tour_pending = true;
                     let base = self.base.clone();
                     return Task::perform(
                         async move {
@@ -6550,7 +6573,7 @@ impl App {
                     self.tour_data.read_overview(o, o);
                 }
                 // the data was for the first start: open it now (nothing else opened the tour)
-                if self.tour.is_none() && !self.store.prefs.tour_seen && self.store.chats.is_empty() {
+                if std::mem::take(&mut self.tour_pending) && self.tour.is_none() && !self.store.prefs.tour_seen && self.store.chats.is_empty() {
                     self.store.prefs.tour_seen = true;
                     self.tour = Some(0);
                     self.save();
@@ -7448,6 +7471,51 @@ impl App {
                 self.models.local_path = text;
                 Task::none()
             }
+            Message::HfAccount(answer) => {
+                self.models.hf = Some(match answer {
+                    Ok(account) => account,
+                    Err(e) => models::HfAccount { error: e, ..Default::default() },
+                });
+                Task::none()
+            }
+            Message::HfToken(text) => {
+                self.models.hf_token = text;
+                self.models.hf_error = None;
+                Task::none()
+            }
+            Message::HfSignIn => {
+                let token = self.models.hf_token.trim().to_string();
+                if token.is_empty() || self.models.hf_busy {
+                    return Task::none();
+                }
+                self.models.hf_busy = true;
+                self.models.hf_error = None;
+                Task::perform(models::save_hf_token(self.base.clone(), token), Message::HfSaved)
+            }
+            Message::HfSignOut => {
+                self.models.hf_busy = true;
+                self.models.hf_error = None;
+                Task::perform(models::save_hf_token(self.base.clone(), String::new()), Message::HfSaved)
+            }
+            Message::HfSaved(answer) => {
+                self.models.hf_busy = false;
+                match answer {
+                    Ok(account) => {
+                        // the token is on the server now: it does not stay in the window
+                        self.models.hf_token.clear();
+                        self.models.hf = Some(account);
+                    }
+                    Err(e) => self.models.hf_error = Some(e),
+                }
+                Task::none()
+            }
+            Message::HfTokenPage => Task::perform(models::open_url(self.base.clone(), "https://huggingface.co/settings/tokens".into()), Message::HfTokenOpened),
+            Message::HfTokenOpened(answer) => {
+                if let Err(e) = answer {
+                    self.models.hf_error = Some(format!("The page could not be opened: {e}"));
+                }
+                Task::none()
+            }
             Message::Mp(m) => self.mp_update(m),
             Message::PickQuant(id, quant) => {
                 self.models.quant.insert(id, quant);
@@ -7569,7 +7637,19 @@ impl App {
                 Task::none()
             }
             Message::ResetPrefs => {
-                self.store.prefs = store::Prefs::default();
+                // the answer settings only: what else is kept in the preferences (the tour that was seen, the rules and
+                // approvals of the code page, the answers about the person, the shortcuts, the voice, the saved prompts)
+                // is not part of them
+                let fresh = store::Prefs::default();
+                let p = &mut self.store.prefs;
+                p.manual_sampling = fresh.manual_sampling;
+                p.temperature = fresh.temperature;
+                p.top_p = fresh.top_p;
+                p.custom_system = fresh.custom_system;
+                p.system_prompt = fresh.system_prompt;
+                p.max_tokens = fresh.max_tokens;
+                p.system_append = fresh.system_append;
+                p.prompt_length = fresh.prompt_length;
                 self.sampling_text = settings::SamplingTexts::default();
                 self.system_editor = Content::new();
                 self.max_tokens_text.clear();
@@ -7612,7 +7692,11 @@ impl App {
 
     fn refresh_models(&self) -> Task<Message> {
         let base = self.base.clone();
-        Task::batch([Task::perform(models::fetch_overview(base.clone()), Message::OverviewLoaded), Task::perform(models::fetch_downloads(base), Message::DownloadsLoaded)])
+        Task::batch([
+            Task::perform(models::fetch_overview(base.clone()), Message::OverviewLoaded),
+            Task::perform(models::fetch_downloads(base.clone()), Message::DownloadsLoaded),
+            Task::perform(models::fetch_hf_account(base), Message::HfAccount),
+        ])
     }
 
     /// One event of the answer. The task of the next round comes back when the answer called a tool
@@ -8319,7 +8403,7 @@ impl App {
             .spacing(4)
             .padding(12),
         )
-        .width(248)
+        .width(SIDEBAR_WIDTH)
         .height(Length::Fill)
         .style(theme::sidebar(t))
         .into()
@@ -8749,13 +8833,21 @@ impl App {
             );
         }
         let manage = button(text("Manage models…").size(13).color(t.fg_soft)).on_press(Message::Go(View::Models)).padding([7, 10]).width(Length::Fill).style(theme::row_button(t, false));
-        let panel = container(column![scrollable(list).height(Length::Shrink), container(Space::new().height(1)).width(Length::Fill).style(move |_| container::Style { background: Some(iced::Background::Color(t.separator)), ..Default::default() }), manage].spacing(6))
+        // the list keeps its own height (about eight rows) and scrolls; without that a long list took the whole height of the
+        // card and pushed "Manage models…" out of it
+        let panel = container(column![container(scrollable(container(list).padding(Padding { right: 10.0, ..Padding::ZERO }))).max_height(PICKER_LIST_HEIGHT), container(Space::new().height(1)).width(Length::Fill).style(move |_| container::Style { background: Some(iced::Background::Color(t.separator)), ..Default::default() }), manage].spacing(6))
             .padding(6)
             .width(380)
-            .max_height(360)
             .style(theme::card(t, theme::R_LG, false));
-        // under the model name: the top bar is 52 high and the column is centered like the chat
-        container(container(panel).max_width(780).width(Length::Fill)).center_x(Length::Fill).padding(Padding { top: 46.0, right: 24.0, bottom: 0.0, left: 24.0 }).width(Length::Fill).height(Length::Fill).into()
+        // under the model name, which is the first thing of the top bar: that is centred in the part right of the sidebar
+        self.under_the_topbar(panel.into(), 0.0)
+    }
+
+    /// Puts a panel under the top bar, at the left edge of its column (`inset` further to the right), where the pills are.
+    fn under_the_topbar<'a>(&self, panel: Element<'a, Message>, inset: f32) -> Element<'a, Message> {
+        let column = container(container(panel).padding(Padding { left: inset, ..Padding::ZERO })).max_width(780).width(Length::Fill);
+        let page = container(column).center_x(Length::Fill).padding(Padding { top: 46.0, right: 24.0, bottom: 0.0, left: 24.0 }).width(Length::Fill).height(Length::Fill);
+        row![Space::new().width(SIDEBAR_WIDTH), page].into()
     }
 
     /// The projects over the chats in the sidebar (the Studio's projectList): a row per project with
@@ -9668,18 +9760,12 @@ impl App {
         let rule = container(Space::new().height(1))
             .width(Length::Fill)
             .style(move |_| container::Style { background: Some(iced::Background::Color(t.separator)), ..Default::default() });
-        let panel = container(column![head, rule, scrollable(list).height(Length::Shrink)].spacing(6))
+        let panel = container(column![head, rule, container(scrollable(list)).max_height(380)].spacing(6))
             .padding(8)
             .width(360)
-            .max_height(440)
             .style(theme::card(t, theme::R_LG, false));
-        // under the name, aligned with the centered top bar like the model list
-        container(container(panel).max_width(780).width(Length::Fill))
-            .center_x(Length::Fill)
-            .padding(Padding { top: 46.0, right: 24.0, bottom: 0.0, left: 24.0 })
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        // under the assistant, which is the second pill of the top bar: after the model name and its gap
+        self.under_the_topbar(panel.into(), self.model_pill_width() + 10.0)
     }
 
     /// The editor window of one assistant (the Studio's assistantModal).
@@ -9914,6 +10000,16 @@ impl App {
             .padding(12)
             .style(theme::card(t, theme::R_LG, true))
             .into()
+    }
+
+    /// How wide the pill with the name of the model is: padding, cube, gaps, chevron and the name in the monospace font (0.6 em a letter).
+    fn model_pill_width(&self) -> f32 {
+        let name = match &self.server {
+            Server::Ready(m) => m.id.chars().count(),
+            Server::Connecting => "Connecting…".chars().count(),
+            Server::NoModel | Server::Down(_) => "No model".chars().count(),
+        };
+        24.0 + 15.0 + 8.0 + name as f32 * 13.0 * 0.6 + 8.0 + 13.0
     }
 
     fn topbar(&self, t: Tokens) -> Element<'_, Message> {
@@ -12537,6 +12633,13 @@ fn window_icon() -> Option<iced::window::Icon> {
     let (width, height) = image.dimensions();
     iced::window::icon::from_rgba(image.into_raw(), width, height).ok()
 }
+
+/// The width of the sidebar. The dialogs that hang under the top bar are layers of the whole window, but the top bar is centred
+/// in the part right of the sidebar: they start behind it, or they sit left of the model name by half of this.
+const SIDEBAR_WIDTH: f32 = 248.0;
+
+/// The height of the list of models in the picker, about eight rows.
+const PICKER_LIST_HEIGHT: f32 = 280.0;
 
 /// What a switch of the model waits for.
 struct SwitchWait {

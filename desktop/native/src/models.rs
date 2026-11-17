@@ -111,6 +111,61 @@ pub struct ModelsState {
     pub picker: crate::modelpicker::Picker,
     /// A download that is loaded as soon as it is done (*Download and load*).
     pub pending_load: Option<u64>,
+    /// The Hugging Face account the server uses (`None` until it has answered).
+    pub hf: Option<HfAccount>,
+    /// The token that is typed into the field of the card *Hugging Face account* (never shown, never kept after it was sent).
+    pub hf_token: String,
+    /// A sign in or sign out is under way.
+    pub hf_busy: bool,
+    /// What went wrong with the last sign in.
+    pub hf_error: Option<String>,
+}
+
+/// Whose Hugging Face token the server uses (`GET /api/studio/hf-account`): private and gated models need one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HfAccount {
+    pub signed_in: bool,
+    pub name: String,
+    /// `saved` (typed in here) or `environment` (`HF_TOKEN` of the server).
+    pub source: String,
+    /// The saved token does not work (the server says why).
+    pub error: String,
+}
+
+impl HfAccount {
+    pub fn from_json(v: &Value) -> HfAccount {
+        HfAccount {
+            signed_in: v.get("signed_in").and_then(Value::as_bool).unwrap_or(false),
+            name: text_of(v, "name"),
+            source: text_of(v, "source"),
+            error: text_of(v, "error"),
+        }
+    }
+
+    /// The line under the title of the card (the words of the Studio).
+    pub fn line(&self) -> String {
+        if self.signed_in {
+            format!("Signed in as {}{}.", self.name, if self.source == "environment" { " (token from the environment)" } else { "" })
+        } else if !self.error.is_empty() {
+            format!("The saved token does not work: {}", self.error)
+        } else {
+            "Not signed in. Public models need no account.".to_string()
+        }
+    }
+
+    /// Only a token that was typed in can be taken away from here; one of the environment belongs to the server's computer.
+    pub fn can_sign_out(&self) -> bool {
+        self.signed_in && self.source == "saved"
+    }
+}
+
+pub async fn fetch_hf_account(base: String) -> Result<HfAccount, String> {
+    get_json(&base, "/api/studio/hf-account").await.map(|v| HfAccount::from_json(&v))
+}
+
+/// `POST /api/studio/hf-account`: the server checks the token with Hugging Face and keeps it; an empty token signs out.
+pub async fn save_hf_token(base: String, token: String) -> Result<HfAccount, String> {
+    post(&base, "/api/studio/hf-account", serde_json::json!({ "token": token })).await.map(|v| HfAccount::from_json(&v))
 }
 
 impl ModelsState {
@@ -1597,6 +1652,51 @@ pub fn page<'a>(s: &'a ModelsState, t: Tokens, nothing_loaded: bool) -> Element<
     ]
     .spacing(10);
     content = content.push(card(t, "Add a model", local.into()));
+
+    // the account of Hugging Face (`hfAccountCard`): a token is needed for private and gated models
+    let account = s.hf.clone().unwrap_or_default();
+    let status_line = if s.hf.is_some() { account.line() } else { "Checking …".to_string() };
+    let can_send = !s.hf_busy && !s.hf_token.trim().is_empty();
+    let mut buttons = row![small_button(t, if s.hf_busy { "Checking …" } else { "Sign in" }, can_send.then_some(Message::HfSignIn), true)].spacing(8);
+    if account.can_sign_out() {
+        buttons = buttons.push(small_button(t, "Sign out", (!s.hf_busy).then_some(Message::HfSignOut), false));
+    }
+    let mut hf = column![
+        text(status_line).size(13).color(t.muted),
+        row![
+            text_input("Paste an access token (hf_...)", &s.hf_token)
+                .on_input(Message::HfToken)
+                .on_submit_maybe(can_send.then_some(Message::HfSignIn))
+                .secure(true)
+                .font(Font::MONOSPACE)
+                .size(13)
+                .padding([8, 12])
+                .style(move |_, status| text_input::Style {
+                    background: iced::Background::Color(t.surface_2),
+                    border: iced::Border { radius: 10.0.into(), width: 1.0, color: if matches!(status, text_input::Status::Focused { .. }) { t.fg_soft } else { t.separator } },
+                    icon: t.muted,
+                    placeholder: t.muted,
+                    value: t.fg,
+                    selection: t.primary_soft,
+                }),
+            buttons,
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(10);
+    if let Some(e) = &s.hf_error {
+        hf = hf.push(text(e.clone()).size(13).color(t.danger));
+    }
+    hf = hf.push(
+        row![
+            text("A token is needed for private and gated models. Read access is enough.").size(12).color(t.muted),
+            small_button(t, "Create a token", Some(Message::HfTokenPage), false),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    );
+    content = content.push(card(t, "Hugging Face account", hf.into()));
 
     // the catalog
     let search = text_input("Search the catalog", &s.filter)
