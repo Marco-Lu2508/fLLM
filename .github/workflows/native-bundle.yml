@@ -160,8 +160,15 @@ jobs:
           The engine alone: fllm-rs --help
           TXT
           echo "$VARIANT" > fllm-desktop/variant.txt
-          # the GPU builds load their driver library when they are used, not at the start: --help must still work without a GPU
-          "fllm-desktop/fllm-rs$EXE" --help > /dev/null
+          # the CUDA builds and the Windows builds load their driver library when they are used, not at the start: --help must still work
+          # without a GPU. The Linux ROCm engine links the HIP runtime (libamdhip64.so) in the usual way, so it cannot start on a machine
+          # without ROCm, and neither can this runner: that build is only checked for the files it has.
+          if [ "$VARIANT" = amd ] && [ "$RUNNER_OS" = Linux ]; then
+            echo "the ROCm engine needs the HIP runtime to start: not run here"
+            test -s "fllm-desktop/fllm-rs$EXE"
+          else
+            "fllm-desktop/fllm-rs$EXE" --help > /dev/null
+          fi
 
       - name: Pack
         run: |
