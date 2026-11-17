@@ -68,15 +68,18 @@ jobs:
             os: ubuntu-24.04
             exe: ""
           - asset: fllm-desktop-windows-x86_64.zip
+            setup: fLLM
             engine: fllm-windows-x86_64-msvc.zip
             os: windows-2025
             exe: ".exe"
           - asset: fllm-desktop-windows-x86_64-cuda.zip
+            setup: fLLM-cuda
             engine: fllm-windows-x86_64-msvc-cuda.zip
             variant: cuda
             os: windows-2025
             exe: ".exe"
           - asset: fllm-desktop-windows-x86_64-hip.zip
+            setup: fLLM-hip
             engine: fllm-windows-x86_64-msvc-hip.zip
             variant: amd
             os: windows-2025
@@ -181,6 +184,59 @@ jobs:
           if command -v sha256sum >/dev/null 2>&1; then sha256sum "$ASSET" > "$ASSET.sha256"; else shasum -a 256 "$ASSET" > "$ASSET.sha256"; fi
           cat "$ASSET.sha256"
 
+      # The installer of the Windows app (setup.exe, NSIS): for the current user, Start menu and desktop shortcut, an uninstaller.
+      # The zip stays: it is what the app's own update downloads. The installer is tried here before it is published: it is
+      # installed silently into a folder, the files and the start of the program are looked at, and it is uninstalled again.
+      - name: Windows installer (setup.exe)
+        if: matrix.setup
+        shell: pwsh
+        env:
+          SETUP_NAME: ${{ matrix.setup }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install nsis -y --no-progress
+          $make = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
+          $version = $env:TAG.TrimStart('v')
+          $setup = "${env:SETUP_NAME}_${version}_x64-setup.exe"
+          $out = Join-Path (Get-Location).Path $setup
+          $src = (Resolve-Path fllm-desktop).Path
+          & $make /V2 "/DVERSION=$version" "/DOUTFILE=$out" "/DSRC=$src" desktop/native/installer/fllm.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed ($LASTEXITCODE)" }
+          Get-Item $setup | Format-List Name, Length
+          "SETUP=$setup" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          # install silently, look, uninstall
+          $dir = Join-Path $env:RUNNER_TEMP 'fllm-install-test'
+          $p = Start-Process -FilePath $out -ArgumentList '/S', "/D=$dir" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "the installer exited with $($p.ExitCode)" }
+          foreach ($f in 'fllm-app.exe', 'fllm-rs.exe', 'uninstall.exe', 'fllm.ico', 'variant.txt', 'LICENSE') {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "the installer did not put $f into $dir" }
+          }
+          Write-Host "variant: $((Get-Content (Join-Path $dir 'variant.txt')).Trim())"
+          & (Join-Path $dir 'fllm-rs.exe') --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "the installed engine does not start" }
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\fLLM'
+          if ((Get-ItemProperty $key).DisplayVersion -ne $version) { throw "the uninstall entry has the wrong version" }
+          $p = Start-Process -FilePath (Join-Path $dir 'uninstall.exe') -ArgumentList '/S', "_?=$dir" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "the uninstaller exited with $($p.ExitCode)" }
+          foreach ($f in 'fllm-app.exe', 'fllm-rs.exe') {
+            if (Test-Path (Join-Path $dir $f)) { throw "the uninstaller left $f" }
+          }
+          if (Test-Path $key) { throw "the uninstaller left its registry entry" }
+          Write-Host "installed and uninstalled cleanly"
+          Get-FileHash -Algorithm SHA256 $out | ForEach-Object { "$($_.Hash.ToLower())  $setup" } | Out-File -FilePath "$setup.sha256" -Encoding ascii
+          Get-Content "$setup.sha256"
+
+      - name: Keep the installer as an artifact
+        if: matrix.setup
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.SETUP }}
+          path: |
+            ${{ env.SETUP }}
+            ${{ env.SETUP }}.sha256
+          retention-days: 7
+
       - name: Keep the bundle as an artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -207,3 +263,17 @@ jobs:
       - name: Upload to the release
         if: inputs.upload
         run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" "$ASSET.sigstore.json" --clobber
+
+      - name: Sign the installer with Cosign (keyless OIDC)
+        if: inputs.upload && matrix.setup
+        run: for attempt in 1 2 3; do cosign sign-blob --yes --bundle "$SETUP.sigstore.json" "$SETUP" && break; [ "$attempt" = 3 ] && exit 1; sleep $((attempt * 30)); done
+
+      - name: Attest build provenance of the installer
+        if: inputs.upload && matrix.setup
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ env.SETUP }}
+
+      - name: Upload the installer to the release
+        if: inputs.upload && matrix.setup
+        run: gh release upload "$TAG" "$SETUP" "$SETUP.sha256" "$SETUP.sigstore.json" --clobber

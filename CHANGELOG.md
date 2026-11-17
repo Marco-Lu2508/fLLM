@@ -18,6 +18,7 @@ The first release of the native desktop app. The old Tauri app (the web Studio i
 
 
 ### Added
+- **A Windows installer** for the native app: `fLLM_<version>_x64-setup.exe`, `fLLM-cuda_...` and `fLLM-hip_...` (NSIS; per user, Start menu and desktop shortcut, uninstaller), installed and uninstalled silently on a Windows runner before it is published.
 - **Self-update of the native app** (`selfupdate.rs`): the bundle of the installed build (standard, CUDA, AMD) from the newest release, checked against its checksum, unpacked and put over the installation on a button, with a rollback when anything fails. Settings, Desktop app, Updates.
 - **Rich answers in the native app** (`rich.rs`): math, charts, Mermaid diagrams and SVG in chat and Code, as pictures in the theme's colors; the same switch tells the models about the formats.
 - **The browser panel got a new look**: a card with a header, round navigation buttons, the address in one pill (Ctrl+L), a wide mode, the page with its title and host, what the agent is doing over the page, comment mode with a crosshair, and quick addresses on an empty stage.

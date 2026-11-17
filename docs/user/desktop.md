@@ -15,6 +15,8 @@ One archive per system and build, attached to every [release](https://github.com
 | macOS (Apple silicon) | `fllm-desktop-macos-aarch64.tar.gz` | | |
 
 Every archive holds the app (`fllm-app`), the engine of the same release (`fllm-rs`) and a `README.txt`; unpacking it is the whole installation.
+
+**Windows installer:** `fLLM_<version>_x64-setup.exe` (standard), `fLLM-cuda_<version>_x64-setup.exe` and `fLLM-hip_<version>_x64-setup.exe` are the same bundles as a setup program: it installs for your user (no administrator rights; the app updates itself in its folder), adds a Start menu entry and a desktop shortcut, and registers an uninstaller (*Settings, Apps*). `/S` installs silently, `/D=<folder>` picks the folder. The release workflow installs and uninstalls each installer on a Windows runner before it publishes it; it was not tried on a PC with a screen.
 A `.sha256` and a signature (`.sigstore.json`, cosign keyless) lie beside each archive. The apps are not signed with a system certificate, so
 Windows may show a warning on the first start and macOS asks you to confirm it (right click, Open). The CUDA and AMD builds exist when the
 release has the matching engine; the AMD kernels are untested on AMD GPUs. Pascal and Volta cards (GTX 10 series, V100) are not in the CUDA
