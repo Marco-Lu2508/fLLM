@@ -1,6 +1,6 @@
 [package]
 name = "fllm-app"
-version = "0.2.3"
+version = "0.2.4"
 description = "fLLM desktop app, native: the Studio written in Rust (iced), no web view"
 edition = "2021"
 license = "Apache-2.0"

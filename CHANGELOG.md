@@ -6,6 +6,10 @@ behaviour between versions).
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-17
+
+Fixes for the native app of 0.2.3, and the Settings pages and the Hugging Face account it lacked.
+
 ### Fixed
 - **The welcome tour** came again after the answer settings were reset (the reset wiped every preference, the seen tour included, and also the rules and approvals of the Code page, the answers about the person, the shortcuts, the voice and the saved prompts) and could come with any later answer of the server, for instance after switching the model. It now comes once, at the very first start of the program (no data file yet), and *Back to automatic* resets the answer settings only.
 - **The list of models and the menu of assistants** hung left of the name they belong to (they were centred over the whole window, the top bar is centred in the part right of the sidebar), and a long list pushed *Manage models…* out of the card.
