@@ -13,6 +13,8 @@ ignore = [
     # `paste` (unmaintained, no vulnerability) is a compile-time proc-macro dependency of tokenizers, which is pinned to =0.23.2
     # (rust/engine/Cargo.toml). A newer tokenizers release would be needed; revisit when the pin is moved.
     { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro pulled by the pinned tokenizers =0.23.2; no runtime code" },
+    # `chrono` is unmaintained (INFO, no vulnerability, no patched version exists). Used for local time in the engine (the scheduler's wall-clock and DST handling, time stamps) and the native app; replacing it with `jiff` or `time` is a change of its own (the scheduler tests pin the DST behaviour). Revisit when that is done.
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained (INFO only, no vulnerability); a replacement is a change of its own, see the comment above" },
 ]
 
 [licenses]
