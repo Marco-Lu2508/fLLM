@@ -331,16 +331,15 @@ __device__ __forceinline__ void decode16(const uint8_t *rp, int run, int cols, f
         const float dm = (float)(b[group / 2 + 2] & 15) * scale;
         const int off = (run * 16) % group;
         const uint8_t *qs = b + off / 2;
-        const uint32_t w0 = ld32_a1(qs);
-        const uint32_t w1 = ld32_a1(qs + 4);
 #pragma unroll
         for (int i = 0; i < 4; i++) {
-            const uint32_t q0 = (w0 >> (i * 8)) & 0xffu;
-            const uint32_t q1 = (w1 >> (i * 8)) & 0xffu;
-            w[2 * i] = fmaf((float)(q0 & 15u), scale, -dm);
-            w[2 * i + 1] = fmaf((float)(q0 >> 4), scale, -dm);
-            w[8 + 2 * i] = fmaf((float)(q1 & 15u), scale, -dm);
-            w[8 + 2 * i + 1] = fmaf((float)(q1 >> 4), scale, -dm);
+            const uint16_t q = ld16_a1(qs + i * 2);
+            const uint32_t b0 = q & 0xffu;
+            const uint32_t b1 = q >> 8;
+            w[4 * i] = fmaf((float)(b0 & 15u), scale, -dm);
+            w[4 * i + 1] = fmaf((float)(b0 >> 4), scale, -dm);
+            w[4 * i + 2] = fmaf((float)(b1 & 15u), scale, -dm);
+            w[4 * i + 3] = fmaf((float)(b1 >> 4), scale, -dm);
         }
         return;
     }

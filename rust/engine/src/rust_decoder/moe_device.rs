@@ -8,6 +8,11 @@
 use super::*;
 use crate::backend::{moe::moe_block_for, moe::moe_sort_bytes, BufferPool, MoeGlu, MoeGrouped, MoeRoute, MoeSort, Stream};
 
+fn moe_decode_max_rows() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::env::var("FLLM_MOE_DECODE_MAX_ROWS").ok().and_then(|v| v.trim().parse::<usize>().ok()).filter(|&n| n > 0).unwrap_or(4))
+}
+
 impl RustDecoder {
     /// Routing parameters of a layer for the device router.
     pub(super) fn device_route(&self, moe: &Moe) -> MoeRoute {
@@ -48,8 +53,9 @@ impl RustDecoder {
         let (Some(cfg), Some(_)) = (self.cfg.moe.as_ref(), self.device_glu_mode(layer_idx)) else {
             return Ok(None);
         };
-        // one to four tokens through the integer dot-product kernels when the formats allow it; everything else through the grouped GEMM
-        let decode = rows <= 4 && fast.dp4a && !cfg.input_scaled;
+        // small batches through the per-slot decode kernels when the formats allow it; larger batches through the grouped GEMM
+        let decode_cap = moe_decode_max_rows();
+        let decode = rows <= decode_cap && fast.dp4a && !cfg.input_scaled;
         if rows == 0 || (!decode && !dev.grouped) {
             return Ok(None);
         }

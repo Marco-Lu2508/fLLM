@@ -213,7 +213,7 @@ int fllm_moe_align_launch(cudaStream_t s, const int32_t *ids, int32_t *sorted, i
 // ---------------------------------------------------------------------------------------------
 template <int BN>
 struct MoeTile {
-    static constexpr int BM = BN >= 64 ? 64 : 128, BK = 64, LD = BK + 8;
+    static constexpr int BM = 128, BK = 64, LD = BK + 8;
     static constexpr int WM = BN >= 64 ? 2 : 4;
     static constexpr int WN = BN / 16;
     static constexpr int NT = WM * WN * 32;
