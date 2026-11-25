@@ -494,7 +494,17 @@ pub fn prepare_checkpoint(
             outs.push(vision_tensor(name, t, options.output_dtype)?);
             continue;
         }
-        let (name, add) = match plan.map(&t.name)? {
+        let mapped = match plan.map(&t.name) {
+            Ok(m) => m,
+            Err(e) => {
+                if is_all_zero_bias(&t) {
+                    skipped.push(t.name);
+                    continue;
+                }
+                return Err(e.into());
+            }
+        };
+        let (name, add) = match mapped {
             Mapped::Skip => {
                 skipped.push(t.name);
                 continue;
@@ -3625,3 +3635,45 @@ mod chat_template_meta_tests {
         assert!(chat_template_meta(dir.path(), &json!({})).unwrap().is_empty());
     }
 }
+
+fn is_all_zero_bias(t: &Tensor) -> bool {
+    if !t.name.ends_with(".bias") || !matches!(t.dtype.as_str(), "F32" | "F16" | "BF16") {
+        return false;
+    }
+    let w = if t.dtype == "F32" { 4 } else { 2 };
+    let data = t.payload.as_slice();
+    if data.is_empty() || !data.len().is_multiple_of(w) {
+        return false;
+    }
+    data.chunks_exact(w)
+        .all(|c| gguf::to_f32(&t.dtype, c).is_ok_and(|v| v == 0.0))
+}
+
+#[cfg(test)]
+mod zero_bias_tests {
+    use super::{is_all_zero_bias, safetensors::Payload, Tensor};
+    use std::sync::Arc;
+
+    fn make_tensor(name: &str, dtype: &str, bytes: Vec<u8>) -> Tensor {
+        let len = bytes.len();
+        Tensor {
+            name: name.into(),
+            dtype: dtype.into(),
+            shape: vec![(len / if dtype == "F32" { 4 } else { 2 }) as u64],
+            payload: Payload::Owned(Arc::new(bytes), 0..len),
+        }
+    }
+
+    #[test]
+    fn skips_all_zero_autogptq_bias_only() {
+        let zero_f16 = make_tensor("model.layers.0.mlp.experts.0.gate_proj.bias", "F16", vec![0, 0, 0, 0x80]);
+        assert!(is_all_zero_bias(&zero_f16));
+
+        let nonzero_f16 = make_tensor("model.layers.0.mlp.experts.0.gate_proj.bias", "F16", vec![0, 0, 0x00, 0x3c]);
+        assert!(!is_all_zero_bias(&nonzero_f16));
+
+        let non_bias = make_tensor("model.layers.0.mlp.experts.0.gate_proj.weight", "F16", vec![0, 0]);
+        assert!(!is_all_zero_bias(&non_bias));
+    }
+}
+

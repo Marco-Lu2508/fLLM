@@ -50,8 +50,8 @@ fi
 echo "=== 1/3 verify_all.py ==="
 python3 "${ROOT_DIR}/scripts/colab/verify_all.py" \
   --binary "${FLLM_BIN}" \
-  --steps hw,devices,serve,speed,dspine,fp8kv \
-  --out "${WORK_DIR}/verify_results.json"
+  --work "${WORK_DIR}/verify" \
+  --steps hw,devices,dense,moe,speed,cudagraph,dspine,fp8kv,actdtype
 
 echo "=== 2/3 hill_climb_colab.py (${CLIMB_PRESET} @ ${CLIMB_GPU}) ==="
 python3 "${ROOT_DIR}/scripts/colab/hill_climb_colab.py" \
@@ -70,4 +70,4 @@ python3 "${ROOT_DIR}/scripts/colab/compare.py" \
   --only fllm,vllm,sglang --no-llama --no-ik --no-ollama
 
 echo "ALL DONE. Artifacts in ${WORK_DIR}:"
-ls -lh "${WORK_DIR}/verify_results.json" "${WORK_DIR}/ledger.jsonl" "${WORK_DIR}/compare/compare_result.json" 2>/dev/null || true
+ls -lh "${WORK_DIR}/verify" "${WORK_DIR}/ledger.jsonl" "${WORK_DIR}/compare/compare_result.json" 2>/dev/null || true
