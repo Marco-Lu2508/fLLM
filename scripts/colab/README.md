@@ -113,3 +113,9 @@ Offline regression and in-memory mutation checks (no token server or Colab neede
 python3 -B scripts/colab/test_compare_measure.py -v
 python3 -B scripts/colab/test_compare_measure.py --mutations
 ```
+
+For DSpine / DFlash parallel speculative decoding on Colab GPU (`verify_all.py` `dspine` step):
+
+- Default (>= 12 GB VRAM): verifies `Qwen/Qwen3-8B` + `tencent/Qwen3-8B-DSpine-b16` (automatically uses `--quant q4_k_m` on < 22 GB GPUs such as T4).
+- 27B hybrid target (>= 40 GB A100/H100): set `FLLM_VERIFY_DSPINE_27B=1` (or `FLLM_VERIFY_DSPINE_TARGET=Qwen/Qwen3.5-27B FLLM_VERIFY_DSPINE_DRAFT=tencent/Qwen3.8-27B-DSpine-b16`) and run `python3 scripts/colab/verify_all.py --build-from-source --steps dspine`.
+

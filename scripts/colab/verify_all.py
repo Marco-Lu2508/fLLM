@@ -105,6 +105,11 @@ IMPORT_MODEL = os.environ.get(
 # There is no small public ModelOpt NVFP4 checkpoint known to this script yet;
 # point FLLM_VERIFY_NVFP4_MODEL at one to enable the NVFP4 import check.
 NVFP4_MODEL = os.environ.get("FLLM_VERIFY_NVFP4_MODEL", "")
+# Parallel speculative decoding verification (DSpine / DFlash). Override for larger
+# models such as Qwen/Qwen3.5-27B + tencent/Qwen3.8-27B-DSpine-b16 (or set FLLM_VERIFY_DSPINE_27B=1 on >=40 GB GPUs).
+DSPINE_TARGET_MODEL = os.environ.get("FLLM_VERIFY_DSPINE_TARGET", "")
+DSPINE_DRAFT_MODEL = os.environ.get("FLLM_VERIFY_DSPINE_DRAFT", "")
+DSPINE_27B = os.environ.get("FLLM_VERIFY_DSPINE_27B", "0") in ("1", "true", "yes")
 
 SELFTEST_TIMEOUT = 3600
 MODEL_TIMEOUT = 2400          # one model load plus a few generations
@@ -922,6 +927,71 @@ def step_spec():
             "data": {"text": spec}}
 
 
+def gpu_vram_mb():
+    gpus = CACHE.get("gpus") or []
+    if not gpus:
+        return 0
+    m = re.search(r"(\d+)\s*(MiB|GiB|MB|GB)", gpus[0].get("memory", ""), re.I)
+    if not m:
+        return 0
+    val = int(m.group(1))
+    return val * 1024 if m.group(2).lower().startswith("g") else val
+
+
+def step_dspine():
+    require_gpu_step()
+    if not supports_flag("--speculative-model") or not bin_has_string("dspine"):
+        raise StepSkipped("this binary has no DSpine/DFlash support")
+    vram_mb = gpu_vram_mb()
+    if DSPINE_TARGET_MODEL and DSPINE_DRAFT_MODEL:
+        target_model, draft_model = DSPINE_TARGET_MODEL, DSPINE_DRAFT_MODEL
+        extra_quant = ()
+    elif DSPINE_27B:
+        if vram_mb and vram_mb < 36000:
+            raise StepSkipped("FLLM_VERIFY_DSPINE_27B=1 needs >=36 GB VRAM (detected %d MiB)" % vram_mb)
+        target_model = DSPINE_TARGET_MODEL or "Qwen/Qwen3.5-27B"
+        draft_model = DSPINE_DRAFT_MODEL or "tencent/Qwen3.8-27B-DSpine-b16"
+        extra_quant = () if (vram_mb == 0 or vram_mb >= 60000) else ("--quant", "q4_k_m")
+    else:
+        if vram_mb and vram_mb < 12000:
+            raise StepSkipped("DSpine GPU check needs >=12 GB VRAM (detected %d MiB; or set FLLM_VERIFY_DSPINE_TARGET/DRAFT)" % vram_mb)
+        target_model = DSPINE_TARGET_MODEL or "Qwen/Qwen3-8B"
+        draft_model = DSPINE_DRAFT_MODEL or "tencent/Qwen3-8B-DSpine-b16"
+        extra_quant = ("--quant", "q4_k_m") if (vram_mb and vram_mb < 22000) else ()
+
+    start_server(target_model, device="cuda", extra_args=extra_quant,
+                 tag="dspine-base", timeout=MODEL_TIMEOUT)
+    base_eq = complete(EQUALITY_PROMPT, 32, timeout=MODEL_TIMEOUT)
+    base_rep = complete(REPETITIVE_PROMPT, 48, timeout=MODEL_TIMEOUT)
+    stop_servers()
+
+    dspine_args = extra_quant + ("--speculative", "dspine", "--speculative-model", draft_model)
+    start_server(target_model, device="cuda", extra_args=dspine_args,
+                 tag="dspine-on", timeout=MODEL_TIMEOUT)
+    spec_eq = complete(EQUALITY_PROMPT, 32, timeout=MODEL_TIMEOUT)
+    spec_rep = complete(REPETITIVE_PROMPT, 48, timeout=MODEL_TIMEOUT)
+    metrics_note = ""
+    try:
+        status, raw = http_get("/metrics", timeout=10)
+        if status == 200:
+            m_acc = re.search(r"speculative_accepted_tokens(?:_total)?\s+(\d+)", raw.decode("utf-8", "replace"))
+            m_prop = re.search(r"speculative_proposed_tokens(?:_total)?\s+(\d+)", raw.decode("utf-8", "replace"))
+            if m_acc and m_prop and int(m_prop.group(1)) > 0:
+                acc, prop = int(m_acc.group(1)), int(m_prop.group(1))
+                metrics_note = " (accepted %d/%d, %.1f%%)" % (acc, prop, 100.0 * acc / prop)
+    except Exception:
+        pass
+    stop_servers()
+
+    if base_eq != spec_eq:
+        raise StepFailed("DSpine greedy text differed on equality prompt: " + first_diff(base_eq, spec_eq))
+    if base_rep != spec_rep:
+        raise StepFailed("DSpine greedy text differed on repetitive prompt: " + first_diff(base_rep, spec_rep))
+    return {"detail": "%s + %s: greedy exact match%s" % (target_model, draft_model, metrics_note),
+            "data": {"target": target_model, "draft": draft_model, "quant": list(extra_quant),
+                     "text": spec_eq}}
+
+
 def step_fp8kv():
     require_gpu_step()
     if not supports_flag("--kv-cache-type"):
@@ -1092,6 +1162,7 @@ STEPS = [
     ("speed", "Speed vs reference", step_speed, MODEL_TIMEOUT + 900),
     ("cudagraph", "CUDA graphs", step_cudagraph, 2 * MODEL_TIMEOUT),
     ("spec", "Spec decoding", step_spec, 2 * MODEL_TIMEOUT),
+    ("dspine", "DSpine speculative", step_dspine, 2 * MODEL_TIMEOUT),
     ("fp8kv", "FP8 KV cache", step_fp8kv, MODEL_TIMEOUT),
     ("actdtype", "FP16 activations", step_actdtype, MODEL_TIMEOUT),
     ("vision", "Vision model", step_vision, MODEL_TIMEOUT + 600),
