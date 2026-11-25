@@ -531,17 +531,19 @@ def main(argv=None):
     result["gpu"] = gpu
     log(f"{'CPU' if args.cpu else 'GPU'}: {gpu}")
 
+    only_engines = set(args.only.split(",")) if args.only else None
     engines = {}
-    engines["fllm"] = get_fllm(args, args.work)
-    if not args.no_llama:
+    if not only_engines or "fllm" in only_engines:
+        engines["fllm"] = get_fllm(args, args.work)
+    if not args.no_llama and (not only_engines or "llama.cpp" in only_engines):
         engines["llama.cpp"] = get_llama(args.work, cpu=args.cpu)
-    if not args.no_ik:
+    if not args.no_ik and (not only_engines or "ik_llama.cpp" in only_engines):
         engines["ik_llama.cpp"] = get_llama(args.work, cpu=args.cpu, fork="ik_llama.cpp")
-    if not args.no_ollama:
+    if not args.no_ollama and (not only_engines or "ollama" in only_engines):
         engines["ollama"] = get_ollama()
-    if not args.no_vllm:
+    if not args.no_vllm and (not only_engines or "vllm" in only_engines):
         engines["vllm"] = get_vllm(args.work)
-    if not args.no_sglang:
+    if not args.no_sglang and (not only_engines or "sglang" in only_engines):
         engines["sglang"] = get_sglang(args.work)
     result["engines"] = {k: (v or "not available") for k, v in engines.items()}
     log(f"engines: {result['engines']}")

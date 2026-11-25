@@ -1800,6 +1800,9 @@ pub trait Stream: Send {
     fn graph_begin(&mut self, _id: usize, _sizes: [usize; 4], _max_len: usize) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("graph_begin".into()))
     }
+    fn graph_capturing(&self) -> bool {
+        false
+    }
     fn graph_end(&mut self, _id: usize, _abort: bool) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("graph_end".into()))
     }

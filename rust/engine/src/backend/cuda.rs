@@ -1784,6 +1784,7 @@ impl Backend for CudaBackend {
             wide_retired: Vec::new(),
             dsa_scores: None,
             dsa_psel: None,
+            capturing: false,
         }))
     }
 
@@ -2210,6 +2211,8 @@ pub struct CudaStream {
     dsa_scores: Option<DeviceBuffer>,
     /// Chosen pools of the k-pool indexer (`dsa_select`).
     dsa_psel: Option<DeviceBuffer>,
+    /// True while `graph_begin`..`graph_end` is actively capturing this stream into a CUDA graph.
+    capturing: bool,
 }
 
 // SAFETY: the raw stream is only used through `&mut self`.
@@ -4174,10 +4177,19 @@ impl Stream for CudaStream {
 
     fn graph_begin(&mut self, id: usize, sizes: [usize; 4], max_len: usize) -> Result<(), BackendError> {
         // SAFETY: plain call on a live stream.
-        check(unsafe { fllm_cuda_graph_begin(self.raw, to_c(id, "graph id")?, sizes[0], sizes[1], sizes[2], sizes[3], to_c(max_len, "context")?) })
+        let r = check(unsafe { fllm_cuda_graph_begin(self.raw, to_c(id, "graph id")?, sizes[0], sizes[1], sizes[2], sizes[3], to_c(max_len, "context")?) });
+        if r.is_ok() {
+            self.capturing = true;
+        }
+        r
+    }
+
+    fn graph_capturing(&self) -> bool {
+        self.capturing
     }
 
     fn graph_end(&mut self, id: usize, abort: bool) -> Result<(), BackendError> {
+        self.capturing = false;
         // SAFETY: plain call on a live stream.
         check(unsafe { fllm_cuda_graph_end(self.raw, to_c(id, "graph id")?, c_int::from(abort)) })
     }

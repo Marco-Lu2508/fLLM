@@ -248,8 +248,10 @@ impl RustDecoder {
         let mut gate_scale = None;
         if let Some(sh) = dm.shared.as_ref() {
             let sh_mode = if sh.gate.is_some() { shared_mode } else { GluMode::Plain(plain_act) };
-            if let Some(ref s2_lock) = self.backend_stream2 {
+            let use_s2 = !stream.graph_capturing();
+            if let Some(s2_lock) = self.backend_stream2.as_ref().filter(|_| use_s2) {
                 if let Ok(mut stream2) = s2_lock.try_lock() {
+                    stream2.wait_stream(stream).map_err(err)?;
                     shared = Some(Self::gated_run(&mut **stream2, scratch, sh_mode, &ExpertSrc::Device(sh), x, rows)?);
                     if let Some(g) = dev.shared_gate.as_ref() {
                         let mut scale = scratch.acquire(rows * 4).map_err(err)?;
