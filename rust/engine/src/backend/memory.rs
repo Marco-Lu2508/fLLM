@@ -222,7 +222,7 @@ impl MemoryPlan {
         // activation buffers of a feed-forward, and the logits of the few rows that are sampled (not of every prompt token)
         let ff = model.config().ff.max(hidden);
         // batches of host-streamed models (more than 512 tokens) keep more buffers of the pool alive at once
-        let (hid_mul, ff_mul) = if max_tokens > 512 { (28, 14) } else { (12, 6) };
+        let (hid_mul, ff_mul) = if max_tokens > 2048 { (36, 20) } else if max_tokens > 512 { (28, 14) } else { (12, 6) };
         let scratchpad_bytes = ((max_tokens * (hidden * hid_mul + ff * ff_mul) + vocab * 16) * 4) as u64;
 
         // KV cache calculations per layer:
@@ -444,7 +444,7 @@ pub fn pipeline_sizes(model: &GgufModel, max_tokens: usize, min_kv_blocks: u64) 
         *b += *b / 20 + recurrent;
     }
     let ff = model.config().ff.max(hidden);
-    let (hid_mul, ff_mul) = if max_tokens > 512 { (28, 14) } else { (12, 6) };
+    let (hid_mul, ff_mul) = if max_tokens > 2048 { (36, 20) } else if max_tokens > 512 { (28, 14) } else { (12, 6) };
     let scratchpad_bytes = ((max_tokens * (hidden * hid_mul + ff * ff_mul) + vocab * 16) * 4) as u64;
     let (key_format, value_format) = model.kv_formats();
     let block_size = model.block_size() as u64;

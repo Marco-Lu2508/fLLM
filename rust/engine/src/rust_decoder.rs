@@ -4111,31 +4111,82 @@ impl RustDecoder {
                 Ffn::Moe(moe) => Some(moe),
                 _ => layer.shortcut.as_deref(),
             };
+            let upload_expert_linear =
+                |name: &str, linear: &Linear| -> Result<crate::backend::DeviceWeight, String> {
+                    crate::load_progress::copying(name);
+                    if let Some((kind, bytes)) = linear.packed_weights() {
+                        let quant = crate::backend::QuantType::from_gguf_type_id(kind);
+                        let uploaded = backend
+                            .upload_expert_weight(name, bytes, quant, linear.rows, linear.cols, linear.bias.as_deref())
+                            .map_err(|e| e.to_string());
+                        if uploaded.is_ok() {
+                            crate::load_progress::note_uploaded(bytes.len());
+                            if release_pages {
+                                if let Some((_, storage)) = linear.packed_storage() {
+                                    if crate::expert_cache::release_mapped_pages(storage) {
+                                        crate::load_progress::note_released(storage.len());
+                                    }
+                                }
+                            }
+                        }
+                        uploaded
+                    } else {
+                        upload_linear(name, linear)
+                    }
+                };
             let moe_dev = match moe_src {
                 Some(moe) if !host_ffn && self.device_glu_mode(i).is_some() => {
-                    let up_expert = |e: &Expert, tag: &str| -> Result<Option<DeviceExpert>, String> {
-                        let gate = e
-                            .gate
-                            .as_ref()
-                            .map(|g| upload_linear(&format!("blk.{i}.{tag}.gate"), g))
-                            .transpose()?;
+                    // zero experts need `moe_zero_fold` next to the device routing
+                    let device_moe = backend.moe_device_available()
+                        && (self.cfg.moe.as_ref().is_none_or(|m| m.zero_experts == 0) || backend.create_stream().is_ok_and(|s| s.supports_moe_zero()));
+                    let linear_quant = |l: &Linear| {
+                        l.packed_weights()
+                            .map_or(crate::backend::QuantType::F32, |(k, _)| crate::backend::QuantType::from_gguf_type_id(k))
+                    };
+                    let use_grouped_expert_layout = self.device_routing_ok(moe, device_moe)
+                        && moe.experts.first().is_some_and(|e0| {
+                            let plain = e0.gate.is_none();
+                            let ks = [
+                                linear_quant(e0.gate.as_ref().unwrap_or(&e0.up)),
+                                linear_quant(&e0.up),
+                                linear_quant(&e0.down),
+                            ];
+                            let (ff, hid) = (e0.up.rows, e0.up.cols);
+                            moe.experts.iter().all(|e| {
+                                e.gate.is_some() == !plain
+                                    && e.gate.as_ref().is_none_or(|g| linear_quant(g) == ks[0] && g.rows == ff && g.cols == hid)
+                                    && linear_quant(&e.up) == ks[1]
+                                    && e.up.rows == ff
+                                    && e.up.cols == hid
+                                    && linear_quant(&e.down) == ks[2]
+                                    && e.down.rows == hid
+                                    && e.down.cols == ff
+                            }) && [16usize, 64].iter().all(|&b| {
+                                (plain || backend.moe_grouped_supported(ks[0], hid, b))
+                                    && backend.moe_grouped_supported(ks[1], hid, b)
+                                    && backend.moe_grouped_supported(ks[2], ff, b)
+                            })
+                        });
+                    let up_expert = |e: &Expert, tag: &str, routed: bool| -> Result<Option<DeviceExpert>, String> {
+                        let up_w = |proj: &str, l: &Linear| {
+                            let name = format!("blk.{i}.{tag}.{proj}");
+                            if routed { upload_expert_linear(&name, l) } else { upload_linear(&name, l) }
+                        };
+                        let gate = e.gate.as_ref().map(|g| up_w("gate", g)).transpose()?;
                         Ok(Some(DeviceExpert {
                             gate,
-                            up: upload_linear(&format!("blk.{i}.{tag}.up"), &e.up)?,
-                            down: upload_linear(&format!("blk.{i}.{tag}.down"), &e.down)?,
+                            up: up_w("up", &e.up)?,
+                            down: up_w("down", &e.down)?,
                         }))
                     };
                     let mut experts = Vec::with_capacity(moe.experts.len());
                     for (n, e) in moe.experts.iter().enumerate() {
-                        experts.push(up_expert(e, &format!("exp{n}"))?);
+                        experts.push(up_expert(e, &format!("exp{n}"), use_grouped_expert_layout)?);
                     }
                     let shared = match &moe.shared {
-                        Some((e, _)) => up_expert(e, "shared")?,
+                        Some((e, _)) => up_expert(e, "shared", false)?,
                         None => None,
                     };
-                    // zero experts need `moe_zero_fold` next to the device routing
-                    let device_moe = backend.moe_device_available()
-                        && (self.cfg.moe.as_ref().is_none_or(|m| m.zero_experts == 0) || backend.create_stream().is_ok_and(|s| s.supports_moe_zero()));
                     let fast = if self.device_routing_ok(moe, device_moe) && (moe.shared.is_none() || shared.is_some()) {
                         let all: Option<Vec<&DeviceExpert>> = experts.iter().map(|e| e.as_ref()).collect();
                         match all {
@@ -4173,7 +4224,10 @@ impl RustDecoder {
                                             && ok(|e| e.up.bias.is_some())
                                             && ok(|e| e.down.bias.is_some())
                                     };
-                                let dp4a = kinds.iter().all(|&q| ok_kind(q));
+                                let dp4a = kinds.iter().all(|&q| ok_kind(q))
+                                    && (plain || backend.moe_linear_supported(kinds[0], hid))
+                                    && backend.moe_linear_supported(kinds[1], hid)
+                                    && backend.moe_linear_supported(kinds[2], ff);
                                 let grouped = device_moe
                                     && [16usize, 64].iter().all(|&b| {
                                         (plain || backend.moe_grouped_supported(kinds[0], hid, b))
@@ -4270,15 +4324,27 @@ impl RustDecoder {
                     };
                     let router = upload_linear(&format!("blk.{i}.attn_v_gate"), &vm.router)?;
                     let bias = vm.bias.as_ref().map(upload_vec).transpose()?;
+                    let width = self.cfg.kv_heads * self.cfg.value_dim;
+                    let linear_quant = |l: &Linear| {
+                        l.packed_weights()
+                            .map_or(crate::backend::QuantType::F32, |(k, _)| crate::backend::QuantType::from_gguf_type_id(k))
+                    };
+                    let grouped_precheck = backend.moe_device_available()
+                        && vm.experts.first().is_some_and(|e0| {
+                            let k0 = linear_quant(e0);
+                            vm.experts.iter().all(|e| linear_quant(e) == k0 && e.rows == width && e.cols == self.cfg.hidden && e.bias.is_none())
+                                && [16usize, 64].iter().all(|&b| backend.moe_grouped_supported(k0, self.cfg.hidden, b))
+                        });
                     let mut v_experts = Vec::with_capacity(vm.experts.len());
                     for (e, w) in vm.experts.iter().enumerate() {
-                        v_experts.push(upload_linear(&format!("blk.{i}.attn_v_exp{e}"), w)?);
+                        let name = format!("blk.{i}.attn_v_exp{e}");
+                        v_experts.push(if grouped_precheck { upload_expert_linear(&name, w)? } else { upload_linear(&name, w)? });
                     }
-                    let width = self.cfg.kv_heads * self.cfg.value_dim;
                     let table = if !v_experts.is_empty() {
                         let kind = v_experts[0].quant_type;
                         let same = v_experts.iter().all(|e| e.quant_type == kind && e.rows == width && e.cols == self.cfg.hidden && e.bias.is_none());
-                        let ok_kind = matches!(kind.to_gguf_type_id(), 1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 0x8000_0010..=0x8000_0012);
+                        let ok_kind = matches!(kind.to_gguf_type_id(), 1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 0x8000_0010..=0x8000_0012)
+                            && backend.moe_linear_supported(kind, self.cfg.hidden);
                         let id = kind.to_gguf_type_id();
                         let align256 = !matches!(id, 10..=14 | 16..=19 | 21 | 22 | 29) || (self.cfg.hidden.is_multiple_of(256) && width.is_multiple_of(256));
                         let dims_ok = width.is_multiple_of(16) && self.cfg.hidden.is_multiple_of(16) && align256;

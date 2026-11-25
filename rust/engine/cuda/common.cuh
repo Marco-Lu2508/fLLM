@@ -26,6 +26,10 @@ __device__ __forceinline__ uint16_t f2h_bits(float x) { return __half_as_ushort(
 // Quantized blocks start at multiples of their size (18, 22, 34, 110, 210 ... bytes), so they are
 // only guaranteed 2-byte aligned.
 __device__ __forceinline__ uint16_t ld16(const uint8_t *p) { return *reinterpret_cast<const uint16_t *>(p); }
+// Q4Z blocks are 19, 35, or 67 bytes wide (odd), so consecutive blocks and odd rows can be 1-byte aligned.
+__device__ __forceinline__ uint16_t ld16_a1(const uint8_t *p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
 __device__ __forceinline__ uint32_t ld32_a2(const uint8_t *p) {
     return (uint32_t)ld16(p) | ((uint32_t)ld16(p + 2) << 16);
 }
@@ -312,7 +316,7 @@ __device__ __forceinline__ void decode16(const uint8_t *rp, int run, int cols, f
         constexpr int width = group / 2 + 3;
         const int blk = (run * 16) / group;
         const uint8_t *b = rp + (size_t)blk * width;
-        const float scale = h2f_bits(ld16(b + group / 2));
+        const float scale = h2f_bits(ld16_a1(b + group / 2));
         const float zero = (float)(b[group / 2 + 2] & 15);
         const int off = (run * 16) % group;
         const uint8_t *qs = b + off / 2;

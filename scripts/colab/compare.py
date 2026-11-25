@@ -658,7 +658,7 @@ def main(argv=None):
             if isinstance(per[n], dict) and "error" in per[n]:
                 print(f"  {n}: {per[n]['error'][:200]}")
         for n in names:
-            sample = next((r.get("sample") for r in per[n] if r.get("users") == 0), "")
+            sample = next((r.get("sample") for r in per[n] if r.get("users") == 0), "") or ""
             print(f"  answer {n:>13}: {sample[:90]!r}")
     result["seconds"] = round(time.time() - T0)
     json.dump(result, open(os.path.join(args.work, "compare_result.json"), "w"), indent=1)

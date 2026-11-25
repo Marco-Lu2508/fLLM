@@ -3064,10 +3064,29 @@ pub trait Backend: Send + Sync {
         self.upload_weight(name, &bytes, QuantType::F32, rows, cols, bias)
     }
 
+    /// Upload one weight tensor of a routed mixture-of-experts expert. Backends whose `moe_grouped_linear` reads raw block layouts while
+    /// dense `quantized_linear` repacks into tensor-core tiles override this to keep the grouped layout without duplicating weights.
+    fn upload_expert_weight(
+        &self,
+        name: &str,
+        raw_bytes: &[u8],
+        quant_type: QuantType,
+        rows: usize,
+        cols: usize,
+        bias: Option<&[f32]>,
+    ) -> Result<DeviceWeight, BackendError> {
+        self.upload_weight(name, raw_bytes, quant_type, rows, cols, bias)
+    }
+
     /// Whether the device mixture-of-experts operations (`moe_route_ex`, `moe_align`, `moe_grouped_linear`, `moe_combine_ex`,
     /// `moe_gate_scale`) are available on this device.
     fn moe_device_available(&self) -> bool {
         false
+    }
+
+    /// Whether `Stream::moe_linear` (the small-batch per-expert decode kernel) supports `quant_type` weights with `cols` inputs.
+    fn moe_linear_supported(&self, _quant_type: QuantType, _cols: usize) -> bool {
+        true
     }
 
     /// Whether `Stream::moe_grouped_linear` runs weights of `quant_type` with `cols` inputs in tiles of `block` pairs.

@@ -2023,8 +2023,58 @@ impl Backend for CudaBackend {
         self.upload_weight(name, &bytes, QuantType::F16, rows, cols, bias)
     }
 
+    fn upload_expert_weight(
+        &self,
+        name: &str,
+        raw_bytes: &[u8],
+        quant_type: QuantType,
+        rows: usize,
+        cols: usize,
+        bias: Option<&[f32]>,
+    ) -> Result<DeviceWeight, BackendError> {
+        if let Some(group) = quant_type.q4z_group() {
+            if !quant_type.is_q4zp() && self.moe_grouped_supported(quant_type, cols, 16) {
+                let row_bytes = (cols / group) * (group / 2 + 3);
+                if raw_bytes.len() != rows * row_bytes {
+                    return Err(invalid(format!("{name}: {} bytes are not {rows} x {cols} {quant_type:?}", raw_bytes.len())));
+                }
+                let buffer = self.alloc(raw_bytes.len())?;
+                self.upload_sync(&buffer, raw_bytes)?;
+                let bias = match bias {
+                    Some(b) if b.len() != rows => {
+                        return Err(invalid(format!("{name}: bias has {} values for {rows} rows", b.len())))
+                    }
+                    Some(b) => {
+                        let buf = self.alloc(b.len() * 4)?;
+                        let raw: Vec<u8> = b.iter().flat_map(|v| v.to_le_bytes()).collect();
+                        self.upload_sync(&buf, &raw)?;
+                        Some(buf)
+                    }
+                    None => None,
+                };
+                return Ok(DeviceWeight {
+                    name: name.to_string(),
+                    buffer,
+                    quant_type,
+                    rows,
+                    cols,
+                    bias,
+                    scale: 1.0,
+                    perm: None,
+                });
+            }
+        }
+        self.upload_weight(name, raw_bytes, quant_type, rows, cols, bias)
+    }
+
     fn moe_device_available(&self) -> bool {
         !self.rocm && self.cc >= 75 && moe::moe_enabled()
+    }
+
+    fn moe_linear_supported(&self, quant_type: QuantType, cols: usize) -> bool {
+        let kind = quant_type.to_gguf_type_id();
+        let k_quant = matches!(kind, 12..=14);
+        (k_quant || matches!(kind, 2 | 3 | 6 | 7 | 8 | 20 | 39)) && cols.is_multiple_of(if k_quant { 256 } else { 32 })
     }
 
     fn moe_grouped_supported(&self, quant_type: QuantType, cols: usize, block: usize) -> bool {

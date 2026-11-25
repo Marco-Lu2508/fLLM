@@ -156,7 +156,7 @@ impl Tester<'_> {
         }
         // the grouped GEMM: every format of the kernel, both tiles, with bias; K-quants need widths of 256
         let mode_swiglu = MoeGlu { mode: 0, alpha: 0.0, limit: 0.0 };
-        for kind in self.kinds(&[1u32, 30, 2, 3, 6, 7, 8, 12, 13, 14, 20, 39, 42, 0x8000_0021]) {
+        for kind in self.kinds(&[1u32, 30, 2, 3, 6, 7, 8, 12, 13, 14, 20, 39, 42, 0x8000_0010, 0x8000_0011, 0x8000_0012, 0x8000_0021]) {
             for block in [16usize, 64] {
                 let tokens = if block == 16 { 6 } else { 70 };
                 let r = self.moe_grouped_check(kind, 8, tokens, 2, 130, 512, block, 2, None, true, false, usize::MAX);
@@ -166,6 +166,11 @@ impl Tester<'_> {
             self.record(&format!("moe grouped {}", format_name(kind)), "down shape 8 experts 140 pairs 256x512", r);
             let r = self.moe_grouped_check(kind, 6, 40, 3, 130, 512, 16, 3, Some(mode_swiglu), true, false, usize::MAX);
             self.record(&format!("moe gate/up {}", format_name(kind)), "6 experts 40 tokens k3 130x512 swiglu +bias", r);
+        }
+        // odd Q4Z128 block count (cols = 384 = 3 * 128 => 201 bytes/row, odd block & odd row alignment)
+        for kind in self.kinds(&[0x8000_0012u32]) {
+            let r = self.moe_grouped_check(kind, 8, 6, 4, 1408, 384, 16, 4, Some(mode_swiglu), false, false, usize::MAX);
+            self.record("moe gate/up q4z128", "odd-stride 8 experts 6 tokens k4 1408x384 tile 16", r);
         }
         // block-wise FP8 experts: widths that are not a multiple of the 128-wide tile (a 16-wide last tile), rows that end inside a tile row
         for kind in self.kinds(&[0x8000_0021u32]) {
@@ -546,7 +551,7 @@ impl Tester<'_> {
         for p in 0..projections {
             let mut list = Vec::new();
             for e in 0..experts {
-                list.push(self.device.upload_weight("selftest", &raws[p][e], quant, rows, cols, with_bias.then_some(biases[p][e].as_slice()))?);
+                list.push(self.device.upload_expert_weight("selftest", &raws[p][e], quant, rows, cols, with_bias.then_some(biases[p][e].as_slice()))?);
             }
             weights.push(list);
         }
