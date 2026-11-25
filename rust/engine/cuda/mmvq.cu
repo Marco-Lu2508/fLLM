@@ -544,13 +544,89 @@ int fllm_mmvq_leg_try(cudaStream_t s, const void *W, int kind, const float *X, f
 }
 
 // ---------------------------------------------------------------------------------------------
-// Mixture-of-experts: y[slot] = W[ids[slot]] x[slot / xdiv] for Q4_K / Q5_K / Q6_K experts whose device weights are
+// Mixture-of-experts: y[slot] = W[ids[slot]] x[slot / xdiv] for Q4_K / Q5_K / Q6_K / Q4Z / legacy experts whose device weights are
 // listed in a pointer table; the int8 activations are quantized once per input vector.
 // ---------------------------------------------------------------------------------------------
+__device__ __forceinline__ void q4z_unpack8(uint32_t packed, uint32_t &q0, uint32_t &q1) {
+    const uint32_t lo4 = packed & 0x0f0f0f0fu;
+    const uint32_t hi4 = (packed >> 4) & 0x0f0f0f0fu;
+#if defined(__HIPCC__)
+    q0 = (lo4 & 0xffu) | ((hi4 & 0xffu) << 8) | (((lo4 >> 8) & 0xffu) << 16) | (((hi4 >> 8) & 0xffu) << 24);
+    q1 = ((lo4 >> 16) & 0xffu) | (((hi4 >> 16) & 0xffu) << 8) | ((lo4 >> 24) << 16) | ((hi4 >> 24) << 24);
+#else
+    q0 = __byte_perm(lo4, hi4, 0x5140u);
+    q1 = __byte_perm(lo4, hi4, 0x7362u);
+#endif
+}
+
+template <int GROUP, int R>
+__global__ void __launch_bounds__(128)
+mmvq_q4z_kernel(const int8_t *__restrict__ Xq_, const float2 *__restrict__ Xs_, float *__restrict__ Y_,
+                int rows, int cols, const uint8_t *const *wtab, const int32_t *ids, int xdiv,
+                const float *const *btab) {
+    const int slot = blockIdx.y;
+    const int e = ids[slot];
+    const uint8_t *W = wtab[e];
+    const int8_t *Xq = Xq_ + (size_t)(slot / xdiv) * cols;
+    const float2 *Xs = Xs_ + (size_t)(slot / xdiv) * (cols >> 5);
+    float *Y = Y_ + (size_t)slot * rows;
+    const float *bias = btab ? btab[e] : nullptr;
+
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int row0 = (blockIdx.x * 4 + warp) * R;
+    if (row0 >= rows) return;
+
+    constexpr int SPB = GROUP >> 5;
+    constexpr int WIDTH = GROUP / 2 + 3;
+    const int sg = cols >> 5;
+    const size_t rowb = (size_t)(cols / GROUP) * WIDTH;
+    const uint8_t *rp[R];
+#pragma unroll
+    for (int r = 0; r < R; r++) rp[r] = W + (size_t)min(row0 + r, rows - 1) * rowb;
+
+    float acc[R];
+#pragma unroll
+    for (int r = 0; r < R; r++) acc[r] = 0.f;
+
+    for (int g = lane; g < sg; g += 32) {
+        const int blk = g / SPB;
+        const int sub = g % SPB;
+        const uint4 x0 = __ldg(reinterpret_cast<const uint4 *>(Xq + (size_t)g * 32));
+        const uint4 x1 = __ldg(reinterpret_cast<const uint4 *>(Xq + (size_t)g * 32 + 16));
+        const float2 sx = __ldg(&Xs[g]);
+        const uint32_t xv[8] = {x0.x, x0.y, x0.z, x0.w, x1.x, x1.y, x1.z, x1.w};
+#pragma unroll
+        for (int r = 0; r < R; r++) {
+            const uint8_t *bp = rp[r] + (size_t)blk * WIDTH;
+            const float d = h2f_bits(ld16_a1(bp + GROUP / 2));
+            const float z = (float)(bp[GROUP / 2 + 2] & 15u);
+            const uint8_t *qs = bp + sub * 16;
+            int dot = 0;
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                uint32_t q0, q1;
+                q4z_unpack8(ld32_a1(qs + j * 4), q0, q1);
+                dot = __dp4a((int)q0, (int)xv[2 * j], dot);
+                dot = __dp4a((int)q1, (int)xv[2 * j + 1], dot);
+            }
+            acc[r] += d * ((float)dot * sx.x - z * sx.y);
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < R; r++) acc[r] = warp_sum(acc[r]);
+    if (lane == 0) {
+#pragma unroll
+        for (int r = 0; r < R; r++) {
+            if (row0 + r < rows) Y[row0 + r] = acc[r] + (bias ? bias[row0 + r] : 0.f);
+        }
+    }
+}
+
 int fllm_moe_linear_launch(cudaStream_t s, const void *const *tab, int kind, const int32_t *ids, const float *X, float *Y,
                            int rows, int cols, int slots, int xdiv, const void *const *btab, void *scratch, size_t scratch_bytes) {
     const bool k_quant = kind == KIND_Q4_K || kind == KIND_Q5_K || kind == KIND_Q6_K;
-    if ((cols & (k_quant ? 255 : 31)) != 0 || slots <= 0 || xdiv <= 0) return fllm_set_error("moe_linear: unsupported shape");
+    const int align = k_quant ? 256 : kind == KIND_Q4Z128 ? 128 : kind == KIND_Q4Z64 ? 64 : 32;
+    if ((cols & (align - 1)) != 0 || slots <= 0 || xdiv <= 0) return fllm_set_error("moe_linear: unsupported shape");
     const int inputs = (slots + xdiv - 1) / xdiv;
     const size_t xq_bytes = ((size_t)inputs * cols + 255) & ~size_t(255);
     const size_t need = xq_bytes + (size_t)inputs * (cols / 32) * sizeof(float2);
@@ -568,7 +644,12 @@ int fllm_moe_linear_launch(cudaStream_t s, const void *const *tab, int kind, con
     if (kind == KIND_Q4_K) mmvq_q4k_kernel<1, MMVQ_R, false><<<grid, block, 0, s>>>(nullptr, xq, xs, Y, nullptr, rows, cols, 1, wt, ids, xdiv, bt);
     else if (kind == KIND_Q5_K) mmvq_q4k_kernel<1, MMVQ_R, true><<<grid, block, 0, s>>>(nullptr, xq, xs, Y, nullptr, rows, cols, 1, wt, ids, xdiv, bt);
     else if (kind == KIND_Q6_K) mmvq_q6k_kernel<1, MMVQ_R><<<grid, block, 0, s>>>(nullptr, xq, xs, Y, nullptr, rows, cols, 1, wt, ids, xdiv, bt);
-    else {
+    else if (kind == KIND_Q4Z32 || kind == KIND_Q4Z64 || kind == KIND_Q4Z128) {
+        const dim3 lgrid((rows + 7) / 8, slots);
+        if (kind == KIND_Q4Z32) mmvq_q4z_kernel<32, 2><<<lgrid, block, 0, s>>>(xq, xs, Y, rows, cols, wt, ids, xdiv, bt);
+        else if (kind == KIND_Q4Z64) mmvq_q4z_kernel<64, 2><<<lgrid, block, 0, s>>>(xq, xs, Y, rows, cols, wt, ids, xdiv, bt);
+        else mmvq_q4z_kernel<128, 2><<<lgrid, block, 0, s>>>(xq, xs, Y, rows, cols, wt, ids, xdiv, bt);
+    } else {
         // 32-value formats: one lane per block, two rows per warp
         const dim3 lgrid((rows + 7) / 8, slots);
 #define MOE_LEG(K) mmvq_leg_kernel<K, 1, 2><<<lgrid, block, 0, s>>>(nullptr, xq, xs, Y, nullptr, rows, cols, 1, wt, ids, xdiv, bt)

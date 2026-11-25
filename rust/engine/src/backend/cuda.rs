@@ -2148,6 +2148,9 @@ impl Backend for CudaBackend {
     fn moe_linear_supported(&self, quant_type: QuantType, cols: usize) -> bool {
         let kind = quant_type.to_gguf_type_id();
         let k_quant = matches!(kind, 12..=14);
+        if let Some(group) = quant_type.q4z_group() {
+            return !quant_type.is_q4zp() && cols.is_multiple_of(group);
+        }
         (k_quant || matches!(kind, 2 | 3 | 6 | 7 | 8 | 20 | 39)) && cols.is_multiple_of(if k_quant { 256 } else { 32 })
     }
 
@@ -3434,7 +3437,9 @@ impl Stream for CudaStream {
     ) -> Result<(), BackendError> {
         let kind = quant_type.to_gguf_type_id();
         let k_quant = matches!(kind, 12..=14);
-        if !(k_quant || matches!(kind, 2 | 3 | 6 | 7 | 8 | 20 | 39)) || !cols.is_multiple_of(if k_quant { 256 } else { 32 }) || x_div == 0 {
+        let q4z_group = quant_type.q4z_group().filter(|_| !quant_type.is_q4zp());
+        let align = k_quant.then_some(256).or(q4z_group).unwrap_or(32);
+        if !(k_quant || q4z_group.is_some() || matches!(kind, 2 | 3 | 6 | 7 | 8 | 20 | 39)) || !cols.is_multiple_of(align) || x_div == 0 {
             return Err(BackendError::UnsupportedQuant(quant_type));
         }
         let inputs = slots.div_ceil(x_div);

@@ -30,6 +30,17 @@ __device__ __forceinline__ uint16_t ld16(const uint8_t *p) { return *reinterpret
 __device__ __forceinline__ uint16_t ld16_a1(const uint8_t *p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
+__device__ __forceinline__ uint32_t ld32_a1(const uint8_t *p) {
+#if defined(__HIPCC__)
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+#else
+    const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+    const uint32_t off = (uint32_t)(a & 3u);
+    if (off == 0u) return *reinterpret_cast<const uint32_t *>(p);
+    const uint32_t *q = reinterpret_cast<const uint32_t *>(a & ~uintptr_t(3u));
+    return __funnelshift_r(q[0], q[1], off * 8u);
+#endif
+}
 __device__ __forceinline__ uint32_t ld32_a2(const uint8_t *p) {
     return (uint32_t)ld16(p) | ((uint32_t)ld16(p + 2) << 16);
 }
@@ -317,14 +328,19 @@ __device__ __forceinline__ void decode16(const uint8_t *rp, int run, int cols, f
         const int blk = (run * 16) / group;
         const uint8_t *b = rp + (size_t)blk * width;
         const float scale = h2f_bits(ld16_a1(b + group / 2));
-        const float zero = (float)(b[group / 2 + 2] & 15);
+        const float dm = (float)(b[group / 2 + 2] & 15) * scale;
         const int off = (run * 16) % group;
         const uint8_t *qs = b + off / 2;
+        const uint32_t w0 = ld32_a1(qs);
+        const uint32_t w1 = ld32_a1(qs + 4);
 #pragma unroll
-        for (int i = 0; i < 16; i += 2) {
-            uint8_t q = qs[i / 2];
-            w[i] = ((float)(q & 15) - zero) * scale;
-            w[i + 1] = ((float)(q >> 4) - zero) * scale;
+        for (int i = 0; i < 4; i++) {
+            const uint32_t q0 = (w0 >> (i * 8)) & 0xffu;
+            const uint32_t q1 = (w1 >> (i * 8)) & 0xffu;
+            w[2 * i] = fmaf((float)(q0 & 15u), scale, -dm);
+            w[2 * i + 1] = fmaf((float)(q0 >> 4), scale, -dm);
+            w[8 + 2 * i] = fmaf((float)(q1 & 15u), scale, -dm);
+            w[8 + 2 * i + 1] = fmaf((float)(q1 >> 4), scale, -dm);
         }
         return;
     }
