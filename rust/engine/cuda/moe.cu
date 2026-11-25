@@ -223,36 +223,76 @@ struct MoeTile {
     static constexpr int RPK = BK / 16;
     static constexpr int BRUNS = BN * RPK;
     static constexpr int BPT = (BRUNS + NT - 1) / NT;
-    static constexpr size_t SMEM = (size_t)2 * (BM + BN) * LD * sizeof(__half);
+    static constexpr size_t SMEM = (size_t)(BM + BN) * LD * sizeof(__half);
     static_assert(NI == 2 && MI >= 2 && MI % 2 == 0 && APT >= 1, "tile shape");
 };
 
-__device__ __forceinline__ uint32_t moe_pack_half2(float lo, float hi) {
-    const __half2 h = __floats2half2_rn(lo, hi);
-    return *reinterpret_cast<const uint32_t *>(&h);
-}
-__device__ __forceinline__ void moe_load16_x(const float *p, int e0, int cols, float *x) {
+__device__ __forceinline__ void moe_load16_x_h2(const float *p, int e0, int cols, float scale, bool has_pw, __half2 *out) {
     if (e0 + 16 <= cols) {
         const float4 *q = reinterpret_cast<const float4 *>(p + e0);
 #pragma unroll
         for (int i = 0; i < 4; i++) {
-            const float4 v = __ldg(q + i);
-            x[4 * i] = v.x; x[4 * i + 1] = v.y; x[4 * i + 2] = v.z; x[4 * i + 3] = v.w;
+            float4 v = __ldg(q + i);
+            if (has_pw) {
+                v.x *= scale;
+                v.y *= scale;
+                v.z *= scale;
+                v.w *= scale;
+            }
+            out[2 * i] = __floats2half2_rn(v.x, v.y);
+            out[2 * i + 1] = __floats2half2_rn(v.z, v.w);
         }
     } else {
+        float x[16];
 #pragma unroll
-        for (int i = 0; i < 16; i++) x[i] = e0 + i < cols ? __ldg(p + e0 + i) : 0.f;
+        for (int i = 0; i < 16; i++) {
+            const float v = e0 + i < cols ? __ldg(p + e0 + i) : 0.f;
+            x[i] = has_pw ? v * scale : v;
+        }
+#pragma unroll
+        for (int i = 0; i < 8; i++) out[i] = __floats2half2_rn(x[2 * i], x[2 * i + 1]);
     }
 }
-__device__ __forceinline__ void moe_store16(__half *dst, const float *v) {
-    uint4 a, b;
-    a.x = moe_pack_half2(v[0], v[1]);   a.y = moe_pack_half2(v[2], v[3]);
-    a.z = moe_pack_half2(v[4], v[5]);   a.w = moe_pack_half2(v[6], v[7]);
-    b.x = moe_pack_half2(v[8], v[9]);   b.y = moe_pack_half2(v[10], v[11]);
-    b.z = moe_pack_half2(v[12], v[13]); b.w = moe_pack_half2(v[14], v[15]);
+
+template <int GROUP>
+__device__ __forceinline__ void moe_decode16_q4z_h2(const uint8_t *rp, int run, __half2 *out) {
+    constexpr int width = GROUP / 2 + 3;
+    const int blk = (run * 16) / GROUP;
+    const uint8_t *b = rp + (size_t)blk * width;
+    const uint16_t d_bits = ld16_a1(b + GROUP / 2);
+    const uint32_t z = (uint32_t)(b[GROUP / 2 + 2] & 15u);
+    const __half2 hs = __half2half2(__ushort_as_half(d_bits));
+    const __half2 hnb = __half2half2(__ushort_as_half((uint16_t)(0xE400u | z)));
+    const int off = (run * 16) % GROUP;
+    const uint8_t *qs = b + off / 2;
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(qs);
+    const uint32_t *p32 = reinterpret_cast<const uint32_t *>(addr & ~uintptr_t(3));
+    const uint32_t shift = (uint32_t)(addr & 3u) * 8u;
+    uint32_t lo32 = p32[0], hi32 = p32[1];
+    if (shift) {
+        const uint32_t w2 = p32[2];
+        lo32 = __funnelshift_r(lo32, hi32, shift);
+        hi32 = __funnelshift_r(hi32, w2, shift);
+    }
+    const uint32_t words[2] = {lo32, hi32};
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+        const uint32_t w = words[i];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            const uint32_t bx = (w >> (j * 8)) & 0xffu;
+            const __half2 q = __halves2half2(__ushort_as_half((uint16_t)(0x6400u | (bx & 15u))),
+                                              __ushort_as_half((uint16_t)(0x6400u | (bx >> 4))));
+            out[i * 4 + j] = __hmul2(__hadd2(q, hnb), hs);
+        }
+    }
+}
+
+__device__ __forceinline__ void moe_store16_h2(__half *dst, const __half2 *v) {
+    const uint4 *src = reinterpret_cast<const uint4 *>(v);
     uint4 *d = reinterpret_cast<uint4 *>(dst);
-    d[0] = a;
-    d[1] = b;
+    d[0] = src[0];
+    d[1] = src[1];
 }
 
 // glu_mode 0: SwiGLU, 1: GeGLU (tanh), 2: gpt-oss clamped SwiGLU (alpha, limit)
@@ -277,8 +317,8 @@ moe_tc_kernel(const uint8_t *const *__restrict__ wtab, const uint8_t *const *__r
     const int e = block_expert[blockIdx.y];
     if (e < 0) return;
     extern __shared__ __align__(16) unsigned char moe_tc_smem[];
-    __half *As = reinterpret_cast<__half *>(moe_tc_smem);       // [2][BM][LD]
-    __half *Bs = As + (size_t)2 * T::BM * T::LD;                // [2][BN][LD]
+    __half *As = reinterpret_cast<__half *>(moe_tc_smem);       // [BM][LD]
+    __half *Bs = As + (size_t)T::BM * T::LD;                    // [BN][LD]
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
     const int wm = warp % T::WM, wn = warp / T::WM;
     constexpr int HALF = T::BM / T::WM / 2;  // gate rows (and up rows) per warp when the two projections share the tile
@@ -329,79 +369,89 @@ moe_tc_kernel(const uint8_t *const *__restrict__ wtab, const uint8_t *const *__r
 #pragma unroll
             for (int c = 0; c < 4; c++) acc[a][b][c] = 0.f;
 
-    float wv[T::APT][16], xv[T::BPT][16];
+    alignas(16) __half2 wv[T::APT][8];
+    alignas(16) __half2 xv[T::BPT][8];
     auto fetch = [&](int kt) {
 #pragma unroll
         for (int i = 0; i < T::APT; i++) {
             const int k = kt * T::BK + ((tid + i * T::NT) % T::RPK) * 16;
             if (wrow[i]) {
-                decode16<KIND>(wrow[i], k >> 4, cols, wv[i]);
-                if constexpr (KIND == KIND_FP8B) {
-                    // the tile scale of the 16 codes (a run never straddles two 128-wide tiles); past the end of the row the activations are zero
-                    const float sc = k < cols ? __ldg(srow[i] + (k >> 7)) : 0.f;
+                if constexpr (KIND == KIND_Q4Z32) {
+                    moe_decode16_q4z_h2<32>(wrow[i], k >> 4, wv[i]);
+                } else if constexpr (KIND == KIND_Q4Z64) {
+                    moe_decode16_q4z_h2<64>(wrow[i], k >> 4, wv[i]);
+                } else if constexpr (KIND == KIND_Q4Z128) {
+                    moe_decode16_q4z_h2<128>(wrow[i], k >> 4, wv[i]);
+                } else {
+                    float tmp[16];
+                    decode16<KIND>(wrow[i], k >> 4, cols, tmp);
+                    if constexpr (KIND == KIND_FP8B) {
+                        // the tile scale of the 16 codes (a run never straddles two 128-wide tiles); past the end of the row the activations are zero
+                        const float sc = k < cols ? __ldg(srow[i] + (k >> 7)) : 0.f;
 #pragma unroll
-                    for (int j = 0; j < 16; j++) wv[i][j] *= sc;
+                        for (int j = 0; j < 16; j++) tmp[j] *= sc;
+                    }
+#pragma unroll
+                    for (int j = 0; j < 8; j++) wv[i][j] = __floats2half2_rn(tmp[2 * j], tmp[2 * j + 1]);
                 }
             } else {
+                const __half2 zero = __halves2half2(__ushort_as_half(0), __ushort_as_half(0));
 #pragma unroll
-                for (int j = 0; j < 16; j++) wv[i][j] = 0.f;
+                for (int j = 0; j < 8; j++) wv[i][j] = zero;
             }
         }
 #pragma unroll
         for (int i = 0; i < T::BPT; i++) {
             const int k = kt * T::BK + ((tid + i * T::NT) % T::RPK) * 16;
             if (xrow[i]) {
-                moe_load16_x(xrow[i], k, cols, xv[i]);
-                if (pw) {
-#pragma unroll
-                    for (int j = 0; j < 16; j++) xv[i][j] *= xsc[i];
-                }
+                moe_load16_x_h2(xrow[i], k, cols, xsc[i], pw != nullptr, xv[i]);
             } else {
+                const __half2 zero = __halves2half2(__ushort_as_half(0), __ushort_as_half(0));
 #pragma unroll
-                for (int j = 0; j < 16; j++) xv[i][j] = 0.f;
+                for (int j = 0; j < 8; j++) xv[i][j] = zero;
             }
         }
     };
-    auto stash = [&](int buf) {
+    auto stash = [&]() {
 #pragma unroll
         for (int i = 0; i < T::APT; i++) {
             const int run = tid + i * T::NT;
-            moe_store16(As + ((size_t)buf * T::BM + run / T::RPK) * T::LD + (run % T::RPK) * 16, wv[i]);
+            moe_store16_h2(As + (size_t)(run / T::RPK) * T::LD + (run % T::RPK) * 16, wv[i]);
         }
 #pragma unroll
         for (int i = 0; i < T::BPT; i++) {
             const int run = tid + i * T::NT;
-            if (run < T::BRUNS) moe_store16(Bs + ((size_t)buf * BN + run / T::RPK) * T::LD + (run % T::RPK) * 16, xv[i]);
+            if (run < T::BRUNS) moe_store16_h2(Bs + (size_t)(run / T::RPK) * T::LD + (run % T::RPK) * 16, xv[i]);
         }
     };
 
     fetch(0);
-    stash(0);
+    stash();
     __syncthreads();
     for (int kt = 0; kt < ktiles; kt++) {
-        const int buf = kt & 1;
         if (kt + 1 < ktiles) fetch(kt + 1);
-        const __half *a_base = As + (size_t)buf * T::BM * T::LD;
-        const __half *b_base = Bs + (size_t)buf * BN * T::LD;
 #pragma unroll
         for (int kk = 0; kk < T::BK; kk += 16) {
             uint32_t af[T::MI][4], bf[T::NI][2];
 #pragma unroll
             for (int mi = 0; mi < T::MI; mi++)
                 ldmatrix4(af[mi][0], af[mi][1], af[mi][2], af[mi][3],
-                          a_base + (size_t)(wm * (T::BM / T::WM) + mi * 16 + (lane & 15)) * T::LD + kk + (lane >> 4) * 8);
+                          As + (size_t)(wm * (T::BM / T::WM) + mi * 16 + (lane & 15)) * T::LD + kk + (lane >> 4) * 8);
 #pragma unroll
             for (int np = 0; np < T::NI / 2; np++)
                 ldmatrix4(bf[np * 2][0], bf[np * 2][1], bf[np * 2 + 1][0], bf[np * 2 + 1][1],
-                          b_base + (size_t)(wn * (BN / T::WN) + np * 16 + (lane & 7) + ((lane >> 4) << 3)) * T::LD + kk +
+                          Bs + (size_t)(wn * (BN / T::WN) + np * 16 + (lane & 7) + ((lane >> 4) << 3)) * T::LD + kk +
                               ((lane >> 3) & 1) * 8);
 #pragma unroll
             for (int mi = 0; mi < T::MI; mi++)
 #pragma unroll
                 for (int ni = 0; ni < T::NI; ni++) mma16816(acc[mi][ni], af[mi], bf[ni][0], bf[ni][1]);
         }
-        if (kt + 1 < ktiles) stash(buf ^ 1);
-        __syncthreads();
+        if (kt + 1 < ktiles) {
+            __syncthreads();
+            stash();
+            __syncthreads();
+        }
     }
 
     const int g = lane >> 2, t = lane & 3;
