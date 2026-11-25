@@ -114,6 +114,22 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "k2horizon",
     "k2",
     "g9v3",
+    "bailing_moe",
+    "ax",
+    "deepseek_moe",
+    "gigachat",
+    "grok",
+    "hrm",
+    "jetmoe",
+    "pangu",
+    "param2_moe",
+    "plamo",
+    "step1",
+    "step3",
+    "telechat",
+    "zaya1",
+    "dspine",
+    "dflash",
 ];
 
 /// llama.cpp architecture names for layouts this program implements under its own name. Only names whose metadata keys

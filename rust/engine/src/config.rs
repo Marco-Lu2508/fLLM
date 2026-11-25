@@ -673,29 +673,37 @@ impl ModelConfig {
                 "{arch}: head count {heads} is not a multiple of {kv_heads}"
             ));
         }
-        let embedding = mapping
-            .index()
-            .tensors
-            .iter()
-            .find(|t| t.name == "token_embd.weight")
-            .ok_or("missing token_embd.weight")?;
-        if embedding.dimensions.len() != 2 || embedding.dimensions[0] as usize != hidden {
-            return Err(format!(
-                "embedding width {:?} does not match metadata {hidden}",
-                embedding.dimensions
-            ));
-        }
-        let tied = !has(mapping, "output.weight");
-        let vocab = if tied {
-            embedding.dimensions[1] as usize
+        let (vocab, tied) = if matches!(a, "dspine" | "dflash") {
+            (
+                uint(meta, a, "vocab_size").ok_or("missing vocab_size for DSpine/DFlash draft")?,
+                false,
+            )
         } else {
-            mapping
+            let embedding = mapping
                 .index()
                 .tensors
                 .iter()
-                .find(|t| t.name == "output.weight")
-                .map(|t| t.dimensions.get(1).copied().unwrap_or(0) as usize)
-                .unwrap_or(0)
+                .find(|t| t.name == "token_embd.weight")
+                .ok_or("missing token_embd.weight")?;
+            if embedding.dimensions.len() != 2 || embedding.dimensions[0] as usize != hidden {
+                return Err(format!(
+                    "embedding width {:?} does not match metadata {hidden}",
+                    embedding.dimensions
+                ));
+            }
+            let tied = !has(mapping, "output.weight");
+            let vocab = if tied {
+                embedding.dimensions[1] as usize
+            } else {
+                mapping
+                    .index()
+                    .tensors
+                    .iter()
+                    .find(|t| t.name == "output.weight")
+                    .map(|t| t.dimensions.get(1).copied().unwrap_or(0) as usize)
+                    .unwrap_or(0)
+            };
+            (vocab, tied)
         };
         let eps = float(meta, a, "attention.layer_norm_rms_epsilon")
             .or_else(|| float(meta, a, "attention.layer_norm_epsilon"))

@@ -1410,6 +1410,8 @@ pub struct RustDecoder {
     v4_device: bool,
     /// Qwen3.8-Flash-Next runs on the device (streams, n-gram embeddings and token indexer included).
     q4_device: bool,
+    /// Multi-layer hidden-state tap `(target_layer_ids, buffer [rows, K * hidden])` for DSpine/DFlash drafts.
+    layer_tap: std::sync::Mutex<Option<(Vec<usize>, Vec<f32>)>>,
 }
 
 /// DeepStack features: per decoder layer, (row, values) pairs.
@@ -1873,20 +1875,6 @@ impl RustDecoder {
         let state_capacity = model.max_sequences().max(1) * 2;
         let mapping = model.mapping();
         let cfg = model.config().clone();
-        // These new mixers currently have a reference CPU implementation. Keep accelerator
-        // dispatch explicit until the separate backend integration supports their operations.
-        // (LFM2 runs on the device: the short convolution has CUDA kernels and everything else is attention / dense FFN.)
-        let device = if matches!(cfg.arch.as_str(), "dbrx" | "lfm2moe") {
-            if !matches!(device, "cpu" | "auto") {
-                return Err(format!(
-                    "{} currently requires --device cpu; accelerator integration is pending",
-                    cfg.arch
-                ));
-            }
-            "cpu"
-        } else {
-            device
-        };
         let meta = &mapping.index().metadata;
         let hidden = cfg.hidden;
         // the projections of an MLA layer have the per-head widths of the model, also when the cache geometry is the latent one
@@ -2656,6 +2644,7 @@ impl RustDecoder {
             hc_device: false,
             v4_device: false,
             q4_device: false,
+            layer_tap: std::sync::Mutex::new(None),
         };
         decoder.set_device(device)?;
         decoder.plan_expert_cache(mapping);
@@ -2947,6 +2936,11 @@ impl RustDecoder {
         self.backend.is_some()
     }
 
+    /// Active accelerator backend handle when running on a GPU / NPU / TPU backend.
+    pub fn accelerator_backend(&self) -> Option<Arc<dyn crate::backend::Backend>> {
+        self.backend.clone()
+    }
+
     /// Work the accelerator path leaves to the host reference code: `(whole layers, feed-forward blocks of otherwise device layers)`.
     pub fn host_fallbacks(&self) -> (usize, usize) {
         self.backend_weights.as_ref().map_or((0, 0), |w| {
@@ -2959,59 +2953,19 @@ impl RustDecoder {
 
     /// Create the backend `selected_backend` (number `selected_dev_id` within that backend) and move the model onto it.
     fn attach_accelerator(&mut self, selected_backend: &str, selected_dev_id: usize) -> Result<(), String> {
-        // `wgpu-<api>`: the wgpu implementation of that API even where a native backend exists
-        let wgpu_only = selected_backend.strip_prefix("wgpu-");
         crate::placement::begin_load(&Self::device_name(selected_backend, selected_dev_id), selected_backend);
-        // native backends (features vulkan, metal, hip, sycl, npu-*, tpu-pjrt); `Ok(None)` when `selected_backend` is none of them
-        if wgpu_only.is_none() {
-            match crate::backend::create_native_backend(selected_backend, selected_dev_id) {
-                Ok(Some(backend)) => {
-                    self.init_backend(backend)?;
-                    eprintln!("[fllm-rs] Unified accelerator backend enabled: {selected_backend}:{selected_dev_id} (native)");
-                    return Ok(());
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    // the wgpu backend serves vulkan and metal too when it is compiled in
-                    if !(cfg!(feature = "rust-gpu") && matches!(selected_backend, "vulkan" | "metal")) || crate::placement::strict() {
-                        return Err(error);
-                    }
-                    eprintln!("[fllm-rs] native {selected_backend} backend unavailable ({error}); falling back to wgpu");
-                    crate::placement::note_notice(&format!("The native {selected_backend} backend could not be used ({error}); the slower wgpu path runs the model instead"));
-                }
-            }
-        }
-        #[cfg(feature = "cuda")]
-        if selected_backend == "cuda" {
-            let backend: Arc<dyn crate::backend::Backend> = Arc::new(
-                crate::backend::cuda::CudaBackend::new(selected_dev_id).map_err(|e| e.to_string())?,
-            );
-            self.init_backend(backend)?;
+        let (backend, kind_label) = open_accelerator_backend(selected_backend, selected_dev_id)?;
+        let is_cuda_native = kind_label == "cuda";
+        self.init_backend(backend)?;
+        if is_cuda_native {
+            #[cfg(feature = "cuda")]
             set_device_sampling_default(true);
             eprintln!("[fllm-rs] Unified accelerator backend enabled: cuda:{selected_dev_id}");
-            return Ok(());
+        } else {
+            let display_backend = selected_backend.strip_prefix("wgpu-").unwrap_or(selected_backend);
+            eprintln!("[fllm-rs] Unified accelerator backend enabled: {display_backend}:{selected_dev_id} ({kind_label})");
         }
-        let wgpu_api = wgpu_only.unwrap_or(selected_backend);
-        if matches!(wgpu_api, "vulkan" | "metal" | "dx12" | "opengl" | "gl" | "gpu" | "wgpu") {
-            #[cfg(feature = "rust-gpu")]
-            {
-                let gpu_backend = crate::backend::wgpu_backend::WgpuBackend::new(wgpu_api, selected_dev_id)
-                    .map_err(|e| e.to_string())?;
-                let backend: Arc<dyn crate::backend::Backend> = Arc::new(gpu_backend);
-                self.init_backend(backend)?;
-                eprintln!("[fllm-rs] Unified accelerator backend enabled: {wgpu_api}:{selected_dev_id} (wgpu)");
-                return Ok(());
-            }
-            #[cfg(not(feature = "rust-gpu"))]
-            return Err(format!(
-                "the {wgpu_api} backend needs a build with --features rust-gpu (wgpu) or --features {} (native) for GPU projections",
-                if wgpu_api == "vulkan" || wgpu_api == "metal" { wgpu_api } else { "rust-gpu" }
-            ));
-        }
-        Err(format!(
-            "the {selected_backend} backend is not compiled into this binary (compiled: {})",
-            crate::devices::compiled_backends().join(", ")
-        ))
+        Ok(())
     }
 
     /// Model features `forward_backend` does not implement. The device path refuses such
@@ -4783,6 +4737,9 @@ impl RustDecoder {
         let kv_base = self.kv_base();
         // tensor parallelism: the output and down projections give partial sums; the fused residual-add kernels cannot take them
         let tp = self.par.as_ref().is_some_and(|p| p.tp_size() > 1);
+        if !recording {
+            self.prepare_layer_tap(rows);
+        }
         if self.v4_device {
             let streams = hc_streams.as_mut().ok_or("DeepSeek-V4 needs the residual streams on the device")?;
             self.v4_device_layers(&mut **stream, &mut scratch, dev_weights, streams, &mut x_buf, ids, &positions, tables, lengths)?;
@@ -4803,6 +4760,9 @@ impl RustDecoder {
                 stream.download(cast_f32_to_u8_mut(&mut host_x), &x_buf).map_err(err)?;
                 let mut trace = crate::cpu_profile::Trace::new(false, rows);
                 self.host_layers(i..i + 1, &mut host_x, &positions, tables, lengths, key, value, &mut trace, ple_host.as_deref(), &mut Vec::new())?;
+                if !recording {
+                    self.record_layer_tap_host(i, &host_x, rows);
+                }
                 stream.upload(&mut x_buf, cast_f32_to_u8(&host_x)).map_err(err)?;
                 continue;
             }
@@ -4823,6 +4783,9 @@ impl RustDecoder {
                 self.inkling_layer_device(&mut **stream, &mut scratch, i, kvi, dev_layer, ink, &mut x_buf, (&slots, tables, lengths), plan, dev_kv)?;
                 if let Some(host_in) = check_in {
                     self.layer_check(&mut **stream, (i, i), &x_buf, host_in, &positions, tables, lengths, key, value)?;
+                }
+                if !recording {
+                    self.record_layer_tap_device(i, &mut **stream, &x_buf, rows)?;
                 }
                 continue;
             }
@@ -5534,6 +5497,9 @@ impl RustDecoder {
                     self.layer_check(&mut **stream, (i, i), &x_buf, host_in, &positions, tables, lengths, key, value)?;
                 }
                 scratch.recycle(normed_buf);
+                if !recording {
+                    self.record_layer_tap_device(i, &mut **stream, &x_buf, rows)?;
+                }
                 continue;
             }
             if let (Some(hcd), Some(streams), Some(block)) = (hc_dev, hc_streams.as_mut(), hc_block.take()) {
@@ -5879,6 +5845,9 @@ impl RustDecoder {
             }
             scratch.recycle(ffn_normed);
             scratch.recycle(normed_buf);
+            if !recording {
+                self.record_layer_tap_device(i, &mut **stream, &x_buf, rows)?;
+            }
         }
         if act_check {
             report_act_check(&mut **stream, rows, &act_stats);
@@ -8474,6 +8443,137 @@ impl RustDecoder {
         GREEDY_IDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
     }
 
+    pub(crate) fn set_layer_tap(&self, layers: &[usize]) {
+        *self.layer_tap.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((layers.to_vec(), Vec::new()));
+    }
+
+    pub(crate) fn clear_layer_tap(&self) {
+        *self.layer_tap.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    pub(crate) fn take_layer_tap(&self) -> Vec<f32> {
+        let mut guard = self.layer_tap.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.as_mut().map_or_else(Vec::new, |(_, buf)| std::mem::take(buf))
+    }
+
+    fn layer_tap_active(&self) -> bool {
+        self.layer_tap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    fn prepare_layer_tap(&self, rows: usize) {
+        let mut guard = self.layer_tap.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((ids, buf)) = guard.as_mut() {
+            buf.clear();
+            buf.resize(rows * ids.len() * self.cfg.hidden, 0.0);
+        }
+    }
+
+    fn record_layer_tap_host(&self, layer_idx: usize, x: &[f32], rows: usize) {
+        let mut guard = self.layer_tap.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some((ids, buf)) = guard.as_mut() else {
+            return;
+        };
+        let k = ids.len();
+        let h = self.cfg.hidden;
+        if buf.len() != rows * k * h || x.len() < rows * h {
+            return;
+        }
+        for (slot, &target_id) in ids.iter().enumerate() {
+            if target_id == layer_idx {
+                for r in 0..rows {
+                    let src = &x[r * h..(r + 1) * h];
+                    let dst = &mut buf[(r * k + slot) * h..(r * k + slot + 1) * h];
+                    dst.copy_from_slice(src);
+                }
+            }
+        }
+    }
+
+    fn record_layer_tap_device(
+        &self,
+        layer_idx: usize,
+        stream: &mut dyn crate::backend::Stream,
+        x_buf: &crate::backend::DeviceBuffer,
+        rows: usize,
+    ) -> Result<(), String> {
+        let needed = {
+            let guard = self.layer_tap.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.as_ref().is_some_and(|(ids, _)| ids.contains(&layer_idx))
+        };
+        if !needed {
+            return Ok(());
+        }
+        let mut host_x = vec![0.0f32; rows * self.cfg.hidden];
+        stream
+            .download(cast_f32_to_u8_mut(&mut host_x), x_buf)
+            .map_err(|e| format!("layer tap download failed: {e}"))?;
+        self.record_layer_tap_host(layer_idx, &host_x, rows);
+        Ok(())
+    }
+
+    pub(crate) fn embed_tokens(&self, ids: &[i64]) -> Result<Vec<f32>, String> {
+        let mut out = Vec::with_capacity(ids.len() * self.cfg.hidden);
+        for &id in ids {
+            if id < 0 || id as usize >= self.embedding.rows {
+                return Err(format!("token id {id} out of embedding vocabulary range"));
+            }
+            out.extend_from_slice(&self.embedding.row(id as usize)?);
+        }
+        if self.cfg.embedding_scale != 1.0 {
+            for v in &mut out {
+                *v *= self.cfg.embedding_scale;
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn head_logits(&self, hidden: &[f32]) -> Result<Vec<f32>, String> {
+        let h = self.cfg.hidden;
+        if hidden.is_empty() || !hidden.len().is_multiple_of(h) {
+            return Err("invalid hidden input for head_logits".into());
+        }
+        let rows = hidden.len() / h;
+        if let (Some(weights), Some(stream_mtx), Some(scratch_mtx)) = (
+            self.backend_weights.as_ref(),
+            self.backend_stream.as_ref(),
+            self.backend_scratch.as_ref(),
+        ) {
+            if self.par.is_none() {
+                let err = |e: crate::backend::BackendError| e.to_string();
+                let mut stream = stream_mtx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut scratch = scratch_mtx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut in_buf = scratch.acquire(hidden.len() * 4).map_err(err)?;
+                stream.upload(&mut in_buf, cast_f32_to_u8(hidden)).map_err(err)?;
+                let mut out_buf = scratch.acquire(rows * weights.head.rows * 4).map_err(err)?;
+                stream
+                    .quantized_linear_wide(&mut out_buf, &in_buf, &weights.head, weights.head.bias.as_ref())
+                    .map_err(err)?;
+                let mut logits = vec![0.0f32; rows * weights.head.rows];
+                stream.download(cast_f32_to_u8_mut(&mut logits), &out_buf).map_err(err)?;
+                scratch.recycle(in_buf);
+                scratch.recycle(out_buf);
+                return Ok(logits);
+            }
+        }
+        self.head.forward(hidden)
+    }
+
+    pub(crate) fn head_rows(&self, ids: &[i64]) -> Result<Vec<f32>, String> {
+        let h = self.cfg.hidden;
+        let mut out = Vec::with_capacity(ids.len() * h);
+        for &id in ids {
+            if id < 0 {
+                return Err(format!("negative token id {id} in head_rows"));
+            }
+            out.extend_from_slice(&self.head.row_f32(id as usize)?);
+        }
+        Ok(out)
+    }
+
     /// Capture the main decoder state after its output RMS norm, matching h_nextn.
     /// MTP pairs row p with token p+1; logits still use only the requested rows.
     #[allow(clippy::too_many_arguments)]
@@ -8639,6 +8739,7 @@ impl RustDecoder {
                 rms(&mut x, &vec![1.0; cfg.hidden], cfg.eps);
             }
             trace.mark(0);
+            self.prepare_layer_tap(rows);
             let ple_inputs = self.ple_inputs(ids, &x)?;
             let mut streams = self.altup_expand(&x)?;
             self.stash_embeddings(&x);
@@ -8772,11 +8873,13 @@ impl RustDecoder {
                 dump_layer("normed", i, &normed);
                 if let Attn::Rwkv(rw) = &layer.attn {
                     self.rwkv_layer(rw, layer, i, &mut x, &normed, tables, lengths, &mut rwkv_v_first)?;
+                    self.record_layer_tap_host(i, &x, rows);
                     continue;
                 }
                 if matches!(layer.attn, Attn::None) {
                     let ffn = self.ffn_forward(layer, &normed, &mut ffn_workspace)?;
                     add_scaled(&mut x, &ffn, residual);
+                    self.record_layer_tap_host(i, &x, rows);
                     continue;
                 }
                 let mut branch = if let Attn::ShortConv(conv) = &layer.attn {
@@ -9038,6 +9141,7 @@ impl RustDecoder {
                 }
                 if matches!(layer.ffn, Ffn::None) {
                     add_scaled(&mut x, &branch, residual);
+                    self.record_layer_tap_host(i, &x, rows);
                     continue;
                 }
                 let ffn_input = if cfg.parallel_residual {
@@ -9106,6 +9210,7 @@ impl RustDecoder {
                         }
                     }
                 }
+                self.record_layer_tap_host(i, &x, rows);
             }
             if let (Some(_), Some(score)) = (cfg.attn_res, &self.output_res) {
                 x = apply_attn_res(&x, &block_res, score, cfg.eps, cfg.hidden);
@@ -9215,7 +9320,7 @@ impl RustDecoder {
         overrides: &[(usize, Vec<f32>)],
         capture: Option<&mut Vec<f32>>,
     ) -> Result<Vec<f32>, String> {
-        if capture.is_none() && self.par.is_none() && self.row_positions3().is_none() && self.row_deepstack().is_none() && self.row_visible_lengths().is_none() {
+        if capture.is_none() && !self.layer_tap_active() && self.par.is_none() && self.row_positions3().is_none() && self.row_deepstack().is_none() && self.row_visible_lengths().is_none() {
             // (a decode step of a few rows: the recorded graph reads full-width tables)
             let widened;
             let graph_tables = if self.is_narrow(ids.len(), tables) && ids.len() <= graph_max_rows() {
@@ -10190,6 +10295,52 @@ mod grouped_rms_norm_tests {
             assert_eq!(got, got_post);
         }
     }
+}
+
+pub(crate) fn open_accelerator_backend(
+    selected_backend: &str,
+    selected_dev_id: usize,
+) -> Result<(Arc<dyn crate::backend::Backend>, &'static str), String> {
+    let wgpu_only = selected_backend.strip_prefix("wgpu-");
+    if wgpu_only.is_none() {
+        match crate::backend::create_native_backend(selected_backend, selected_dev_id) {
+            Ok(Some(backend)) => return Ok((backend, "native")),
+            Ok(None) => {}
+            Err(error) => {
+                if !(cfg!(feature = "rust-gpu") && matches!(selected_backend, "vulkan" | "metal")) || crate::placement::strict() {
+                    return Err(error);
+                }
+                eprintln!("[fllm-rs] native {selected_backend} backend unavailable ({error}); falling back to wgpu");
+                crate::placement::note_notice(&format!("The native {selected_backend} backend could not be used ({error}); the slower wgpu path runs the model instead"));
+            }
+        }
+    }
+    #[cfg(feature = "cuda")]
+    if selected_backend == "cuda" {
+        let backend: Arc<dyn crate::backend::Backend> = Arc::new(
+            crate::backend::cuda::CudaBackend::new(selected_dev_id).map_err(|e| e.to_string())?,
+        );
+        return Ok((backend, "cuda"));
+    }
+    let wgpu_api = wgpu_only.unwrap_or(selected_backend);
+    if matches!(wgpu_api, "vulkan" | "metal" | "dx12" | "opengl" | "gl" | "gpu" | "wgpu") {
+        #[cfg(feature = "rust-gpu")]
+        {
+            let gpu_backend = crate::backend::wgpu_backend::WgpuBackend::new(wgpu_api, selected_dev_id)
+                .map_err(|e| e.to_string())?;
+            let backend: Arc<dyn crate::backend::Backend> = Arc::new(gpu_backend);
+            return Ok((backend, "wgpu"));
+        }
+        #[cfg(not(feature = "rust-gpu"))]
+        return Err(format!(
+            "the {wgpu_api} backend needs a build with --features rust-gpu (wgpu) or --features {} (native) for GPU projections",
+            if wgpu_api == "vulkan" || wgpu_api == "metal" { wgpu_api } else { "rust-gpu" }
+        ));
+    }
+    Err(format!(
+        "the {selected_backend} backend is not compiled into this binary (compiled: {})",
+        crate::devices::compiled_backends().join(", ")
+    ))
 }
 
 #[cfg(test)]

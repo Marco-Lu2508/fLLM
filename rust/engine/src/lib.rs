@@ -67,6 +67,7 @@ mod cpu_spin;
 pub mod cpu_threads;
 pub mod cpu_topology;
 pub mod draft;
+pub mod dspine;
 pub mod expert_cache;
 pub mod load_progress;
 pub(crate) mod kv_blocks;
@@ -115,6 +116,8 @@ mod tokenizer_convert_tests;
 mod gemma_tests;
 #[cfg(test)]
 mod spec_tests;
+#[cfg(test)]
+mod dspine_tests;
 #[cfg(test)]
 mod spec_state_tests;
 #[cfg(test)]

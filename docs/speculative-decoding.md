@@ -234,9 +234,18 @@ then, queue time included). `/metrics`: `fllm_queue_wait_seconds`, `fllm_preempt
 existing running/waiting gauges. `FLLM_CUDA_GRAPH_MAX_ROWS` (default 64, at most 256) raises the largest batch the CUDA graphs
 cover.
 
+See [changes/spec.md](changes/spec.md) for the full list.
+
+## Parallel block speculation (DSpine and DFlash)
+
+`--speculative dspine` and `--speculative dflash` (auto-selected when passing `--speculative-model` pointing to a `DSpineDraftModel`, `DFlashDraftModel`, or `DFlash2DraftModel` checkpoint such as `tencent/Qwen3.8-27B-DSpine-b16` or `tencent/Qwen3-8B-DSpine-b16`, including Hugging Face repositories without `tokenizer.json`) run block-parallel speculative drafting:
+
+- Multi-layer target hidden states (`target_layer_ids`) are tapped from committed prefill, decode, and accepted verification rows (never from rejected rows), projected via `fc` + `hidden_norm`, and appended to each draft layer's sliding-window context KV cache.
+- DSpine runs causal block attention + per-layer `DSpineCodeBridge` adjacent-position gating and serial `RefinementTail` verification (both greedy decomposed scoring and sampled table distributions with exact speculative verification).
+- DFlash runs block-parallel decoding without a bridge or refinement tail and verifies against the target's LM head.
+- Both support stateful hybrid targets (such as Qwen3.5 / Qwen3.8 GatedDeltaNet + Attention) cleanly alongside pure attention targets.
+
 ## Not implemented
 
-EAGLE, EAGLE-3 and Medusa heads, tree verification of the draft (the verification, `speculative::verify_tree`, is implemented and
-tested, but the decoder has no tree attention mask), `n > 1` for models with recurrent layers,
-the stateful prefix cache, prompt log-probabilities / `echo` log-probabilities, host-memory prefix-cache tiers.
-See [changes/spec.md](changes/spec.md) for the full list.
+Tree verification of drafts (`speculative::verify_tree` is implemented and tested, while the decoder runs linear chains rather than tree attention masks), `n > 1` for models with recurrent layers, the stateful prefix cache, prompt log-probabilities / `echo` log-probabilities, and host-memory prefix-cache tiers. (Note: EAGLE, EAGLE-3, Medusa heads, and DSpine/DFlash chain speculation are wired via `--speculative` + `--speculative-model`.)
+

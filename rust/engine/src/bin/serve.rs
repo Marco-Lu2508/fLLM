@@ -51,30 +51,6 @@ use fllm_engine::{
 };
 use std::{env, process};
 
-/// A draft model given as a file, a Hugging Face reference or a directory: resolved to one GGUF file (checkpoints are converted).
-fn resolve_gguf(spec: &str, offline: bool) -> Result<std::path::PathBuf, String> {
-    let path = fllm_engine::import::prepare(
-        spec,
-        &fllm_engine::import::ImportOptions { revision: None, offline, quant: None, outtype: None, direct: false, no_direct: true },
-    )?;
-    if !path.is_dir() {
-        return Ok(path);
-    }
-    let mut ggufs: Vec<_> = std::fs::read_dir(&path)
-        .map_err(|e| e.to_string())?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case("gguf")))
-        .collect();
-    ggufs.sort();
-    ggufs
-        .iter()
-        .find(|p| p.to_string_lossy().to_lowercase().contains("q4_k_m"))
-        .or_else(|| ggufs.first())
-        .cloned()
-        .ok_or_else(|| format!("directory '{}' contains no .gguf file", path.display()))
-}
-
 fn value(args: &[String], index: &mut usize, flag: &str) -> String {
     *index += 1;
     args.get(*index)
@@ -86,7 +62,7 @@ fn usage(error: &str) -> ! {
     if !error.is_empty() {
         eprintln!("{error}");
     }
-    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N|DEV,DEV,...] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--strict-device] [--expert-cache-mb auto|SIZE|off] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|mtp|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads auto|N] [--tensor-parallel N|auto | --tensor-parallel-size N | -tp N] [--tensor-split 3,1] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--no-jump-forward] [--temp T] [--top-p P] [--top-k K]");
+    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N|DEV,DEV,...] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--strict-device] [--expert-cache-mb auto|SIZE|off] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|dspine|dflash|mtp|medusa|eagle|eagle3|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads auto|N] [--tensor-parallel N|auto | --tensor-parallel-size N | -tp N] [--tensor-split 3,1] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--no-jump-forward] [--temp T] [--top-p P] [--top-k K]");
     eprintln!("       --multi-step N (alias --num-scheduler-steps): up to N decode rounds per scheduler round while the batch does not change; off by default, CPU backend only until verified elsewhere");
     eprintln!("       --device A,B,C (two or more devices of any backends, the CPU too): the model is split over them by layers in proportion to their free memory and speed (`fllm-rs devices --split MODEL --device A,B,C` shows the plan); --tensor-parallel N|auto groups N same-backend devices per stage, --tensor-split 3,1 sets the shares");
     eprintln!("       --device: BACKEND:N counts the devices of that backend from 0 (vulkan:1 = second Vulkan device; `fllm-rs devices` prints the value to use); auto = best GPU (CUDA > ROCm > Metal > Vulkan > DX12 > SYCL), else CPU");
@@ -959,15 +935,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     speculative_lookup = num_speculative_tokens.unwrap_or(5);
                 }
             }
-            Some(Method::Draft) => {
+            Some(Method::Draft | Method::Dspine | Method::Dflash | Method::Medusa | Method::Eagle | Method::Eagle3) => {
                 if draft_model.is_none() {
-                    usage("--speculative draft needs --speculative-model (or --draft-model)");
+                    let flag = speculative_method.map(|m| m.name()).unwrap_or("draft");
+                    usage(&format!("--speculative {flag} needs --speculative-model (or --draft-model)"));
                 }
             }
             Some(Method::Mtp) => speculative_mtp = true,
             Some(Method::Suffix) => speculative_suffix = true,
             Some(Method::Off) | None => {}
-            Some(other) => usage(other.unsupported_reason().unwrap_or("unsupported speculation method")),
         }
         if let Some(n) = num_speculative_tokens {
             draft_tokens = n;
@@ -1285,7 +1261,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // A draft model lives on the same device as the target and has its own weights and KV pool: take its memory out of the budget
     // the target's plan may use.
     let draft_path = match &draft_model {
-        Some(spec) => Some(resolve_gguf(spec, hub_offline)?),
+        Some(spec) => Some(fllm_engine::import::prepare(
+            spec,
+            &fllm_engine::import::ImportOptions {
+                revision: hub_revision.clone(),
+                offline: hub_offline,
+                quant: None,
+                outtype: None,
+                direct: true,
+                no_direct: false,
+            },
+        )?),
         None => None,
     };
     let draft_reserve: u64 = if device == "cpu" {
@@ -1293,8 +1279,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         draft_path
             .as_ref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .map_or(0, |m| m.len() + m.len() / 16 + (256 << 20))
+            .map(|p| {
+                if p.is_dir() {
+                    std::fs::read_dir(p)
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .filter_map(|e| e.metadata().ok().filter(|m| m.is_file()).map(|m| m.len()))
+                        .sum()
+                } else {
+                    std::fs::metadata(p).map_or(0, |m| m.len())
+                }
+            })
+            .filter(|&bytes| bytes > 0)
+            .map_or(0, |bytes| bytes + bytes / 16 + (256 << 20))
     };
     if let Some(list) = &multi_devices {
         // `--tensor-parallel auto`: with the model known, choose tensor / pipeline / expert parallelism for a node of identical large GPUs
@@ -1610,12 +1609,50 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("MTP enabled: first NextN block, one target-verified candidate; prefix reuse disabled");
     }
     if let Some(path) = draft_path {
-        let draft = GgufModel::load(path.to_str().ok_or("invalid draft model path")?, context, max_sequences, threads)?;
-        runtime.enable_draft(draft, draft_tokens)?;
-        eprintln!(
-            "[fllm-rs] Draft-model speculation enabled: {} ({draft_tokens} candidate tokens per step, adaptive length unless FLLM_SPEC_ADAPTIVE=0, same device as the target)",
-            path.display()
-        );
+        let draft = if fllm_engine::import::is_direct(&path) {
+            let draft_mapping = fllm_engine::import::open_model(&path)?;
+            GgufModel::from_mapping(
+                draft_mapping.with_tensor_aliases(&[])?,
+                context,
+                max_sequences,
+                threads,
+            )?
+        } else {
+            GgufModel::load(
+                path.to_str().ok_or("invalid draft model path")?,
+                context,
+                max_sequences,
+                threads,
+            )?
+        };
+        let draft_arch = draft.config().arch.clone();
+        use fllm_engine::speculative::SpeculativeMethod as Method;
+        if fllm_engine::dspine::DSpineEngine::is_dspine_arch(&draft_arch)
+            || matches!(speculative_method, Some(Method::Dspine | Method::Dflash))
+        {
+            runtime.enable_dspine(draft, num_speculative_tokens)?;
+            let (_, tokens, _) = runtime.speculative_status();
+            eprintln!(
+                "[fllm-rs] {} parallel speculative decoding enabled: {} ({tokens} candidate tokens per step)",
+                draft_arch.to_uppercase(),
+                path.display()
+            );
+        } else if let Some(method @ (Method::Medusa | Method::Eagle | Method::Eagle3)) =
+            speculative_method
+        {
+            runtime.enable_spec_head(draft, method, draft_tokens)?;
+            eprintln!(
+                "[fllm-rs] {} speculative head enabled: {} ({draft_tokens} candidate tokens per step)",
+                method.name(),
+                path.display()
+            );
+        } else {
+            runtime.enable_draft(draft, draft_tokens)?;
+            eprintln!(
+                "[fllm-rs] Draft-model speculation enabled: {} ({draft_tokens} candidate tokens per step, adaptive length unless FLLM_SPEC_ADAPTIVE=0, same device as the target)",
+                path.display()
+            );
+        }
     }
     // Conversation lookup is on unless the user chose something else: it costs nothing when it finds no match and about doubles the speed on
     // text that repeats (code edits, summaries, quotes, agent loops), with the same text as without. Only where it has been run: the

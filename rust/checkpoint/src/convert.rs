@@ -322,8 +322,10 @@ pub fn prepare_checkpoint(
         .get("tie_word_embeddings")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let (_real_token_count, tokenmeta) = tokenizer(root, vocab, &cfg)?;
-    meta.extend(tokenmeta);
+    if !crate::dspine::is_dspine_arch(arch) {
+        let (_real_token_count, tokenmeta) = tokenizer(root, vocab, &cfg)?;
+        meta.extend(tokenmeta);
+    }
     let native_layout = crate::mistral_native::is_native(root);
     let rowperm = |name: &str| -> Result<Option<Vec<usize>>, String> {
         if native_layout {
@@ -408,6 +410,9 @@ pub fn prepare_checkpoint(
         }
         // Kimi K3 output attention residual
         if arch == "kimi-linear" && name.starts_with("output_res_") {
+            return Ok(None);
+        }
+        if crate::dspine::is_dspine_arch(arch) && name.starts_with("dspine.") {
             return Ok(None);
         }
         // MLA attention has its own projection shapes
@@ -960,13 +965,26 @@ pub fn prepare_checkpoint(
     for (name, _) in &plan.synthesized {
         seen.insert(name.clone());
     }
-    for required in ["token_embd.weight", "output_norm.weight"] {
-        if !seen.contains(required) {
-            return Err(format!("missing required tensor {required}").into());
+    if crate::dspine::is_dspine_arch(arch) {
+        let has_bridge = meta.iter().any(|(k, v)| k.ends_with(".has_bridge") && matches!(v, Meta::Bool(true)));
+        let tr_rank = meta
+            .iter()
+            .find_map(|(k, v)| if k.ends_with(".terminal_residual_rank") { match v { Meta::U32(n) => Some(*n), _ => None } } else { None })
+            .unwrap_or(0);
+        for required in crate::dspine::required_top_tensors(has_bridge, tr_rank) {
+            if !seen.contains(required) {
+                return Err(format!("missing required tensor {required}").into());
+            }
         }
-    }
-    if !tie && !seen.contains("output.weight") {
-        return Err("missing lm_head.weight while tie_word_embeddings is false".into());
+    } else {
+        for required in ["token_embd.weight", "output_norm.weight"] {
+            if !seen.contains(required) {
+                return Err(format!("missing required tensor {required}").into());
+            }
+        }
+        if !tie && !seen.contains("output.weight") {
+            return Err("missing lm_head.weight while tie_word_embeddings is false".into());
+        }
     }
     for (name, values) in &plan.synthesized {
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -1194,6 +1212,7 @@ pub fn prepare_checkpoint(
             ]);
         } else if matches!(plan.family, Family::Phi3 | Family::Neox)
             || matches!(arch, "dbrx" | "internlm2" | "persimmon" | "chatglm" | "qwen" | "baichuan")
+            || (arch == "bailing_moe" && byname.contains_key(format!("blk.{i}.attn_qkv.weight").as_str()))
         {
             required.push("attn_qkv.weight");
         } else if plan.family == Family::Deepseek {
@@ -1261,6 +1280,8 @@ pub fn prepare_checkpoint(
         if matches!(
             arch,
             "qwen3"
+                | "dspine"
+                | "dflash"
                 | "gemma3"
                 | "muse-glimmer"
                 | "olmo2"
@@ -2619,9 +2640,15 @@ fn output_dtype(source: &str, requested: OutputDType) -> Result<String, String> 
         _ => Err(format!("unsupported source dtype {source}")),
     }
 }
-/// Multimodal configs keep the language model in `text_config`; use that as the model config.
+/// Multimodal configs keep the language model in `text_config` (or `thinker_config.text_config`); use that as the model config.
 fn flatten_text_config(cfg: Value) -> Value {
-    let Some(mut text) = cfg.get("text_config").filter(|v| v.is_object()).cloned() else {
+    let thinker = cfg.get("thinker_config").filter(|v| v.is_object());
+    let Some(mut text) = cfg
+        .get("text_config")
+        .or_else(|| thinker.and_then(|t| t.get("text_config")))
+        .filter(|v| v.is_object())
+        .cloned()
+    else {
         return cfg;
     };
     for key in [
@@ -2632,7 +2659,7 @@ fn flatten_text_config(cfg: Value) -> Value {
         "vocab_size",
     ] {
         if text.get(key).is_none() {
-            if let Some(v) = cfg.get(key) {
+            if let Some(v) = thinker.and_then(|t| t.get(key)).or_else(|| cfg.get(key)) {
                 text[key] = v.clone();
             }
         }

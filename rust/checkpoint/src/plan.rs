@@ -244,6 +244,8 @@ fn family_for(model_type: &str) -> Option<(Family, &'static str)> {
         "qwen2_vl_text" | "qwen2_5_vl_text" => (Family::Qwen, "qwen2"),
         "qwen3_vl_text" => (Family::Qwen, "qwen3"),
         "qwen3_vl_moe_text" => (Family::Qwen, "qwen3moe"),
+        "qwen2_5_omni_text" => (Family::Qwen, "qwen2"),
+        "qwen3_omni_moe_text" => (Family::Qwen, "qwen3moe"),
         "qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text" => (Family::Qwen3Next, "qwen3next"),
         "glm4_moe" => (Family::Qwen, "glm4moe"),
         "dots1" => (Family::Qwen, "dots1"),
@@ -877,6 +879,9 @@ impl Plan {
     }
 
     pub(crate) fn from_config(cfg: &Value) -> Result<Self, String> {
+        if crate::dspine::is_dspine_or_dflash(cfg) {
+            return crate::dspine::plan(cfg);
+        }
         let raw = cfg
             .get("model_type")
             .and_then(Value::as_str)
@@ -1033,6 +1038,7 @@ impl Plan {
                         | "glm4v_moe_text"
                         | "mistral4"
                         | "qwen3_vl_moe_text"
+                        | "qwen3_omni_moe_text"
                         | "phimoe"
                         | "k2_horizon"
                         | "g9v3"
@@ -1597,6 +1603,7 @@ impl Plan {
                 );
             }
             if mla
+                || arch == "bailing_moe"
                 || matches!(
                     raw.as_str(),
                     "glm4_moe" | "dots1" | "solar_open" | "exaone_moe" | "g9v3" | "deepseek" | "xverse_moe" | "xverse"
@@ -1617,7 +1624,7 @@ impl Plan {
                 let gating = match cfg.get("scoring_func").and_then(Value::as_str) {
                     Some("sigmoid") => 2,
                     Some(_) => 1,
-                    None if !matches!(raw.as_str(), "deepseek_v2" | "mistral4" | "deepseek" | "xverse_moe" | "xverse") => 2,
+                    None if !matches!(raw.as_str(), "deepseek_v2" | "mistral4" | "deepseek" | "xverse_moe" | "xverse") && arch != "bailing_moe" => 2,
                     None => 1,
                 };
                 u!("expert_gating_func", gating);
@@ -1685,7 +1692,8 @@ impl Plan {
                         | "cohere2_moe"
                         | "xverse_moe"
                         | "xverse"
-                ),
+                ) || (arch == "bailing_moe"
+                    && cfg.get("scoring_func").and_then(Value::as_str) == Some("sigmoid")),
             };
             meta.push((format!("{arch}.expert_weights_norm"), Meta::Bool(normalize)));
         }
@@ -2084,7 +2092,7 @@ impl Plan {
             moe_layers: (0..layers)
                 .map(|i| match raw.as_str() {
                     "deepseek_v2" | "deepseek_v3" | "kimi_k2" | "glm4_moe" | "dots1"
-                    | "mistral4" | "g9v3" | "deepseek" => i >= num(cfg, "first_k_dense_replace").unwrap_or(0),
+                    | "mistral4" | "g9v3" | "deepseek" | "bailing_moe" | "bailing_hybrid" => i >= num(cfg, "first_k_dense_replace").unwrap_or(0),
                     "hy_v3" | "exaone_moe" | "glm4_moe_lite" | "deepseek_v32" | "glm_moe_dsa" | "mellum" | "laguna" | "mimo_v2_flash" => cfg
                         .get("mlp_layer_types")
                         .and_then(Value::as_array)
@@ -2195,6 +2203,7 @@ impl Plan {
             "mlp.shared_experts.up_proj.weight" => plain("ffn_up_shexp.weight"),
             "mlp.shared_experts.down_proj.weight" => plain("ffn_down_shexp.weight"),
             "mlp.gate.e_score_correction_bias"
+            | "mlp.gate.expert_bias"
             | "mlp.expert_bias"
             | "mlp.e_score_correction_bias"
             | "mlp.experts.e_score_correction_bias"
@@ -2622,13 +2631,20 @@ impl Plan {
             name: name.to_owned(),
             add: 0.0,
         };
-        // multimodal checkpoints nest the language model; the vision tower is not imported
+        // multimodal / omni checkpoints nest the language model; vision, audio and speech towers are not imported
         let renamed;
         let n = if let Some(rest) = n.strip_prefix("model.language_model.") {
             renamed = format!("model.{rest}");
             renamed.as_str()
         } else if let Some(rest) = n.strip_prefix("language_model.") {
             renamed = if rest.starts_with("model.") || rest.starts_with("lm_head.") {
+                rest.to_owned()
+            } else {
+                format!("model.{rest}")
+            };
+            renamed.as_str()
+        } else if let Some(rest) = n.strip_prefix("thinker.") {
+            renamed = if rest.starts_with("model.") || rest.starts_with("lm_head.") || rest.starts_with("visual.") || rest.starts_with("audio_tower.") {
                 rest.to_owned()
             } else {
                 format!("model.{rest}")
@@ -2646,8 +2662,15 @@ impl Plan {
             || n.starts_with("model.vision_")
             || n.starts_with("vision_model.")
             || n.starts_with("vit_large_projector.")
+            || n.starts_with("audio_tower.")
+            || n.starts_with("model.audio_tower.")
+            || n.starts_with("talker.")
+            || n.starts_with("token2wav.")
         {
             return Ok(Mapped::Skip);
+        }
+        if crate::dspine::is_dspine_arch(&self.arch) {
+            return crate::dspine::map(n);
         }
         if self.arch == "deepseek4" {
             return crate::deepseek4::map(self, n);
@@ -2777,6 +2800,7 @@ impl Plan {
                 return Ok(plain("output_norm.weight"))
             }
             "model.embed_tokens.weight"
+            | "model.word_embeddings.weight"
             | "transformer.wte.weight"
             | "transformer.embedding.word_embeddings.weight" => return Ok(plain("token_embd.weight")),
             "model.norm.weight" if self.arch == "muse-glimmer" => return Ok(plain("output_norm.weight")),
@@ -3007,8 +3031,12 @@ impl Plan {
                 "mlp.c_fc.bias" => Some(("ffn_up.bias", false)),
                 "mlp.c_proj.weight" => Some(("ffn_down.weight", false)),
                 "mlp.c_proj.bias" => Some(("ffn_down.bias", false)),
-                "self_attn.query_layernorm.weight" => Some(("attn_q_norm.weight", false)),
-                "self_attn.key_layernorm.weight" => Some(("attn_k_norm.weight", false)),
+                "self_attn.query_layernorm.weight" | "attention.query_layernorm.weight" => {
+                    Some(("attn_q_norm.weight", false))
+                }
+                "self_attn.key_layernorm.weight" | "attention.key_layernorm.weight" => {
+                    Some(("attn_k_norm.weight", false))
+                }
                 "post_self_attn_layernorm.weight" => Some(("post_attention_norm.weight", false)),
                 "pre_mlp_layernorm.weight" => Some(("ffn_norm.weight", false)),
                 "attention_layernorm.weight" => Some(("attn_norm.weight", true)),
@@ -3569,5 +3597,95 @@ mod tests {
         assert_eq!(v6.map("rwkv.blocks.1.attention.time_maa_w2").unwrap(), Mapped::Transposed { name: "blk.1.time_mix_w2.weight".into() });
         assert_eq!(v6.map("rwkv.blocks.1.feed_forward.receptance.weight").unwrap(), t("blk.1.channel_mix_receptance.weight"));
         assert_eq!(v6.map("head.weight").unwrap(), t("output.weight"));
+    }
+
+    #[test]
+    fn bailing_moe_gqa_shared_dense_and_tensor_names() {
+        let mut cfg = base("bailing_moe");
+        cfg["num_hidden_layers"] = json!(3);
+        cfg["num_experts"] = json!(8);
+        cfg["num_experts_per_tok"] = json!(2);
+        cfg["num_shared_experts"] = json!(1);
+        cfg["first_k_dense_replace"] = json!(1);
+        cfg["routed_scaling_factor"] = json!(2.5);
+        cfg["scoring_func"] = json!("sigmoid");
+        let plan = Plan::from_config(&cfg).unwrap();
+        assert_eq!(plan.arch, "bailing_moe");
+        assert_eq!(plan.moe_layers, vec![false, true, true]);
+        assert!(matches!(
+            plan.meta.iter().find(|(k, _)| k == "bailing_moe.leading_dense_block_count"),
+            Some((_, Meta::U32(1)))
+        ));
+        assert!(matches!(
+            plan.meta.iter().find(|(k, _)| k == "bailing_moe.expert_gating_func"),
+            Some((_, Meta::U32(2)))
+        ));
+        assert_eq!(
+            plan.map("model.word_embeddings.weight").unwrap(),
+            Mapped::Tensor { name: "token_embd.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("model.layers.0.attention.query_key_value.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.attn_qkv.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("model.layers.0.attention.query_layernorm.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.attn_q_norm.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("model.layers.1.mlp.gate.expert_bias").unwrap(),
+            Mapped::Tensor { name: "blk.1.exp_probs_b.bias".into(), add: 0.0 }
+        );
+    }
+
+    #[test]
+    fn qwen_omni_thinker_and_dspine_plan_mapping() {
+        let mut omni = base("qwen3_omni_moe_text");
+        omni["num_experts"] = json!(4);
+        omni["num_experts_per_tok"] = json!(2);
+        let omni_plan = Plan::from_config(&omni).unwrap();
+        assert_eq!(omni_plan.arch, "qwen3moe");
+        assert_eq!(
+            omni_plan.map("thinker.model.embed_tokens.weight").unwrap(),
+            Mapped::Tensor { name: "token_embd.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            omni_plan.map("thinker.lm_head.weight").unwrap(),
+            Mapped::Tensor { name: "output.weight".into(), add: 0.0 }
+        );
+        assert_eq!(omni_plan.map("talker.model.embed_tokens.weight").unwrap(), Mapped::Skip);
+        assert_eq!(omni_plan.map("token2wav.flow.weight").unwrap(), Mapped::Skip);
+        assert_eq!(omni_plan.map("thinker.audio_tower.conv1.weight").unwrap(), Mapped::Skip);
+
+        let dspine_cfg = json!({
+            "architectures": ["DSpineDraftModel"],
+            "model_type": "qwen3",
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 16,
+            "vocab_size": 100,
+            "block_size": 8,
+            "num_target_layers": 4,
+            "sliding_window": 32,
+            "code_bridge_second_pass": { "mode": "serial_table", "first_exact": 1, "head_topk": 4 },
+            "dflash_config": {
+                "mask_token_id": 99,
+                "target_layer_ids": [0, 3],
+                "draft_block_causal": true,
+                "selected_prefix_terminal": false,
+                "selected_prefix_feature_writes": true,
+                "selected_prefix_feature_write_mode": "independent",
+                "selected_prefix_feature_layers": [1, 2],
+                "selected_prefix_code_bridge": { "code_size": 16, "rank": 8, "eps": 1e-6 }
+            }
+        });
+        let dp = Plan::from_config(&dspine_cfg).unwrap();
+        assert_eq!(dp.arch, "dspine");
+        assert_eq!(dp.map("fc.weight").unwrap(), Mapped::Tensor { name: "dspine.fc.weight".into(), add: 0.0 });
+        assert_eq!(dp.map("selected_prefix_bridge.codebook").unwrap(), Mapped::Tensor { name: "dspine.bridge.codebook".into(), add: 0.0 });
+        assert_eq!(dp.map("draft_block_causal_version").unwrap(), Mapped::Skip);
     }
 }

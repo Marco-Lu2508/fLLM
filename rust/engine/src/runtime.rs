@@ -93,6 +93,7 @@ pub struct InferenceRuntime {
     mtp: Option<crate::draft::MtpEngine>,
     suffix: Option<crate::speculative::SuffixCache>,
     spec_head: Option<crate::draft::SpecHeadEngine>,
+    dspine: Option<crate::dspine::DSpineEngine>,
     /// Distributions the draft model drew this step's draft tokens from (only for sequences with a draft model proposal).
     draft_q: std::collections::HashMap<i64, Vec<Option<crate::speculative::Dist>>>,
     /// Beam searches in flight, by request id (see `submit_beam`).
@@ -242,6 +243,7 @@ impl InferenceRuntime {
             mtp: None,
             suffix: None,
             spec_head: None,
+            dspine: None,
             draft_q: Default::default(),
             beams: Default::default(),
             beam_seq: Default::default(),
@@ -471,6 +473,7 @@ impl InferenceRuntime {
             && !self.model.is_stateful()
             && self.draft.is_none()
             && self.mtp.is_none()
+            && self.dspine.is_none()
     }
     /// Starts a beam search (`use_beam_search`): `params.width` beams that share the prompt's KV blocks, pruned after every token
     /// by the summed log-probability (see `beam.rs` for the exact scoring). The finished hypotheses come out as token events
@@ -500,7 +503,7 @@ impl InferenceRuntime {
         let unsupported = if params.width > 1 {
             !self.supports_shared_choices()
         } else {
-            self.draft.is_some() || self.mtp.is_some()
+            self.draft.is_some() || self.mtp.is_some() || self.dspine.is_some()
         };
         if unsupported {
             return Err(format!(
@@ -1251,8 +1254,8 @@ impl InferenceRuntime {
         let Some(jump) = self.jump_forward.clone() else {
             return Ok(());
         };
-        // Draft models, MTP and speculative heads keep per-token state of their own that forced tokens would bypass.
-        if self.draft.is_some() || self.mtp.is_some() || self.spec_head.is_some() {
+        // Draft models, MTP, DSpine, and speculative heads keep per-token state of their own that forced tokens would bypass.
+        if self.draft.is_some() || self.mtp.is_some() || self.spec_head.is_some() || self.dspine.is_some() {
             return Ok(());
         }
         let Some(sequence) = self.scheduler.sequences.get(&sid) else {
@@ -1495,7 +1498,7 @@ impl InferenceRuntime {
 
     /// Suffix-match speculation across the conversation and recent generations (`--speculative suffix`).
     pub fn enable_suffix(&mut self, tokens: usize, config: crate::speculative::SuffixConfig) -> Result<(), String> {
-        if self.draft.is_some() || self.mtp.is_some() || self.suffix.is_some() || self.spec_head.is_some() || self.scheduler.cfg.speculative_lookup > 0 {
+        if self.draft.is_some() || self.mtp.is_some() || self.suffix.is_some() || self.spec_head.is_some() || self.dspine.is_some() || self.scheduler.cfg.speculative_lookup > 0 {
             return Err("speculative methods are mutually exclusive".into());
         }
         if tokens == 0 || tokens > 32 {
@@ -1550,7 +1553,7 @@ impl InferenceRuntime {
     }
 
     pub fn enable_mtp(&mut self) -> Result<(), String> {
-        if self.draft.is_some() || self.suffix.is_some() || self.spec_head.is_some() || self.scheduler.cfg.speculative_lookup > 0 {
+        if self.draft.is_some() || self.suffix.is_some() || self.spec_head.is_some() || self.dspine.is_some() || self.scheduler.cfg.speculative_lookup > 0 {
             return Err("speculative methods are mutually exclusive".into());
         }
         if self.decoder.is_some() {
@@ -1579,7 +1582,7 @@ impl InferenceRuntime {
                 ));
             }
         }
-        if self.draft.is_some() || self.mtp.is_some() || self.suffix.is_some() || self.spec_head.is_some() || self.scheduler.cfg.speculative_lookup > 0 {
+        if self.draft.is_some() || self.mtp.is_some() || self.suffix.is_some() || self.spec_head.is_some() || self.dspine.is_some() || self.scheduler.cfg.speculative_lookup > 0 {
             return Err("speculative methods are mutually exclusive".into());
         }
         self.draft = Some(crate::draft::DraftEngine::new(model, tokens)?);
@@ -1595,7 +1598,7 @@ impl InferenceRuntime {
         method: crate::speculative::SpeculativeMethod,
         tokens: usize,
     ) -> Result<(), String> {
-        if self.draft.is_some() || self.mtp.is_some() || self.suffix.is_some() || self.spec_head.is_some() || self.scheduler.cfg.speculative_lookup > 0 {
+        if self.draft.is_some() || self.mtp.is_some() || self.suffix.is_some() || self.spec_head.is_some() || self.dspine.is_some() || self.scheduler.cfg.speculative_lookup > 0 {
             return Err("speculative methods are mutually exclusive".into());
         }
         if tokens == 0 || tokens > 32 {
@@ -1604,6 +1607,47 @@ impl InferenceRuntime {
         self.spec_head = Some(crate::draft::SpecHeadEngine::new(&model, method)?);
         self.spec_method = method;
         self.spec_tokens = tokens;
+        self.scheduler.cfg.prefix_cache = false;
+        self.scheduler.pc = None;
+        Ok(())
+    }
+
+    /// Enable DSpine (`DSpineDraftModel`) or DFlash (`DFlashDraftModel`) parallel speculative draft model.
+    pub fn enable_dspine(&mut self, model: GgufModel, tokens: Option<usize>) -> Result<(), String> {
+        if self.draft.is_some()
+            || self.mtp.is_some()
+            || self.suffix.is_some()
+            || self.spec_head.is_some()
+            || self.dspine.is_some()
+            || self.scheduler.cfg.speculative_lookup > 0
+        {
+            return Err("speculative methods are mutually exclusive".into());
+        }
+        let mut engine = crate::dspine::DSpineEngine::new(&model)?;
+        let target_cfg = self.model.config();
+        engine.validate_target(target_cfg.layers, target_cfg.hidden, target_cfg.vocab)?;
+        let max_draft = engine.block_size().saturating_sub(1);
+        let spec_tokens = tokens.unwrap_or(max_draft);
+        if spec_tokens == 0 || spec_tokens > max_draft {
+            return Err(format!(
+                "the number of speculative tokens for {} must be between 1 and {max_draft} (block_size {})",
+                engine.cfg.arch,
+                engine.block_size()
+            ));
+        }
+        if let Some(backend) = self.decoder.as_ref().and_then(|d| d.accelerator_backend()) {
+            engine.init_backend(backend)?;
+        }
+        self.spec_method = if engine.cfg.has_bridge {
+            crate::speculative::SpeculativeMethod::Dspine
+        } else {
+            crate::speculative::SpeculativeMethod::Dflash
+        };
+        self.spec_tokens = spec_tokens;
+        // Main-model prefix hits would skip computing target hidden states needed by the draft context KV.
+        self.scheduler.cfg.prefix_cache = false;
+        self.scheduler.pc = None;
+        self.dspine = Some(engine);
         Ok(())
     }
     /// Load the decoder weights for `device` ("cpu" or a GPU backend). Must be called once before
@@ -1630,6 +1674,10 @@ impl InferenceRuntime {
         }
         if let Some(mtp) = &mut self.mtp {
             mtp.attach_compute(&self.model, device)?;
+        }
+        if let Some(dspine) = &mut self.dspine {
+            let shared = self.decoder.as_ref().and_then(|d| d.accelerator_backend());
+            dspine.attach_compute(device, shared)?;
         }
         Ok(())
     }
@@ -2174,6 +2222,7 @@ impl InferenceRuntime {
             || self.mtp.is_some()
             || self.suffix.is_some()
             || self.spec_head.is_some()
+            || self.dspine.is_some()
             || self.scheduler.cfg.speculative_lookup > 0
             || !self.beams.is_empty()
             || !self.pending_choices.is_empty()
@@ -2319,6 +2368,52 @@ impl InferenceRuntime {
                 }
             }
             self.spec_delta.draft_ns += started.elapsed().as_nanos() as u64;
+        }
+        if let Some(dspine) = &mut self.dspine {
+            if let Some(target_decoder) = &self.decoder {
+                let started = Instant::now();
+                let active: std::collections::HashSet<u64> =
+                    self.scheduler.sequences.keys().map(|&id| id as u64).collect();
+                dspine.retain(&active);
+                self.scheduler.external_drafts.clear();
+                let running = self.scheduler.running.clone();
+                for sid in running {
+                    let pending = self.pending_logits.contains_key(&sid);
+                    let Some(sequence) = self.scheduler.sequences.get_mut(&sid) else {
+                        continue;
+                    };
+                    if sequence.num_computed >= sequence.prefill_target
+                        && sequence.can_speculate()
+                        && !pending
+                    {
+                        if let Some(&anchor) = sequence.tokens.last() {
+                            let limit = if adaptive { sequence.adaptive.length() } else { usize::MAX };
+                            let count = self
+                                .spec_tokens
+                                .min(limit)
+                                .min(sequence.remaining_max().saturating_sub(1));
+                            let remaining = sequence.remaining_max().saturating_sub(1);
+                            let sampling = sequence.sampling.clone();
+                            let history = sequence.tokens.clone();
+                            let (tokens, q) = dspine.propose(
+                                sid as u64,
+                                anchor,
+                                count,
+                                remaining,
+                                &sampling,
+                                &mut sequence.sampling_state,
+                                &history,
+                                target_decoder,
+                            )?;
+                            if !tokens.is_empty() {
+                                self.scheduler.external_drafts.insert(sid, tokens);
+                                self.draft_q.insert(sid, q);
+                            }
+                        }
+                    }
+                }
+                self.spec_delta.draft_ns += started.elapsed().as_nanos() as u64;
+            }
         }
         let scheduled = match replay {
             Some(batch) => Some(batch),
@@ -2522,12 +2617,14 @@ impl InferenceRuntime {
         self.batch_stats.batch_build_ns += build_started.elapsed().as_nanos() as u64;
         let forward_started = Instant::now();
         let mut hidden_capture = Vec::new();
+        let mut dspine_tapped: Option<Vec<f32>> = None;
         // A decode-only step in which every sequence just takes the largest logit needs no logits on the host: the device returns
         // the ids (vLLM's greedy_sample is an argmax on the GPU as well).
         let use_greedy_ids = !rows.is_empty()
             && !logit_rows.is_empty()
             && verify_candidates.is_empty()
             && self.mtp.is_none()
+            && self.dspine.is_none()
             && logit_rows.len() == decode_row.len()
             && prefill_commits.iter().all(|(_, _, final_row)| final_row.is_none())
             && step.decode.iter().all(|sid| {
@@ -2546,6 +2643,7 @@ impl InferenceRuntime {
             && !logit_rows.is_empty()
             && verify_candidates.is_empty()
             && self.mtp.is_none()
+            && self.dspine.is_none()
             && logit_rows.len() == decode_row.len()
             && prefill_commits.iter().all(|(_, _, final_row)| final_row.is_none())
             && step.decode.iter().all(|sid| {
@@ -2560,6 +2658,7 @@ impl InferenceRuntime {
         let plain_decode = step.prefill.is_empty()
             && verify_candidates.is_empty()
             && self.mtp.is_none()
+            && self.dspine.is_none()
             && self.mrope_positions.is_empty()
             && self.deepstack.is_empty()
             && self.visible_lengths.is_empty()
@@ -2646,6 +2745,11 @@ impl InferenceRuntime {
             decoder.set_row_positions3(positions3);
             decoder.set_row_deepstack((!levels.is_empty()).then_some(levels));
             decoder.set_row_visible_lengths(visible_lengths);
+            if let Some(d) = &self.dspine {
+                decoder.set_layer_tap(d.target_layer_ids());
+            } else {
+                decoder.clear_layer_tap();
+            }
             let forwarded = decoder.forward_with_hidden(
                 &ids,
                 &lengths,
@@ -2664,6 +2768,12 @@ impl InferenceRuntime {
             decoder.set_row_positions3(None);
             decoder.set_row_deepstack(None);
             decoder.set_row_visible_lengths(None);
+            dspine_tapped = if self.dspine.is_some() {
+                Some(decoder.take_layer_tap())
+            } else {
+                decoder.clear_layer_tap();
+                None
+            };
             forwarded?
         };
         crate::rust_decoder::RustDecoder::clear_ahead_request();
@@ -3130,6 +3240,43 @@ impl InferenceRuntime {
                     sequence.num_computed,
                     captures.remove(&sid).unwrap_or_default(),
                 )?;
+            }
+        }
+        if let Some(dspine) = &mut self.dspine {
+            if let Some(tapped) = dspine_tapped {
+                let width = dspine.target_layer_ids().len() * dspine.cfg.target_hidden;
+                if tapped.len() != rows.len() * width {
+                    return Err(format!(
+                        "invalid target layer capture for DSpine/DFlash: expected {} floats for {} rows, got {}",
+                        rows.len() * width,
+                        rows.len(),
+                        tapped.len()
+                    ));
+                }
+                let mut per_seq: std::collections::HashMap<i64, Vec<(usize, &[f32])>> =
+                    std::collections::HashMap::new();
+                for (index, row) in rows.iter().enumerate() {
+                    if let Some(sequence) = self.scheduler.sequences.get(&row.sequence_id) {
+                        let position = row.length as usize - 1;
+                        if position < sequence.num_computed
+                            && sequence.tokens.get(position) == Some(&row.token_id)
+                        {
+                            per_seq.entry(row.sequence_id).or_default().push((
+                                position,
+                                &tapped[index * width..(index + 1) * width],
+                            ));
+                        }
+                    }
+                }
+                for (sid, mut items) in per_seq {
+                    items.sort_by_key(|(pos, _)| *pos);
+                    let count = items.len();
+                    let mut buf = Vec::with_capacity(count * width);
+                    for (_, slice) in items {
+                        buf.extend_from_slice(slice);
+                    }
+                    dspine.observe_target_hidden(sid as u64, count, &buf)?;
+                }
             }
         }
         if self.spec_delta != crate::speculative::SpecStats::default() {

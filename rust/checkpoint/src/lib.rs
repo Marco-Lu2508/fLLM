@@ -5,6 +5,7 @@ mod classic;
 mod convert;
 mod dequant;
 mod dequant_bits;
+mod dspine;
 mod exl2;
 mod exl3;
 mod decoder_enc;

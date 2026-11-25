@@ -688,7 +688,9 @@ fn prepare_hub(reference: &Reference, opts: &ImportOptions) -> Result<PathBuf, S
         session.download("hf_quant_config.json")?;
     }
     let check = check_architecture(&session.snapshot, &repo_name)?;
-    require_tokenizer(has_tokenizer_source(&name_refs), &repo_name)?;
+    if !matches!(check.architecture.as_str(), "dspine" | "dflash") {
+        require_tokenizer(has_tokenizer_source(&name_refs), &repo_name)?;
+    }
     let outtype = choose_outtype(&check.quantization, opts.quant.as_deref(), opts.outtype.as_deref())?;
     let cfg = read_config(&session.snapshot)?;
     // 2. the files that make up the checkpoint
@@ -852,7 +854,9 @@ fn prepare_local(path: &Path, opts: &ImportOptions) -> Result<PathBuf, String> {
         .map(|entries| entries.flatten().filter_map(|e| e.file_name().into_string().ok()).collect())
         .unwrap_or_default();
     let local_refs: Vec<&str> = local_names.iter().map(String::as_str).collect();
-    require_tokenizer(has_tokenizer_source(&local_refs), &what)?;
+    if !matches!(check.architecture.as_str(), "dspine" | "dflash") {
+        require_tokenizer(has_tokenizer_source(&local_refs), &what)?;
+    }
     let outtype = choose_outtype(&check.quantization, opts.quant.as_deref(), opts.outtype.as_deref())?;
     let (files, weight_bytes) = local_fingerprint(&root)?;
     let direct = direct_mode(opts, direct_unsupported(&check, weight_bytes, &outtype), &what);

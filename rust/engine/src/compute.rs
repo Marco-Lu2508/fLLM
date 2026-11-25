@@ -1222,6 +1222,61 @@ impl Linear {
     pub fn enable_fast_cpu(&mut self) {
         self.fast_cpu = true;
     }
+
+    /// Dequantizes a single output row `[cols]` to `f32` (for sparse vocabulary lookups).
+    pub fn row_f32(&self, row: usize) -> Result<Vec<f32>, String> {
+        if row >= self.rows {
+            return Err(format!("row {row} out of bounds for {} rows", self.rows));
+        }
+        let mut out = if let Some((kind, packed)) = &self.packed {
+            if fllm_gguf_probe::fp8m_type(*kind) {
+                let s_bytes = [
+                    packed[self.rows * self.cols + row * 2],
+                    packed[self.rows * self.cols + row * 2 + 1],
+                ];
+                let scale = half::f16::from_le_bytes(s_bytes).to_f32();
+                packed[row * self.cols..(row + 1) * self.cols]
+                    .iter()
+                    .map(|&b| e4m3fn_to_f32(b) * scale)
+                    .collect()
+            } else if let Some(group) = fllm_gguf_probe::q4zp_group(*kind) {
+                let group = group as usize;
+                let row_bytes = self.cols / group * (group / 2 + 3);
+                let row_slice = &packed[row * row_bytes..(row + 1) * row_bytes];
+                let perm = &packed[self.rows * row_bytes..];
+                let permuted = dequantize(row_slice, 0x8000_0010 + (group.trailing_zeros() - 5), self.cols)?;
+                let mut unperm = vec![0.0f32; self.cols];
+                for (j, &w) in permuted.iter().enumerate() {
+                    let source = u32::from_le_bytes(perm[j * 4..j * 4 + 4].try_into().unwrap()) as usize;
+                    if source >= self.cols {
+                        return Err("perm index out of bounds".into());
+                    }
+                    unperm[source] = w;
+                }
+                unperm
+            } else if fllm_gguf_probe::fp8b_type(*kind)
+                || fllm_gguf_probe::bnb::is_bnb(*kind)
+                || fllm_gguf_probe::mlx_affine(*kind).is_some()
+                || fllm_gguf_probe::exl::is_exl_type(*kind)
+                || *kind == 40
+            {
+                let all = dequantize(packed, *kind, self.rows * self.cols)?;
+                all[row * self.cols..(row + 1) * self.cols].to_vec()
+            } else {
+                let width = packed.len() / self.rows;
+                let slice = &packed[row * width..(row + 1) * width];
+                dequantize(slice, *kind, self.cols)?
+            }
+        } else {
+            self.weight.data[row * self.cols..(row + 1) * self.cols].to_vec()
+        };
+        if self.scale != 1.0 {
+            for v in &mut out {
+                *v *= self.scale;
+            }
+        }
+        Ok(out)
+    }
 }
 fn dot_quantized(x: &[f32], packed: &[u8], kind: u32) -> f32 {
     if matches!(kind, 1 | 30) {
