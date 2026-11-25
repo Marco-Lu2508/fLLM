@@ -38,13 +38,14 @@ impl RustDecoder {
         &self,
         stream: &mut dyn Stream,
         scratch: &mut BufferPool,
+        layer_idx: usize,
         dm: &DeviceMoe,
         fast: &DeviceMoeFast,
         dev: &DeviceMoeDevice,
         x: &crate::backend::DeviceBuffer,
         rows: usize,
     ) -> Result<Option<crate::backend::DeviceBuffer>, String> {
-        let (Some(cfg), Some(_)) = (self.cfg.moe.as_ref(), self.device_glu_mode()) else {
+        let (Some(cfg), Some(_)) = (self.cfg.moe.as_ref(), self.device_glu_mode(layer_idx)) else {
             return Ok(None);
         };
         // one to four tokens through the integer dot-product kernels when the formats allow it; everything else through the grouped GEMM
@@ -62,7 +63,7 @@ impl RustDecoder {
             let n = (rows - start).min(max_rows);
             let xs = x.slice(start * hidden * 4, n * hidden * 4).map_err(err)?;
             let mut os = out.slice(start * hidden * 4, n * hidden * 4).map_err(err)?;
-            self.moe_device_rows(stream, scratch, dm, fast, dev, &xs, &mut os, n, decode)?;
+            self.moe_device_rows(stream, scratch, layer_idx, dm, fast, dev, &xs, &mut os, n, decode)?;
             start += n;
         }
         Ok(Some(out))
@@ -74,6 +75,7 @@ impl RustDecoder {
         &self,
         stream: &mut dyn Stream,
         scratch: &mut BufferPool,
+        layer_idx: usize,
         dm: &DeviceMoe,
         fast: &DeviceMoeFast,
         dev: &DeviceMoeDevice,
@@ -82,11 +84,12 @@ impl RustDecoder {
         rows: usize,
         decode: bool,
     ) -> Result<(), String> {
-        let (Some(cfg), Some(mode)) = (self.cfg.moe.as_ref(), self.device_glu_mode()) else {
+        let (Some(cfg), Some(mode)) = (self.cfg.moe.as_ref(), self.device_glu_mode(layer_idx)) else {
             return Err("MoE layer without MoE configuration".into());
         };
         let err = |e: crate::backend::BackendError| e.to_string();
-        let shared_mode = self.dense_glu_mode().unwrap_or(mode);
+        let shared_mode = self.dense_glu_mode(layer_idx).unwrap_or(mode);
+        let plain_act = act_code(self.cfg.activation);
         let (scored, k, hidden, ff) = (cfg.experts, cfg.used, self.cfg.hidden, fast.ff);
         // LongCat-Flash: the router also scores `zero_experts` experts without weights that return their input; the tables hold the others
         let zero = cfg.zero_experts;
@@ -111,20 +114,25 @@ impl RustDecoder {
         }
         let mut temps = vec![logits];
         if decode {
-            let mut gate = scratch.acquire(pairs * ff * 4).map_err(err)?;
             let mut up = scratch.acquire(pairs * ff * 4).map_err(err)?;
             let mut act = scratch.acquire(pairs * ff * 4).map_err(err)?;
             stream
-                .moe_linear(&mut gate, x, &fast.gate, fast.gate_bias.as_ref(), &ids, fast.kinds[0], ff, hidden, pairs, k)
-                .map_err(err)?;
-            stream
                 .moe_linear(&mut up, x, &fast.up, fast.up_bias.as_ref(), &ids, fast.kinds[1], ff, hidden, pairs, k)
                 .map_err(err)?;
-            Self::device_glu(stream, mode, &mut act, &gate, &up)?;
+            if let Some(gate_tbl) = fast.gate.as_ref() {
+                let mut gate = scratch.acquire(pairs * ff * 4).map_err(err)?;
+                stream
+                    .moe_linear(&mut gate, x, gate_tbl, fast.gate_bias.as_ref(), &ids, fast.kinds[0], ff, hidden, pairs, k)
+                    .map_err(err)?;
+                Self::device_glu(stream, mode, &mut act, &gate, &up)?;
+                temps.push(gate);
+            } else {
+                stream.activation(&mut act, &up, plain_act).map_err(err)?;
+            }
             stream
                 .moe_linear(&mut y, &act, &fast.down, fast.down_bias.as_ref(), &ids, fast.kinds[2], hidden, ff, pairs, 1)
                 .map_err(err)?;
-            temps.extend([gate, up, act]);
+            temps.extend([up, act]);
         } else {
             let block = moe_block_for(pairs, experts);
             let (sorted, blocks, post) = moe_sort_bytes(pairs, experts, block);
@@ -140,19 +148,24 @@ impl RustDecoder {
             // Llama 4 scales the expert input by the router score; every other model scales the output (in the combination)
             let input_weights = cfg.input_scaled.then_some(&weights);
             let mut act = scratch.acquire(pairs * ff * 4).map_err(err)?;
-            let fuse = fast.kinds[0] == fast.kinds[1] && fast.gate_bias.is_some() == fast.up_bias.is_some() && !matches!(mode, GluMode::Clamped(_));
-            if fuse {
+            let fuse = fast.gate.is_some()
+                && fast.kinds[0] == fast.kinds[1]
+                && fast.gate_bias.is_some() == fast.up_bias.is_some()
+                && !matches!(mode, GluMode::Clamped(_) | GluMode::Act(_) | GluMode::Plain(_));
+            if let (true, Some(gate_tbl)) = (fuse, fast.gate.as_ref()) {
                 let glu = match mode {
                     GluMode::Swiglu => MoeGlu { mode: 0, alpha: 0.0, limit: 0.0 },
                     GluMode::Geglu => MoeGlu { mode: 1, alpha: 0.0, limit: 0.0 },
                     GluMode::SwigluOai(alpha, limit) => MoeGlu { mode: 2, alpha, limit },
-                    GluMode::Clamped(_) => return Err("the fused expert kernels have no clamped activation".into()),
+                    GluMode::Clamped(_) | GluMode::Act(_) | GluMode::Plain(_) => {
+                        return Err("the fused expert kernels have no clamped or custom activation".into());
+                    }
                 };
                 stream
                     .moe_grouped_linear(MoeGrouped {
                         out: &mut act,
                         x,
-                        table: &fast.gate,
+                        table: gate_tbl,
                         table_up: Some(&fast.up),
                         bias: fast.gate_bias.as_ref(),
                         bias_up: fast.up_bias.as_ref(),
@@ -165,10 +178,10 @@ impl RustDecoder {
                         glu: Some(glu),
                     })
                     .map_err(err)?;
-            } else {
+            } else if let Some(gate_tbl) = fast.gate.as_ref() {
                 let mut gate = scratch.acquire(pairs * ff * 4).map_err(err)?;
                 let mut up = scratch.acquire(pairs * ff * 4).map_err(err)?;
-                for (out, table, bias, quant) in [(&mut gate, &fast.gate, &fast.gate_bias, fast.kinds[0]), (&mut up, &fast.up, &fast.up_bias, fast.kinds[1])] {
+                for (out, table, bias, quant) in [(&mut gate, gate_tbl, &fast.gate_bias, fast.kinds[0]), (&mut up, &fast.up, &fast.up_bias, fast.kinds[1])] {
                     stream
                         .moe_grouped_linear(MoeGrouped {
                             out,
@@ -189,6 +202,27 @@ impl RustDecoder {
                 }
                 Self::device_glu(stream, mode, &mut act, &gate, &up)?;
                 temps.extend([gate, up]);
+            } else {
+                let mut up = scratch.acquire(pairs * ff * 4).map_err(err)?;
+                stream
+                    .moe_grouped_linear(MoeGrouped {
+                        out: &mut up,
+                        x,
+                        table: &fast.up,
+                        table_up: None,
+                        bias: fast.up_bias.as_ref(),
+                        bias_up: None,
+                        input_weights,
+                        sort: &sort,
+                        quant_type: fast.kinds[1],
+                        rows: ff,
+                        cols: hidden,
+                        x_div: k,
+                        glu: None,
+                    })
+                    .map_err(err)?;
+                stream.activation(&mut act, &up, plain_act).map_err(err)?;
+                temps.push(up);
             }
             stream
                 .moe_grouped_linear(MoeGrouped {
@@ -213,9 +247,10 @@ impl RustDecoder {
         let mut shared = None;
         let mut gate_scale = None;
         if let Some(sh) = dm.shared.as_ref() {
+            let sh_mode = if sh.gate.is_some() { shared_mode } else { GluMode::Plain(plain_act) };
             if let Some(ref s2_lock) = self.backend_stream2 {
                 if let Ok(mut stream2) = s2_lock.try_lock() {
-                    shared = Some(Self::gated_run(&mut **stream2, scratch, shared_mode, &ExpertSrc::Device(sh), x, rows)?);
+                    shared = Some(Self::gated_run(&mut **stream2, scratch, sh_mode, &ExpertSrc::Device(sh), x, rows)?);
                     if let Some(g) = dev.shared_gate.as_ref() {
                         let mut scale = scratch.acquire(rows * 4).map_err(err)?;
                         stream2.moe_gate_scale(&mut scale, x, g, rows, hidden).map_err(err)?;
@@ -223,7 +258,7 @@ impl RustDecoder {
                     }
                     stream.wait_stream(&mut **stream2).map_err(err)?;
                 } else {
-                    shared = Some(Self::gated_run(stream, scratch, shared_mode, &ExpertSrc::Device(sh), x, rows)?);
+                    shared = Some(Self::gated_run(stream, scratch, sh_mode, &ExpertSrc::Device(sh), x, rows)?);
                     if let Some(g) = dev.shared_gate.as_ref() {
                         let mut scale = scratch.acquire(rows * 4).map_err(err)?;
                         stream.moe_gate_scale(&mut scale, x, g, rows, hidden).map_err(err)?;
@@ -231,7 +266,7 @@ impl RustDecoder {
                     }
                 }
             } else {
-                shared = Some(Self::gated_run(stream, scratch, shared_mode, &ExpertSrc::Device(sh), x, rows)?);
+                shared = Some(Self::gated_run(stream, scratch, sh_mode, &ExpertSrc::Device(sh), x, rows)?);
                 if let Some(g) = dev.shared_gate.as_ref() {
                     let mut scale = scratch.acquire(rows * 4).map_err(err)?;
                     stream.moe_gate_scale(&mut scale, x, g, rows, hidden).map_err(err)?;

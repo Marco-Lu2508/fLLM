@@ -1268,8 +1268,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 offline: hub_offline,
                 quant: None,
                 outtype: None,
-                direct: true,
-                no_direct: false,
+                direct: import_direct,
+                no_direct: import_no_direct,
             },
         )?),
         None => None,
@@ -1295,6 +1295,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|&bytes| bytes > 0)
             .map_or(0, |bytes| bytes + bytes / 16 + (256 << 20))
     };
+    let mut single_device_plan: Option<fllm_engine::backend::memory::MemoryPlan> = None;
     if let Some(list) = &multi_devices {
         // `--tensor-parallel auto`: with the model known, choose tensor / pipeline / expert parallelism for a node of identical large GPUs
         if parallel.tp_auto {
@@ -1551,6 +1552,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         );
                         fllm_engine::rust_decoder::set_ffn_host_from(plan.total_layers, plan.offload_layers);
                     }
+                    single_device_plan = Some(plan);
                 }
             }
         }
@@ -1685,42 +1687,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("[fllm-rs] Suffix cache kept in {dir}: {restored} earlier generations restored");
         }
     }
-    if device != "cpu" && multi_devices.is_none() {
-        let target_dev = plan_device.as_ref();
-        if let Some(d) = target_dev {
-            if let Ok(plan) = fllm_engine::backend::memory::MemoryPlan::plan_for_device(
-                &runtime.model,
-                d.free_memory_bytes,
-                d.total_memory_bytes,
-                gpu_memory_utilization,
-                Some(&gpu_layers),
-                max_batched_tokens,
-                &selected_backend,
-            ) {
-                #[cfg(feature = "cuda")]
-                if selected_backend == "cuda" {
-                    fllm_engine::backend::cuda::set_marlin_q4k_enabled(plan.marlin_q4k_dual);
-                }
-                tracing::info!(
-                    "Memory plan: target device [{}] {} (budget: {:.2} GB / {:.2} GB total, util: {:.0}%)",
-                    d.index,
-                    d.name,
-                    plan.budget_bytes as f64 / 1e9,
-                    plan.total_vram_bytes as f64 / 1e9,
-                    plan.utilization * 100.0
-                );
-                tracing::info!(
-                    "Memory split: {}/{} layers offloaded | Model weights: {:.2} GB{} | KV Cache: {:.2} GB ({} blocks) | Scratchpad: {:.2} MB",
-                    plan.offload_layers,
-                    plan.total_layers,
-                    plan.estimated_model_bytes as f64 / 1e9,
-                    if plan.marlin_q4k_dual { " (Q4_K dual Marlin enabled)" } else { "" },
-                    plan.kv_cache_bytes as f64 / 1e9,
-                    plan.kv_block_count,
-                    plan.scratchpad_bytes as f64 / 1e6
-                );
-            }
+    if let Some((d, plan)) = plan_device.as_ref().zip(single_device_plan.as_ref()) {
+        #[cfg(feature = "cuda")]
+        if selected_backend == "cuda" {
+            fllm_engine::backend::cuda::set_marlin_q4k_enabled(plan.marlin_q4k_dual);
         }
+        tracing::info!(
+            "Memory plan: target device [{}] {} (budget: {:.2} GB / {:.2} GB total, util: {:.0}%)",
+            d.index,
+            d.name,
+            plan.budget_bytes as f64 / 1e9,
+            plan.total_vram_bytes as f64 / 1e9,
+            plan.utilization * 100.0
+        );
+        tracing::info!(
+            "Memory split: {}/{} layers offloaded | Model weights: {:.2} GB{} | KV Cache: {:.2} GB ({} blocks) | Scratchpad: {:.2} MB",
+            plan.offload_layers,
+            plan.total_layers,
+            plan.estimated_model_bytes as f64 / 1e9,
+            if plan.marlin_q4k_dual { " (Q4_K dual Marlin enabled)" } else { "" },
+            plan.kv_cache_bytes as f64 / 1e9,
+            plan.kv_block_count,
+            plan.scratchpad_bytes as f64 / 1e6
+        );
     }
     runtime.attach_compute(&device)?;
     // where every layer lives and how fast that can be: the answer to "is my GPU doing the work?" (the numbers of a device: `fllm-rs doctor --gpu`)

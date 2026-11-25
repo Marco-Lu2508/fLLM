@@ -61,7 +61,7 @@ impl RustDecoder {
     /// Can the device run every layer of this model (the convolutions and the attention for the head widths of both kinds of layers)?
     pub(super) fn ink_device_possible(&self, backend: &dyn crate::backend::Backend) -> bool {
         let (Some(ic), Some(model)) = (self.cfg.inkling.as_ref(), self.inkling.as_deref()) else { return false };
-        if self.par.is_some() || std::env::var("FLLM_INKLING").is_ok_and(|v| v.eq_ignore_ascii_case("host")) || !matches!(self.device_glu_mode(), Some(GluMode::Swiglu)) {
+        if self.par.is_some() || std::env::var("FLLM_INKLING").is_ok_and(|v| v.eq_ignore_ascii_case("host")) || !matches!(self.device_glu_mode(0), Some(GluMode::Swiglu)) {
             return false;
         }
         let Ok(stream) = backend.create_stream() else { return false };
@@ -203,7 +203,7 @@ impl RustDecoder {
                 w[t] = weights[order.len() + s];
             }
         }
-        let mode = self.device_glu_mode().ok_or("Inkling feed-forward without a device activation")?;
+        let mode = self.device_glu_mode(0).ok_or("Inkling feed-forward without a device activation")?;
         let mut acc = scratch.acquire(rows * hidden * 4).map_err(err)?;
         stream.zero_buffer(&mut acc).map_err(err)?;
         for (e, tokens) in assigned.iter().enumerate().filter(|(_, t)| !t.is_empty()) {

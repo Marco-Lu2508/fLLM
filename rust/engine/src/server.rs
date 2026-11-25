@@ -220,12 +220,30 @@ impl GenerationTx {
         self.inner.capacity()
     }
     fn send(&self, event: Result<crate::runtime::TokenEvent, String>) -> Result<(), ()> {
-        self.inner.try_send(event).map_err(|error| {
-            if matches!(error, tokio_mpsc::error::TrySendError::Full(_)) {
-                *security::lock(&self.error) =
-                    Some("client output buffer is full; generation cancelled".into());
+        self.send_with_timeout(event, std::time::Duration::from_secs(30))
+    }
+
+    fn send_with_timeout(
+        &self,
+        mut event: Result<crate::runtime::TokenEvent, String>,
+        timeout: std::time::Duration,
+    ) -> Result<(), ()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.inner.try_send(event) {
+                Ok(()) => return Ok(()),
+                Err(tokio_mpsc::error::TrySendError::Closed(_)) => return Err(()),
+                Err(tokio_mpsc::error::TrySendError::Full(unsent)) => {
+                    if Instant::now() >= deadline {
+                        *security::lock(&self.error) =
+                            Some("client output buffer is full; generation cancelled".into());
+                        return Err(());
+                    }
+                    event = unsent;
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
             }
-        })
+        }
     }
 }
 struct GenerationRx {
@@ -4626,7 +4644,9 @@ mod chat_template_tests {
         };
         assert!(sender.send(Err("first".into())).is_ok());
         assert!(sender.send(Err("second".into())).is_ok());
-        assert!(sender.send(Err("overflow".into())).is_err());
+        assert!(sender
+            .send_with_timeout(Err("overflow".into()), std::time::Duration::from_millis(10))
+            .is_err());
         drop(sender);
         assert_eq!(receiver.recv().await.unwrap().unwrap_err(), "first");
         assert_eq!(receiver.recv().await.unwrap().unwrap_err(), "second");
@@ -4637,6 +4657,21 @@ mod chat_template_tests {
             .unwrap_err()
             .contains("buffer is full"));
         assert!(receiver.recv().await.is_none());
+
+        let (inner, mut rx) = tokio_mpsc::channel(1);
+        let sender = GenerationTx {
+            inner,
+            error: Arc::new(std::sync::Mutex::new(None)),
+            submitted: Instant::now(),
+        };
+        assert!(sender.send(Err("queued".into())).is_ok());
+        let sender_thread = sender.clone();
+        let handle = thread::spawn(move || sender_thread.send(Err("retried".into())));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert_eq!(rx.recv().await.unwrap().unwrap_err(), "queued");
+        assert!(handle.join().unwrap().is_ok());
+        assert_eq!(rx.recv().await.unwrap().unwrap_err(), "retried");
+
         let (inner, receiver) = tokio_mpsc::channel(1);
         let sender = GenerationTx {
             inner,
@@ -4645,6 +4680,7 @@ mod chat_template_tests {
         };
         drop(receiver);
         assert!(sender.is_closed());
+        assert!(sender.send(Err("closed".into())).is_err());
     }
 
     #[test]

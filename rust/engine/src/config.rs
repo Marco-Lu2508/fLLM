@@ -145,12 +145,38 @@ pub struct MoeConfig {
     pub swiglu_clamp: Option<f32>,
     /// The shared expert is clamped too (DeepSeek-V4); Hy4 clamps the routed experts only.
     pub swiglu_clamp_shared: bool,
+    /// Per-layer routed SwiGLU clamp bounds (Step-3.7-Flash); empty when uniform (`swiglu_clamp`).
+    pub layer_swiglu_clamp: Vec<Option<f32>>,
+    /// Per-layer shared-expert SwiGLU clamp bounds (Step-3.7-Flash); empty when uniform (`swiglu_clamp_shared`).
+    pub layer_swiglu_clamp_shared: Vec<Option<f32>>,
     /// Nemotron-H latent MoE: the routed experts work on a `latent`-wide projection of the hidden state.
     pub latent: Option<usize>,
     /// Experts that return their input (LongCat-Flash): the router scores `experts` of which the last `zero_experts` have no weights.
     pub zero_experts: usize,
     /// Router logits go through `cap * tanh(logit / cap)` before the gating function (Laguna).
     pub router_softcap: Option<f32>,
+}
+
+impl MoeConfig {
+    /// SwiGLU clamp limit for the routed experts of `layer` (`None` when unclamped).
+    pub fn routed_clamp(&self, layer: usize) -> Option<f32> {
+        if !self.layer_swiglu_clamp.is_empty() {
+            self.layer_swiglu_clamp.get(layer).copied().flatten()
+        } else {
+            self.swiglu_clamp
+        }
+    }
+
+    /// SwiGLU clamp limit for the shared expert of `layer` (`None` when unclamped).
+    pub fn shared_clamp(&self, layer: usize) -> Option<f32> {
+        if !self.layer_swiglu_clamp_shared.is_empty() {
+            self.layer_swiglu_clamp_shared.get(layer).copied().flatten()
+        } else if self.swiglu_clamp_shared {
+            self.routed_clamp(layer)
+        } else {
+            None
+        }
+    }
 }
 
 /// Gated DeltaNet layers (Qwen3-Next, Qwen3.5): a recurrent state replaces the KV cache.
@@ -357,6 +383,8 @@ impl Minimax3Config {
             swiglu_oai: Some((self.alpha, self.limit)),
             swiglu_clamp: None,
             swiglu_clamp_shared: true,
+            layer_swiglu_clamp: Vec::new(),
+            layer_swiglu_clamp_shared: Vec::new(),
             latent: None,
             zero_experts: 0,
             router_softcap: None,
@@ -773,15 +801,16 @@ impl ModelConfig {
             flipped: key(meta, a, "rope.flipped")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
-            factors: rope_factors(mapping, rope_dims, "rope_freqs.weight")?.or(rope_factors(
+            factors: rope_factors(mapping, rope_dims, head_dim, "rope_freqs.weight")?.or(rope_factors(
                 mapping,
                 rope_dims,
+                head_dim,
                 "rope_factors_short.weight",
             )?),
         };
         let mut rope = rope;
         if let RopeScaling::LongRope { long, .. } = &mut rope.scaling {
-            *long = rope_factors(mapping, rope_dims, "rope_factors_long.weight")?
+            *long = rope_factors(mapping, rope_dims, head_dim, "rope_factors_long.weight")?
                 .ok_or("longrope scaling needs rope_factors_long.weight")?;
             if rope.factors.is_none() {
                 return Err("longrope scaling needs rope_factors_short.weight".into());
@@ -1115,7 +1144,7 @@ impl ModelConfig {
             tied_embeddings: tied,
             moe: match &minimax3 {
                 Some(m) => Some(m.moe_config()),
-                None => parse_moe(mapping, a, ff)?,
+                None => parse_moe(mapping, a, ff, layers)?,
             },
             position_offset: uint(meta, a, "position_embedding_offset").unwrap_or(0),
             alibi_slopes: match key(meta, a, "attention.alibi_slopes") {
@@ -1193,7 +1222,7 @@ impl ModelConfig {
             attention_chunk: uint(meta, a, "attention.chunk_size"),
             attn_gate: if is_k2(a) {
                 AttnGate::Softplus(std::f32::consts::LN_2)
-            } else if a == "laguna" && !key(meta, a, "attention.gate_sigmoid").and_then(Value::as_bool).unwrap_or(false) {
+            } else if matches!(a, "laguna" | "step35") && !key(meta, a, "attention.gate_sigmoid").and_then(Value::as_bool).unwrap_or(a == "step35") {
                 // Laguna gates with softplus; Step-3.5 files (same layers) say `attention.gate_sigmoid`
                 AttnGate::Softplus(1.0)
             } else {
@@ -1472,7 +1501,7 @@ fn parse_delta(meta: &Map<String, Value>, arch: &str) -> Option<DeltaConfig> {
     })
 }
 
-fn parse_moe(mapping: &MappedGguf, arch: &str, ff: usize) -> Result<Option<MoeConfig>, String> {
+fn parse_moe(mapping: &MappedGguf, arch: &str, ff: usize, layers: usize) -> Result<Option<MoeConfig>, String> {
     let meta = &mapping.index().metadata;
     let experts = uint(meta, arch, "expert_count").unwrap_or(0);
     if experts == 0 {
@@ -1513,6 +1542,51 @@ fn parse_moe(mapping: &MappedGguf, arch: &str, ff: usize) -> Result<Option<MoeCo
     if weight_norm_p.is_some_and(|p| !p.is_finite() || p <= 0.0) {
         return Err("DBRX expert_weights_norm_p must be finite and positive".into());
     }
+    let clamp_val = key(meta, arch, "expert_swiglu_clamp").or_else(|| key(meta, arch, "swiglu_clamp_exp"));
+    let (swiglu_clamp, layer_swiglu_clamp) = match clamp_val {
+        Some(Value::Array(values)) => {
+            let per_layer: Vec<Option<f32>> = (0..layers)
+                .map(|i| values.get(i).and_then(Value::as_f64).map(|f| f as f32).filter(|f| f.is_finite() && *f > 0.0))
+                .collect();
+            if per_layer.iter().all(Option::is_none) {
+                (None, Vec::new())
+            } else {
+                let uniform = per_layer.first().copied().flatten().filter(|first| per_layer.iter().all(|v| *v == Some(*first)));
+                (uniform, per_layer)
+            }
+        }
+        Some(v) => (v.as_f64().map(|f| f as f32).filter(|f| f.is_finite() && *f > 0.0), Vec::new()),
+        None => (None, Vec::new()),
+    };
+    let clamp_shared_val = key(meta, arch, "expert_swiglu_clamp_shared").or_else(|| key(meta, arch, "swiglu_clamp_shexp"));
+    let (swiglu_clamp_shared, layer_swiglu_clamp_shared) = match clamp_shared_val {
+        Some(Value::Array(values)) => {
+            let per_layer: Vec<Option<f32>> = (0..layers)
+                .map(|i| match values.get(i) {
+                    Some(Value::Bool(true)) => {
+                        if layer_swiglu_clamp.is_empty() {
+                            swiglu_clamp
+                        } else {
+                            layer_swiglu_clamp.get(i).copied().flatten()
+                        }
+                    }
+                    Some(Value::Bool(false)) | None => None,
+                    Some(v) => v.as_f64().map(|f| f as f32).filter(|f| f.is_finite() && *f > 0.0),
+                })
+                .collect();
+            if per_layer.iter().all(Option::is_none) {
+                (false, Vec::new())
+            } else {
+                (true, per_layer)
+            }
+        }
+        Some(Value::Bool(b)) => (*b, Vec::new()),
+        Some(v) => match v.as_f64().map(|f| f as f32).filter(|f| f.is_finite() && *f > 0.0) {
+            Some(limit) => (true, vec![Some(limit); layers]),
+            None => (false, Vec::new()),
+        },
+        None => (true, Vec::new()),
+    };
     Ok(Some(MoeConfig {
         experts,
         used,
@@ -1536,8 +1610,10 @@ fn parse_moe(mapping: &MappedGguf, arch: &str, ff: usize) -> Result<Option<MoeCo
         latent: uint(meta, arch, "moe_latent_size").filter(|&n| n > 0),
         zero_experts: uint(meta, arch, "expert_zero_count").unwrap_or(0),
         router_softcap: float(meta, arch, "router_logit_softcapping").filter(|c| *c > 0.0),
-        swiglu_clamp: float(meta, arch, "expert_swiglu_clamp").filter(|l| *l > 0.0),
-        swiglu_clamp_shared: key(meta, arch, "expert_swiglu_clamp_shared").and_then(Value::as_bool).unwrap_or(true),
+        swiglu_clamp,
+        swiglu_clamp_shared,
+        layer_swiglu_clamp,
+        layer_swiglu_clamp_shared,
         swiglu_oai: match (arch, float(meta, arch, "expert_swiglu_limit")) {
             (_, Some(limit)) => Some((
                 float(meta, arch, "expert_swiglu_alpha").unwrap_or(1.702),
@@ -1579,19 +1655,22 @@ fn parse_scaling(meta: &Map<String, Value>, arch: &str) -> Result<RopeScaling, S
     }
 }
 
-fn rope_factors(mapping: &MappedGguf, dims: usize, name: &str) -> Result<Option<Vec<f32>>, String> {
+fn rope_factors(mapping: &MappedGguf, dims: usize, head_dim: usize, name: &str) -> Result<Option<Vec<f32>>, String> {
     if !has(mapping, name) {
         return Ok(None);
     }
     let tensor = crate::compute::Tensor::load(mapping, name)?;
-    if tensor.data.len() != dims / 2 {
-        return Err(format!(
-            "{name} has {} entries, expected {}",
-            tensor.data.len(),
-            dims / 2
-        ));
+    let want = dims / 2;
+    if tensor.data.len() == want {
+        return Ok(Some(tensor.data));
     }
-    Ok(Some(tensor.data))
+    if dims <= head_dim && tensor.data.len() == head_dim / 2 {
+        return Ok(Some(tensor.data[..want].to_vec()));
+    }
+    Err(format!(
+        "{name} has {} entries, expected {want}",
+        tensor.data.len(),
+    ))
 }
 
 #[cfg(test)]
@@ -1675,5 +1754,129 @@ pub(crate) mod tests_support {
             gemma: None,
             hybrid: Default::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fllm_checkpoint::gguf::{write_to, Meta, OutTensor};
+    use fllm_checkpoint::safetensors::Payload;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    fn f32_tensor(name: &str, dims: Vec<u64>, data: &[f32]) -> OutTensor {
+        let mut bytes = Vec::with_capacity(data.len() * 4);
+        for v in data {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let data_len = bytes.len() as u64;
+        OutTensor {
+            name: name.to_owned(),
+            dims,
+            source_dtype: "F32".into(),
+            dtype: "F32".into(),
+            data: Payload::Owned(Arc::new(Vec::new()), 0..0),
+            packed: None,
+            data_len,
+            source_for_output: None,
+            add: 0.0,
+            owned: Some(bytes),
+            parts: Vec::new(),
+        }
+    }
+
+    fn write_test_gguf(meta: Vec<(String, Meta)>, tensors: Vec<OutTensor>) -> MappedGguf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let id = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("fllm_config_test_{}_{}.gguf", std::process::id(), id));
+        {
+            let mut file = std::fs::File::create(&path).unwrap();
+            write_to(&mut file, &meta, &tensors).unwrap();
+        }
+        let mapped = MappedGguf::open(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        mapped
+    }
+
+    fn base_meta(arch: &str) -> Vec<(String, Meta)> {
+        vec![
+            ("general.architecture".into(), Meta::Str(arch.into())),
+            (format!("{arch}.embedding_length"), Meta::U32(32)),
+            (format!("{arch}.block_count"), Meta::U32(2)),
+            (format!("{arch}.attention.head_count"), Meta::U32(2)),
+            (format!("{arch}.attention.head_count_kv"), Meta::U32(1)),
+            (format!("{arch}.attention.key_length"), Meta::U32(16)),
+            (format!("{arch}.feed_forward_length"), Meta::U32(64)),
+        ]
+    }
+
+    #[test]
+    fn rope_factors_slices_head_dim_when_rope_dims_is_partial() {
+        let mut meta = base_meta("laguna");
+        meta.push(("laguna.rope.dimension_count".into(), Meta::U32(8)));
+        let emb = vec![0.0f32; 32 * 16];
+        let freqs = [1.5f32, 2.0, 2.5, 3.0, 0.0, 0.0, 0.0, 0.0];
+        let mapped = write_test_gguf(
+            meta,
+            vec![
+                f32_tensor("token_embd.weight", vec![32, 16], &emb),
+                f32_tensor("rope_freqs.weight", vec![8], &freqs),
+            ],
+        );
+        let cfg = ModelConfig::from_gguf(&mapped).unwrap();
+        assert_eq!(cfg.rope.dims, 8);
+        assert_eq!(cfg.rope.factors, Some(vec![1.5, 2.0, 2.5, 3.0]));
+        let tables = crate::rope::build(&cfg.rope, cfg.rope.base, 8);
+        assert!(tables.cos.iter().chain(&tables.sin).all(|v| v.is_finite()));
+
+        // A factor tensor that matches neither rope.dims/2 nor head_dim/2 is still rejected.
+        let mut bad_meta = base_meta("laguna");
+        bad_meta.push(("laguna.rope.dimension_count".into(), Meta::U32(8)));
+        let bad = write_test_gguf(
+            bad_meta,
+            vec![
+                f32_tensor("token_embd.weight", vec![32, 16], &emb),
+                f32_tensor("rope_freqs.weight", vec![5], &[1.0; 5]),
+            ],
+        );
+        assert!(ModelConfig::from_gguf(&bad).is_err());
+    }
+
+    #[test]
+    fn moe_swiglu_clamp_and_step35_gate_work_across_layouts() {
+        let emb = vec![0.0f32; 32 * 16];
+        let mut per_layer_meta = base_meta("step35");
+        per_layer_meta.extend([
+            ("step35.expert_count".into(), Meta::U32(4)),
+            ("step35.expert_used_count".into(), Meta::U32(2)),
+            ("step35.swiglu_clamp_exp".into(), Meta::F32s(vec![0.0, 7.0])),
+            ("step35.swiglu_clamp_shexp".into(), Meta::F32s(vec![0.0, 5.0])),
+        ]);
+        let step = write_test_gguf(per_layer_meta, vec![f32_tensor("token_embd.weight", vec![32, 16], &emb)]);
+        let cfg = ModelConfig::from_gguf(&step).unwrap();
+        assert_eq!(cfg.attn_gate, AttnGate::Sigmoid);
+        let moe = cfg.moe.as_ref().unwrap();
+        assert_eq!(moe.swiglu_clamp, None);
+        assert_eq!(moe.routed_clamp(0), None);
+        assert_eq!(moe.routed_clamp(1), Some(7.0));
+        assert_eq!(moe.shared_clamp(0), None);
+        assert_eq!(moe.shared_clamp(1), Some(5.0));
+
+        let mut scalar_meta = base_meta("laguna");
+        scalar_meta.extend([
+            ("laguna.expert_count".into(), Meta::U32(4)),
+            ("laguna.expert_used_count".into(), Meta::U32(2)),
+            ("laguna.expert_swiglu_clamp".into(), Meta::F32(10.0)),
+            ("laguna.expert_swiglu_clamp_shared".into(), Meta::Bool(false)),
+        ]);
+        let laguna = write_test_gguf(scalar_meta, vec![f32_tensor("token_embd.weight", vec![32, 16], &emb)]);
+        let cfg = ModelConfig::from_gguf(&laguna).unwrap();
+        assert_eq!(cfg.attn_gate, AttnGate::Softplus(1.0));
+        let moe = cfg.moe.as_ref().unwrap();
+        assert_eq!(moe.swiglu_clamp, Some(10.0));
+        assert!(!moe.swiglu_clamp_shared);
+        assert_eq!(moe.routed_clamp(0), Some(10.0));
+        assert_eq!(moe.shared_clamp(0), None);
     }
 }

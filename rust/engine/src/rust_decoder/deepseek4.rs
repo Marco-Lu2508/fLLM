@@ -392,7 +392,7 @@ impl RustDecoder {
             if let Some(norm) = &layer.ffn_norm {
                 self.norm(&mut normed, norm);
             }
-            let mlp = self.ffn_forward(layer, &normed, &mut workspace)?;
+            let mlp = self.ffn_forward(i, layer, &normed, &mut workspace)?;
             combine_streams(&mut streams, &post, Some(&comb), &mlp, rows, hc, hidden);
             dump_layer("ffn", i, &streams);
         }
@@ -705,7 +705,7 @@ impl RustDecoder {
             && stream.supports_hc(v.hc_mult)
             && stream.supports_copy_columns()
             && shapes.iter().all(|s| stream.supports_v4(s))
-            && self.device_glu_mode().is_some();
+            && self.device_glu_mode(0).is_some();
         if ok && state_bytes > (16usize << 30) {
             eprintln!("[fllm-rs] DeepSeek-V4 stays on the host: the per-sequence state for a context of {} tokens would take {} MiB of device memory", self.stride * self.block_size, state_bytes >> 20);
             return false;
@@ -898,13 +898,13 @@ impl RustDecoder {
             }
             let mut out = None;
             if let (Ffn::Moe(_), Some(dm)) = (&layer.ffn, dev_layer.moe.as_ref()) {
-                out = self.moe_fast(stream, scratch, dm, &ffn_normed, rows)?;
+                out = self.moe_fast(stream, scratch, i, dm, &ffn_normed, rows)?;
             }
             if out.is_none() && !dev_layer.host_ffn {
                 if let (Ffn::Moe(moe), Some(_)) = (&layer.ffn, dev_layer.moe.as_ref()) {
                     let mut host_in = vec![0.0f32; rows * hidden];
                     stream.download(cast_f32_to_u8_mut(&mut host_in), &ffn_normed).map_err(err)?;
-                    out = self.moe_on_device(stream, scratch, moe, dev_layer.moe.as_ref(), &ffn_normed, &host_in, rows)?;
+                    out = self.moe_on_device(stream, scratch, i, moe, dev_layer.moe.as_ref(), &ffn_normed, &host_in, rows)?;
                 }
             }
             let out = match out {
@@ -913,7 +913,7 @@ impl RustDecoder {
                     let mut host_in = vec![0.0f32; rows * hidden];
                     stream.download(cast_f32_to_u8_mut(&mut host_in), &ffn_normed).map_err(err)?;
                     let mut workspace = compute::ProjectionGroupWorkspace::default();
-                    let host_out = self.ffn_forward(layer, &host_in, &mut workspace)?;
+                    let host_out = self.ffn_forward(i, layer, &host_in, &mut workspace)?;
                     let mut buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                     stream.upload(&mut buf, cast_f32_to_u8(&host_out)).map_err(err)?;
                     buf

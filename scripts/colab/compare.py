@@ -66,6 +66,10 @@ MODELS = {
     "llama3b": ("Llama-3.2-3B-Instruct Q4_K_M (GGUF)", "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf", 4000),
     "llama3b-q8": ("Llama-3.2-3B-Instruct Q8_0 (GGUF)", "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q8_0.gguf", 5500),
     "qwen3-30b-a3b": ("Qwen3-30B-A3B Q4_K_M (GGUF, MoE)", "https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf", 22000),
+    # Hugging Face MoE checkpoints runnable across fLLM (`fllm-rs convert`), vLLM, and SGLang
+    "qwen15-moe-gptq": ("Qwen1.5-MoE-A2.7B-Chat GPTQ-Int4 (MoE)", "Qwen/Qwen1.5-MoE-A2.7B-Chat-GPTQ-Int4", 9500),
+    "olmoe": ("OLMoE-1B-7B-0924-Instruct bf16 (MoE)", "allenai/OLMoE-1B-7B-0924-Instruct", 16000),
+    "qwen3-30b-a3b-gptq": ("Qwen3-30B-A3B GPTQ-Int4 (MoE)", "Qwen/Qwen3-30B-A3B-GPTQ-Int4", 20000),
 }
 GGUF_ENGINES = ("fllm", "llama.cpp", "ik_llama.cpp", "ollama")
 HF_ENGINES = ("fllm", "vllm", "sglang")
@@ -111,18 +115,27 @@ def get_fllm(args, work):
             sh("curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal")
         rc, cc = sh("nvidia-smi --query-gpu=compute_cap --format=csv,noheader")
         arch = cc.strip().splitlines()[0].replace(".", "") if rc == 0 and cc.strip() else "89"
-        if arch in ("90", "100", "120") and not os.path.exists(f"{src}/third_party/cutlass"):
-            sh(f"git clone -q --depth 1 --branch v4.8.0 https://github.com/NVIDIA/cutlass {src}/third_party/cutlass")
+        for dep_name, repo, tag, marker in (
+            ("cutlass", "NVIDIA/cutlass", "v4.8.0", "include/cutlass/cutlass.h"),
+            ("flashinfer", "flashinfer-ai/flashinfer", "v0.6.5", "include/flashinfer/attention/prefill.cuh"),
+        ):
+            target = f"{src}/third_party/{dep_name}"
+            if not os.path.exists(f"{target}/{marker}"):
+                sh(f"rm -rf {target} && mkdir -p {src}/third_party && git clone -q --depth 1 --branch {tag} https://github.com/{repo} {target}")
         log(f"building fLLM from source for sm_{arch} ...")
         rc, out = sh(f"cd {src} && FLLM_CUDA_ARCHS={arch} cargo build --release --locked --features cuda -p fllm-engine --bin fllm-rs 2>&1 | tail -3", timeout=3 * 3600)
         binary = f"{src}/target/release/fllm-rs"
         return binary if os.path.exists(binary) else None
-    # `releases/latest` skips pre-releases and all 0.x releases are pre-releases: take the newest one that is not a draft
-    rel = next(r for r in json.load(urllib.request.urlopen(f"https://api.github.com/repos/{REPO}/releases?per_page=5")) if not r.get("draft") and not str(r.get("tag_name", "")).startswith("colab-"))
+    if getattr(args, "colab_binary", False):
+        rel = json.load(urllib.request.urlopen(f"https://api.github.com/repos/{REPO}/releases/tags/colab-latest"))
+        name = "fllm-colab-cuda.tar.gz"
+    else:
+        # `releases/latest` skips pre-releases and all 0.x releases are pre-releases: take the newest one that is not a draft
+        rel = next(r for r in json.load(urllib.request.urlopen(f"https://api.github.com/repos/{REPO}/releases?per_page=5")) if not r.get("draft") and not str(r.get("tag_name", "")).startswith("colab-"))
+        name = "fllm-linux-x86_64-cuda.tar.gz"
     assets = {a["name"]: a["browser_download_url"] for a in rel["assets"]}
-    name = "fllm-linux-x86_64-cuda.tar.gz"
     if name not in assets:
-        log("the latest release has no CUDA archive")
+        log(f"release {rel.get('tag_name', '?')} has no {name}")
         return None
     tgz = download(assets[name], os.path.join(work, name))
     if name + ".sha256" in assets:
@@ -136,7 +149,9 @@ def get_fllm(args, work):
         t.extractall(out)
     for root, _, files in os.walk(out):
         if "fllm-rs" in files:
-            return os.path.join(root, "fllm-rs")
+            binary = os.path.join(root, "fllm-rs")
+            os.chmod(binary, os.stat(binary).st_mode | 0o111)
+            return binary
     return None
 
 
@@ -414,10 +429,54 @@ def fllm_control_options(extra_args):
 
 # ---- main ----------------------------------------------------------------------------------------------------------------
 
-def main():
+def dry_run_plan(args, control_args, control_env, sizes, users, ctx_one, ctx, vram):
+    maxu = max(users)
+    selected_engines = (
+        [e.strip() for e in args.only.split(",") if e.strip()]
+        if args.only
+        else [e for e, off in (("fllm", False), ("llama.cpp", args.no_llama), ("ik_llama.cpp", args.no_ik),
+                                ("ollama", args.no_ollama), ("vllm", args.no_vllm), ("sglang", args.no_sglang)) if not off]
+    )
+    print(f"DRY RUN: sizes={sizes} users={users} tokens={args.tokens} ctx_one={ctx_one} ctx={ctx} vram_mib={vram}")
+    print(f"Control env={control_env} args={control_args} rival_prefix_cache={args.rival_prefix_cache}")
+    planned_models = 0
+    for key in args.models.split(","):
+        if key not in MODELS:
+            print(f"  UNKNOWN model: {key}")
+            continue
+        label, url, need = MODELS[key]
+        hf = not url.startswith("http")
+        if vram < need:
+            print(f"  SKIP {key} ({label}): needs {need} MiB > {vram} MiB")
+            continue
+        planned_models += 1
+        eligible = [e for e in selected_engines if e in (HF_ENGINES if hf else GGUF_ENGINES)]
+        print(f"  MODEL {key}: {label} | repo={url} | format={'HF' if hf else 'GGUF'} | need={need} MiB | engines={eligible}")
+        path = f"{args.work}/{url.split('/')[-1]}.gguf" if hf else f"{args.work}/{os.path.basename(url)}"
+        hf_dir = f"{args.work}/{url.split('/')[1]}" if hf else ""
+        for e in eligible:
+            if e == "fllm":
+                dev = ["--device", "cpu", "--threads", str(args.threads or 1)] if args.cpu else ["--device", "cuda"]
+                cmd = [args.fllm or "fllm-rs", "serve", "--model", path, *dev, "--port", "<PORT>", "--ctx", f"{ctx_one}", "--max-seqs", str(maxu), "--model-name", "m", *control_args]
+            elif e == "vllm":
+                cmd = ["vllm", "serve", hf_dir, "--port", "<PORT>", "--max-model-len", str(ctx_one), "--max-num-seqs", str(maxu),
+                       "--gpu-memory-utilization", "0.85", "--served-model-name", "m"] + ([] if args.rival_prefix_cache else ["--no-enable-prefix-caching"])
+            elif e == "sglang":
+                cmd = ["python", "-m", "sglang.launch_server", "--model-path", hf_dir, "--port", "<PORT>", "--host", "127.0.0.1",
+                       "--context-length", str(ctx_one), "--max-running-requests", str(maxu), "--mem-fraction-static", "0.8",
+                       "--served-model-name", "m"] + ([] if args.rival_prefix_cache else ["--disable-radix-cache"])
+            else:
+                cmd = [e, "--model", path, "--max-seqs", str(maxu)]
+            print(f"    [{e}] {shlex.join(cmd)}")
+    print(f"ALL PLANNED ({planned_models} model(s), {len(sizes) * len(users)} cells/engine)")
+    return 0
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--work", default="/content/fllm_compare" if os.path.exists("/content") else os.path.abspath("fllm_compare"))
     ap.add_argument("--fllm", help="an fllm-rs binary to use instead of the release")
+    ap.add_argument("--colab-binary", action="store_true", help="download the pre-release colab-latest CUDA test build instead of the newest signed release")
     ap.add_argument("--build-from-source", action="store_true", help="build fLLM from main (newest changes, takes longer)")
     ap.add_argument("--models", default="llama8b,llama8b-awq,qwen2b", help=f"comma-separated, of {','.join(MODELS)}")
     ap.add_argument("--sizes", default="100,500,2000")
@@ -436,17 +495,23 @@ def main():
                     help="leave the prefix cache of vLLM and SGLang on (their default); without it they run with it off like the fLLM control, so that no engine "
                          "reuses the 30 tokens of the shared chat-template header between requests")
     ap.add_argument("--only", help="comma-separated engines to measure (the others are still installed if needed), e.g. fllm")
-    args = ap.parse_args()
+    ap.add_argument("--dry-run", action="store_true", help="print the planned models, concurrency/context matrix, and engine launch commands without downloading or running servers")
+    ap.add_argument("--gpu-vram-mib", type=int, default=0, help="assumed GPU VRAM in MiB during --dry-run when no GPU is present (default: 24576)")
+    args = ap.parse_args(argv)
     try:
         control_args, control_env = fllm_control_options(args.fllm_args)
     except ValueError as ex:
         ap.error(str(ex))
-    os.makedirs(args.work, exist_ok=True)
-    os.chdir(args.work)
     sizes = [int(x) for x in args.sizes.split(",")]
     users = [int(x) for x in args.users.split(",")]
     maxu = max(users)
-    ctx = (max(sizes) + args.tokens + 400) * maxu
+    ctx_one = max(sizes) + args.tokens + 400
+    ctx = ctx_one * maxu
+    if args.dry_run:
+        vram = 10**9 if args.cpu else (args.gpu_vram_mib or 24576)
+        return dry_run_plan(args, control_args, control_env, sizes, users, ctx_one, ctx, vram)
+    os.makedirs(args.work, exist_ok=True)
+    os.chdir(args.work)
     result = {"schema_version": 2, "started": time.strftime("%Y-%m-%d %H:%M:%S"), "seed": args.seed,
               "measurement": {"tokens": "server_usage_only", "first_s": "first_nonempty_output_delta",
                               "each_tok_s": "end_to_end_including_ttft"},
@@ -506,7 +571,6 @@ def main():
             path = download(url, os.path.join(args.work, os.path.basename(url)))
         per = {}
         no_think = {"chat_template_kwargs": {"enable_thinking": False}}
-        ctx_one = max(sizes) + args.tokens + 400
         for name, binary in engines.items():
             if not binary or name not in (HF_ENGINES if hf else GGUF_ENGINES) or (args.only and name not in args.only.split(",")):
                 continue
@@ -519,7 +583,7 @@ def main():
             extra = {}
             if name == "fllm":
                 device = ["--device", "cpu", "--threads", str(args.threads)] if args.cpu else ["--device", "cuda"]
-                server = Server([binary, "serve", "--model", path] + device + ["--port", str(port), "--ctx", str(ctx), "--max-seqs", str(maxu), "--model-name", "m"] + control_args,
+                server = Server([binary, "serve", "--model", path] + device + ["--port", str(port), "--ctx", str(ctx_one), "--max-seqs", str(maxu), "--model-name", "m"] + control_args,
                                 f"http://127.0.0.1:{port}/health", "m", env=control_env, logfile=f"fllm-{key}.log")
                 extra = no_think
             elif name in ("llama.cpp", "ik_llama.cpp"):
@@ -530,7 +594,7 @@ def main():
                 extra = no_think
             elif name == "ollama":
                 env = {"OLLAMA_HOST": f"127.0.0.1:{port}", "OLLAMA_MODELS": os.path.join(args.work, "ollama-models"),
-                       "OLLAMA_NUM_PARALLEL": str(maxu), "OLLAMA_CONTEXT_LENGTH": str(max(sizes) + args.tokens + 400), "OLLAMA_MAX_QUEUE": "512"}
+                       "OLLAMA_NUM_PARALLEL": str(maxu), "OLLAMA_CONTEXT_LENGTH": str(ctx_one), "OLLAMA_MAX_QUEUE": "512"}
                 open("Modelfile", "w").write(f"FROM {path}\n")
 
                 def create(env=env):

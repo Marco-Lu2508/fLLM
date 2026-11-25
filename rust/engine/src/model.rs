@@ -157,22 +157,23 @@ const ARCHITECTURE_ALIASES: &[(&str, &str)] = &[
 ];
 
 /// llama.cpp architectures of layouts this program does not implement: the loader says why instead of listing the supported names.
-const UNSUPPORTED_ARCHITECTURES: &[(&str, &str)] = &[
-    (
-        "step35",
-        "Step-3.5 / Step-3.7-Flash: the last layers clamp the SwiGLU of the experts and the shared expert (swiglu_clamp_exp / swiglu_clamp_shexp) and the full-attention layers use scaled partial rotary factors (rope_freqs.weight); neither is implemented (the safetensors converter refuses clamped checkpoints for the same reason)",
-    ),
-    (
-        "glm5-next",
-        "GLM-5-Next / GLM-5.3-Flash: multi-stream residuals (hyper_connection.*, Sinkhorn mixing), the sparse-attention indexer and a KDA/latent-attention hybrid are not implemented",
-    ),
-];
+const UNSUPPORTED_ARCHITECTURES: &[(&str, &str)] = &[];
 
 fn canonical_architecture(mapping: MappedGguf) -> Result<MappedGguf, String> {
     let arch = mapping.index().metadata.get("general.architecture").and_then(Value::as_str).unwrap_or_default();
     if arch == "qwen4exp" {
         // Qwen3.8-Flash-Next as llama.cpp writes it: other metadata keys and tensor names than fLLM's own files
         return crate::qwen4_gguf::view(mapping);
+    }
+    if arch == "glm5-next" {
+        // GLM-5-Next / GLM-5.3-Flash: KDA + MLA + DSA + Sinkhorn HC + clamped-SwiGLU MoE (`kimi-linear` view)
+        return crate::glm5_gguf::view(mapping);
+    }
+    if arch == "step35" {
+        // Step-3.5 / Step-3.7-Flash: Laguna layer with sigmoid attention gate, per-layer SwiGLU clamps and partial RoPE frequencies
+        return Ok(mapping
+            .with_architecture_alias("step35", "laguna")
+            .with_metadata_default("laguna.attention.gate_sigmoid", Value::Bool(true)));
     }
     Ok(match ARCHITECTURE_ALIASES.iter().find(|(from, _)| *from == arch) {
         // the BitNet fork writes the query and key rows in the Hugging Face order (rotate-half pairs); mainline `bitnet` files
@@ -734,5 +735,64 @@ mod tests {
         for (name, reason) in UNSUPPORTED_ARCHITECTURES {
             assert!(!SUPPORTED_ARCHITECTURES.contains(name) && reason.len() > 40, "{name}");
         }
+        assert!(UNSUPPORTED_ARCHITECTURES.is_empty());
+    }
+
+    #[test]
+    fn step35_and_glm5_next_canonicalize_to_supported_architectures() {
+        use fllm_checkpoint::gguf::{write_to, Meta, OutTensor};
+        use fllm_checkpoint::safetensors::Payload;
+        let path = std::env::temp_dir().join(format!("fllm_step35_alias_{}.gguf", std::process::id()));
+        let hidden = 16usize;
+        let vocab = 32usize;
+        let meta = vec![
+            ("general.architecture".into(), Meta::Str("step35".into())),
+            ("step35.embedding_length".into(), Meta::U32(hidden as u32)),
+            ("step35.block_count".into(), Meta::U32(2)),
+            ("step35.feed_forward_length".into(), Meta::U32(32)),
+            ("step35.attention.head_count".into(), Meta::U32(2)),
+            ("step35.attention.head_count_kv".into(), Meta::U32(1)),
+            ("step35.attention.key_length".into(), Meta::U32(8)),
+            ("step35.rope.dimension_count".into(), Meta::U32(4)),
+            ("step35.swiglu_clamp_exp".into(), Meta::F32s(vec![0.0, 6.0])),
+            ("step35.swiglu_clamp_shexp".into(), Meta::F32s(vec![0.0, 4.0])),
+        ];
+        let emb: Vec<f32> = vec![0.1; vocab * hidden];
+        let freqs: Vec<f32> = vec![1.0, 1.5, 1.0, 1.0];
+        let f32_t = |name: &str, dims: Vec<u64>, data: &[f32]| {
+            let mut bytes = Vec::with_capacity(data.len() * 4);
+            for v in data {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            let data_len = bytes.len() as u64;
+            OutTensor {
+                name: name.to_owned(),
+                dims,
+                source_dtype: "F32".into(),
+                dtype: "F32".into(),
+                data: Payload::Owned(Arc::new(Vec::new()), 0..0),
+                packed: None,
+                data_len,
+                source_for_output: None,
+                add: 0.0,
+                owned: Some(bytes),
+                parts: Vec::new(),
+            }
+        };
+        let tensors = vec![
+            f32_t("token_embd.weight", vec![hidden as u64, vocab as u64], &emb),
+            f32_t("rope_freqs.weight", vec![4], &freqs),
+        ];
+        {
+            let mut file = std::fs::File::create(&path).unwrap();
+            write_to(&mut file, &meta, &tensors).unwrap();
+        }
+        let mapped = fllm_gguf_probe::MappedGguf::open(&path).unwrap();
+        let canonical = canonical_architecture(mapped).unwrap();
+        let cfg = ModelConfig::from_gguf(&canonical).unwrap();
+        assert_eq!(cfg.arch, "laguna");
+        assert!(matches!(cfg.attn_gate, crate::config::AttnGate::Sigmoid));
+        assert_eq!(cfg.rope.dims, 4);
+        let _ = std::fs::remove_file(&path);
     }
 }

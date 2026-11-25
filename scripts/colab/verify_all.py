@@ -280,7 +280,17 @@ def gpu_steps_reason():
     return None
 
 
+def ensure_hw_and_devices():
+    """Populate hardware and device backend facts if a step is run standalone (e.g. --steps fp8kv)."""
+    if "gpu_count" not in CACHE:
+        step_hw()
+    if MODE == "gpu" and CACHE.get("gpu_count", 0) > 0 and "cuda_compiled" not in CACHE and BINARY is not None:
+        step_devices()
+
+
 def require_gpu_step():
+    if MODE == "gpu":
+        ensure_hw_and_devices()
     reason = gpu_steps_reason()
     if reason:
         raise StepSkipped(reason)
@@ -481,11 +491,15 @@ def token_count(text):
     raise StepFailed("cannot read token count from /tokenize: %s" % json.dumps(data)[:200])
 
 
-def make_prompt(n_tokens):
-    """Build a prompt of about n_tokens tokens using /tokenize for sizing."""
+def make_prompt(n_tokens, seed=None):
+    """Build a cold prompt of about n_tokens tokens with a unique prefix so prefix caching cannot hit."""
+    nonce = seed if seed is not None else ("%d-%d" % (n_tokens, time.time_ns()))
+    prefix = "[cold-ctx-%s] " % nonce
     base = "The quick brown fox jumps over the lazy dog near the river bank. "
     per = max(1, token_count(base))
-    text = base * max(1, n_tokens // per)
+    head_tokens = token_count(prefix)
+    rem = max(0, n_tokens - head_tokens)
+    text = prefix + base * max(1, rem // per)
     count = token_count(text)
     filler = "Additionally, here is one more simple sentence to lengthen the prompt. "
     for _ in range(24):
@@ -812,11 +826,12 @@ def step_nvfp4():
 def step_speed():
     require_gpu_step()
     path = model_path("dense")
-    start_server(path, device="cuda", tag="speed", timeout=MODEL_TIMEOUT)
+    start_server(path, device="cuda", env_extra={"FLLM_PREFIX_CACHE": "off"},
+                 tag="speed", timeout=MODEL_TIMEOUT)
     measurements = {}
     graph_lines = []
     for ctx in CONTEXTS:
-        prompt, tokens = make_prompt(ctx)
+        prompt, tokens = make_prompt(ctx, seed="%d-%d" % (ctx, time.time_ns()))
         log("    context %d: prompt has %d tokens" % (ctx, tokens))
         prefill_s, decode_tps, events = stream_prompt(prompt, SPEED_GEN_TOKENS)
         prefill_tps = tokens / max(prefill_s, 1e-6)
@@ -1004,12 +1019,16 @@ def step_fp8kv():
                  tag="fp8kv", timeout=MODEL_TIMEOUT)
     text = complete(EQUALITY_PROMPT, 16, timeout=MODEL_TIMEOUT)
     stop_servers()
+    if not text.strip():
+        raise StepFailed("FP8 KV cache completion returned empty text")
     warnings = []
-    if CACHE.get("dense_gpu_text") and not CACHE["dense_gpu_text"].startswith(text[:8]):
+    baseline = CACHE.get("dense_gpu_text")
+    if baseline and not baseline.startswith(text[:8]):
         warnings.append("fp8 KV text start differs from the fp16 KV text; FP8 KV is an"
                         " approximation, the first tokens usually stay equal")
     return {"detail": "generated with --kv-cache-type fp8_e4m3: %r" % text[:40],
-            "data": {"text": text}, "warnings": warnings}
+            "data": {"text": text, "compared_to_dense_baseline": bool(baseline)},
+            "warnings": warnings}
 
 
 def step_actdtype():

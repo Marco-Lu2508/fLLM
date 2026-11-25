@@ -457,7 +457,7 @@ impl RustDecoder {
                 ql.ffn.mix(&streams, hc, hidden, cfg.eps)?
             };
             let (normed, weights) = mixed;
-            let mlp = self.ffn_forward(layer, &normed, &mut workspace)?;
+            let mlp = self.ffn_forward(i, layer, &normed, &mut workspace)?;
             {
                 let _span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::INJECT);
                 inject(&mut streams, &mlp, &weights, hc, hidden);

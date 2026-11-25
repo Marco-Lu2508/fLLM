@@ -153,6 +153,37 @@ fn invalid(msg: impl Into<String>) -> BackendError {
     BackendError::InvalidShape(msg.into())
 }
 
+fn cpu_erf(x: f32) -> f32 {
+    let x = f64::from(x);
+    let t = 1.0 / (1.0 + 0.5 * x.abs());
+    let tau = t
+        * (-x * x - 1.265_512_23
+            + t * (1.000_023_68
+                + t * (0.374_091_96
+                    + t * (0.096_784_18
+                        + t * (-0.186_288_06
+                            + t * (0.278_868_07
+                                + t * (-1.135_203_98
+                                    + t * (1.488_515_87
+                                        + t * (-0.822_152_23 + t * 0.170_872_77)))))))))
+            .exp();
+    (if x >= 0.0 { 1.0 - tau } else { tau - 1.0 }) as f32
+}
+
+fn cpu_activate_code(mode: i32, x: f32) -> Result<f32, BackendError> {
+    match mode {
+        0 => Ok(x / (1.0 + (-x).exp())),
+        1 => Ok(0.5 * x * (1.0 + (0.797_884_6 * (x + 0.044_715 * x * x * x)).tanh())),
+        2 => Ok(0.5 * x * (1.0 + cpu_erf(x * std::f32::consts::FRAC_1_SQRT_2))),
+        3 => Ok(x.max(0.0)),
+        4 => {
+            let r = x.max(0.0);
+            Ok(r * r)
+        }
+        _ => Err(invalid(format!("unsupported activation mode {mode}"))),
+    }
+}
+
 /// Host CPU backend device.
 pub struct CpuBackend {
     capabilities: BackendCapabilities,
@@ -839,6 +870,189 @@ impl Stream for CpuStream {
             })
             .collect();
         write_f32(out, &values, "geglu")
+    }
+
+    fn supports_arch_ops(&self) -> bool {
+        true
+    }
+
+    fn activation(
+        &mut self,
+        out: &mut DeviceBuffer,
+        x: &DeviceBuffer,
+        mode: i32,
+    ) -> Result<(), BackendError> {
+        let src = read_f32(x)?;
+        let values: Vec<f32> = src
+            .iter()
+            .map(|&v| cpu_activate_code(mode, v))
+            .collect::<Result<Vec<_>, _>>()?;
+        write_f32(out, &values, "activation")
+    }
+
+    fn activation_glu(
+        &mut self,
+        out: &mut DeviceBuffer,
+        gate: &DeviceBuffer,
+        up: &DeviceBuffer,
+        mode: i32,
+    ) -> Result<(), BackendError> {
+        let g = read_f32(gate)?;
+        let u = read_f32(up)?;
+        if g.len() != u.len() {
+            return Err(invalid("activation_glu gate and up dimensions mismatch"));
+        }
+        let values: Vec<f32> = g
+            .iter()
+            .zip(&u)
+            .map(|(&g, &u)| cpu_activate_code(mode, g).map(|a| a * u))
+            .collect::<Result<Vec<_>, _>>()?;
+        write_f32(out, &values, "activation_glu")
+    }
+
+    fn clamp(&mut self, x: &mut DeviceBuffer, limit: f32) -> Result<(), BackendError> {
+        with_typed_mut::<f32, _>(x, |vals| {
+            for v in vals {
+                *v = v.clamp(-limit, limit);
+            }
+        })
+    }
+
+    fn supports_head_gate(&self) -> bool {
+        true
+    }
+
+    fn head_gate_mul(
+        &mut self,
+        x: &mut DeviceBuffer,
+        gate: &DeviceBuffer,
+        dv: usize,
+        softplus_beta: Option<f32>,
+    ) -> Result<(), BackendError> {
+        let g = read_f32(gate)?;
+        if dv == 0 {
+            return Err(invalid("head_gate_mul dv must be positive"));
+        }
+        let gates: Vec<f32> = g
+            .iter()
+            .map(|&v| match softplus_beta {
+                None => 1.0 / (1.0 + (-v).exp()),
+                Some(beta) => {
+                    let bv = beta * v;
+                    let sp = if bv > 20.0 { bv } else { bv.exp().ln_1p() };
+                    sp / beta
+                }
+            })
+            .collect();
+        with_typed_mut::<f32, _>(x, |vals| {
+            for (i, v) in vals.iter_mut().enumerate() {
+                if let Some(&w) = gates.get(i / dv) {
+                    *v *= w;
+                }
+            }
+        })
+    }
+
+    fn scale_inplace(&mut self, x: &mut DeviceBuffer, factor: f32) -> Result<(), BackendError> {
+        with_typed_mut::<f32, _>(x, |vals| {
+            for v in vals {
+                *v *= factor;
+            }
+        })
+    }
+
+    fn supports_glu_clamped(&self) -> bool {
+        true
+    }
+
+    fn glu_clamped(
+        &mut self,
+        out: &mut DeviceBuffer,
+        gate: &DeviceBuffer,
+        up: &DeviceBuffer,
+        kind: crate::backend::ClampedGlu,
+    ) -> Result<(), BackendError> {
+        let g = read_f32(gate)?;
+        let u = read_f32(up)?;
+        if g.len() != u.len() {
+            return Err(invalid("glu_clamped gate and up dimensions mismatch"));
+        }
+        let values: Vec<f32> = match kind {
+            crate::backend::ClampedGlu::Clamp(limit) => g
+                .iter()
+                .zip(&u)
+                .map(|(&gv, &uv)| {
+                    let gc = gv.min(limit);
+                    gc / (1.0 + (-gc).exp()) * uv.clamp(-limit, limit)
+                })
+                .collect(),
+            crate::backend::ClampedGlu::Situ(beta, linear_beta) => g
+                .iter()
+                .zip(&u)
+                .map(|(&gv, &uv)| {
+                    let up = if linear_beta > 0.0 { linear_beta * (uv / linear_beta).tanh() } else { uv };
+                    beta * (gv / beta).tanh() / (1.0 + (-gv).exp()) * up
+                })
+                .collect(),
+        };
+        write_f32(out, &values, "glu_clamped")
+    }
+
+    fn zero_buffer(&mut self, buf: &mut DeviceBuffer) -> Result<(), BackendError> {
+        with_buffer_slice_mut(buf, |bytes| bytes.fill(0))
+    }
+
+    fn gather_rows(
+        &mut self,
+        dst: &mut DeviceBuffer,
+        src: &DeviceBuffer,
+        idx: &[i32],
+        weights: Option<&[f32]>,
+        row_len: usize,
+    ) -> Result<(), BackendError> {
+        let s = read_f32(src)?;
+        let mut out = Vec::with_capacity(idx.len() * row_len);
+        for (i, &row) in idx.iter().enumerate() {
+            if row < 0 {
+                return Err(invalid("gather_rows negative index"));
+            }
+            let start = row as usize * row_len;
+            let slice = s.get(start..start + row_len).ok_or_else(|| invalid("gather_rows index out of bounds"))?;
+            if let Some(ws) = weights {
+                let w = ws.get(i).copied().unwrap_or(1.0);
+                out.extend(slice.iter().map(|&v| v * w));
+            } else {
+                out.extend_from_slice(slice);
+            }
+        }
+        write_f32(dst, &out, "gather_rows")
+    }
+
+    fn scatter_add_rows(
+        &mut self,
+        dst: &mut DeviceBuffer,
+        src: &DeviceBuffer,
+        idx: &[i32],
+        weights: Option<&[f32]>,
+        row_len: usize,
+    ) -> Result<(), BackendError> {
+        let s = read_f32(src)?;
+        with_typed_mut::<f32, _>(dst, |out| {
+            for (i, &row) in idx.iter().enumerate() {
+                if row < 0 {
+                    return Err(invalid("scatter_add_rows negative index"));
+                }
+                let src_start = i * row_len;
+                let dst_start = row as usize * row_len;
+                let s_slice = s.get(src_start..src_start + row_len).ok_or_else(|| invalid("scatter_add_rows src out of range"))?;
+                let d_slice = out.get_mut(dst_start..dst_start + row_len).ok_or_else(|| invalid("scatter_add_rows dst out of range"))?;
+                let w = weights.and_then(|ws| ws.get(i).copied()).unwrap_or(1.0);
+                for (d, &sv) in d_slice.iter_mut().zip(s_slice) {
+                    *d += sv * w;
+                }
+            }
+            Ok(())
+        })?
     }
 
     fn supports_kda(&self, s: &crate::backend::KdaShape) -> bool {

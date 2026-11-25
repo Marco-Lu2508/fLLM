@@ -10,18 +10,30 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from unittest.mock import Mock, mock_open, patch
 
 
+def _load_sibling(mod_name: str, filename: str):
+    path = Path(__file__).with_name(filename)
+    mod_spec = importlib.util.spec_from_file_location(mod_name, path)
+    assert mod_spec is not None and mod_spec.loader is not None
+    mod = importlib.util.module_from_spec(mod_spec)
+    mod_spec.loader.exec_module(mod)
+    return mod
+
+
 SOURCE = Path(__file__).with_name("compare.py")
-spec = importlib.util.spec_from_file_location("compare_measure", SOURCE)
-assert spec is not None and spec.loader is not None
-compare = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(compare)
+compare = _load_sibling("compare_measure", "compare.py")
+optimize_fllm = _load_sibling("optimize_fllm", "optimize_fllm.py")
+verify_all = _load_sibling("verify_all", "verify_all.py")
+hill_climb_colab = _load_sibling("hill_climb_colab", "hill_climb_colab.py")
 
 
 def event(delta=None, usage=None, finish=None):
@@ -272,7 +284,7 @@ class MeasurementTests(unittest.TestCase):
             stack.enter_context(patch.object(sys, "argv", argv))
             stack.enter_context(patch.object(compare.os, "makedirs"))
             stack.enter_context(patch.object(compare.os, "chdir"))
-            stack.enter_context(patch.object(compare.os.path, "exists", return_value=True))
+            stack.enter_context(patch.object(compare.os.path, "exists", side_effect=lambda p: not str(p).endswith(".mo")))
             stack.enter_context(patch.object(compare, "get_fllm", return_value="/fixture/fllm"))
             stack.enter_context(patch.object(compare, "download", return_value="/fixture/model.gguf"))
             stack.enter_context(patch.object(compare, "sh", return_value=(0, "fixture CPU/version")))
@@ -358,6 +370,298 @@ class EngineVersionTests(unittest.TestCase):
             self.assertEqual(compare.engine_versions({"vllm": "/env/bin/vllm"}), {})
 
 
+class CompareColabTests(unittest.TestCase):
+    def test_fllm_receives_per_sequence_ctx_one_while_llamacpp_receives_total_ctx(self):
+        started = []
+
+        def fake_server(cmd, health, model, **kwargs):
+            started.append(cmd)
+            srv = types.SimpleNamespace(ok=True, model=model, proc=Mock(), stop=Mock())
+            srv.proc.poll.return_value = None
+            return srv
+
+        argv = [
+            "compare.py", "--cpu", "--fllm", "/fixture/fllm", "--work", "/fixture/work",
+            "--models", "llama8b", "--sizes", "100,500", "--users", "1,4,16", "--tokens", "64",
+            "--no-ik", "--no-ollama", "--no-vllm", "--no-sglang",
+        ]
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(sys, "argv", argv))
+            stack.enter_context(patch.object(compare.os, "makedirs"))
+            stack.enter_context(patch.object(compare.os, "chdir"))
+            stack.enter_context(patch.object(compare.os.path, "exists", side_effect=lambda p: not str(p).endswith(".mo")))
+            stack.enter_context(patch.object(compare, "get_fllm", return_value="/fixture/fllm"))
+            stack.enter_context(patch.object(compare, "get_llama", return_value="/fixture/llama-server"))
+            stack.enter_context(patch.object(compare, "download", return_value="/fixture/model.gguf"))
+            stack.enter_context(patch.object(compare, "sh", return_value=(0, "fixture CPU")))
+            stack.enter_context(patch.object(compare, "Server", side_effect=fake_server))
+            stack.enter_context(patch.object(compare, "measure", return_value=[]))
+            stack.enter_context(patch.object(compare.time, "sleep"))
+            stack.enter_context(patch("builtins.open", mock_open()))
+            stack.enter_context(patch.object(compare.json, "dump"))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            compare.main()
+
+        fllm_cmd = next(c for c in started if c[0] == "/fixture/fllm")
+        llama_cmd = next(c for c in started if c[0] == "/fixture/llama-server")
+        ctx_one = str(500 + 64 + 400)
+        ctx_total = str((500 + 64 + 400) * 16)
+        self.assertEqual(fllm_cmd[fllm_cmd.index("--ctx") + 1], ctx_one)
+        self.assertEqual(fllm_cmd[fllm_cmd.index("--max-seqs") + 1], "16")
+        self.assertEqual(llama_cmd[llama_cmd.index("-c") + 1], ctx_total)
+
+    def test_build_from_source_clones_both_cutlass_and_flashinfer(self):
+        cmds = []
+
+        def fake_sh(cmd, timeout=None, env=None):
+            cmds.append(cmd)
+            if "nvidia-smi" in cmd:
+                return 0, "8.9\n"
+            return 0, ""
+
+        args = types.SimpleNamespace(fllm=None, build_from_source=True)
+        with patch.object(compare, "sh", side_effect=fake_sh), \
+                patch.object(compare.shutil, "which", return_value="/usr/bin/cargo"), \
+                patch.object(compare.os.path, "exists", side_effect=lambda p: p.endswith("fllm-src")):
+            compare.get_fllm(args, "/fixture/work")
+
+        joined = "\n".join(cmds)
+        self.assertIn("NVIDIA/cutlass", joined)
+        self.assertIn("--branch v4.8.0", joined)
+        self.assertIn("flashinfer-ai/flashinfer", joined)
+        self.assertIn("--branch v0.6.5", joined)
+
+    def test_hf_moe_models_and_dry_run_matrix_50_users(self):
+        for key in ("qwen15-moe-gptq", "olmoe", "qwen3-30b-a3b-gptq"):
+            self.assertIn(key, compare.MODELS)
+            self.assertFalse(compare.MODELS[key][1].startswith("http"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = compare.main([
+                "--models", "qwen7b-awq,qwen15-moe-gptq,qwen3-30b-a3b-gptq",
+                "--sizes", "2000,6000",
+                "--users", "1,2,5,10,50",
+                "--only", "fllm,vllm,sglang",
+                "--no-llama", "--no-ik", "--no-ollama",
+                "--gpu-vram-mib", "16384",
+                "--dry-run",
+            ])
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn("ctx_one=6464", text)
+        self.assertIn("--max-seqs 50", text)
+        self.assertIn("--max-num-seqs 50", text)
+        self.assertIn("--max-running-requests 50", text)
+        self.assertIn("SKIP qwen3-30b-a3b-gptq", text)
+        self.assertIn("ALL PLANNED (2 model(s), 10 cells/engine)", text)
+
+    def test_colab_binary_fetches_colab_latest_tag(self):
+        seen_urls = []
+
+        def fake_urlopen(url, *args, **kwargs):
+            seen_urls.append(url)
+            if url.endswith("/releases/tags/colab-latest"):
+                payload = {"tag_name": "colab-latest", "assets": [
+                    {"name": "fllm-colab-cuda.tar.gz", "browser_download_url": "https://example.invalid/fllm-colab-cuda.tar.gz"}
+                ]}
+                return io.BytesIO(json.dumps(payload).encode())
+            raise AssertionError(f"unexpected url {url}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tgz = os.path.join(tmp, "fllm-colab-cuda.tar.gz")
+            import tarfile as tf
+            raw_bin = os.path.join(tmp, "raw_fllm")
+            Path(raw_bin).write_text("#!/bin/sh\necho ok\n")
+            with tf.open(tgz, "w:gz") as tar:
+                tar.add(raw_bin, arcname="fllm-rs")
+            args = types.SimpleNamespace(fllm=None, build_from_source=False, colab_binary=True)
+            with patch.object(compare.urllib.request, "urlopen", side_effect=fake_urlopen), \
+                    patch.object(compare, "download", return_value=tgz):
+                bin_path = compare.get_fllm(args, tmp)
+            self.assertIsNotNone(bin_path)
+            self.assertTrue(os.path.exists(bin_path))
+            self.assertIn("/releases/tags/colab-latest", seen_urls[0])
+
+
+class OptimizeFllmTests(unittest.TestCase):
+    def test_build_bench_config_default_pid_log_and_act_dtype_by_gpu(self):
+        t4_cfg = optimize_fllm.build_bench_config(
+            "qwen3-8b-dspine", optimize_fllm.PRESETS["qwen3-8b-dspine"],
+            "t4", optimize_fllm.GPUS["t4"], "/bin/fllm-rs",
+        )
+        l4_cfg = optimize_fllm.build_bench_config(
+            "qwen3-8b-dspine", optimize_fllm.PRESETS["qwen3-8b-dspine"],
+            "l4", optimize_fllm.GPUS["l4"], "/bin/fllm-rs",
+        )
+        a100_cfg = optimize_fllm.build_bench_config(
+            "qwen3.5-27b-dspine", optimize_fllm.PRESETS["qwen3.5-27b-dspine"],
+            "a100-80g", optimize_fllm.GPUS["a100-80g"], "/bin/fllm-rs",
+        )
+        self.assertIn("/tmp/fllm_serve.pid", " ".join(t4_cfg["launch"]))
+        self.assertIn("/tmp/fllm_serve.log", " ".join(t4_cfg["launch"]))
+        self.assertIn("/tmp/fllm_serve.pid", " ".join(t4_cfg["stop"]))
+        self.assertIn("FLLM_ACT_DTYPE=fp16", " ".join(t4_cfg["launch"]))
+        self.assertIn("FLLM_ACT_DTYPE=bf16", " ".join(l4_cfg["launch"]))
+        self.assertIn("FLLM_ACT_DTYPE=bf16", " ".join(a100_cfg["launch"]))
+
+    def test_async_daemon_launch_and_stop_do_not_hang(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = os.path.join(tmp, "fllm_serve.pid")
+            log_file = os.path.join(tmp, "fllm_serve.log")
+            # Create a tiny wrapper script that ignores serve args and sleeps like a daemon.
+            fake_bin = os.path.join(tmp, "fake_fllm")
+            Path(fake_bin).write_text("#!/usr/bin/env bash\necho 'fake fllm starting'\nsleep 60\n")
+            os.chmod(fake_bin, 0o755)
+
+            cfg = optimize_fllm.build_bench_config(
+                "bailing-moe", optimize_fllm.PRESETS["bailing-moe"],
+                "l4", optimize_fllm.GPUS["l4"], fake_bin,
+                pid_file=pid_file, log_file=log_file,
+            )
+            # Launch must return 0 quickly without hanging subprocess.run(..., capture_output=True).
+            proc = subprocess.run(cfg["launch"], check=True, capture_output=True, text=True, timeout=5)
+            self.assertEqual(proc.returncode, 0)
+            self.assertTrue(os.path.exists(pid_file))
+            pid = int(Path(pid_file).read_text().strip())
+            os.kill(pid, 0)  # raises ProcessLookupError if not alive
+            self.assertIn("fake fllm starting", Path(log_file).read_text())
+
+            # Stop must kill the PID, wait for exit, and remove the PID file.
+            stop_proc = subprocess.run(cfg["stop"], check=True, capture_output=True, text=True, timeout=10)
+            self.assertEqual(stop_proc.returncode, 0)
+            self.assertFalse(os.path.exists(pid_file))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
+    def test_qwen35_27b_gdn_ceiling_and_bailing_moe_preset(self):
+        q27 = optimize_fllm.PRESETS["qwen3.5-27b-dspine"]
+        self.assertTrue(q27.get("kv_per_verify_row"))
+        self.assertGreater(q27.get("recurrent_state_gb", 0.0), 0.1)
+        self.assertGreater(q27.get("extra_flops_per_token", 0.0), 0.0)
+        # Ceiling with GDN state and kv_per_verify_row should be lower than without them.
+        no_gdn = {**q27, "recurrent_state_gb": 0.0, "kv_per_verify_row": False, "extra_flops_per_token": 0.0}
+        self.assertLess(
+            optimize_fllm.decode_ceiling(q27, optimize_fllm.GPUS["a100-80g"], 1, 4.6, 32768, 4),
+            optimize_fllm.decode_ceiling(no_gdn, optimize_fllm.GPUS["a100-80g"], 1, 4.6, 32768, 4),
+        )
+
+        self.assertLess(
+            optimize_fllm.prefill_ceiling(q27, optimize_fllm.GPUS["a100-80g"], 4096),
+            optimize_fllm.prefill_ceiling(no_gdn, optimize_fllm.GPUS["a100-80g"], 4096),
+        )
+
+        bailing = optimize_fllm.PRESETS["bailing-moe"]
+        self.assertEqual(bailing["target_hf"], "inclusionAI/Ling-lite")
+        self.assertEqual(bailing["arch"], "bailing_moe")
+        self.assertGreater(optimize_fllm.decode_ceiling(bailing, optimize_fllm.GPUS["l4"], 0, 1.0, 4096, 1), 0.0)
+
+    def test_dense_and_moe_presets_concurrency_sweep(self):
+        for preset in ("qwen2.5-7b-awq", "qwen1.5-moe-gptq", "qwen3-30b-a3b-gptq"):
+            self.assertIn(preset, optimize_fllm.PRESETS)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = optimize_fllm.main([
+                "--preset", "qwen1.5-moe-gptq",
+                "--gpu", "l4",
+                "--concurrency", "1,2,5,10,50",
+                "--contexts", "2048,4096,8192",
+            ])
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        for conc in (1, 2, 5, 10, 50):
+            self.assertIn(f"Decode ceiling (concurrency {conc}", text)
+
+
+class VerifyAllTests(unittest.TestCase):
+    def test_make_prompt_distinct_cold_prefixes_across_contexts(self):
+        with patch.object(verify_all, "token_count", side_effect=lambda s: max(1, len(s.split()))):
+            prompts = [verify_all.make_prompt(ctx, seed=f"{ctx}-1")[0] for ctx in verify_all.CONTEXTS]
+        # None of the prompts may share the first 32 characters (different context prefix).
+        prefixes = [p[:32] for p in prompts]
+        self.assertEqual(len(set(prefixes)), len(verify_all.CONTEXTS))
+        for a, b in zip(prompts, prompts[1:]):
+            self.assertFalse(b.startswith(a[:24]))
+
+    def test_step_speed_disables_prefix_cache_and_uses_distinct_prompts(self):
+        seen_prompts = []
+        with patch.dict(verify_all.CACHE, {"gpu_count": 1, "cuda_compiled": True, "gpus": [{"name": "L4"}]}, clear=True), \
+                patch.object(verify_all, "model_path", return_value="/tmp/m.gguf"), \
+                patch.object(verify_all, "start_server") as start_srv, \
+                patch.object(verify_all, "stop_servers"), \
+                patch.object(verify_all, "token_count", side_effect=lambda s: max(1, len(s.split()))), \
+                patch.object(verify_all, "stream_prompt", side_effect=lambda p, m: (seen_prompts.append(p) or (0.5, 50.0, 64))), \
+                patch.object(verify_all, "server_stderr_scan", return_value=[]), \
+                patch.object(verify_all, "reference_for_card", return_value=None):
+            verify_all.RUN_DIR = "/tmp"
+            res = verify_all.step_speed()
+
+        self.assertEqual(start_srv.call_args.kwargs["env_extra"]["FLLM_PREFIX_CACHE"], "off")
+        self.assertEqual(len(seen_prompts), len(verify_all.CONTEXTS))
+        self.assertEqual(len({p[:32] for p in seen_prompts}), len(verify_all.CONTEXTS))
+        self.assertIn("355/1863/8000", res["detail"])
+
+    def test_step_fp8kv_works_standalone_without_cached_dense_gpu_text(self):
+        with patch.dict(verify_all.CACHE, {"gpu_count": 1, "cuda_compiled": True, "cc": 89}, clear=True), \
+                patch.object(verify_all, "supports_flag", return_value=True), \
+                patch.object(verify_all, "model_path", return_value="/tmp/m.gguf"), \
+                patch.object(verify_all, "start_server"), \
+                patch.object(verify_all, "stop_servers"), \
+                patch.object(verify_all, "complete", return_value=" Paris, the capital city."):
+            res = verify_all.step_fp8kv()
+        self.assertEqual(res["warnings"], [])
+        self.assertFalse(res["data"]["compared_to_dense_baseline"])
+
+    def test_require_gpu_step_auto_probes_hw_and_devices_when_standalone(self):
+        verify_all.MODE = "gpu"
+        verify_all.BINARY = "/fixture/fllm-rs"
+
+        def fake_hw():
+            verify_all.CACHE["gpu_count"] = 1
+            verify_all.CACHE["cc"] = 89
+
+        def fake_devices():
+            verify_all.CACHE["cuda_compiled"] = True
+
+        with patch.dict(verify_all.CACHE, {}, clear=True), \
+                patch.object(verify_all, "step_hw", side_effect=fake_hw) as hw_mock, \
+                patch.object(verify_all, "step_devices", side_effect=fake_devices) as dev_mock:
+            verify_all.require_gpu_step()
+        hw_mock.assert_called_once()
+        dev_mock.assert_called_once()
+
+
+class HillClimbColabTests(unittest.TestCase):
+    def test_dry_run_all_presets_and_candidates_valid(self):
+        for preset, gpu in (("qwen3.5-27b-dspine", "a100-80g"), ("qwen3-8b-dspine", "t4"), ("bailing-moe", "l4")):
+            with self.subTest(preset=preset, gpu=gpu):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = hill_climb_colab.main(["--preset", preset, "--gpu", gpu, "--dry-run"])
+                self.assertEqual(rc, 0)
+                text = out.getvalue()
+                self.assertIn("ALL PASSED", text)
+                for cand in hill_climb_colab.CANDIDATE_ORDER:
+                    self.assertIn(cand, text)
+
+    def test_should_accept_gates_and_gpu_act_dtype(self):
+        ctl_a = {"ok": True, "flags": [], "c1_decode": 100.0, "c4_aggregate": 300.0, "prefill_4096": 4000.0}
+        ctl_b = {"ok": True, "flags": [], "c1_decode": 102.0, "c4_aggregate": 298.0, "prefill_4096": 3950.0}
+        good = {"ok": True, "flags": [], "c1_decode": 115.0, "c4_aggregate": 310.0, "prefill_4096": 4010.0}
+        regress = {"ok": True, "flags": [], "c1_decode": 115.0, "c4_aggregate": 250.0, "prefill_4096": 4010.0}
+        looped = {"ok": True, "flags": ["LOOP"], "c1_decode": 140.0, "c4_aggregate": 320.0}
+
+        self.assertTrue(hill_climb_colab.should_accept(good, ctl_a, ctl_b)[0])
+        self.assertFalse(hill_climb_colab.should_accept(regress, ctl_a, ctl_b)[0])
+        self.assertFalse(hill_climb_colab.should_accept(looped, ctl_a, ctl_b)[0])
+
+        t4_state, ok, _ = hill_climb_colab.apply_candidate(
+            hill_climb_colab.initial_state(optimize_fllm.PRESETS["qwen3-8b-dspine"]),
+            "+act_dtype", optimize_fllm.PRESETS["qwen3-8b-dspine"], "t4", optimize_fllm.GPUS["t4"],
+        )
+        self.assertTrue(ok)
+        self.assertEqual(t4_state["act_dtype"], "fp16")
+
+
 def run_mutations():
     """Compile valid mutants without touching the source or creating extra files."""
     source = SOURCE.read_text()
@@ -375,6 +679,7 @@ def run_mutations():
         ("speculation enabled", 'args + ["--speculative", "off"]', 'args + ["--speculative", "suffix"]'),
         ("control environment not passed to server", '"m", env=control_env, logfile=f"fllm-{key}.log"',
          '"m", logfile=f"fllm-{key}.log"'),
+        ("fllm ctx multiplied by maxu", '"--ctx", str(ctx_one)', '"--ctx", str(ctx)'),
         ("batch seed not passed from CLI", 'extra, seed=args.seed)', 'extra, seed=0)'),
         ("truncated streams accepted", 'if not done:', 'if False:'),
         ("version probe result invented", 'if rc == 0 and text.strip():', 'if True:'),
@@ -391,7 +696,7 @@ def run_mutations():
         exec(compile(source.replace(old, new, 1), str(SOURCE), "exec"), mutant.__dict__)
         stream = io.StringIO()
         suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(cls)
-                                   for cls in (StreamTests, MeasurementTests, BestRivalTests, EngineVersionTests))
+                                   for cls in (StreamTests, MeasurementTests, BestRivalTests, EngineVersionTests, CompareColabTests))
         with patch.object(sys.modules[__name__], "compare", mutant), contextlib.redirect_stdout(io.StringIO()):
             result = unittest.TextTestRunner(stream=stream).run(suite)
         # A thrown exception alone does not prove an assertion detects the regression.

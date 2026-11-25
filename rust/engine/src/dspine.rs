@@ -7,7 +7,11 @@
 //! Qwen3-style draft layers (with adjacent `DSpineCodeBridge` writes when present), and refines or
 //! decodes rows `1..T-1` into exact draft tokens + candidate distributions.
 
-use crate::backend::{Backend, BufferPool, DeviceWeight, QuantType, Stream};
+use crate::backend::act_dtype::ActDtype;
+use crate::backend::{
+    AttentionParams, Backend, BufferPool, DeviceBuffer, DeviceKvCache, DeviceWeight, QuantType,
+    RopeParams, Stream,
+};
 use crate::compute::{Linear, Tensor};
 use crate::model::GgufModel;
 use crate::rope::{self, RopeTables};
@@ -110,9 +114,28 @@ impl LayerKvCache {
     }
 }
 
+const DRAFT_KV_BLOCK_SIZE: usize = 16;
+
+#[derive(Default, Clone)]
+struct SeqDeviceKv {
+    blocks: Vec<usize>,
+    ctx_rows_in_blocks: usize,
+    total_len: usize,
+}
+
+#[derive(Clone)]
+pub(crate) struct DSpineSeqSnapshot {
+    pending_target_hidden: Vec<f32>,
+    pending_rows: usize,
+    host_kv: Vec<LayerKvCache>,
+    dev_kv: SeqDeviceKv,
+    had_state: bool,
+}
+
 #[derive(Default)]
 struct SeqState {
     kv: Vec<LayerKvCache>,
+    dev_kv: SeqDeviceKv,
     pending_target_hidden: Vec<f32>,
     pending_rows: usize,
 }
@@ -125,6 +148,10 @@ struct BridgeStash {
 }
 
 struct DeviceDraftLayer {
+    attn_norm: DeviceBuffer,
+    ffn_norm: DeviceBuffer,
+    q_norm: Option<DeviceBuffer>,
+    k_norm: Option<DeviceBuffer>,
     q_proj: DeviceWeight,
     k_proj: DeviceWeight,
     v_proj: DeviceWeight,
@@ -135,12 +162,15 @@ struct DeviceDraftLayer {
 }
 
 struct DeviceDraftCompute {
-    #[allow(dead_code)]
-    backend: Arc<dyn Backend>,
     stream: Mutex<Box<dyn Stream>>,
     scratch: Mutex<BufferPool>,
     fc: DeviceWeight,
+    hidden_norm: DeviceBuffer,
+    output_norm: DeviceBuffer,
     layers: Vec<DeviceDraftLayer>,
+    kv: DeviceKvCache,
+    free_blocks: Mutex<Vec<usize>>,
+    rope_tables: (Arc<Vec<f32>>, Arc<Vec<f32>>),
 }
 
 pub struct DSpineEngine {
@@ -165,6 +195,76 @@ fn f32_slice_as_bytes(data: &[f32]) -> &[u8] {
 fn f32_slice_as_bytes_mut(data: &mut [f32]) -> &mut [u8] {
     // SAFETY: exclusive `&mut [f32]` viewed as `&mut [u8]` for stream downloads.
     unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr().cast::<u8>(), std::mem::size_of_val(data)) }
+}
+
+fn upload_vec_buffer(backend: &dyn Backend, stream: &mut dyn Stream, data: &[f32]) -> Result<DeviceBuffer, String> {
+    let mut buf = backend.allocate_buffer(std::mem::size_of_val(data)).map_err(|e| e.to_string())?;
+    if !data.is_empty() {
+        stream.upload(&mut buf, f32_slice_as_bytes(data)).map_err(|e| e.to_string())?;
+    }
+    Ok(buf)
+}
+
+fn device_linear_add(
+    stream: &mut dyn Stream,
+    scratch: &mut BufferPool,
+    residual: &mut DeviceBuffer,
+    x: &DeviceBuffer,
+    weight: &DeviceWeight,
+) -> Result<(), String> {
+    let err = |e: crate::backend::BackendError| e.to_string();
+    if stream
+        .quantized_linear_add(residual, x, weight, weight.bias.as_ref(), 1.0)
+        .map_err(err)?
+    {
+        return Ok(());
+    }
+    let rows = x.size / (weight.cols.max(1) * 4);
+    let mut tmp = scratch.acquire(rows * weight.rows * 4).map_err(err)?;
+    stream
+        .quantized_linear(&mut tmp, x, weight, weight.bias.as_ref())
+        .map_err(err)?;
+    stream.residual_add(residual, &tmp, 1.0).map_err(err)?;
+    scratch.recycle(tmp);
+    Ok(())
+}
+
+fn device_rms_inplace_buf(
+    stream: &mut dyn Stream,
+    scratch: &mut BufferPool,
+    buf: &mut DeviceBuffer,
+    weight: &DeviceBuffer,
+    eps: f32,
+) -> Result<(), String> {
+    let err = |e: crate::backend::BackendError| e.to_string();
+    let mut normed = scratch.acquire(buf.size).map_err(err)?;
+    stream.rms_norm(&mut normed, buf, weight, eps).map_err(err)?;
+    let old = std::mem::replace(buf, normed);
+    scratch.recycle(old);
+    Ok(())
+}
+
+fn acquire_kv_blocks(free_blocks: &Mutex<Vec<usize>>, count: usize) -> Result<Vec<usize>, String> {
+    let mut free = free_blocks
+        .lock()
+        .map_err(|_| "DSpine free block pool poisoned".to_owned())?;
+    if free.len() < count {
+        return Err(format!(
+            "DSpine device KV cache out of blocks (need {count}, have {})",
+            free.len()
+        ));
+    }
+    let start = free.len() - count;
+    Ok(free.split_off(start))
+}
+
+fn release_kv_blocks(free_blocks: &Mutex<Vec<usize>>, blocks: &[usize]) {
+    if blocks.is_empty() {
+        return;
+    }
+    if let Ok(mut free) = free_blocks.lock() {
+        free.extend_from_slice(blocks);
+    }
 }
 
 fn upload_draft_linear(backend: &dyn Backend, name: &str, linear: &Linear) -> Result<DeviceWeight, String> {
@@ -201,40 +301,6 @@ fn upload_draft_linear(backend: &dyn Backend, name: &str, linear: &Linear) -> Re
             )
             .map_err(|e| e.to_string())
     }
-}
-
-fn forward_linear(
-    cpu: &Linear,
-    dev: Option<(&DeviceDraftCompute, &DeviceWeight)>,
-    input: &[f32],
-) -> Result<Vec<f32>, String> {
-    let Some((ctx, w)) = dev else {
-        return cpu.forward(input);
-    };
-    if input.is_empty() {
-        return Ok(Vec::new());
-    }
-    if cpu.cols == 0 || !input.len().is_multiple_of(cpu.cols) {
-        return Err(format!("invalid input width {} for linear cols {}", input.len(), cpu.cols));
-    }
-    let rows = input.len() / cpu.cols;
-    let in_bytes = rows * cpu.cols * 4;
-    let out_elems = rows * cpu.rows;
-    let out_bytes = out_elems * 4;
-    let mut scratch = ctx.scratch.lock().map_err(|_| "DSpine device scratch poisoned".to_owned())?;
-    let mut stream = ctx.stream.lock().map_err(|_| "DSpine device stream poisoned".to_owned())?;
-    let mut in_buf = scratch.acquire(in_bytes).map_err(|e| e.to_string())?;
-    let mut out_buf = scratch.acquire(out_bytes).map_err(|e| e.to_string())?;
-    let res = (|| -> Result<Vec<f32>, String> {
-        stream.upload(&mut in_buf, f32_slice_as_bytes(input)).map_err(|e| e.to_string())?;
-        stream.quantized_linear(&mut out_buf, &in_buf, w, w.bias.as_ref()).map_err(|e| e.to_string())?;
-        let mut out = vec![0.0f32; out_elems];
-        stream.download(f32_slice_as_bytes_mut(&mut out), &out_buf).map_err(|e| e.to_string())?;
-        Ok(out)
-    })();
-    scratch.recycle(in_buf);
-    scratch.recycle(out_buf);
-    res
 }
 
 fn meta_u32(meta: &serde_json::Map<String, Value>, key: &str) -> Result<usize, String> {
@@ -519,34 +585,88 @@ impl DSpineEngine {
         self.dev.is_some()
     }
 
-    /// Upload `fc` and all draft transformer projections (`q/k/v/o/gate/up/down`) onto `backend`.
+    /// Upload `fc`, norm vectors, draft transformer projections, and KV cache onto `backend`.
     pub fn init_backend(&mut self, backend: Arc<dyn Backend>) -> Result<(), String> {
-        let fc = upload_draft_linear(&*backend, "dspine.fc", &self.fc)?;
-        let mut dev_layers = Vec::with_capacity(self.layers.len());
-        for (i, l) in self.layers.iter().enumerate() {
-            dev_layers.push(DeviceDraftLayer {
-                q_proj: upload_draft_linear(&*backend, &format!("dspine.blk.{i}.attn_q"), &l.q_proj)?,
-                k_proj: upload_draft_linear(&*backend, &format!("dspine.blk.{i}.attn_k"), &l.k_proj)?,
-                v_proj: upload_draft_linear(&*backend, &format!("dspine.blk.{i}.attn_v"), &l.v_proj)?,
-                o_proj: upload_draft_linear(&*backend, &format!("dspine.blk.{i}.attn_output"), &l.o_proj)?,
-                gate_proj: upload_draft_linear(&*backend, &format!("dspine.blk.{i}.ffn_gate"), &l.gate_proj)?,
-                up_proj: upload_draft_linear(&*backend, &format!("dspine.blk.{i}.ffn_up"), &l.up_proj)?,
-                down_proj: upload_draft_linear(&*backend, &format!("dspine.blk.{i}.ffn_down"), &l.down_proj)?,
-            });
+        let mut stream = backend.create_stream().map_err(|e| e.to_string())?;
+        let prev_act = stream.act_dtype();
+        if prev_act.is_narrow() {
+            let _ = backend.set_activation_dtype(ActDtype::F32);
+            let _ = stream.set_act_dtype(ActDtype::F32);
         }
-        let stream = backend.create_stream().map_err(|e| e.to_string())?;
-        let mut scratch = BufferPool::new(Arc::clone(&backend));
-        let rows = self.cfg.block_size.max(16);
-        let h_bytes = rows * self.cfg.hidden * 4;
-        let f_bytes = rows * self.cfg.intermediate * 4;
-        let _ = scratch.preallocate(&[h_bytes, h_bytes, f_bytes, f_bytes]);
-        self.dev = Some(DeviceDraftCompute {
-            backend,
-            stream: Mutex::new(stream),
-            scratch: Mutex::new(scratch),
-            fc,
-            layers: dev_layers,
-        });
+        let res = (|| -> Result<DeviceDraftCompute, String> {
+            let fc = upload_draft_linear(&*backend, "dspine.fc", &self.fc)?;
+            let hidden_norm = upload_vec_buffer(&*backend, &mut *stream, &self.hidden_norm)?;
+            let output_norm = upload_vec_buffer(&*backend, &mut *stream, &self.output_norm)?;
+            let mut dev_layers = Vec::with_capacity(self.layers.len());
+            for (i, l) in self.layers.iter().enumerate() {
+                dev_layers.push(DeviceDraftLayer {
+                    attn_norm: upload_vec_buffer(&*backend, &mut *stream, &l.attn_norm)?,
+                    ffn_norm: upload_vec_buffer(&*backend, &mut *stream, &l.ffn_norm)?,
+                    q_norm: l
+                        .q_norm
+                        .as_ref()
+                        .map(|v| upload_vec_buffer(&*backend, &mut *stream, v))
+                        .transpose()?,
+                    k_norm: l
+                        .k_norm
+                        .as_ref()
+                        .map(|v| upload_vec_buffer(&*backend, &mut *stream, v))
+                        .transpose()?,
+                    q_proj: upload_draft_linear(&*backend, &format!("dspine.blk.{i}.attn_q"), &l.q_proj)?,
+                    k_proj: upload_draft_linear(&*backend, &format!("dspine.blk.{i}.attn_k"), &l.k_proj)?,
+                    v_proj: upload_draft_linear(&*backend, &format!("dspine.blk.{i}.attn_v"), &l.v_proj)?,
+                    o_proj: upload_draft_linear(&*backend, &format!("dspine.blk.{i}.attn_output"), &l.o_proj)?,
+                    gate_proj: upload_draft_linear(&*backend, &format!("dspine.blk.{i}.ffn_gate"), &l.gate_proj)?,
+                    up_proj: upload_draft_linear(&*backend, &format!("dspine.blk.{i}.ffn_up"), &l.up_proj)?,
+                    down_proj: upload_draft_linear(&*backend, &format!("dspine.blk.{i}.ffn_down"), &l.down_proj)?,
+                });
+            }
+            let per_block_bytes = 2
+                * DRAFT_KV_BLOCK_SIZE
+                * self.cfg.kv_heads.max(1)
+                * self.cfg.head_dim.max(1)
+                * 2
+                * self.layers.len().max(1);
+            let pool_blocks = if let Some(w) = self.cfg.sliding_window {
+                (w.div_ceil(DRAFT_KV_BLOCK_SIZE) + self.cfg.block_size.div_ceil(DRAFT_KV_BLOCK_SIZE) + 2) * 32
+            } else {
+                ((256usize << 20) / per_block_bytes.max(1)).clamp(64, 4096)
+            };
+            let kv = backend
+                .allocate_kv_cache(
+                    self.layers.len(),
+                    pool_blocks,
+                    DRAFT_KV_BLOCK_SIZE,
+                    self.cfg.kv_heads,
+                    self.cfg.head_dim,
+                    self.cfg.head_dim,
+                    1,
+                )
+                .map_err(|e| e.to_string())?;
+            let free_blocks: Vec<usize> = (0..pool_blocks).rev().collect();
+            let mut scratch = BufferPool::new(Arc::clone(&backend));
+            let rows = self.cfg.block_size.max(16);
+            let h_bytes = rows * self.cfg.hidden * 4;
+            let q_bytes = rows * self.cfg.heads * self.cfg.head_dim * 4;
+            let f_bytes = rows * self.cfg.intermediate * 4;
+            let _ = scratch.preallocate(&[h_bytes, h_bytes, q_bytes, f_bytes, f_bytes]);
+            let rope_tables = (Arc::new(self.rope.cos.clone()), Arc::new(self.rope.sin.clone()));
+            Ok(DeviceDraftCompute {
+                stream: Mutex::new(stream),
+                scratch: Mutex::new(scratch),
+                fc,
+                hidden_norm,
+                output_norm,
+                layers: dev_layers,
+                kv,
+                free_blocks: Mutex::new(free_blocks),
+                rope_tables,
+            })
+        })();
+        if prev_act.is_narrow() {
+            let _ = backend.set_activation_dtype(prev_act);
+        }
+        self.dev = Some(res?);
         Ok(())
     }
 
@@ -627,11 +747,74 @@ impl DSpineEngine {
     }
 
     pub fn clear(&mut self, sid: u64) {
-        self.states.remove(&sid);
+        if let (Some(st), Some(dev)) = (self.states.remove(&sid), self.dev.as_ref()) {
+            release_kv_blocks(&dev.free_blocks, &st.dev_kv.blocks);
+        }
     }
 
     pub fn retain(&mut self, live: &HashSet<u64>) {
+        if let Some(dev) = self.dev.as_ref() {
+            for (sid, st) in &self.states {
+                if !live.contains(sid) {
+                    release_kv_blocks(&dev.free_blocks, &st.dev_kv.blocks);
+                }
+            }
+        }
         self.states.retain(|sid, _| live.contains(sid));
+    }
+
+    pub(crate) fn snapshot_seq(&self, sid: u64) -> DSpineSeqSnapshot {
+        let Some(st) = self.states.get(&sid) else {
+            return DSpineSeqSnapshot {
+                had_state: false,
+                pending_target_hidden: Vec::new(),
+                pending_rows: 0,
+                host_kv: Vec::new(),
+                dev_kv: SeqDeviceKv::default(),
+            };
+        };
+        DSpineSeqSnapshot {
+            had_state: true,
+            pending_target_hidden: st.pending_target_hidden.clone(),
+            pending_rows: st.pending_rows,
+            host_kv: if self.dev.is_some() { Vec::new() } else { st.kv.clone() },
+            dev_kv: st.dev_kv.clone(),
+        }
+    }
+
+    pub(crate) fn restore_seq(&mut self, sid: u64, snap: DSpineSeqSnapshot) {
+        if !snap.had_state {
+            self.clear(sid);
+            return;
+        }
+        let Some(st) = self.states.get_mut(&sid) else {
+            return;
+        };
+        if let Some(dev) = self.dev.as_ref() {
+            // Any newly allocated blocks appended after `snap.dev_kv.blocks` are returned to the pool.
+            if let Ok(mut free) = dev.free_blocks.lock() {
+                for &blk in &st.dev_kv.blocks {
+                    if !snap.dev_kv.blocks.contains(&blk) {
+                        free.push(blk);
+                    }
+                }
+                // Any front blocks trimmed during sliding-window eviction may have been pushed to `free`:
+                // remove them from `free` so ownership returns cleanly to `snap.dev_kv.blocks`.
+                for &blk in &snap.dev_kv.blocks {
+                    if !st.dev_kv.blocks.contains(&blk) {
+                        if let Some(pos) = free.iter().rposition(|&b| b == blk) {
+                            free.swap_remove(pos);
+                        }
+                    }
+                }
+            }
+        }
+        st.dev_kv = snap.dev_kv;
+        if !snap.host_kv.is_empty() {
+            st.kv = snap.host_kv;
+        }
+        st.pending_target_hidden = snap.pending_target_hidden;
+        st.pending_rows = snap.pending_rows;
     }
 
     /// Appends committed concatenated target hidden states (`rows * k * target_hidden` floats)
@@ -650,6 +833,7 @@ impl DSpineEngine {
         }
         let state = self.states.entry(sid).or_insert_with(|| SeqState {
             kv: vec![LayerKvCache::default(); self.cfg.layers],
+            dev_kv: SeqDeviceKv::default(),
             pending_target_hidden: Vec::new(),
             pending_rows: 0,
         });
@@ -662,6 +846,9 @@ impl DSpineEngine {
         let current = self.rope.cos.len().checked_div(self.rope.half).unwrap_or(0);
         if needed > current {
             self.rope = rope::build(&self.rope_cfg, self.rope_base, needed.next_power_of_two());
+            if let Some(dev) = self.dev.as_mut() {
+                dev.rope_tables = (Arc::new(self.rope.cos.clone()), Arc::new(self.rope.sin.clone()));
+            }
         }
     }
 
@@ -683,12 +870,369 @@ impl DSpineEngine {
         if draft_len == 0 {
             return Ok((Vec::new(), Vec::new()));
         }
+        if self.dev.is_some() {
+            return self.propose_device(sid, anchor, draft_len, params, sampler, history, target);
+        }
+        self.propose_host(sid, anchor, draft_len, params, sampler, history, target)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn propose_device(
+        &mut self,
+        sid: u64,
+        anchor: i64,
+        draft_len: usize,
+        params: &SamplingParams,
+        sampler: &mut SamplingState,
+        history: &[i64],
+        target: &RustDecoder,
+    ) -> Result<(Vec<i64>, Vec<Option<Dist>>), String> {
+        let t_block = draft_len + 1;
+        let row_width = self.cfg.target_layer_ids.len() * self.cfg.target_hidden;
+
+        let (ctx_rows, ctx_hidden, prev_pos, prev_ctx_in_blocks) = {
+            let state = self.states.entry(sid).or_insert_with(|| SeqState {
+                kv: vec![LayerKvCache::default(); self.cfg.layers],
+                dev_kv: SeqDeviceKv::default(),
+                pending_target_hidden: Vec::new(),
+                pending_rows: 0,
+            });
+            let mut rows = state.pending_rows;
+            let mut buf = std::mem::take(&mut state.pending_target_hidden);
+            state.pending_rows = 0;
+
+            let offset = state.dev_kv.total_len;
+            if let Some(w) = self.cfg.sliding_window {
+                if offset == 0 && rows > w {
+                    let drop = rows - w;
+                    buf.drain(..drop * row_width);
+                    rows = w;
+                }
+            }
+            (rows, buf, offset, state.dev_kv.ctx_rows_in_blocks)
+        };
+
+        if prev_pos + ctx_rows == 0 {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        self.ensure_rope_len(prev_pos + ctx_rows + t_block + 8);
+
+        let mut block_ids = vec![self.cfg.mask_token_id; t_block];
+        block_ids[0] = anchor;
+        let block_embed = target.embed_tokens(&block_ids)?;
+        if block_embed.len() != t_block * self.cfg.hidden {
+            return Err(format!(
+                "target embed_tokens returned {} floats for {t_block}x{}",
+                block_embed.len(),
+                self.cfg.hidden
+            ));
+        }
+
+        let dev = self.dev.as_ref().ok_or("missing DSpine device compute")?;
+        let state = self.states.get_mut(&sid).ok_or("missing DSpine sequence state")?;
+
+        let ctx_end = prev_ctx_in_blocks + ctx_rows;
+        let need_ctx_blocks = ctx_end.div_ceil(DRAFT_KV_BLOCK_SIZE);
+        let add_ctx_blocks = need_ctx_blocks.saturating_sub(state.dev_kv.blocks.len());
+        if add_ctx_blocks > 0 {
+            let extra = acquire_kv_blocks(&dev.free_blocks, add_ctx_blocks)?;
+            state.dev_kv.blocks.extend(extra);
+        }
+
+        let total_needed_blocks = (ctx_end + t_block).div_ceil(DRAFT_KV_BLOCK_SIZE);
+        let need_tail_blocks = total_needed_blocks.saturating_sub(state.dev_kv.blocks.len());
+        let tail_blocks = acquire_kv_blocks(&dev.free_blocks, need_tail_blocks)?;
+
+        type ProposeRoundOut = (
+            Option<Vec<i32>>,
+            Option<Vec<f32>>,
+            Option<BridgeStash>,
+            Option<Vec<f32>>,
+        );
+        let round_result = (|| -> Result<ProposeRoundOut, String> {
+            let mut round_blocks = Vec::with_capacity(state.dev_kv.blocks.len() + tail_blocks.len());
+            round_blocks.extend_from_slice(&state.dev_kv.blocks);
+            round_blocks.extend_from_slice(&tail_blocks);
+
+            let stride = round_blocks.len();
+            let mut ctx_slots = Vec::with_capacity(ctx_rows);
+            for idx in 0..ctx_rows {
+                let p = prev_ctx_in_blocks + idx;
+                ctx_slots.push(round_blocks[p / DRAFT_KV_BLOCK_SIZE] * DRAFT_KV_BLOCK_SIZE + (p % DRAFT_KV_BLOCK_SIZE));
+            }
+            let mut blk_slots = Vec::with_capacity(t_block);
+            for qi in 0..t_block {
+                let p = ctx_end + qi;
+                blk_slots.push(round_blocks[p / DRAFT_KV_BLOCK_SIZE] * DRAFT_KV_BLOCK_SIZE + (p % DRAFT_KV_BLOCK_SIZE));
+            }
+
+            let mut round_tables = Vec::with_capacity(t_block * stride);
+            for _ in 0..t_block {
+                round_tables.extend(round_blocks.iter().map(|&b| b as i64));
+            }
+            let lengths: Vec<i64> = if self.cfg.block_causal {
+                (0..t_block).map(|qi| (ctx_end + qi + 1) as i64).collect()
+            } else {
+                vec![(ctx_end + t_block) as i64; t_block]
+            };
+            let ctx_positions: Vec<usize> = (prev_pos..prev_pos + ctx_rows).collect();
+            let blk_positions: Vec<usize> = (prev_pos + ctx_rows..prev_pos + ctx_rows + t_block).collect();
+
+            let err = |e: crate::backend::BackendError| e.to_string();
+            let mut scratch = dev.scratch.lock().map_err(|_| "DSpine scratch poisoned".to_owned())?;
+            let mut stream = dev.stream.lock().map_err(|_| "DSpine stream poisoned".to_owned())?;
+            stream.begin_step();
+
+            let pass = (|| -> Result<ProposeRoundOut, String> {
+                let h = self.cfg.hidden;
+                let inter = self.cfg.intermediate;
+                let q_dim = self.cfg.heads * self.cfg.head_dim;
+                let kv_dim = self.cfg.kv_heads * self.cfg.head_dim;
+                let last_layer = self.layers.len() - 1;
+
+                let ctx_proj_buf = if ctx_rows > 0 {
+                    let mut ctx_in = scratch.acquire(ctx_rows * self.fc.cols * 4).map_err(err)?;
+                    stream.upload(&mut ctx_in, f32_slice_as_bytes(&ctx_hidden)).map_err(err)?;
+                    let mut ctx_raw = scratch.acquire(ctx_rows * h * 4).map_err(err)?;
+                    stream.quantized_linear(&mut ctx_raw, &ctx_in, &dev.fc, dev.fc.bias.as_ref()).map_err(err)?;
+                    scratch.recycle(ctx_in);
+                    let mut ctx_proj = scratch.acquire(ctx_rows * h * 4).map_err(err)?;
+                    stream.rms_norm(&mut ctx_proj, &ctx_raw, &dev.hidden_norm, self.cfg.eps).map_err(err)?;
+                    scratch.recycle(ctx_raw);
+                    Some(ctx_proj)
+                } else {
+                    None
+                };
+
+                let mut residual_buf = scratch.acquire(t_block * h * 4).map_err(err)?;
+                stream.upload(&mut residual_buf, f32_slice_as_bytes(&block_embed)).map_err(err)?;
+                let mut x_in_buf = scratch.acquire(t_block * h * 4).map_err(err)?;
+                stream.rms_norm(&mut x_in_buf, &residual_buf, &dev.layers[0].attn_norm, self.cfg.eps).map_err(err)?;
+
+                let rope_params = RopeParams {
+                    heads: self.cfg.heads,
+                    kv_heads: self.cfg.kv_heads,
+                    dim: self.cfg.head_dim,
+                    rope_dim: self.rope.half * 2,
+                    neox: self.rope_cfg.neox,
+                    cos: Arc::clone(&dev.rope_tables.0),
+                    sin: Arc::clone(&dev.rope_tables.1),
+                };
+                let attn_params = AttentionParams {
+                    num_heads: self.cfg.heads,
+                    num_kv_heads: self.cfg.kv_heads,
+                    head_dim: self.cfg.head_dim,
+                    value_dim: self.cfg.head_dim,
+                    stride,
+                    block_size: DRAFT_KV_BLOCK_SIZE,
+                    scale: 1.0 / (self.cfg.head_dim as f32).sqrt(),
+                    softcap: None,
+                    window: self.cfg.sliding_window,
+                    chunk: None,
+                    sinks: None,
+                    alibi_slopes: None,
+                };
+
+                let mut last_stash: Option<BridgeStash> = None;
+                let mut host_tail_fallback: Option<Vec<f32>> = None;
+
+                for (l_idx, dl) in dev.layers.iter().enumerate() {
+                    let mut q_buf = scratch.acquire(t_block * q_dim * 4).map_err(err)?;
+                    let mut k_buf = scratch.acquire(t_block * kv_dim * 4).map_err(err)?;
+                    let v_buf = scratch.acquire(t_block * kv_dim * 4).map_err(err)?;
+
+                    stream.quantized_linear(&mut q_buf, &x_in_buf, &dl.q_proj, dl.q_proj.bias.as_ref()).map_err(err)?;
+                    stream.quantized_linear(&mut k_buf, &x_in_buf, &dl.k_proj, dl.k_proj.bias.as_ref()).map_err(err)?;
+                    let mut v_mut = v_buf;
+                    stream.quantized_linear(&mut v_mut, &x_in_buf, &dl.v_proj, dl.v_proj.bias.as_ref()).map_err(err)?;
+
+                    if let Some(qn) = &dl.q_norm {
+                        device_rms_inplace_buf(&mut **stream, &mut scratch, &mut q_buf, qn, self.cfg.eps)?;
+                    }
+                    if let Some(kn) = &dl.k_norm {
+                        device_rms_inplace_buf(&mut **stream, &mut scratch, &mut k_buf, kn, self.cfg.eps)?;
+                    }
+                    stream.rope(&mut q_buf, &mut k_buf, &blk_positions, &rope_params).map_err(err)?;
+
+                    if let Some(ctx_proj) = ctx_proj_buf.as_ref() {
+                        let mut k_ctx = scratch.acquire(ctx_rows * kv_dim * 4).map_err(err)?;
+                        let mut v_ctx = scratch.acquire(ctx_rows * kv_dim * 4).map_err(err)?;
+                        stream.quantized_linear(&mut k_ctx, ctx_proj, &dl.k_proj, dl.k_proj.bias.as_ref()).map_err(err)?;
+                        stream.quantized_linear(&mut v_ctx, ctx_proj, &dl.v_proj, dl.v_proj.bias.as_ref()).map_err(err)?;
+                        if let Some(kn) = &dl.k_norm {
+                            device_rms_inplace_buf(&mut **stream, &mut scratch, &mut k_ctx, kn, self.cfg.eps)?;
+                        }
+                        let mut dummy_q = scratch.acquire(ctx_rows * q_dim * 4).map_err(err)?;
+                        stream.rope(&mut dummy_q, &mut k_ctx, &ctx_positions, &rope_params).map_err(err)?;
+                        scratch.recycle(dummy_q);
+                        stream.kv_cache_write(&dev.kv, l_idx, &ctx_slots, &k_ctx, &v_ctx).map_err(err)?;
+                        scratch.recycle(k_ctx);
+                        scratch.recycle(v_ctx);
+                    }
+
+                    stream.kv_cache_write(&dev.kv, l_idx, &blk_slots, &k_buf, &v_mut).map_err(err)?;
+                    scratch.recycle(k_buf);
+                    scratch.recycle(v_mut);
+
+                    let mut attn_buf = scratch.acquire(t_block * q_dim * 4).map_err(err)?;
+                    stream
+                        .attention_paged(&mut attn_buf, &q_buf, &dev.kv, &round_tables, &lengths, l_idx, &attn_params)
+                        .map_err(err)?;
+                    scratch.recycle(q_buf);
+
+                    device_linear_add(&mut **stream, &mut scratch, &mut residual_buf, &attn_buf, &dl.o_proj)?;
+                    scratch.recycle(attn_buf);
+
+                    let mut ffn_in = scratch.acquire(t_block * h * 4).map_err(err)?;
+                    stream.rms_norm(&mut ffn_in, &residual_buf, &dl.ffn_norm, self.cfg.eps).map_err(err)?;
+                    let gate_buf = {
+                        let mut g = scratch.acquire(t_block * inter * 4).map_err(err)?;
+                        stream.quantized_linear(&mut g, &ffn_in, &dl.gate_proj, dl.gate_proj.bias.as_ref()).map_err(err)?;
+                        g
+                    };
+                    let up_buf = {
+                        let mut u = scratch.acquire(t_block * inter * 4).map_err(err)?;
+                        stream.quantized_linear(&mut u, &ffn_in, &dl.up_proj, dl.up_proj.bias.as_ref()).map_err(err)?;
+                        u
+                    };
+                    scratch.recycle(ffn_in);
+                    let mut act_buf = scratch.acquire(t_block * inter * 4).map_err(err)?;
+                    stream.swiglu(&mut act_buf, &gate_buf, &up_buf).map_err(err)?;
+                    scratch.recycle(gate_buf);
+                    scratch.recycle(up_buf);
+
+                    device_linear_add(&mut **stream, &mut scratch, &mut residual_buf, &act_buf, &dl.down_proj)?;
+                    scratch.recycle(act_buf);
+
+                    let mut handled_next = false;
+                    if let Some(bridge) = &self.bridge {
+                        if bridge.active_layers.contains(&l_idx) {
+                            let mut host_h = vec![0.0f32; t_block * h];
+                            stream.download(f32_slice_as_bytes_mut(&mut host_h), &residual_buf).map_err(err)?;
+                            let next_norm_w = if l_idx < last_layer {
+                                &self.layers[l_idx + 1].attn_norm
+                            } else {
+                                &self.output_norm
+                            };
+                            let stash = (l_idx == last_layer).then(BridgeStash::default);
+                            let (next_in, next_res, filled_stash) = bridge_forward(
+                                bridge,
+                                &self.cfg,
+                                &host_h,
+                                &block_ids,
+                                t_block,
+                                l_idx,
+                                next_norm_w,
+                                self.cfg.eps,
+                                stash,
+                            );
+                            if let Some(s) = filled_stash {
+                                last_stash = Some(s);
+                            }
+                            if l_idx < last_layer {
+                                stream.upload(&mut x_in_buf, f32_slice_as_bytes(&next_in)).map_err(err)?;
+                                stream.upload(&mut residual_buf, f32_slice_as_bytes(&next_res)).map_err(err)?;
+                            } else {
+                                host_tail_fallback = Some(next_in[h..].to_vec());
+                            }
+                            handled_next = true;
+                        }
+                    }
+                    if !handled_next {
+                        let norm_w = if l_idx < last_layer {
+                            &dev.layers[l_idx + 1].attn_norm
+                        } else {
+                            &dev.output_norm
+                        };
+                        stream.rms_norm(&mut x_in_buf, &residual_buf, norm_w, self.cfg.eps).map_err(err)?;
+                    }
+                }
+
+                if let Some(buf) = ctx_proj_buf {
+                    scratch.recycle(buf);
+                }
+                scratch.recycle(residual_buf);
+
+                let greedy_dflash = !self.cfg.has_bridge && params.argmax_only();
+                if let Some(host_tail) = host_tail_fallback {
+                    // Active bridge on last layer already normalized tail rows on host into `host_tail`.
+                    stream.upload(&mut x_in_buf.slice(h * 4, draft_len * h * 4).map_err(err)?, f32_slice_as_bytes(&host_tail)).map_err(err)?;
+                }
+                let tail_buf = x_in_buf.slice(h * 4, draft_len * h * 4).map_err(err)?;
+                let head_res = target.head_logits_or_argmax_device(
+                    &mut **stream,
+                    &mut scratch,
+                    &tail_buf,
+                    draft_len,
+                    greedy_dflash,
+                );
+                scratch.recycle(x_in_buf);
+                match head_res? {
+                    Ok(ids) => Ok((Some(ids), None, last_stash, None)),
+                    Err(logits) => Ok((None, Some(logits), last_stash, None)),
+                }
+            })();
+
+            stream.end_step();
+            pass
+        })();
+
+        release_kv_blocks(&dev.free_blocks, &tail_blocks);
+        let (greedy_ids, logits, last_stash, _) = round_result?;
+
+        state.dev_kv.ctx_rows_in_blocks = ctx_end;
+        state.dev_kv.total_len += ctx_rows;
+        if let Some(w) = self.cfg.sliding_window {
+            while state.dev_kv.ctx_rows_in_blocks >= w + DRAFT_KV_BLOCK_SIZE {
+                let dropped = state.dev_kv.blocks.remove(0);
+                release_kv_blocks(&dev.free_blocks, &[dropped]);
+                state.dev_kv.ctx_rows_in_blocks -= DRAFT_KV_BLOCK_SIZE;
+            }
+        }
+
+        if let Some(bridge) = &self.bridge {
+            let stash = last_stash.ok_or("DSpine last layer did not populate refinement stash")?;
+            let logits = logits.ok_or("DSpine refine_tail expected full logits")?;
+            refine_tail(
+                bridge,
+                &self.cfg,
+                &self.output_norm,
+                &logits,
+                &stash,
+                anchor,
+                draft_len,
+                params,
+                sampler,
+                target,
+            )
+        } else if let Some(ids) = greedy_ids {
+            let tokens = ids.into_iter().map(i64::from).collect();
+            let dists = vec![None; draft_len];
+            Ok((tokens, dists))
+        } else {
+            let logits = logits.ok_or("DFlash expected logits")?;
+            dflash_sample_from_logits(&logits, draft_len, params, sampler, history)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn propose_host(
+        &mut self,
+        sid: u64,
+        anchor: i64,
+        draft_len: usize,
+        params: &SamplingParams,
+        sampler: &mut SamplingState,
+        history: &[i64],
+        target: &RustDecoder,
+    ) -> Result<(Vec<i64>, Vec<Option<Dist>>), String> {
         let t_block = draft_len + 1;
         let row_width = self.cfg.target_layer_ids.len() * self.cfg.target_hidden;
 
         let (ctx_rows, ctx_hidden, prev_pos) = {
             let state = self.states.entry(sid).or_insert_with(|| SeqState {
                 kv: vec![LayerKvCache::default(); self.cfg.layers],
+                dev_kv: SeqDeviceKv::default(),
                 pending_target_hidden: Vec::new(),
                 pending_rows: 0,
             });
@@ -713,11 +1257,7 @@ impl DSpineEngine {
         self.ensure_rope_len(prev_pos + ctx_rows + t_block + 8);
 
         let ctx_proj = if ctx_rows > 0 {
-            let mut projected = forward_linear(
-                &self.fc,
-                self.dev.as_ref().map(|d| (d, &d.fc)),
-                &ctx_hidden,
-            )?;
+            let mut projected = self.fc.forward(&ctx_hidden)?;
             rms_norm_rows_inplace(&mut projected, &self.hidden_norm, self.cfg.eps, self.cfg.hidden);
             Some(projected)
         } else {
@@ -750,16 +1290,13 @@ impl DSpineEngine {
             .get_mut(&sid)
             .ok_or("missing DSpine sequence state")?;
         let last_layer = self.layers.len() - 1;
-        let dev_ctx = self.dev.as_ref();
 
         for (l_idx, layer) in self.layers.iter().enumerate() {
             if !input_normed {
                 x_in = rms_norm_rows_to(&residual, &layer.attn_norm, self.cfg.eps, self.cfg.hidden);
             }
-            let dev_layer = dev_ctx.map(|d| (d, &d.layers[l_idx]));
             let attn_out = draft_layer_attention(
                 layer,
-                dev_layer,
                 &self.cfg,
                 &x_in,
                 ctx_proj.as_deref(),
@@ -773,22 +1310,10 @@ impl DSpineEngine {
                 *dst += *a;
             }
             let ffn_in = rms_norm_rows_to(&h, &layer.ffn_norm, self.cfg.eps, self.cfg.hidden);
-            let mut gate = forward_linear(
-                &layer.gate_proj,
-                dev_layer.map(|(ctx, dl)| (ctx, &dl.gate_proj)),
-                &ffn_in,
-            )?;
-            let up = forward_linear(
-                &layer.up_proj,
-                dev_layer.map(|(ctx, dl)| (ctx, &dl.up_proj)),
-                &ffn_in,
-            )?;
+            let mut gate = layer.gate_proj.forward(&ffn_in)?;
+            let up = layer.up_proj.forward(&ffn_in)?;
             crate::cpu_elementwise::swiglu(&mut gate, &up);
-            let mlp_out = forward_linear(
-                &layer.down_proj,
-                dev_layer.map(|(ctx, dl)| (ctx, &dl.down_proj)),
-                &gate,
-            )?;
+            let mlp_out = layer.down_proj.forward(&gate)?;
             for (dst, m) in h.iter_mut().zip(&mlp_out) {
                 *dst += *m;
             }
@@ -834,11 +1359,12 @@ impl DSpineEngine {
         let norm_tail_rows = &x_in[self.cfg.hidden..]; // [draft_len, H]
         if let Some(bridge) = &self.bridge {
             let stash = last_stash.ok_or("DSpine last layer did not populate refinement stash")?;
+            let logits = target.head_logits(norm_tail_rows)?;
             refine_tail(
                 bridge,
                 &self.cfg,
                 &self.output_norm,
-                norm_tail_rows,
+                &logits,
                 &stash,
                 anchor,
                 draft_len,
@@ -847,15 +1373,8 @@ impl DSpineEngine {
                 target,
             )
         } else {
-            dflash_sample_tail(
-                norm_tail_rows,
-                self.cfg.hidden,
-                draft_len,
-                params,
-                sampler,
-                history,
-                target,
-            )
+            let logits = target.head_logits(norm_tail_rows)?;
+            dflash_sample_from_logits(&logits, draft_len, params, sampler, history)
         }
     }
 }
@@ -911,7 +1430,6 @@ fn apply_neox_rope_rows(
 #[allow(clippy::too_many_arguments)]
 fn draft_layer_attention(
     layer: &DraftLayerWeights,
-    dev_layer: Option<(&DeviceDraftCompute, &DeviceDraftLayer)>,
     cfg: &DSpineConfig,
     x_in: &[f32],
     ctx_proj: Option<&[f32]>,
@@ -924,9 +1442,9 @@ fn draft_layer_attention(
     let q_dim = cfg.heads * cfg.head_dim;
     let offset = cache.total_len;
 
-    let mut q = forward_linear(&layer.q_proj, dev_layer.map(|(ctx, dl)| (ctx, &dl.q_proj)), x_in)?;
-    let mut k_blk = forward_linear(&layer.k_proj, dev_layer.map(|(ctx, dl)| (ctx, &dl.k_proj)), x_in)?;
-    let v_blk = forward_linear(&layer.v_proj, dev_layer.map(|(ctx, dl)| (ctx, &dl.v_proj)), x_in)?;
+    let mut q = layer.q_proj.forward(x_in)?;
+    let mut k_blk = layer.k_proj.forward(x_in)?;
+    let v_blk = layer.v_proj.forward(x_in)?;
 
     if let Some(qn) = &layer.q_norm {
         rms_norm_rows_inplace(&mut q, qn, cfg.eps, cfg.head_dim);
@@ -941,8 +1459,8 @@ fn draft_layer_attention(
 
     if let Some(ctx) = ctx_proj {
         if ctx_rows > 0 {
-            let mut k_ctx = forward_linear(&layer.k_proj, dev_layer.map(|(c, dl)| (c, &dl.k_proj)), ctx)?;
-            let v_ctx = forward_linear(&layer.v_proj, dev_layer.map(|(c, dl)| (c, &dl.v_proj)), ctx)?;
+            let mut k_ctx = layer.k_proj.forward(ctx)?;
+            let v_ctx = layer.v_proj.forward(ctx)?;
             if let Some(kn) = &layer.k_norm {
                 rms_norm_rows_inplace(&mut k_ctx, kn, cfg.eps, cfg.head_dim);
             }
@@ -1055,11 +1573,7 @@ fn draft_layer_attention(
         }
     }
 
-    forward_linear(
-        &layer.o_proj,
-        dev_layer.map(|(ctx, dl)| (ctx, &dl.o_proj)),
-        &attn_out,
-    )
+    layer.o_proj.forward(&attn_out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1161,7 +1675,7 @@ fn refine_tail(
     bridge: &BridgeWeights,
     cfg: &DSpineConfig,
     output_norm_w: &[f32],
-    norm_tail_rows: &[f32],
+    logits: &[f32],
     stash: &BridgeStash,
     anchor: i64,
     n: usize,
@@ -1175,9 +1689,8 @@ fn refine_tail(
     let k = cfg.head_topk;
     let sqrt_c = (c as f32).sqrt();
 
-    let logits = target.head_logits(norm_tail_rows)?;
     let vocab = cfg.vocab_size;
-    let cand = topk_ids(&logits, n, vocab, k);
+    let cand = topk_ids(logits, n, vocab, k);
 
     let mut sid = vec![0usize; n * k];
     sid[..k].fill(anchor as usize);
@@ -1355,21 +1868,20 @@ fn refine_tail(
     Ok((tokens, dists))
 }
 
-fn dflash_sample_tail(
-    norm_tail_rows: &[f32],
-    hidden: usize,
+fn dflash_sample_from_logits(
+    logits: &[f32],
     n: usize,
     params: &SamplingParams,
     sampler: &mut SamplingState,
     history: &[i64],
-    target: &RustDecoder,
 ) -> Result<(Vec<i64>, Vec<Option<Dist>>), String> {
-    let logits = target.head_logits(norm_tail_rows)?;
+    if n == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let vocab = logits.len() / n;
     let greedy = params.argmax_only();
     let mut tokens = Vec::with_capacity(n);
     let mut dists = Vec::with_capacity(n);
-    let _ = hidden;
     for row in 0..n {
         let row_logits = &logits[row * vocab..(row + 1) * vocab];
         if greedy {

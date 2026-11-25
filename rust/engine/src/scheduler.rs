@@ -51,6 +51,8 @@ pub struct Sequence {
     pub choice_index: usize,
     pub blocks: Vec<usize>,
     pub block_hashes: Vec<Option<u64>>,
+    /// Number of full blocks already registered in the prefix cache (and queued for disk spill).
+    pub last_inserted_full_blocks: usize,
     /// Per-request salt (`cache_salt`): its blocks never match another salt's, even for the same prompt.
     pub prefix_salt: u64,
     /// Draft length controller of this sequence (see `SchedulerConfig::speculative_adaptive`).
@@ -120,6 +122,7 @@ impl Sequence {
             choice_index: 0,
             blocks: vec![],
             block_hashes: vec![],
+            last_inserted_full_blocks: 0,
             prefix_salt: 0,
             adaptive: crate::speculative::AdaptiveDraft::new(1, 16),
             arrival: 0,
@@ -345,14 +348,28 @@ impl Scheduler {
                 return Ok(None);
             }
             let mut budget = self.cfg.max_num_batched_tokens;
-            let decoders = self
+            let decode_reserve: usize = self
                 .running
                 .iter()
-                .filter(|sid| self.sequences.get(sid).is_some_and(|s| s.num_computed >= s.prefill_target && s.remaining_max() > 0))
-                .count();
-            // decode-first keeps one token of the budget per running decoder out of the prompt chunks' reach
+                .filter_map(|sid| {
+                    let s = self.sequences.get(sid)?;
+                    if s.state == "running" && s.num_computed >= s.prefill_target && s.remaining_max() > 0 {
+                        let draft_len = if s.can_speculate() {
+                            self.external_drafts
+                                .get(sid)
+                                .map_or(0, |d| d.len().min(s.remaining_max().saturating_sub(1)))
+                        } else {
+                            0
+                        };
+                        Some(1 + draft_len)
+                    } else {
+                        None
+                    }
+                })
+                .sum();
+            // decode-first keeps one token (plus any pending speculative draft tokens) per running decoder out of the prompt chunks' reach
             let mut prefill_budget = if self.cfg.decode_first {
-                budget.saturating_sub(decoders).max(1)
+                budget.saturating_sub(decode_reserve)
             } else {
                 budget
             };
@@ -399,6 +416,9 @@ impl Scheduler {
                 long_prefills += usize::from(long);
             }
             for sid in self.ordered_running() {
+                if budget == 0 {
+                    break;
+                }
                 let Some(seq) = self.sequences.get(&sid) else {
                     continue;
                 };
@@ -410,19 +430,16 @@ impl Scheduler {
                 }
                 let remaining = seq.remaining_max();
                 let mut draft = if seq.can_speculate() {
-                    self.external_drafts.remove(&sid).or_else(|| {
-                        if self.cfg.speculative_lookup > 0 {
-                            self.lookup_draft(sid)
-                        } else {
-                            None
-                        }
-                    })
+                    if let Some(tokens) = self.external_drafts.get(&sid) {
+                        Some(tokens.clone())
+                    } else if self.cfg.speculative_lookup > 0 {
+                        self.lookup_draft(sid)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 };
-                if budget == 0 {
-                    break;
-                }
                 if let Some(tokens) = &mut draft {
                     tokens.truncate(budget.saturating_sub(1).min(remaining.saturating_sub(1)));
                 }
@@ -450,6 +467,7 @@ impl Scheduler {
                     }
                 }
                 self.bm.ensure_blocks(sid, extra as i64)?;
+                self.external_drafts.remove(&sid);
                 budget = budget.saturating_sub(extra);
                 if let Some(d) = draft {
                     step.verify.push((sid, d))
@@ -486,6 +504,7 @@ impl Scheduler {
         self.bm.get_table_mut(sid)?.num_tokens = seq.num_tokens() as i64;
         seq.blocks = blocks.clone();
         seq.block_hashes = vec![None; blocks.len()];
+        seq.last_inserted_full_blocks = 0;
         seq.swapped_blocks = 0;
         self.swap_used = self.swap_used.saturating_sub(blocks_needed);
         self.pending_swap_in.push((sid, blocks));
@@ -620,6 +639,7 @@ impl Scheduler {
                 self.bm.get_table(sid)?.blocks.len().saturating_sub(reused),
             ))
             .collect();
+        seq.last_inserted_full_blocks = reused;
         Ok(true)
     }
     /// Scheduling key: the sequence with the smaller key goes first.
@@ -944,6 +964,7 @@ impl Scheduler {
                 self.bm.drop_table(sid)?;
                 seq.blocks.clear();
                 seq.block_hashes.clear();
+                seq.last_inserted_full_blocks = 0;
                 self.next_offset.remove(&sid);
                 seq.state = "waiting".into();
                 if let Some(i) = self.running.iter().position(|x| *x == sid) {
@@ -956,6 +977,7 @@ impl Scheduler {
         self.bm.drop_table(sid)?;
         seq.blocks.clear();
         seq.block_hashes.clear();
+        seq.last_inserted_full_blocks = 0;
         seq.num_computed = 0;
         seq.prefill_target = seq.num_tokens();
         self.next_offset.remove(&sid);
@@ -1042,21 +1064,30 @@ impl Scheduler {
         if self.pc.is_none() || !self.cfg.prefix_cache || self.sequences[&sid].has_media {
             return Ok(());
         }
-        let (tokens, num_computed) = {
+        let table_len = self.bm.get_table(sid)?.blocks.len();
+        let (full, start) = {
             let s = &self.sequences[&sid];
-            (s.tokens.clone(), s.num_computed)
+            let full = (s.num_computed / self.cfg.block_size).min(table_len);
+            let mut start = s.last_inserted_full_blocks.min(full);
+            while start > 0 && s.block_hashes.get(start - 1).copied().flatten().is_none() {
+                start -= 1;
+            }
+            (full, start)
         };
-        let full = num_computed / self.cfg.block_size;
+        if start >= full {
+            return Ok(());
+        }
+        let tokens = self.sequences[&sid].tokens.clone();
         // the chain starts where the lookup in `try_admit` starts: at the deployment seed xor the salt of the request
         let (root, salt) = (prefix_seed() ^ self.sequences[&sid].prefix_salt, self.sequences[&sid].prefix_salt);
         let table = self.bm.get_table(sid)?;
-        let mut entries = vec![];
+        let mut entries = Vec::with_capacity(full);
         {
             let seq = self.sequences.get_mut(&sid).unwrap();
             if seq.block_hashes.len() < table.blocks.len() {
                 seq.block_hashes.resize(table.blocks.len(), None)
             }
-            for b in 0..full.min(table.blocks.len()) {
+            for b in 0..full {
                 let seg = tokens[b * self.cfg.block_size..(b + 1) * self.cfg.block_size].to_vec();
                 let prev = if b > 0 {
                     seq.block_hashes[b - 1]
@@ -1073,7 +1104,8 @@ impl Scheduler {
                 });
             }
         }
-        if !entries.is_empty() {
+        let inserted = entries.len();
+        if inserted > start {
             let (pc, bm) = (&mut self.pc, &mut self.bm);
             let cell = std::cell::RefCell::new(&mut *bm);
             let mut claim = |bid| {
@@ -1094,12 +1126,17 @@ impl Scheduler {
             // (own hash, parent hash, block, tokens) — the parent is what makes a chain rebuildable later. Only the blocks of requests
             // without a `cache_salt` go to the disk tier: the salt of a request is not known when the server starts again.
             if salt == 0 {
-                let mut parent = prefix_seed();
-                for entry in &entries {
+                let mut parent = if start > 0 {
+                    entries[start - 1].chain_hash
+                } else {
+                    prefix_seed()
+                };
+                for entry in &entries[start..] {
                     self.pending_spills.push((entry.chain_hash, parent, entry.block_id, entry.tokens.clone()));
                     parent = entry.chain_hash;
                 }
             }
+            self.sequences.get_mut(&sid).unwrap().last_inserted_full_blocks = inserted;
         }
         Ok(())
     }
@@ -1154,10 +1191,11 @@ impl Scheduler {
         }
         self.bm.get_table_mut(sid)?.blocks.truncate(keep);
         let n = self.bm.get_table(sid)?.blocks.len();
-        let hashes = &mut self.sequences.get_mut(&sid).unwrap().block_hashes;
-        if hashes.len() > n {
-            hashes.truncate(n)
+        let seq = self.sequences.get_mut(&sid).unwrap();
+        if seq.block_hashes.len() > n {
+            seq.block_hashes.truncate(n);
         }
+        seq.last_inserted_full_blocks = seq.last_inserted_full_blocks.min(n);
         Ok(())
     }
     fn lookup_draft(&mut self, sid: i64) -> Option<Vec<i64>> {
@@ -1465,5 +1503,129 @@ mod prefix_reuse_tests {
         s.add_request("r3".into(), vec![Sequence::new(3, "r3".into(), other, 8, 0.0)]);
         s.schedule().unwrap().unwrap();
         assert_eq!(s.sequences[&3].cached_prompt_tokens, 0);
+    }
+
+    #[test]
+    fn decode_first_does_not_starve_decoders_or_strip_speculative_drafts() {
+        let mut s = Scheduler::new(
+            SchedulerConfig {
+                block_size: 4,
+                max_num_seqs: 8,
+                max_num_batched_tokens: 4,
+                prefix_cache: false,
+                decode_first: true,
+                ..SchedulerConfig::default()
+            },
+            BlockManager::new(64, 4).unwrap(),
+            None,
+            256,
+        );
+        for id in 1..=4 {
+            s.add_request(format!("r{id}"), vec![Sequence::new(id, format!("r{id}"), (0..4).collect(), 8, 0.0)]);
+        }
+        s.schedule().unwrap().unwrap();
+        for id in 1..=4 {
+            s.commit_chunk(id, 4).unwrap();
+        }
+        s.add_request("r5".into(), vec![Sequence::new(5, "r5".into(), (0..8).collect(), 8, 0.0)]);
+        let step = s.schedule().unwrap().unwrap();
+        assert!(step.prefill.is_empty(), "decoders meeting budget leave 0 prefill tokens");
+        assert_eq!(step.decode, vec![1, 2, 3, 4]);
+
+        let mut s = Scheduler::new(
+            SchedulerConfig {
+                block_size: 4,
+                max_num_seqs: 4,
+                max_num_batched_tokens: 8,
+                prefix_cache: false,
+                decode_first: true,
+                ..SchedulerConfig::default()
+            },
+            BlockManager::new(64, 4).unwrap(),
+            None,
+            256,
+        );
+        s.add_request("r1".into(), vec![Sequence::new(1, "r1".into(), (0..4).collect(), 16, 0.0)]);
+        s.schedule().unwrap().unwrap();
+        s.commit_chunk(1, 4).unwrap();
+        s.external_drafts.insert(1, vec![101, 102, 103, 104]);
+        s.add_request("r2".into(), vec![Sequence::new(2, "r2".into(), (0..20).collect(), 8, 0.0)]);
+        let step = s.schedule().unwrap().unwrap();
+        assert_eq!(step.prefill, vec![(2, 0, 3)]);
+        assert_eq!(step.verify, vec![(1, vec![101, 102, 103, 104])]);
+    }
+
+    #[test]
+    fn external_drafts_are_kept_when_budget_or_blocks_prevent_scheduling() {
+        let mut s = Scheduler::new(
+            SchedulerConfig {
+                block_size: 4,
+                max_num_seqs: 4,
+                max_num_batched_tokens: 4,
+                prefix_cache: false,
+                decode_first: false,
+                ..SchedulerConfig::default()
+            },
+            BlockManager::new(64, 4).unwrap(),
+            None,
+            256,
+        );
+        s.add_request("r1".into(), vec![Sequence::new(1, "r1".into(), (0..4).collect(), 8, 0.0)]);
+        s.schedule().unwrap().unwrap();
+        s.commit_chunk(1, 4).unwrap();
+        s.add_request("r2".into(), vec![Sequence::new(2, "r2".into(), (0..8).collect(), 8, 0.0)]);
+        s.external_drafts.insert(1, vec![10, 11]);
+        let step = s.schedule().unwrap().unwrap();
+        assert_eq!(step.prefill, vec![(2, 0, 4)]);
+        assert!(step.decode.is_empty() && step.verify.is_empty());
+        assert_eq!(s.external_drafts.get(&1), Some(&vec![10, 11]));
+
+        let mut s = Scheduler::new(
+            SchedulerConfig {
+                block_size: 4,
+                max_num_seqs: 2,
+                max_num_batched_tokens: 16,
+                prefix_cache: false,
+                ..SchedulerConfig::default()
+            },
+            BlockManager::new(2, 4).unwrap(),
+            None,
+            256,
+        );
+        s.add_request("r1".into(), vec![Sequence::new(1, "r1".into(), (0..4).collect(), 16, 0.0)]);
+        s.schedule().unwrap().unwrap();
+        s.commit_chunk(1, 4).unwrap();
+        s.external_drafts.insert(1, vec![10, 11, 12, 13, 14]);
+        let step = s.schedule().unwrap();
+        assert!(step.is_none());
+        assert_eq!(s.external_drafts.get(&1), Some(&vec![10, 11, 12, 13, 14]));
+    }
+
+    #[test]
+    fn insert_full_blocks_avoids_duplicate_spills_across_chunks() {
+        let cfg = SchedulerConfig {
+            block_size: 4,
+            max_num_seqs: 4,
+            max_num_batched_tokens: 64,
+            prefix_cache: true,
+            preemption: "recompute".into(),
+            ..SchedulerConfig::default()
+        };
+        let pc = PrefixCache::new(64, true, true).unwrap();
+        let mut s = Scheduler::new(cfg, BlockManager::new(64, 4).unwrap(), Some(pc), 256);
+        s.add_request("r1".into(), vec![Sequence::new(1, "r1".into(), (0..12).collect(), 8, 0.0)]);
+        s.schedule().unwrap().unwrap();
+        s.commit_chunk(1, 4).unwrap();
+        assert_eq!(s.sequences[&1].last_inserted_full_blocks, 1);
+        assert_eq!(s.take_pending_spills().len(), 1);
+        s.commit_chunk(1, 2).unwrap();
+        assert_eq!(s.sequences[&1].last_inserted_full_blocks, 1);
+        assert!(s.take_pending_spills().is_empty());
+        s.commit_chunk(1, 6).unwrap();
+        assert_eq!(s.sequences[&1].last_inserted_full_blocks, 3);
+        let spills = s.take_pending_spills();
+        assert_eq!(spills.len(), 2);
+        assert_eq!(Some(spills[0].1), s.sequences[&1].block_hashes[0]);
+        assert_eq!(spills[1].1, spills[0].0);
     }
 }

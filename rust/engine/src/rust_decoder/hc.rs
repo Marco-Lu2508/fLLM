@@ -68,7 +68,7 @@ impl RustDecoder {
             if let Some(norm) = &layer.ffn_norm {
                 self.norm(&mut normed, norm);
             }
-            let mlp = self.ffn_forward(layer, &normed, &mut workspace)?;
+            let mlp = self.ffn_forward(i, layer, &normed, &mut workspace)?;
             combine_streams(&mut streams, &post, comb.as_deref(), &mlp, rows, hc, hidden);
             dump_layer("ffn", i, &streams);
         }

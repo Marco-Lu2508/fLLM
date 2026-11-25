@@ -20,9 +20,19 @@ fn flt(cfg: &Value, key: &str) -> Option<f64> {
     cfg.get(key).and_then(Value::as_f64)
 }
 
-/// The clamp bounds of `swiglu_limits` / `swiglu_limits_shared` (Step-3.7-Flash clamps the last layers): zero or null means none.
-fn clamps(cfg: &Value, key: &str) -> bool {
-    cfg.get(key).and_then(Value::as_array).is_some_and(|l| l.iter().any(|v| v.as_f64().is_some_and(|f| f != 0.0)))
+/// Per-layer clamp bounds of `swiglu_limits` / `swiglu_limits_shared` (Step-3.7-Flash clamps the last layers): zero or null means none.
+fn clamp_limits(cfg: &Value, key: &str, layers: usize) -> Option<Vec<f64>> {
+    let vals: Vec<f64> = match cfg.get(key)? {
+        Value::Array(list) => (0..layers)
+            .map(|i| list.get(i).and_then(Value::as_f64).filter(|f| f.is_finite() && *f > 0.0).unwrap_or(0.0))
+            .collect(),
+        Value::Number(n) => {
+            let f = n.as_f64().filter(|f| f.is_finite() && *f > 0.0)?;
+            vec![f; layers]
+        }
+        _ => return None,
+    };
+    vals.iter().any(|&v| v > 0.0).then_some(vals)
 }
 
 /// Laguna configuration of a Step-3.5 / 3.7 text configuration.
@@ -30,9 +40,6 @@ pub(crate) fn config(cfg: &Value) -> Result<Value, String> {
     let layers = num(cfg, "num_hidden_layers").ok_or("config.json requires num_hidden_layers")? as usize;
     let heads = num(cfg, "num_attention_heads").ok_or("config.json requires num_attention_heads")?;
     let head_dim = num(cfg, "head_dim").unwrap_or(0);
-    if clamps(cfg, "swiglu_limits") || clamps(cfg, "swiglu_limits_shared") {
-        return Err("Step-3.7 layers with clamped SwiGLU (swiglu_limits) are unsupported".into());
-    }
     if let Some(scalar) = flt(cfg, "query_pre_attn_scalar") {
         if head_dim > 0 && (scalar - head_dim as f64).abs() > 1e-9 {
             return Err("Step-3.5 with query_pre_attn_scalar different from head_dim is unsupported".into());
@@ -68,6 +75,16 @@ pub(crate) fn config(cfg: &Value) -> Result<Value, String> {
     out["num_experts_per_tok"] = first_num(cfg, &["num_experts_per_tok", "moe_top_k"]).ok_or("config.json requires num_experts_per_tok")?.into();
     if let Some(shared) = first_num(cfg, &["share_expert_dim", "share_expert_dims", "shared_expert_intermediate_size"]) {
         out["shared_expert_intermediate_size"] = shared.into();
+    }
+    for key in ["swiglu_limits", "swiglu_limits_shared"] {
+        match clamp_limits(cfg, key, layers) {
+            Some(limits) => out[key] = json!(limits),
+            None => {
+                if let Some(obj) = out.as_object_mut() {
+                    obj.remove(key);
+                }
+            }
+        }
     }
     out["moe_routed_scaling_factor"] = flt(cfg, "moe_router_scaling_factor").or_else(|| flt(cfg, "moe_routed_scaling_factor")).unwrap_or(1.0).into();
     if num(cfg, "max_position_embeddings").is_none() {
@@ -165,10 +182,29 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_variants_are_refused() {
+    fn swiglu_limits_propagate_to_laguna_plan() {
         let mut c = hub();
-        c["swiglu_limits"] = json!([0.0, 7.0, 0.0, 0.0]);
-        assert!(config(&c).unwrap_err().contains("swiglu"));
+        c["rope_scaling"] = json!({"rope_type": "llama3", "factor": 2.0, "original_max_position_embeddings": 256});
+        c["swiglu_limits"] = json!([0.0, Value::Null, 7.0, 5.5]);
+        c["swiglu_limits_shared"] = json!([0.0, 0.0, 4.0, 4.0]);
+        let normalized = config(&c).unwrap();
+        assert_eq!(normalized["swiglu_limits"], json!([0.0, 0.0, 7.0, 5.5]));
+        assert_eq!(normalized["swiglu_limits_shared"], json!([0.0, 0.0, 4.0, 4.0]));
+        let plan = crate::plan::Plan::from_config(&c).unwrap();
+        let meta = |key: &str| plan.meta.iter().find(|(k, _)| k == &format!("laguna.{key}")).map(|(_, v)| v.clone());
+        assert!(matches!(meta("expert_swiglu_clamp"), Some(crate::gguf::Meta::F32s(v)) if v == [0.0, 0.0, 7.0, 5.5]));
+        assert!(matches!(meta("expert_swiglu_clamp_shared"), Some(crate::gguf::Meta::F32s(v)) if v == [0.0, 0.0, 4.0, 4.0]));
+        assert!(matches!(meta("attention.gate_sigmoid"), Some(crate::gguf::Meta::Bool(true))));
+
+        let mut un_clamped = hub();
+        un_clamped["rope_scaling"] = json!({"rope_type": "llama3", "factor": 2.0, "original_max_position_embeddings": 256});
+        un_clamped["swiglu_limits"] = json!([0.0, 0.0, 0.0, 0.0]);
+        let plan_plain = crate::plan::Plan::from_config(&un_clamped).unwrap();
+        assert!(!plan_plain.meta.iter().any(|(k, _)| k == "laguna.expert_swiglu_clamp"));
+    }
+
+    #[test]
+    fn unsupported_variants_are_refused() {
         let mut c = hub();
         c["sink"] = true.into();
         assert!(config(&c).unwrap_err().contains("sinks"));

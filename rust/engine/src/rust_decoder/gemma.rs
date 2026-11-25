@@ -206,8 +206,6 @@ impl GemmaLayer {
     pub(super) fn device_gap(&self) -> Option<&'static str> {
         if self.altup.is_some() {
             Some("Gemma AltUp residual streams")
-        } else if self.laurel.is_some() {
-            Some("Gemma LAuReL residual")
         } else if self.moe.is_some() {
             Some("the Gemma mixture-of-experts branch")
         } else if self.sparsity > 0.0 {
@@ -220,6 +218,11 @@ impl GemmaLayer {
     /// Gate, projection and norm of the per-layer input path.
     pub(super) fn ple_parts(&self) -> Option<(&Linear, &Linear, &Norm)> {
         self.ple.as_ref().map(|p| (&p.gate, &p.proj, &p.norm))
+    }
+
+    /// Low-rank left/right projections and post-norm of a Gemma LAuReL residual block.
+    pub(super) fn laurel_parts(&self) -> Option<(&Linear, &Linear, &Norm)> {
+        self.laurel.as_ref().map(|l| (&l.left, &l.right, &l.norm))
     }
 
     /// The layer output scale.

@@ -82,12 +82,20 @@ enum GluMode {
     SwigluOai(f32, f32),
     /// Hy4 / GLM-5-Next clamped SwiGLU, Kimi K3 SiTU.
     Clamped(crate::backend::ClampedGlu),
+    /// General gated activation (`Stream::activation_glu` code: GeluErf, Relu, ReluSquared).
+    Act(i32),
+    /// Non-gated plain feed-forward / expert (`down(act(up(x)))`, `Stream::activation` code).
+    Plain(i32),
 }
 
 /// Where the three projections of a gated FFN / expert come from when it is computed on the device.
 enum ExpertSrc<'a> {
     Device(&'a DeviceExpert),
-    Host([HostWeight<'a>; 3]),
+    Host {
+        gate: Option<HostWeight<'a>>,
+        up: HostWeight<'a>,
+        down: HostWeight<'a>,
+    },
 }
 
 /// K2 Horizon MoVA: each token's values are `sum_k w_k * silu(W_k x)` over routed value experts.
@@ -646,7 +654,7 @@ pub fn set_ffn_host_from(layers: usize, first: usize) {
 
 /// One expert of a mixture-of-experts layer whose weights live on the device.
 pub struct DeviceExpert {
-    pub gate: crate::backend::DeviceWeight,
+    pub gate: Option<crate::backend::DeviceWeight>,
     pub up: crate::backend::DeviceWeight,
     pub down: crate::backend::DeviceWeight,
 }
@@ -661,7 +669,7 @@ pub struct DeviceMoe {
 
 pub struct DeviceMoeFast {
     pub router: crate::backend::DeviceWeight,
-    pub gate: crate::backend::DeviceBuffer,
+    pub gate: Option<crate::backend::DeviceBuffer>,
     pub up: crate::backend::DeviceBuffer,
     pub down: crate::backend::DeviceBuffer,
     /// Tables of the experts' bias vectors (gpt-oss), when the projections have them.
@@ -686,6 +694,18 @@ pub struct DeviceMoeDevice {
     pub shared_gate: Option<crate::backend::DeviceBuffer>,
     /// The grouped GEMM runs the formats and widths of this layer (both pair tiles).
     pub grouped: bool,
+}
+
+/// MoVA routed value experts kept on the device (`K2 Horizon`).
+pub struct DeviceValueMoe {
+    pub router: crate::backend::DeviceWeight,
+    pub bias: Option<crate::backend::DeviceBuffer>,
+    pub experts: Vec<crate::backend::DeviceWeight>,
+    /// Pointer table over `experts` (`quant_type`, `dp4a`, `grouped`) for fused decode/prefill launches.
+    pub table: Option<(crate::backend::DeviceBuffer, crate::backend::QuantType, bool, bool)>,
+    pub route: crate::backend::MoeRoute,
+    pub used: usize,
+    pub width: usize,
 }
 
 pub struct DeviceLayerWeights {
@@ -722,6 +742,8 @@ pub struct DeviceLayerWeights {
     pub ffn_up: Option<crate::backend::DeviceWeight>,
     pub ffn_down: Option<crate::backend::DeviceWeight>,
     pub moe: Option<DeviceMoe>,
+    /// K2 Horizon MoVA value experts on the device.
+    pub value_moe: Option<DeviceValueMoe>,
     /// Gated DeltaNet mixer resident on the device.
     delta: Option<DeviceDelta>,
     /// Multi-head latent attention projections resident on the device.
@@ -756,10 +778,20 @@ pub struct DeviceLayerWeights {
     pub gate_up: Option<DeviceMergedProj>,
     /// Gemma per-layer input path after the feed-forward block: gate (hidden -> per-layer width), projection back and its norm.
     pub ple: Option<(crate::backend::DeviceWeight, crate::backend::DeviceWeight, crate::backend::DeviceBuffer)>,
+    /// Gemma LAuReL low-rank residual block (`x + norm(right(left(normed)))`).
+    pub laurel: Option<DeviceLaurel>,
     /// Gemma layer output scale (multiplies the residual stream at the end of the layer).
     pub out_scale: Option<f32>,
     /// Weightless RMS norm of every value head (Gemma 4 / 3n): a vector of ones of the value width.
     pub v_norm: Option<crate::backend::DeviceBuffer>,
+}
+
+/// Gemma LAuReL low-rank residual projections and norm resident on the device.
+pub struct DeviceLaurel {
+    pub left: crate::backend::DeviceWeight,
+    pub right: crate::backend::DeviceWeight,
+    pub norm: crate::backend::DeviceBuffer,
+    pub norm_b: Option<crate::backend::DeviceBuffer>,
 }
 
 /// Several projections of a layer uploaded as one matrix (`FLLM_MERGE_PROJ`): rows of the parts in `parts` (q, k, v or gate, up, 0).
@@ -796,6 +828,7 @@ impl DeviceLayerWeights {
             ffn_up: None,
             ffn_down: None,
             moe: None,
+            value_moe: None,
             delta: None,
             mla: None,
             dsa: None,
@@ -813,6 +846,7 @@ impl DeviceLayerWeights {
             qkv: None,
             gate_up: None,
             ple: None,
+            laurel: None,
             out_scale: None,
             v_norm: None,
         }
@@ -1007,6 +1041,27 @@ fn act_code(a: Activation) -> i32 {
         Activation::Relu => 3,
         Activation::ReluSquared => 4,
     }
+}
+
+fn device_scale_inplace(
+    stream: &mut dyn crate::backend::Stream,
+    scratch: &mut crate::backend::BufferPool,
+    buf: &mut crate::backend::DeviceBuffer,
+    scale: f32,
+) -> Result<(), String> {
+    if (scale - 1.0).abs() < 1e-7 {
+        return Ok(());
+    }
+    let err = |e: crate::backend::BackendError| e.to_string();
+    if stream.supports_value_scale() && !stream.act_dtype().is_narrow() {
+        stream.scale_inplace(buf, scale).map_err(err)?;
+        return Ok(());
+    }
+    let mut copy = scratch.acquire(buf.size).map_err(err)?;
+    stream.copy_buffer(&mut copy, buf).map_err(err)?;
+    stream.residual_add(buf, &copy, scale - 1.0).map_err(err)?;
+    scratch.recycle(copy);
+    Ok(())
 }
 
 pub struct DeviceModelWeights {
@@ -1810,9 +1865,6 @@ impl RustDecoder {
     }
 
     pub(crate) fn load_mtp(model: &GgufModel, device: &str) -> Result<Self, String> {
-        if !matches!(device, "auto" | "cpu") && !device.starts_with("cuda") {
-            return Err("MTP currently requires --device cpu or cuda; GPU hidden-state capture is not integrated with the other backends".into());
-        }
         if model.is_stateful() {
             return Err(
                 "MTP speculative decoding is unavailable for stateful DeltaNet/Mamba models".into(),
@@ -3154,7 +3206,7 @@ impl RustDecoder {
     /// cache, and the stream goes back up. `gate_ok` / `arch_ok` / `head_ok`: the stream has the attention-gate / element-wise /
     /// per-head gate and value-scale kernels.
     #[allow(clippy::too_many_arguments)]
-    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool, rwkv_ok: bool, kda_ok: bool, mamba_ok: bool, zamba_ok: bool, q4_ok: bool) -> Option<&'static str> {
+    fn layer_host_reason(&self, _i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool, rwkv_ok: bool, kda_ok: bool, mamba_ok: bool, zamba_ok: bool, q4_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
         if cfg.v4.is_some() {
             return if self.v4_device { None } else { Some("DeepSeek-V4 hyper-connections and compressed attention (the backend has no kernels for them, or FLLM_V4=host)") };
@@ -3203,11 +3255,8 @@ impl RustDecoder {
                 if gated && (!arch_ok || !gate_ok) {
                     return Some("an attention output gate");
                 }
-                if cfg.qkv_clip.is_some() && (!arch_ok || layer.output_gate) {
+                if cfg.qkv_clip.is_some() && !arch_ok {
                     return Some("QKV clipping");
-                }
-                if cfg.attn_temperature.is_some() && (!cfg.temperature_nope_only || !cfg.layer_rotates(i)) {
-                    return Some("attention temperature scaling");
                 }
                 None
             }
@@ -3268,11 +3317,14 @@ impl RustDecoder {
     }
 
     /// Why the feed-forward of `layer` has to use the host reference code although the mixer runs on the device.
-    fn ffn_host_reason(&self, layer: &Layer, arch_ok: bool, clamp_ok: bool) -> Option<&'static str> {
+    fn ffn_host_reason(&self, layer_idx: usize, layer: &Layer, arch_ok: bool, clamp_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
         let native = |a: Activation| matches!(a, Activation::Silu | Activation::GeluTanh) || arch_ok;
-        // the clamped SwiGLU (Hy4, GLM-5-Next) and SiTU (Kimi K3) have no device kernel; the device GLU would apply the plain SwiGLU
-        if !clamp_ok && (cfg.situ.is_some() || cfg.moe.as_ref().is_some_and(|m| m.swiglu_clamp.is_some())) && matches!(layer.ffn, Ffn::Moe(_) | Ffn::Gated { .. }) {
+        // the clamped SwiGLU (Hy4, GLM-5-Next, Step-3.7) and SiTU (Kimi K3) need clamp kernels; earlier unclamped layers run natively
+        if !clamp_ok
+            && (cfg.situ.is_some() || cfg.moe.as_ref().is_some_and(|m| m.routed_clamp(layer_idx).is_some() || m.shared_clamp(layer_idx).is_some()))
+            && matches!(layer.ffn, Ffn::Moe(_) | Ffn::Gated { .. })
+        {
             return Some("a clamped SwiGLU or SiTU activation (the backend has no kernel for it)");
         }
         match &layer.ffn {
@@ -3366,7 +3418,7 @@ impl RustDecoder {
         let shape = ModelShape {
             all_layers_standard_attention: self.layers.iter().all(|l| matches!(l.attn, Attn::Std { .. })),
             host_layers: layer_reasons.iter().any(Option::is_some)
-                || self.layers.iter().any(|l| l.value_moe.is_some() || self.ffn_host_reason(l, true, true).is_some())
+                || self.layers.iter().enumerate().any(|(i, l)| l.value_moe.is_some() || self.ffn_host_reason(i, l, true, true).is_some())
                 || FFN_HOST_FROM.lock().ok().and_then(|slot| *slot).is_some_and(|(layers, _)| layers == self.layers.len()),
             moe: self.layers.iter().any(|l| matches!(l.ffn, Ffn::Moe(_))),
             mla: cfg.mla.is_some(),
@@ -3782,8 +3834,8 @@ impl RustDecoder {
                 dev_layers.push(DeviceLayerWeights::empty(true));
                 continue;
             }
-            let ffn_host_exact = self.ffn_host_reason(layer, arch_ok, clamp_ok).is_some();
-            if let Some(reason) = self.ffn_host_reason(layer, arch_ok, clamp_ok) {
+            let ffn_host_exact = self.ffn_host_reason(i, layer, arch_ok, clamp_ok).is_some();
+            if let Some(reason) = self.ffn_host_reason(i, layer, arch_ok, clamp_ok) {
                 ffn_host_blocks.0 += 1;
                 ffn_host_blocks.1 = reason;
             }
@@ -3975,7 +4027,7 @@ impl RustDecoder {
                     let up_expert = |e: &Expert, tag: &str| -> Result<DeviceExpert, String> {
                         let gate = e.gate.as_ref().ok_or("an Inkling expert without a gate projection")?;
                         Ok(DeviceExpert {
-                            gate: upload_linear(&format!("blk.{i}.{tag}.gate"), gate)?,
+                            gate: Some(upload_linear(&format!("blk.{i}.{tag}.gate"), gate)?),
                             up: upload_linear(&format!("blk.{i}.{tag}.up"), &e.up)?,
                             down: upload_linear(&format!("blk.{i}.{tag}.down"), &e.down)?,
                         })
@@ -4034,7 +4086,7 @@ impl RustDecoder {
                     .and_then(|slot| *slot)
                     .is_some_and(|(layers, first)| layers == self.layers.len() && i >= first);
             let merged_gate_up = match &layer.ffn {
-                Ffn::Gated { gate, up, .. } if merge_on && !host_ffn && self.cfg.inkling.is_none() && matches!(self.cfg.activation, Activation::Silu | Activation::GeluTanh) && !matches!(self.dense_glu_mode(), Some(GluMode::Clamped(_) | GluMode::SwigluOai(..))) => {
+                Ffn::Gated { gate, up, .. } if merge_on && !host_ffn && self.cfg.inkling.is_none() && matches!(self.cfg.activation, Activation::Silu | Activation::GeluTanh) && !matches!(self.dense_glu_mode(i), Some(GluMode::Clamped(_) | GluMode::SwigluOai(..))) => {
                     upload_merged(&format!("blk.{i}.ffn_gate_up"), &[gate, up])?
                 }
                 _ => None,
@@ -4060,13 +4112,15 @@ impl RustDecoder {
                 _ => layer.shortcut.as_deref(),
             };
             let moe_dev = match moe_src {
-                Some(moe) if !host_ffn && self.device_glu_mode().is_some() => {
+                Some(moe) if !host_ffn && self.device_glu_mode(i).is_some() => {
                     let up_expert = |e: &Expert, tag: &str| -> Result<Option<DeviceExpert>, String> {
-                        let Some(gate) = e.gate.as_ref() else {
-                            return Ok(None);
-                        };
+                        let gate = e
+                            .gate
+                            .as_ref()
+                            .map(|g| upload_linear(&format!("blk.{i}.{tag}.gate"), g))
+                            .transpose()?;
                         Ok(Some(DeviceExpert {
-                            gate: upload_linear(&format!("blk.{i}.{tag}.gate"), gate)?,
+                            gate,
                             up: upload_linear(&format!("blk.{i}.{tag}.up"), &e.up)?,
                             down: upload_linear(&format!("blk.{i}.{tag}.down"), &e.down)?,
                         }))
@@ -4086,13 +4140,22 @@ impl RustDecoder {
                         let all: Option<Vec<&DeviceExpert>> = experts.iter().map(|e| e.as_ref()).collect();
                         match all {
                             Some(list) if !list.is_empty() => {
-                                let kinds = [list[0].gate.quant_type, list[0].up.quant_type, list[0].down.quant_type];
+                                let plain = list[0].gate.is_none();
+                                let kinds = [
+                                    list[0].gate.as_ref().unwrap_or(&list[0].up).quant_type,
+                                    list[0].up.quant_type,
+                                    list[0].down.quant_type,
+                                ];
                                 let same = list.iter().all(|e| {
-                                    e.gate.quant_type == kinds[0] && e.up.quant_type == kinds[1] && e.down.quant_type == kinds[2]
+                                    e.gate.is_some() == !plain
+                                        && e.gate.as_ref().is_none_or(|g| g.quant_type == kinds[0])
+                                        && e.up.quant_type == kinds[1]
+                                        && e.down.quant_type == kinds[2]
                                 });
                                 let ok_kind = |q: crate::backend::QuantType| matches!(q.to_gguf_type_id(), 1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 0x8000_0010..=0x8000_0012);
-                                let (ff, hid) = (list[0].gate.rows, list[0].gate.cols);
-                                let dims = list[0].down.rows == hid
+                                let (ff, hid) = (list[0].up.rows, list[0].up.cols);
+                                let dims = list.iter().all(|e| e.gate.as_ref().is_none_or(|g| g.rows == ff && g.cols == hid))
+                                    && list[0].down.rows == hid
                                     && list[0].down.cols == ff
                                     && hid.is_multiple_of(16)
                                     && ff.is_multiple_of(16)
@@ -4106,26 +4169,33 @@ impl RustDecoder {
                                     })
                                     && {
                                         let ok = |sel: fn(&DeviceExpert) -> bool| list.iter().all(|e| sel(e)) || list.iter().all(|e| !sel(e));
-                                        ok(|e| e.gate.bias.is_some()) && ok(|e| e.up.bias.is_some()) && ok(|e| e.down.bias.is_some())
+                                        ok(|e| e.gate.as_ref().is_some_and(|g| g.bias.is_some()))
+                                            && ok(|e| e.up.bias.is_some())
+                                            && ok(|e| e.down.bias.is_some())
                                     };
                                 let dp4a = kinds.iter().all(|&q| ok_kind(q));
                                 let grouped = device_moe
                                     && [16usize, 64].iter().all(|&b| {
-                                        backend.moe_grouped_supported(kinds[0], hid, b)
+                                        (plain || backend.moe_grouped_supported(kinds[0], hid, b))
                                             && backend.moe_grouped_supported(kinds[1], hid, b)
                                             && backend.moe_grouped_supported(kinds[2], ff, b)
                                     });
                                 if same && dims && (dp4a || grouped) {
-                                    let gates: Vec<&crate::backend::DeviceWeight> = list.iter().map(|e| &e.gate).collect();
+                                    let gates: Vec<&crate::backend::DeviceWeight> = list.iter().filter_map(|e| e.gate.as_ref()).collect();
                                     let ups: Vec<&crate::backend::DeviceWeight> = list.iter().map(|e| &e.up).collect();
                                     let downs: Vec<&crate::backend::DeviceWeight> = list.iter().map(|e| &e.down).collect();
+                                    let gate_tbl = if !plain {
+                                        backend.upload_pointer_table(&gates).map(Some)
+                                    } else {
+                                        Ok(None)
+                                    };
                                     let tables = (
-                                        backend.upload_pointer_table(&gates),
+                                        gate_tbl,
                                         backend.upload_pointer_table(&ups),
                                         backend.upload_pointer_table(&downs),
                                     );
                                     let bias_table = |ws: &[&crate::backend::DeviceWeight]| {
-                                        if ws.iter().all(|w| w.bias.is_some()) {
+                                        if !ws.is_empty() && ws.iter().all(|w| w.bias.is_some()) {
                                             backend.upload_bias_table(ws).map(Some)
                                         } else {
                                             Ok(None)
@@ -4170,8 +4240,10 @@ impl RustDecoder {
                     let mut experts = experts;
                     if let Some(f) = fast.as_ref() {
                         let mut live: Vec<&mut DeviceExpert> = experts.iter_mut().flatten().collect();
-                        let mut gates: Vec<&mut crate::backend::DeviceWeight> = live.iter_mut().map(|e| &mut e.gate).collect();
-                        let _ = backend.alias_weights_into_table(&f.gate, &mut gates);
+                        if let Some(fg) = f.gate.as_ref() {
+                            let mut gates: Vec<&mut crate::backend::DeviceWeight> = live.iter_mut().filter_map(|e| e.gate.as_mut()).collect();
+                            let _ = backend.alias_weights_into_table(fg, &mut gates);
+                        }
                         let mut ups: Vec<&mut crate::backend::DeviceWeight> = live.iter_mut().map(|e| &mut e.up).collect();
                         let _ = backend.alias_weights_into_table(&f.up, &mut ups);
                         let mut downs: Vec<&mut crate::backend::DeviceWeight> = live.iter_mut().map(|e| &mut e.down).collect();
@@ -4180,6 +4252,62 @@ impl RustDecoder {
                     Some(DeviceMoe { experts, shared, fast })
                 }
                 _ => None,
+            };
+            let value_moe_dev = match layer.value_moe.as_ref() {
+                Some(vm) => {
+                    let moe_cfg = self.cfg.moe.as_ref();
+                    let softmax = moe_cfg.is_some_and(|m| matches!(m.gating, Gating::Softmax));
+                    let normalize = moe_cfg.is_none_or(|m| m.normalize);
+                    let scale = moe_cfg.map_or(1.0, |m| m.weight_scale);
+                    let route = crate::backend::MoeRoute {
+                        sigmoid: !softmax,
+                        normalize,
+                        scale,
+                        eps: 0.0,
+                        groups: 0,
+                        groups_used: 0,
+                        group_top2: false,
+                    };
+                    let router = upload_linear(&format!("blk.{i}.attn_v_gate"), &vm.router)?;
+                    let bias = vm.bias.as_ref().map(upload_vec).transpose()?;
+                    let mut v_experts = Vec::with_capacity(vm.experts.len());
+                    for (e, w) in vm.experts.iter().enumerate() {
+                        v_experts.push(upload_linear(&format!("blk.{i}.attn_v_exp{e}"), w)?);
+                    }
+                    let width = self.cfg.kv_heads * self.cfg.value_dim;
+                    let table = if !v_experts.is_empty() {
+                        let kind = v_experts[0].quant_type;
+                        let same = v_experts.iter().all(|e| e.quant_type == kind && e.rows == width && e.cols == self.cfg.hidden && e.bias.is_none());
+                        let ok_kind = matches!(kind.to_gguf_type_id(), 1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 0x8000_0010..=0x8000_0012);
+                        let id = kind.to_gguf_type_id();
+                        let align256 = !matches!(id, 10..=14 | 16..=19 | 21 | 22 | 29) || (self.cfg.hidden.is_multiple_of(256) && width.is_multiple_of(256));
+                        let dims_ok = width.is_multiple_of(16) && self.cfg.hidden.is_multiple_of(16) && align256;
+                        let grouped = backend.moe_device_available()
+                            && [16usize, 64].iter().all(|&b| backend.moe_grouped_supported(kind, self.cfg.hidden, b));
+                        let refs: Vec<&crate::backend::DeviceWeight> = v_experts.iter().collect();
+                        if same && dims_ok && (ok_kind || grouped) {
+                            backend.upload_pointer_table(&refs).ok().map(|tbl| (tbl, kind, ok_kind, grouped))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some((ref tbl, ..)) = table {
+                        let mut e_mut: Vec<&mut crate::backend::DeviceWeight> = v_experts.iter_mut().collect();
+                        let _ = backend.alias_weights_into_table(tbl, &mut e_mut);
+                    }
+                    Some(DeviceValueMoe {
+                        router,
+                        bias,
+                        experts: v_experts,
+                        table,
+                        route,
+                        used: vm.used,
+                        width,
+                    })
+                }
+                None => None,
             };
             dev_layers.push(DeviceLayerWeights {
                 attn_norm,
@@ -4194,7 +4322,7 @@ impl RustDecoder {
                 post_ffn_norm_b: layer.post_ffn_norm.as_ref().and_then(|n| n.bias.as_ref()).map(upload_vec).transpose()?,
                 host_layer: false,
                 host_ffn: ffn_host_exact,
-                host_values: layer.value_moe.is_some(),
+                host_values: layer.value_moe.is_some() && value_moe_dev.is_none(),
                 attn_gate: layer.attn_gate.as_ref().map(|g| upload_linear(&format!("blk.{i}.attn_gate"), g)).transpose()?,
                 attn_sub_norm: layer.attn_sub_norm.as_ref().map(upload_vec).transpose()?,
                 ffn_sub_norm: layer.ffn_sub_norm.as_ref().map(upload_vec).transpose()?,
@@ -4206,6 +4334,7 @@ impl RustDecoder {
                 ffn_up,
                 ffn_down,
                 moe: moe_dev,
+                value_moe: value_moe_dev,
                 delta,
                 mla,
                 dsa,
@@ -4228,6 +4357,15 @@ impl RustDecoder {
                         upload_linear_q8(&format!("blk.{i}.proj"), proj)?,
                         upload_norm(&format!("blk.{i}.post_norm"), norm)?,
                     )),
+                    None => None,
+                },
+                laurel: match layer.gemma.as_ref().and_then(|g| g.laurel_parts()) {
+                    Some((left, right, norm)) => Some(DeviceLaurel {
+                        left: upload_linear(&format!("blk.{i}.laurel_l"), left)?,
+                        right: upload_linear(&format!("blk.{i}.laurel_r"), right)?,
+                        norm: upload_norm(&format!("blk.{i}.laurel_norm"), norm)?,
+                        norm_b: norm.bias.as_ref().map(upload_vec).transpose()?,
+                    }),
                     None => None,
                 },
                 out_scale: layer.gemma.as_ref().and_then(|g| g.output_scale()).filter(|&s| s != 1.0),
@@ -4363,7 +4501,7 @@ impl RustDecoder {
                 // the memory plan keeps the feed-forward weights of the last layers in host memory: the layer has no device feed-forward weights
                 let cut = !matches!(layer.ffn, Ffn::None) && dl.ffn_up.is_none() && dl.gate_up.is_none() && dl.moe.is_none();
                 if dl.host_ffn || cut {
-                    let why = match self.ffn_host_reason(layer, arch_ok, clamp_ok) {
+                    let why = match self.ffn_host_reason(i, layer, arch_ok, clamp_ok) {
                         Some(r) => r.to_owned(),
                         None if planner_cut.is_some_and(|(_, first)| i >= first) => "not enough device memory: the feed-forward weights of these layers stay in host memory; a smaller --ctx or --max-seqs, a smaller quantization or a bigger GPU keeps them on the device".to_owned(),
                         None => "feed-forward block forced to the host".to_owned(),
@@ -4785,7 +4923,7 @@ impl RustDecoder {
                     self.layer_check(&mut **stream, (i, i), &x_buf, host_in, &positions, tables, lengths, key, value)?;
                 }
                 if !recording {
-                    self.record_layer_tap_device(i, &mut **stream, &x_buf, rows)?;
+                    self.record_layer_tap_device(i, &mut **stream, &mut scratch, &x_buf, rows)?;
                 }
                 continue;
             }
@@ -4840,9 +4978,30 @@ impl RustDecoder {
             if i == 0 {
                 debug_sum(&mut **stream, "attn_norm-0", &normed_buf);
             }
+            let mut laurel_buf = if let Some(dl) = &dev_layer.laurel {
+                let mut low = scratch.acquire(rows * dl.left.rows * 4).map_err(err)?;
+                stream.quantized_linear(&mut low, &normed_buf, &dl.left, dl.left.bias.as_ref()).map_err(err)?;
+                let mut back = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                stream.quantized_linear(&mut back, &low, &dl.right, dl.right.bias.as_ref()).map_err(err)?;
+                scratch.recycle(low);
+                device_post_norm_inplace(
+                    &mut **stream,
+                    &mut scratch,
+                    cfg.norm,
+                    &mut back,
+                    Some(&dl.norm),
+                    dl.norm_b.as_ref(),
+                    cfg.post_eps,
+                    self.groups,
+                )?;
+                stream.residual_add(&mut back, &normed_buf, 1.0).map_err(err)?;
+                Some(back)
+            } else {
+                None
+            };
             let std_qkv = match (&dev_layer.q, &dev_layer.k, &dev_layer.v) {
                 (Some(q), Some(k), Some(v)) => Some((q, k, Some(v))),
-                (Some(q), Some(k), None) if dev_layer.host_values || layer.k_eq_v => Some((q, k, None)),
+                (Some(q), Some(k), None) if dev_layer.host_values || dev_layer.value_moe.is_some() || layer.k_eq_v => Some((q, k, None)),
                 // the layer reads the cache of an earlier layer: only the query is projected (the key weight is a placeholder)
                 (Some(q), None, None) if layer.kv_shared => Some((q, q, None)),
                 // one matrix for all three: the merged path below replaces the individual projections
@@ -5018,6 +5177,8 @@ impl RustDecoder {
                     stream
                         .quantized_linear(&mut v_buf, &normed_buf, v_w, v_w.bias.as_ref())
                         .map_err(err)?;
+                } else if let (Some(vm_dev), Some(vm)) = (&dev_layer.value_moe, &layer.value_moe) {
+                    self.value_moe_device(&mut **stream, &mut scratch, vm_dev, vm, &normed_buf, &mut v_buf, rows)?;
                 } else if let Some(vm) = &layer.value_moe {
                     let mut host_normed = vec![0.0f32; rows * hidden];
                     stream.download(cast_f32_to_u8_mut(&mut host_normed), &normed_buf).map_err(err)?;
@@ -5136,6 +5297,27 @@ impl RustDecoder {
                         .kv_cache_write(dev_kv, kvi, &slots, &k_buf, &v_buf)
                         .map_err(err)?;
                 }
+                }
+                if let (Some((beta, context)), true) = (
+                    cfg.attn_temperature,
+                    !cfg.temperature_nope_only || !cfg.layer_rotates(i),
+                ) {
+                    if rows == 1 {
+                        let steps = (positions[0] + cfg.temperature_offset) / context;
+                        let scale = 1.0 + beta * (1.0 + steps as f32).ln();
+                        device_scale_inplace(&mut **stream, &mut scratch, &mut q_buf, scale)?;
+                    } else {
+                        let elem_bytes = if stream.act_dtype().is_narrow() { 2 } else { 4 };
+                        let row_bytes = layer_heads * dk * elem_bytes;
+                        for (r, &position) in positions.iter().enumerate() {
+                            let steps = (position + cfg.temperature_offset) / context;
+                            let scale = 1.0 + beta * (1.0 + steps as f32).ln();
+                            if (scale - 1.0).abs() >= 1e-7 {
+                                let mut q_row = q_buf.slice(r * row_bytes, row_bytes).map_err(err)?;
+                                device_scale_inplace(&mut **stream, &mut scratch, &mut q_row, scale)?;
+                            }
+                        }
+                    }
                 }
                 } else if let (true, Some(dm), Some(mc)) = (lat, &dev_layer.mla, cfg.mla.as_ref()) {
                     latent_attn = Some(self.device_mla_latent(
@@ -5316,7 +5498,7 @@ impl RustDecoder {
                 let mut out_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                 let out_w = dev_layer.out.as_ref().ok_or("attention layer without a device output projection")?;
                 // the feed-forward norm (and the activation format of its first GEMM) can join the residual add of the output projection
-                let ffn_target = if !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.par_mamba.is_none() && dev_layer.post_attn_norm.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
+                let ffn_target = if !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.par_mamba.is_none() && dev_layer.post_attn_norm.is_none() && dev_layer.laurel.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
                     dev_layer
                         .ffn_norm
                         .as_ref()
@@ -5341,6 +5523,7 @@ impl RustDecoder {
                 if !fused {
                     fused = !tp
                         && dev_layer.post_attn_norm.is_none()
+                        && dev_layer.laurel.is_none()
                         && !parallel
                         && stream
                             .quantized_linear_add(&mut x_buf, &attn_buf, out_w, out_w.bias.as_ref(), cfg.residual_scale)
@@ -5394,8 +5577,21 @@ impl RustDecoder {
                             stream
                                 .residual_add(&mut x_buf, &out_buf, cfg.residual_scale)
                                 .map_err(err)?;
+                            if let Some(laurel) = laurel_buf.take() {
+                                stream.residual_add(&mut x_buf, &laurel, 1.0).map_err(err)?;
+                                device_scale_inplace(
+                                    &mut **stream,
+                                    &mut scratch,
+                                    &mut x_buf,
+                                    std::f32::consts::FRAC_1_SQRT_2,
+                                )?;
+                                scratch.recycle(laurel);
+                            }
                         }
                     }
+                }
+                if let Some(laurel) = laurel_buf.take() {
+                    scratch.recycle(laurel);
                 }
                 // Falcon-H1: the Mamba-2 branch reads the same normed input; both branches are added to the residual stream before the feed-forward norm
                 if let (Some((dm, out_w)), Some(shape)) = (&dev_layer.par_mamba, &mamba_shape) {
@@ -5498,7 +5694,7 @@ impl RustDecoder {
                 }
                 scratch.recycle(normed_buf);
                 if !recording {
-                    self.record_layer_tap_device(i, &mut **stream, &x_buf, rows)?;
+                    self.record_layer_tap_device(i, &mut **stream, &mut scratch, &x_buf, rows)?;
                 }
                 continue;
             }
@@ -5532,7 +5728,7 @@ impl RustDecoder {
                 scratch.recycle(branch);
             }
             if let Some(moe) = &layer.shortcut {
-                let buf = self.shortcut_device(&mut **stream, &mut scratch, moe, dev_layer.moe.as_ref(), &ffn_normed, rows)?;
+                let buf = self.shortcut_device(&mut **stream, &mut scratch, i, moe, dev_layer.moe.as_ref(), &ffn_normed, rows)?;
                 if let Some(old) = pending_shortcut_dev.replace(buf) {
                     scratch.recycle(old);
                 }
@@ -5560,12 +5756,12 @@ impl RustDecoder {
                 // NVFP4 prompts and 4-bit Marlin: both GEMMs leave FP16 and the gated activation reads it (folded into the activation
                 // quantization / conversion of the down projection)
                 let mut half_glu = false;
-                let dense_clamped = match self.dense_glu_mode() {
+                let dense_clamped = match self.dense_glu_mode(i) {
                     Some(GluMode::Clamped(kind)) => Some(kind),
                     _ => None,
                 };
                 // the clamped SwiGLU of gpt-oss and MiniMax-M3 (also in their dense layers)
-                let dense_oai = match self.dense_glu_mode() {
+                let dense_oai = match self.dense_glu_mode(i) {
                     Some(GluMode::SwigluOai(alpha, limit)) => Some((alpha, limit)),
                     _ => None,
                 };
@@ -5707,19 +5903,19 @@ impl RustDecoder {
                 let mut streamed = None;
                 let mut host_in = Vec::new();
                 if let (Ffn::Moe(_), Some(dm)) = (&layer.ffn, dev_layer.moe.as_ref()) {
-                    streamed = self.moe_fast(&mut **stream, &mut scratch, dm, &ffn_normed, rows)?;
+                    streamed = self.moe_fast(&mut **stream, &mut scratch, i, dm, &ffn_normed, rows)?;
                 }
                 if streamed.is_none() && (big || dev_layer.moe.is_some()) && !dev_layer.host_ffn {
                     match &layer.ffn {
                         Ffn::Gated { gate, up, down } if big => {
                             if let (Some(mode), Some(w)) =
-                                (self.dense_glu_mode(), Self::gated_weights(&**stream, gate, up, down))
+                                (self.dense_glu_mode(i), Self::gated_weights(&**stream, gate, up, down))
                             {
                                 streamed = Some(Self::gated_run(
                                     &mut **stream,
                                     &mut scratch,
                                     mode,
-                                    &ExpertSrc::Host(w),
+                                    &ExpertSrc::Host { gate: Some(w.0), up: w.1, down: w.2 },
                                     &ffn_normed,
                                     rows,
                                 )?);
@@ -5733,6 +5929,7 @@ impl RustDecoder {
                             streamed = self.moe_on_device(
                                 &mut **stream,
                                 &mut scratch,
+                                i,
                                 moe,
                                 dev_layer.moe.as_ref(),
                                 &ffn_normed,
@@ -5753,7 +5950,7 @@ impl RustDecoder {
                                 .map_err(err)?;
                         }
                         let mut workspace = compute::ProjectionGroupWorkspace::default();
-                        let host_out = self.ffn_forward(layer, &host_in, &mut workspace)?;
+                        let host_out = self.ffn_forward(i, layer, &host_in, &mut workspace)?;
                         let mut buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                         stream
                             .upload(&mut buf, cast_f32_to_u8(&host_out))
@@ -5819,10 +6016,7 @@ impl RustDecoder {
                 }
             }
             if let Some(scale) = dev_layer.out_scale {
-                let mut copy = scratch.acquire(rows * hidden * 4).map_err(err)?;
-                stream.copy_buffer(&mut copy, &x_buf).map_err(err)?;
-                stream.residual_add(&mut x_buf, &copy, scale - 1.0).map_err(err)?;
-                scratch.recycle(copy);
+                device_scale_inplace(&mut **stream, &mut scratch, &mut x_buf, scale)?;
             }
             if i == 0 || crate::backend::env_flag_once!("FLLM_DEBUG_LAYERS") {
                 debug_sum(&mut **stream, &format!("l_out-{i}"), &x_buf);
@@ -5846,7 +6040,7 @@ impl RustDecoder {
             scratch.recycle(ffn_normed);
             scratch.recycle(normed_buf);
             if !recording {
-                self.record_layer_tap_device(i, &mut **stream, &x_buf, rows)?;
+                self.record_layer_tap_device(i, &mut **stream, &mut scratch, &x_buf, rows)?;
             }
         }
         if act_check {
@@ -7370,22 +7564,25 @@ impl RustDecoder {
         stream.supports_host_linear(quant).then_some((quant, bytes, l.bias.as_deref()))
     }
 
-    /// The gated activation of the device path (SwiGLU, GeGLU, gpt-oss SwiGLU); the others stay on the host.
-    fn device_glu_mode(&self) -> Option<GluMode> {
-        // routed experts: SiTU, or the clamped SwiGLU
+    /// The gated activation of the device path (SwiGLU, GeGLU, gpt-oss SwiGLU, per-layer Step-3.7 clamps); the others stay on the host.
+    fn device_glu_mode(&self, layer: usize) -> Option<GluMode> {
+        // routed experts: SiTU, or the clamped SwiGLU (uniform or per-layer)
         if let Some((beta, linear_beta)) = self.cfg.situ {
             return Some(GluMode::Clamped(crate::backend::ClampedGlu::Situ(beta, linear_beta)));
         }
-        if let Some(limit) = self.cfg.moe.as_ref().and_then(|m| m.swiglu_clamp) {
+        if let Some(limit) = self.cfg.moe.as_ref().and_then(|m| m.routed_clamp(layer)) {
             return Some(GluMode::Clamped(crate::backend::ClampedGlu::Clamp(limit)));
         }
         self.plain_glu_mode()
     }
 
     /// The gated activation of the dense feed-forward layers and of the shared expert: like the routed experts' unless only they are clamped.
-    fn dense_glu_mode(&self) -> Option<GluMode> {
-        if self.cfg.situ.is_some() || self.cfg.moe.as_ref().is_some_and(|m| m.swiglu_clamp.is_some() && m.swiglu_clamp_shared) {
-            return self.device_glu_mode();
+    fn dense_glu_mode(&self, layer: usize) -> Option<GluMode> {
+        if let Some((beta, linear_beta)) = self.cfg.situ {
+            return Some(GluMode::Clamped(crate::backend::ClampedGlu::Situ(beta, linear_beta)));
+        }
+        if let Some(limit) = self.cfg.moe.as_ref().and_then(|m| m.shared_clamp(layer)) {
+            return Some(GluMode::Clamped(crate::backend::ClampedGlu::Clamp(limit)));
         }
         self.plain_glu_mode()
     }
@@ -7397,7 +7594,7 @@ impl RustDecoder {
         match self.cfg.activation {
             Activation::Silu => Some(GluMode::Swiglu),
             Activation::GeluTanh => Some(GluMode::Geglu),
-            _ => None,
+            other => Some(GluMode::Act(act_code(other))),
         }
     }
 
@@ -7419,12 +7616,14 @@ impl RustDecoder {
             GluMode::Geglu => stream.geglu(out, gate, up),
             GluMode::SwigluOai(alpha, limit) => stream.swiglu_oai(out, gate, up, alpha, limit),
             GluMode::Clamped(kind) => stream.glu_clamped(out, gate, up, kind),
+            GluMode::Act(code) => stream.activation_glu(out, gate, up, code),
+            GluMode::Plain(code) => stream.activation(out, up, code),
         }
         .map_err(|e| e.to_string())
     }
 
-    /// `out = down(act(gate(x)) * up(x))` for `rows` rows of the device buffer `x`: with device-resident weights, or with
-    /// every weight streamed over PCIe for its product (`host_linear`; the weights must pass `streamable`).
+    /// `out = down(act(gate(x)) * up(x))` or `out = down(act(up(x)))` for `rows` rows of `x`: with device-resident
+    /// weights, or with every weight streamed over PCIe (`host_linear`).
     fn gated_run(
         stream: &mut dyn crate::backend::Stream,
         scratch: &mut crate::backend::BufferPool,
@@ -7434,34 +7633,69 @@ impl RustDecoder {
         rows: usize,
     ) -> Result<crate::backend::DeviceBuffer, String> {
         let err = |e: crate::backend::BackendError| e.to_string();
-        let (gr, ur, dr) = match src {
-            ExpertSrc::Device(e) => (e.gate.rows, e.up.rows, e.down.rows),
-            ExpertSrc::Host(w) => (w[0].2, w[1].2, w[2].2),
+        let (gr, ur, dr, has_gate) = match src {
+            ExpertSrc::Device(e) => (
+                e.gate.as_ref().map_or(e.up.rows, |g| g.rows),
+                e.up.rows,
+                e.down.rows,
+                e.gate.is_some(),
+            ),
+            ExpertSrc::Host { gate, up, down } => (gate.map_or(up.2, |g| g.2), up.2, down.2, gate.is_some()),
         };
-        let mut gate_buf = scratch.acquire(rows * gr * 4).map_err(err)?;
         let mut up_buf = scratch.acquire(rows * ur * 4).map_err(err)?;
         let mut act_buf = scratch.acquire(rows * gr * 4).map_err(err)?;
         let mut out = scratch.acquire(rows * dr * 4).map_err(err)?;
-        match src {
-            ExpertSrc::Device(e) => {
-                stream.quantized_linear(&mut gate_buf, x, &e.gate, e.gate.bias.as_ref()).map_err(err)?;
+        let gate_buf = if has_gate {
+            Some(scratch.acquire(rows * gr * 4).map_err(err)?)
+        } else {
+            None
+        };
+        match (src, gate_buf) {
+            (ExpertSrc::Device(e), Some(mut gate_b)) => {
+                let gate_w = e.gate.as_ref().ok_or("missing device gate weight")?;
+                stream.quantized_linear(&mut gate_b, x, gate_w, gate_w.bias.as_ref()).map_err(err)?;
                 stream.quantized_linear(&mut up_buf, x, &e.up, e.up.bias.as_ref()).map_err(err)?;
+                Self::device_glu(stream, mode, &mut act_buf, &gate_b, &up_buf)?;
+                scratch.recycle(gate_b);
             }
-            ExpertSrc::Host([(gq, gb, gr, gc, gbias), (uq, ub, ur, uc, ubias), _]) => {
-                stream.host_linear(&mut gate_buf, x, gb, *gq, *gr, *gc, *gbias).map_err(err)?;
-                stream.host_linear(&mut up_buf, x, ub, *uq, *ur, *uc, *ubias).map_err(err)?;
+            (ExpertSrc::Host { gate: Some((gq, gb, g_rows, g_cols, gbias)), up: (uq, ub, u_rows, u_cols, ubias), .. }, Some(mut gate_b)) => {
+                stream.host_linear(&mut gate_b, x, gb, *gq, *g_rows, *g_cols, *gbias).map_err(err)?;
+                stream.host_linear(&mut up_buf, x, ub, *uq, *u_rows, *u_cols, *ubias).map_err(err)?;
+                Self::device_glu(stream, mode, &mut act_buf, &gate_b, &up_buf)?;
+                scratch.recycle(gate_b);
             }
+            (ExpertSrc::Device(e), None) => {
+                stream.quantized_linear(&mut up_buf, x, &e.up, e.up.bias.as_ref()).map_err(err)?;
+                let code = match mode {
+                    GluMode::Plain(c) | GluMode::Act(c) => c,
+                    GluMode::Geglu => 1,
+                    GluMode::Swiglu | GluMode::SwigluOai(..) | GluMode::Clamped(_) => 0,
+                };
+                stream.activation(&mut act_buf, &up_buf, code).map_err(err)?;
+            }
+            (ExpertSrc::Host { gate: None, up: (uq, ub, u_rows, u_cols, ubias), .. }, None) => {
+                stream.host_linear(&mut up_buf, x, ub, *uq, *u_rows, *u_cols, *ubias).map_err(err)?;
+                let code = match mode {
+                    GluMode::Plain(c) | GluMode::Act(c) => c,
+                    GluMode::Geglu => 1,
+                    GluMode::Swiglu | GluMode::SwigluOai(..) | GluMode::Clamped(_) => 0,
+                };
+                stream.activation(&mut act_buf, &up_buf, code).map_err(err)?;
+            }
+            (_, Some(gate_b)) => {
+                scratch.recycle(gate_b);
+                return Err("expert gate buffer state mismatch".into());
+            }
+            (_, None) => return Err("expert gate weight missing".into()),
         }
-        Self::device_glu(stream, mode, &mut act_buf, &gate_buf, &up_buf)?;
         match src {
             ExpertSrc::Device(e) => {
                 stream.quantized_linear(&mut out, &act_buf, &e.down, e.down.bias.as_ref()).map_err(err)?;
             }
-            ExpertSrc::Host([_, _, (dq, db, dr, dc, dbias)]) => {
-                stream.host_linear(&mut out, &act_buf, db, *dq, *dr, *dc, *dbias).map_err(err)?;
+            ExpertSrc::Host { down: (dq, db, d_rows, d_cols, dbias), .. } => {
+                stream.host_linear(&mut out, &act_buf, db, *dq, *d_rows, *d_cols, *dbias).map_err(err)?;
             }
         }
-        scratch.recycle(gate_buf);
         scratch.recycle(up_buf);
         scratch.recycle(act_buf);
         Ok(out)
@@ -7473,15 +7707,15 @@ impl RustDecoder {
         gate: &'a Linear,
         up: &'a Linear,
         down: &'a Linear,
-    ) -> Option<[HostWeight<'a>; 3]> {
+    ) -> Option<(HostWeight<'a>, HostWeight<'a>, HostWeight<'a>)> {
         let g = Self::streamable(stream, gate)?;
         let u = Self::streamable(stream, up)?;
         let d = Self::streamable(stream, down)?;
-        Some([
+        Some((
             (g.0, g.1, gate.rows, gate.cols, g.2),
             (u.0, u.1, up.rows, up.cols, u.2),
             (d.0, d.1, down.rows, down.cols, d.2),
-        ])
+        ))
     }
 
     /// The source of one expert: its device copy, else its host weights when the stream can take them.
@@ -7493,8 +7727,18 @@ impl RustDecoder {
         if let Some(d) = dev {
             return Some(ExpertSrc::Device(d));
         }
-        let gate = e.gate.as_ref()?;
-        Self::gated_weights(stream, gate, &e.up, &e.down).map(ExpertSrc::Host)
+        let u = Self::streamable(stream, &e.up)?;
+        let d = Self::streamable(stream, &e.down)?;
+        let up = (u.0, u.1, e.up.rows, e.up.cols, u.2);
+        let down = (d.0, d.1, e.down.rows, e.down.cols, d.2);
+        let gate = match e.gate.as_ref() {
+            Some(g_lin) => {
+                let g = Self::streamable(stream, g_lin)?;
+                Some((g.0, g.1, g_lin.rows, g_lin.cols, g.2))
+            }
+            None => None,
+        };
+        Some(ExpertSrc::Host { gate, up, down })
     }
 
     /// Whether the routing of this layer is what the device kernels implement. Without `device` (the grouped operations): softmax over all
@@ -7533,20 +7777,21 @@ impl RustDecoder {
     }
 
     /// A whole mixture-of-experts layer for one to four tokens without leaving the device: router, top-k, the selected
-    /// experts' three projections through pointer tables, and the weighted sum. `None` when the layer does not qualify.
+    /// experts' projections through pointer tables, and the weighted sum. `None` when the layer does not qualify.
     fn moe_fast(
         &self,
         stream: &mut dyn crate::backend::Stream,
         scratch: &mut crate::backend::BufferPool,
+        layer_idx: usize,
         dm: &DeviceMoe,
         x: &crate::backend::DeviceBuffer,
         rows: usize,
     ) -> Result<Option<crate::backend::DeviceBuffer>, String> {
-        let (Some(fast), Some(cfg), Some(mode)) = (dm.fast.as_ref(), self.cfg.moe.as_ref(), self.device_glu_mode()) else {
+        let (Some(fast), Some(cfg), Some(mode)) = (dm.fast.as_ref(), self.cfg.moe.as_ref(), self.device_glu_mode(layer_idx)) else {
             return Ok(None);
         };
         if let Some(device) = fast.device.as_ref() {
-            return self.moe_device(stream, scratch, dm, fast, device, x, rows);
+            return self.moe_device(stream, scratch, layer_idx, dm, fast, device, x, rows);
         }
         if rows == 0 || rows > 4 || cfg.zero_experts > 0 {
             return Ok(None);
@@ -7561,23 +7806,28 @@ impl RustDecoder {
         stream
             .moe_topk(&logits, &mut ids, &mut weights, rows, experts, k, cfg.normalize, cfg.weight_scale)
             .map_err(err)?;
-        let mut gate = scratch.acquire(slots * ff * 4).map_err(err)?;
         let mut up = scratch.acquire(slots * ff * 4).map_err(err)?;
         let mut act = scratch.acquire(slots * ff * 4).map_err(err)?;
         let mut y = scratch.acquire(slots * hidden * 4).map_err(err)?;
         let mut out = scratch.acquire(rows * hidden * 4).map_err(err)?;
         stream
-            .moe_linear(&mut gate, x, &fast.gate, fast.gate_bias.as_ref(), &ids, fast.kinds[0], ff, hidden, slots, k)
-            .map_err(err)?;
-        stream
             .moe_linear(&mut up, x, &fast.up, fast.up_bias.as_ref(), &ids, fast.kinds[1], ff, hidden, slots, k)
             .map_err(err)?;
-        Self::device_glu(stream, mode, &mut act, &gate, &up)?;
+        if let Some(gate_tbl) = fast.gate.as_ref() {
+            let mut gate = scratch.acquire(slots * ff * 4).map_err(err)?;
+            stream
+                .moe_linear(&mut gate, x, gate_tbl, fast.gate_bias.as_ref(), &ids, fast.kinds[0], ff, hidden, slots, k)
+                .map_err(err)?;
+            Self::device_glu(stream, mode, &mut act, &gate, &up)?;
+            scratch.recycle(gate);
+        } else {
+            stream.activation(&mut act, &up, act_code(self.cfg.activation)).map_err(err)?;
+        }
         stream
             .moe_linear(&mut y, &act, &fast.down, fast.down_bias.as_ref(), &ids, fast.kinds[2], hidden, ff, slots, 1)
             .map_err(err)?;
         stream.moe_combine(&mut out, &y, &weights, rows, k, hidden).map_err(err)?;
-        for b in [logits, ids, weights, gate, up, act, y] {
+        for b in [logits, ids, weights, up, act, y] {
             scratch.recycle(b);
         }
         Ok(Some(out))
@@ -7591,18 +7841,20 @@ impl RustDecoder {
         &self,
         stream: &mut dyn crate::backend::Stream,
         scratch: &mut crate::backend::BufferPool,
+        layer_idx: usize,
         moe: &Moe,
         dev: Option<&DeviceMoe>,
         x: &crate::backend::DeviceBuffer,
         host_in: &[f32],
         rows: usize,
     ) -> Result<Option<crate::backend::DeviceBuffer>, String> {
-        let Some(mode) = self.device_glu_mode() else {
+        let Some(mode) = self.device_glu_mode(layer_idx) else {
             return Ok(None);
         };
         let Some(cfg) = self.cfg.moe.as_ref() else {
             return Ok(None);
         };
+        let plain_act = act_code(self.cfg.activation);
         let hidden = self.cfg.hidden;
         let mut routed = self.moe_route(moe, host_in)?;
         // expert parallelism: this rank computes the experts it holds; the rest of the group adds its share in `device_tp_reduce`
@@ -7616,14 +7868,14 @@ impl RustDecoder {
             let Some(src) = Self::expert_src(stream, expert, resident) else {
                 return Ok(None);
             };
-            plan.push((src, assigned));
+            plan.push((src, assigned, expert.gate.is_some()));
         }
         let shared = match &moe.shared {
             Some((e, gate_vec)) => {
                 let Some(src) = Self::expert_src(stream, e, dev.and_then(|d| d.shared.as_ref())) else {
                     return Ok(None);
                 };
-                Some((src, gate_vec))
+                Some((src, gate_vec, e.gate.is_some()))
             }
             None => None,
         };
@@ -7634,7 +7886,7 @@ impl RustDecoder {
             scratch.recycle(acc);
             return Ok(None);
         }
-        for (src, assigned) in plan {
+        for (src, assigned, has_gate) in plan {
             let idx: Vec<i32> = assigned.iter().map(|&(t, _)| t as i32).collect();
             let weights: Vec<f32> = assigned.iter().map(|&(_, wt)| wt).collect();
             let n = idx.len();
@@ -7648,7 +7900,8 @@ impl RustDecoder {
                     .map_err(err)?;
                 gathered = Some(xe);
             }
-            let result = Self::gated_run(stream, scratch, mode, &src, gathered.as_ref().unwrap_or(x), n)?;
+            let expert_mode = if has_gate { mode } else { GluMode::Plain(plain_act) };
+            let result = Self::gated_run(stream, scratch, expert_mode, &src, gathered.as_ref().unwrap_or(x), n)?;
             stream
                 .scatter_add_rows(&mut acc, &result, &idx, (!cfg.input_scaled).then_some(weights.as_slice()), hidden)
                 .map_err(err)?;
@@ -7674,8 +7927,9 @@ impl RustDecoder {
                 scratch.recycle(xe);
             }
         }
-        if let Some((src, gate_vec)) = shared {
-            let result = Self::gated_run(stream, scratch, self.dense_glu_mode().unwrap_or(mode), &src, x, rows)?;
+        if let Some((src, gate_vec, has_gate)) = shared {
+            let sh_mode = if has_gate { self.dense_glu_mode(layer_idx).unwrap_or(mode) } else { GluMode::Plain(plain_act) };
+            let result = Self::gated_run(stream, scratch, sh_mode, &src, x, rows)?;
             let idx: Vec<i32> = (0..rows as i32).collect();
             let scales: Option<Vec<f32>> = gate_vec.as_ref().map(|g| {
                 (0..rows)
@@ -7697,22 +7951,173 @@ impl RustDecoder {
         Ok(Some(acc))
     }
 
+    /// K2 Horizon MoVA value experts on the device: routes tokens and evaluates `sum_k w_k * silu(W_k x)` directly into `v_buf`.
+    #[allow(clippy::too_many_arguments)]
+    fn value_moe_device(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        vm_dev: &DeviceValueMoe,
+        vm: &ValueMoe,
+        x: &crate::backend::DeviceBuffer,
+        v_buf: &mut crate::backend::DeviceBuffer,
+        rows: usize,
+    ) -> Result<(), String> {
+        if rows == 0 {
+            return Ok(());
+        }
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let (count, used, hidden, width) = (vm_dev.experts.len(), vm_dev.used, self.cfg.hidden, vm_dev.width);
+        let slots = rows * used;
+        let mut logits = scratch.acquire(rows * count * 4).map_err(err)?;
+        stream
+            .quantized_linear(&mut logits, x, &vm_dev.router, vm_dev.router.bias.as_ref())
+            .map_err(err)?;
+
+        if let Some((ref table, kind, dp4a, grouped)) = vm_dev.table {
+            let decode = rows <= 4 && dp4a;
+            if decode || grouped {
+                let mut ids = scratch.acquire(slots * 4).map_err(err)?;
+                let mut weights = scratch.acquire(slots * 4).map_err(err)?;
+                if stream
+                    .moe_route_ex(&logits, vm_dev.bias.as_ref(), &mut ids, &mut weights, rows, count, used, &vm_dev.route)
+                    .is_ok()
+                {
+                    let mut vals = scratch.acquire(slots * width * 4).map_err(err)?;
+                    let mut act = scratch.acquire(slots * width * 4).map_err(err)?;
+                    if decode {
+                        stream
+                            .moe_linear(&mut vals, x, table, None, &ids, kind, width, hidden, slots, used)
+                            .map_err(err)?;
+                    } else {
+                        let block = crate::backend::moe::moe_block_for(slots, count);
+                        let (sorted, blocks, post) = crate::backend::moe::moe_sort_bytes(slots, count, block);
+                        let mut sort = crate::backend::MoeSort {
+                            sorted: scratch.acquire(sorted).map_err(err)?,
+                            block_expert: scratch.acquire(blocks).map_err(err)?,
+                            post: scratch.acquire(post).map_err(err)?,
+                            pairs: slots,
+                            block,
+                            max_blocks: blocks / 4,
+                        };
+                        stream.moe_align(&ids, &mut sort, 0, count).map_err(err)?;
+                        stream
+                            .moe_grouped_linear(crate::backend::MoeGrouped {
+                                out: &mut vals,
+                                x,
+                                table,
+                                table_up: None,
+                                bias: None,
+                                bias_up: None,
+                                input_weights: None,
+                                sort: &sort,
+                                quant_type: kind,
+                                rows: width,
+                                cols: hidden,
+                                x_div: used,
+                                glu: None,
+                            })
+                            .map_err(err)?;
+                        scratch.recycle(sort.sorted);
+                        scratch.recycle(sort.block_expert);
+                        scratch.recycle(sort.post);
+                    }
+                    stream.activation(&mut act, &vals, 0).map_err(err)?;
+                    stream.moe_combine(v_buf, &act, &weights, rows, used, width).map_err(err)?;
+                    for b in [logits, ids, weights, vals, act] {
+                        scratch.recycle(b);
+                    }
+                    return Ok(());
+                }
+                scratch.recycle(ids);
+                scratch.recycle(weights);
+            }
+        }
+
+        // Per-expert GPU path when pointer tables / moe_route_ex are unavailable on the backend: download only the tiny router logits.
+        let mut host_logits = vec![0.0f32; rows * count];
+        stream.download(cast_f32_to_u8_mut(&mut host_logits), &logits).map_err(err)?;
+        scratch.recycle(logits);
+
+        if stream.zero_buffer(v_buf).is_ok() {
+            let mut by_expert: Vec<Vec<(i32, f32)>> = vec![Vec::new(); count];
+            for t in 0..rows {
+                let row = &host_logits[t * count..(t + 1) * count];
+                let scores: Vec<f32> = if !vm_dev.route.sigmoid {
+                    let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let exps: Vec<f32> = row.iter().map(|v| (v - max).exp()).collect();
+                    let sum: f32 = exps.iter().sum();
+                    exps.iter().map(|e| e / sum).collect()
+                } else {
+                    row.iter().map(|v| 1.0 / (1.0 + (-v).exp())).collect()
+                };
+                let mut order: Vec<usize> = (0..count).collect();
+                let sel = |e: usize| scores[e] + vm.bias.as_ref().map_or(0.0, |b| b[e]);
+                order.sort_by(|&a, &b| sel(b).total_cmp(&sel(a)).then(a.cmp(&b)));
+                order.truncate(used);
+                let mut wts: Vec<f32> = order.iter().map(|&e| scores[e]).collect();
+                if vm_dev.route.normalize {
+                    let sum: f32 = wts.iter().sum::<f32>().max(6.103_515_6e-5);
+                    wts.iter_mut().for_each(|w| *w /= sum);
+                }
+                for (&e, w) in order.iter().zip(wts) {
+                    by_expert[e].push((t as i32, w * vm_dev.route.scale));
+                }
+            }
+            for (e, assigned) in by_expert.iter().enumerate() {
+                if assigned.is_empty() {
+                    continue;
+                }
+                let n = assigned.len();
+                let idx: Vec<i32> = assigned.iter().map(|&(t, _)| t).collect();
+                let wts: Vec<f32> = assigned.iter().map(|&(_, w)| w).collect();
+                let direct = n == rows && idx.iter().enumerate().all(|(i, &t)| t as usize == i);
+                let mut gathered = None;
+                if !direct {
+                    let mut xe = scratch.acquire(n * hidden * 4).map_err(err)?;
+                    stream.gather_rows(&mut xe, x, &idx, None, hidden).map_err(err)?;
+                    gathered = Some(xe);
+                }
+                let mut val = scratch.acquire(n * width * 4).map_err(err)?;
+                let mut act = scratch.acquire(n * width * 4).map_err(err)?;
+                let ew = &vm_dev.experts[e];
+                stream
+                    .quantized_linear(&mut val, gathered.as_ref().unwrap_or(x), ew, ew.bias.as_ref())
+                    .map_err(err)?;
+                stream.activation(&mut act, &val, 0).map_err(err)?;
+                stream.scatter_add_rows(v_buf, &act, &idx, Some(&wts), width).map_err(err)?;
+                if let Some(xe) = gathered {
+                    scratch.recycle(xe);
+                }
+                scratch.recycle(val);
+                scratch.recycle(act);
+            }
+            return Ok(());
+        }
+
+        let mut host_normed = vec![0.0f32; rows * hidden];
+        stream.download(cast_f32_to_u8_mut(&mut host_normed), x).map_err(err)?;
+        let values = self.value_moe_forward(vm, &host_normed)?;
+        stream.upload(v_buf, cast_f32_to_u8(&values)).map_err(err)?;
+        Ok(())
+    }
+
     fn expert_forward(
         &self,
         e: &Expert,
         input: &[f32],
         workspace: &mut compute::ProjectionGroupWorkspace,
     ) -> Result<Vec<f32>, String> {
-        self.expert_forward_clamped(e, input, workspace, true)
+        self.expert_forward_clamped(e, input, workspace, self.cfg.moe.as_ref().and_then(|m| m.swiglu_clamp))
     }
 
-    /// `expert_forward`; `clamp` false skips the clamp of the SwiGLU limit (a shared expert that is not clamped).
+    /// `expert_forward`; `clamp_limit` specifies the optional SwiGLU clamp bound for this layer/expert.
     fn expert_forward_clamped(
         &self,
         e: &Expert,
         input: &[f32],
         workspace: &mut compute::ProjectionGroupWorkspace,
-        clamp: bool,
+        clamp_limit: Option<f32>,
     ) -> Result<Vec<f32>, String> {
         let Some(gate) = &e.gate else {
             let mut hidden = e.up.forward(input)?;
@@ -7726,18 +8131,11 @@ impl RustDecoder {
         let [g, u] = projected else {
             return Err("invalid expert projection group".into());
         };
-        self.gate_activation_clamped(g, u, true, clamp);
+        self.gate_activation_clamped(g, u, true, clamp_limit);
         e.down.forward(g)
     }
 
-    /// `g = act(g) * u` of a gated expert FFN. Elementwise, so the serial form (used between
-    /// the fused expert passes, where the vectors are too short for a fork/join) gives the
-    /// same bits as the parallel one.
-    fn gate_activation(&self, g: &mut [f32], u: &[f32], parallel: bool) {
-        self.gate_activation_clamped(g, u, parallel, true);
-    }
-
-    fn gate_activation_clamped(&self, g: &mut [f32], u: &[f32], parallel: bool, clamp: bool) {
+    fn gate_activation_clamped(&self, g: &mut [f32], u: &[f32], parallel: bool, clamp_limit: Option<f32>) {
         let activation = self.cfg.activation;
         if let Some((beta, linear_beta)) = self.cfg.situ {
             let apply = |g: &mut f32, u: &f32| {
@@ -7750,7 +8148,7 @@ impl RustDecoder {
             } else {
                 g.iter_mut().zip(u).for_each(|(g, u)| apply(g, u));
             }
-        } else if let Some(limit) = self.cfg.moe.as_ref().and_then(|m| m.swiglu_clamp).filter(|_| clamp) {
+        } else if let Some(limit) = clamp_limit {
             let apply = |g: &mut f32, u: &f32| {
                 let gate = g.min(limit);
                 *g = gate / (1.0 + (-gate).exp()) * u.clamp(-limit, limit);
@@ -7795,6 +8193,7 @@ impl RustDecoder {
     /// Experts are accumulated in ascending expert order like the per-expert loop does.
     fn fused_experts(
         &self,
+        layer_idx: usize,
         moe: &Moe,
         routed: &[Vec<(usize, f32)>],
         input: &[f32],
@@ -7816,7 +8215,8 @@ impl RustDecoder {
         if members.is_empty() {
             return true;
         }
-        let activate = |g: &mut [f32], u: &[f32]| self.gate_activation(g, u, false);
+        let routed_clamp = self.cfg.moe.as_ref().and_then(|m| m.routed_clamp(layer_idx));
+        let activate = |g: &mut [f32], u: &[f32]| self.gate_activation_clamped(g, u, false, routed_clamp);
         let Some(results) = Linear::forward_experts(&members, input, &activate, workspace) else {
             return false;
         };
@@ -7833,10 +8233,12 @@ impl RustDecoder {
 
     /// The shortcut experts of a LongCat-Flash layer for the normed input `x` on the device: the device routing (`moe_fast`) where the backend has it,
     /// else routing on the host with the experts on the device (`moe_on_device`, as for every other mixture-of-experts layer), else the host reference.
+    #[allow(clippy::too_many_arguments)]
     fn shortcut_device(
         &self,
         stream: &mut dyn crate::backend::Stream,
         scratch: &mut crate::backend::BufferPool,
+        layer_idx: usize,
         moe: &Moe,
         dev: Option<&DeviceMoe>,
         x: &crate::backend::DeviceBuffer,
@@ -7846,12 +8248,12 @@ impl RustDecoder {
         let hidden = self.cfg.hidden;
         let mut host_in = Vec::new();
         if let Some(dm) = dev {
-            if let Some(buf) = self.moe_fast(stream, scratch, dm, x, rows)? {
+            if let Some(buf) = self.moe_fast(stream, scratch, layer_idx, dm, x, rows)? {
                 return Ok(buf);
             }
             host_in = vec![0.0f32; rows * hidden];
             stream.download(cast_f32_to_u8_mut(&mut host_in), x).map_err(err)?;
-            if let Some(buf) = self.moe_on_device(stream, scratch, moe, Some(dm), x, &host_in, rows)? {
+            if let Some(buf) = self.moe_on_device(stream, scratch, layer_idx, moe, Some(dm), x, &host_in, rows)? {
                 return Ok(buf);
             }
         }
@@ -8058,6 +8460,7 @@ impl RustDecoder {
     /// when the layer does not qualify. The caller combines them in ascending expert order.
     fn moe_prompt_experts(
         &self,
+        layer_idx: usize,
         moe: &Moe,
         routed: &[Vec<(usize, f32)>],
         active: &[usize],
@@ -8093,12 +8496,14 @@ impl RustDecoder {
             let expert = &moe.experts[e];
             members.push((expert.gate.as_ref()?, &expert.up, &expert.down, rows.as_slice()));
         }
-        let activate = |g: &mut [f32], u: &[f32]| self.gate_activation(g, u, false);
+        let routed_clamp = cfg.routed_clamp(layer_idx);
+        let activate = |g: &mut [f32], u: &[f32]| self.gate_activation_clamped(g, u, false, routed_clamp);
         Linear::forward_experts_prompt(&members, &activate)
     }
 
     fn moe_forward(
         &self,
+        layer_idx: usize,
         moe: &Moe,
         input: &[f32],
         workspace: &mut compute::ProjectionGroupWorkspace,
@@ -8108,6 +8513,8 @@ impl RustDecoder {
             .moe
             .as_ref()
             .ok_or("MoE layer without MoE configuration")?;
+        let routed_clamp = cfg.routed_clamp(layer_idx);
+        let shared_clamp = cfg.shared_clamp(layer_idx);
         let hidden = self.cfg.hidden;
         let tokens = input.len() / hidden;
         // A pass that must give every token the bits of single-token decoding (the verification of draft tokens) runs the experts of
@@ -8115,7 +8522,7 @@ impl RustDecoder {
         if tokens > 1 && crate::cpu_kernels::batch_invariant() {
             let mut out = Vec::with_capacity(input.len());
             for row in input.chunks_exact(hidden) {
-                out.extend(self.moe_forward(moe, row, workspace)?);
+                out.extend(self.moe_forward(layer_idx, moe, row, workspace)?);
             }
             return Ok(out);
         }
@@ -8137,7 +8544,7 @@ impl RustDecoder {
         let fused = tokens == 1
             && moe.latent.is_none()
             && !cfg.input_scaled
-            && self.fused_experts(moe, &routed, expert_input, &mut out, workspace);
+            && self.fused_experts(layer_idx, moe, &routed, expert_input, &mut out, workspace);
         // A prompt batch keeps every expert's rows and combines them per token afterwards, in
         // ascending expert order like the sequential accumulation, but spread over the pool.
         // Also for a handful of tokens (the verification pass of speculative decoding): the experts the tokens share are then read
@@ -8151,7 +8558,7 @@ impl RustDecoder {
         // All experts at once when the batch qualifies; `done` then replaces the per-expert loop.
         let done = batched && moe.latent.is_none() && {
             let active: Vec<usize> = (0..routed.len()).filter(|&e| !routed[e].is_empty()).collect();
-            match self.moe_prompt_experts(moe, &routed, &active, expert_input) {
+            match self.moe_prompt_experts(layer_idx, moe, &routed, &active, expert_input) {
                 Some(all) => {
                     for (slot, (&expert, result)) in active.iter().zip(all).enumerate() {
                         for (i, &(t, w)) in routed[expert].iter().enumerate() {
@@ -8187,7 +8594,7 @@ impl RustDecoder {
             } else {
                 gathered.chunks_mut(width).zip(assigned.iter()).for_each(fill);
             }
-            let result = self.expert_forward(expert, &gathered, workspace)?;
+            let result = self.expert_forward_clamped(expert, &gathered, workspace, routed_clamp)?;
             if batched {
                 for (i, &(t, w)) in assigned.iter().enumerate() {
                     pending[t].push((results.len(), i, if cfg.input_scaled { 1.0 } else { w }));
@@ -8223,7 +8630,7 @@ impl RustDecoder {
         drop(experts_span);
         let _shared_span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::SHARED);
         if let Some((shared, gate)) = &moe.shared {
-            let result = self.expert_forward_clamped(shared, input, workspace, cfg.swiglu_clamp_shared)?;
+            let result = self.expert_forward_clamped(shared, input, workspace, shared_clamp)?;
             for t in 0..tokens {
                 let x = &input[t * hidden..(t + 1) * hidden];
                 let scale = gate.as_ref().map_or(1.0, |g| {
@@ -8289,6 +8696,7 @@ impl RustDecoder {
     /// over the tensor-parallel group).
     fn ffn_forward_local(
         &self,
+        layer_idx: usize,
         layer: &Layer,
         input: &[f32],
         workspace: &mut compute::ProjectionGroupWorkspace,
@@ -8304,9 +8712,10 @@ impl RustDecoder {
                     let width = g.len() / (input.len() / self.cfg.hidden).max(1);
                     gemma::gaussian_top_k(g, width, factor);
                 }
-                if self.cfg.situ.is_some() || self.cfg.moe.as_ref().is_some_and(|m| m.swiglu_clamp.is_some() && m.swiglu_clamp_shared) {
-                    // the dense layers of a model with a clamped SwiGLU clamp like its shared expert (GLM-5-Next)
-                    self.gate_activation_clamped(g, u, true, true);
+                let clamp_limit = self.cfg.moe.as_ref().and_then(|m| m.shared_clamp(layer_idx));
+                if self.cfg.situ.is_some() || clamp_limit.is_some() {
+                    // the dense layers of a model with a clamped SwiGLU clamp like its shared expert (GLM-5-Next, Step-3.7)
+                    self.gate_activation_clamped(g, u, true, clamp_limit);
                 } else if self.cfg.activation == Activation::Silu {
                     crate::cpu_elementwise::swiglu(g, u);
                 } else {
@@ -8321,7 +8730,7 @@ impl RustDecoder {
                 down.forward(g)
             }
             Ffn::None => Err("layer without a feed-forward".into()),
-            Ffn::Moe(moe) => self.moe_forward(moe, input, workspace),
+            Ffn::Moe(moe) => self.moe_forward(layer_idx, moe, input, workspace),
             Ffn::Plain { up, down } => {
                 let mut hidden = up.forward(input)?;
                 let activation = self.cfg.activation;
@@ -8497,6 +8906,7 @@ impl RustDecoder {
         &self,
         layer_idx: usize,
         stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
         x_buf: &crate::backend::DeviceBuffer,
         rows: usize,
     ) -> Result<(), String> {
@@ -8508,9 +8918,19 @@ impl RustDecoder {
             return Ok(());
         }
         let mut host_x = vec![0.0f32; rows * self.cfg.hidden];
-        stream
-            .download(cast_f32_to_u8_mut(&mut host_x), x_buf)
-            .map_err(|e| format!("layer tap download failed: {e}"))?;
+        if stream.act_dtype().is_narrow() {
+            let err = |e: crate::backend::BackendError| e.to_string();
+            let mut wide = scratch.acquire(rows * self.cfg.hidden * 4).map_err(err)?;
+            stream.widen_activations(&mut wide, x_buf).map_err(err)?;
+            stream
+                .download(cast_f32_to_u8_mut(&mut host_x), &wide)
+                .map_err(|e| format!("layer tap download failed: {e}"))?;
+            scratch.recycle(wide);
+        } else {
+            stream
+                .download(cast_f32_to_u8_mut(&mut host_x), x_buf)
+                .map_err(|e| format!("layer tap download failed: {e}"))?;
+        }
         self.record_layer_tap_host(layer_idx, &host_x, rows);
         Ok(())
     }
@@ -8560,6 +8980,57 @@ impl RustDecoder {
             }
         }
         self.head.forward(hidden)
+    }
+
+    /// Runs the target LM head directly on a device hidden buffer (`rows x hidden`), returning `Ok(argmax_ids)` when `greedy`
+    /// and the stream implements `argmax_rows`, or `Err(logits)` otherwise.
+    pub(crate) fn head_logits_or_argmax_device(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        hidden_buf: &crate::backend::DeviceBuffer,
+        rows: usize,
+        greedy: bool,
+    ) -> Result<Result<Vec<i32>, Vec<f32>>, String> {
+        let h = self.cfg.hidden;
+        if rows == 0 {
+            return Ok(if greedy { Ok(Vec::new()) } else { Err(Vec::new()) });
+        }
+        let err = |e: crate::backend::BackendError| e.to_string();
+        if let Some(weights) = self.backend_weights.as_ref().filter(|_| self.par.is_none()) {
+            let mut out_buf = scratch.acquire(rows * weights.head.rows * 4).map_err(err)?;
+            stream
+                .quantized_linear_wide(&mut out_buf, hidden_buf, &weights.head, weights.head.bias.as_ref())
+                .map_err(err)?;
+            if greedy {
+                match stream.argmax_rows(&out_buf, rows, weights.head.rows) {
+                    Ok(ids) => {
+                        scratch.recycle(out_buf);
+                        return Ok(Ok(ids));
+                    }
+                    Err(crate::backend::BackendError::UnsupportedOperation(_)) => {}
+                    Err(e) => {
+                        scratch.recycle(out_buf);
+                        return Err(e.to_string());
+                    }
+                }
+            }
+            let mut logits = vec![0.0f32; rows * weights.head.rows];
+            stream.download(cast_f32_to_u8_mut(&mut logits), &out_buf).map_err(err)?;
+            scratch.recycle(out_buf);
+            return Ok(Err(logits));
+        }
+        let mut host_hidden = vec![0.0f32; rows * h];
+        if stream.act_dtype().is_narrow() {
+            let mut wide = scratch.acquire(rows * h * 4).map_err(err)?;
+            stream.widen_activations(&mut wide, hidden_buf).map_err(err)?;
+            stream.download(cast_f32_to_u8_mut(&mut host_hidden), &wide).map_err(err)?;
+            scratch.recycle(wide);
+        } else {
+            stream.download(cast_f32_to_u8_mut(&mut host_hidden), hidden_buf).map_err(err)?;
+        }
+        let logits = self.head.forward(&host_hidden)?;
+        Ok(Err(logits))
     }
 
     pub(crate) fn head_rows(&self, ids: &[i64]) -> Result<Vec<f32>, String> {
@@ -8877,7 +9348,7 @@ impl RustDecoder {
                     continue;
                 }
                 if matches!(layer.attn, Attn::None) {
-                    let ffn = self.ffn_forward(layer, &normed, &mut ffn_workspace)?;
+                    let ffn = self.ffn_forward(i, layer, &normed, &mut ffn_workspace)?;
                     add_scaled(&mut x, &ffn, residual);
                     self.record_layer_tap_host(i, &x, rows);
                     continue;
@@ -9176,7 +9647,7 @@ impl RustDecoder {
                 if let Some(moe) = &layer.shortcut {
                     pending_shortcut = Some(self.shortcut_forward(moe, &ffn_input, &mut ffn_workspace)?);
                 }
-                let mut ffn = self.ffn_forward(layer, &ffn_input, &mut ffn_workspace)?;
+                let mut ffn = self.ffn_forward(i, layer, &ffn_input, &mut ffn_workspace)?;
                 if let Some(moe) = layer.gemma.as_ref().and_then(|g| g.has_moe()) {
                     self.gemma_moe_branch(moe, &x, &mut ffn, &mut ffn_workspace)?;
                 }

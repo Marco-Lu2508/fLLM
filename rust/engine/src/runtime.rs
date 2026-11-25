@@ -2369,6 +2369,7 @@ impl InferenceRuntime {
             }
             self.spec_delta.draft_ns += started.elapsed().as_nanos() as u64;
         }
+        let mut dspine_pending: Vec<(i64, crate::dspine::DSpineSeqSnapshot, crate::sampling::SamplingState)> = Vec::new();
         if let Some(dspine) = &mut self.dspine {
             if let Some(target_decoder) = &self.decoder {
                 let started = Instant::now();
@@ -2379,7 +2380,7 @@ impl InferenceRuntime {
                 let running = self.scheduler.running.clone();
                 for sid in running {
                     let pending = self.pending_logits.contains_key(&sid);
-                    let Some(sequence) = self.scheduler.sequences.get_mut(&sid) else {
+                    let Some(sequence) = self.scheduler.sequences.get(&sid) else {
                         continue;
                     };
                     if sequence.num_computed >= sequence.prefill_target
@@ -2394,17 +2395,20 @@ impl InferenceRuntime {
                                 .min(sequence.remaining_max().saturating_sub(1));
                             let remaining = sequence.remaining_max().saturating_sub(1);
                             let sampling = sequence.sampling.clone();
+                            let mut proposed_sampling = sequence.sampling_state.clone();
                             let history = sequence.tokens.clone();
+                            let snap = dspine.snapshot_seq(sid as u64);
                             let (tokens, q) = dspine.propose(
                                 sid as u64,
                                 anchor,
                                 count,
                                 remaining,
                                 &sampling,
-                                &mut sequence.sampling_state,
+                                &mut proposed_sampling,
                                 &history,
                                 target_decoder,
                             )?;
+                            dspine_pending.push((sid, snap, proposed_sampling));
                             if !tokens.is_empty() {
                                 self.scheduler.external_drafts.insert(sid, tokens);
                                 self.draft_q.insert(sid, q);
@@ -2435,6 +2439,13 @@ impl InferenceRuntime {
             self.scheduler.wait_times.clear();
         }
         let Some(mut step) = scheduled else {
+            if let Some(dspine) = &mut self.dspine {
+                for (sid, snap, _) in dspine_pending {
+                    dspine.restore_seq(sid as u64, snap);
+                    self.draft_q.remove(&sid);
+                    self.scheduler.external_drafts.remove(&sid);
+                }
+            }
             self.drive_beams();
             return Ok(Vec::new());
         };
@@ -2444,6 +2455,22 @@ impl InferenceRuntime {
         if !pending.is_empty() {
             step.verify.retain(|v| !pending.contains(&v.0));
             step.decode.extend(pending);
+        }
+        if !dspine_pending.is_empty() {
+            let verifying: std::collections::HashMap<i64, usize> = step.verify.iter().map(|(sid, d)| (*sid, d.len())).collect();
+            for (sid, snap, proposed_sampling) in dspine_pending {
+                if verifying.get(&sid).copied().unwrap_or(0) > 0 {
+                    if let Some(seq) = self.scheduler.sequences.get_mut(&sid) {
+                        seq.sampling_state = proposed_sampling;
+                    }
+                } else {
+                    if let Some(dspine) = &mut self.dspine {
+                        dspine.restore_seq(sid as u64, snap);
+                    }
+                    self.draft_q.remove(&sid);
+                    self.scheduler.external_drafts.remove(&sid);
+                }
+            }
         }
         let cached_counts: std::collections::HashMap<_, _> = self
             .scheduler

@@ -1862,6 +1862,24 @@ impl Plan {
                 if cap > 0.0 {
                     f!("router_logit_softcapping", cap);
                 }
+                let clamp_list = |key: &str| -> Option<Vec<f32>> {
+                    match cfg.get(key)? {
+                        Value::Array(list) => {
+                            let vals: Vec<f32> = (0..layers as usize)
+                                .map(|i| list.get(i).and_then(Value::as_f64).filter(|f| f.is_finite() && *f > 0.0).unwrap_or(0.0) as f32)
+                                .collect();
+                            vals.iter().any(|&v| v > 0.0).then_some(vals)
+                        }
+                        Value::Number(n) => n.as_f64().filter(|f| f.is_finite() && *f > 0.0).map(|f| vec![f as f32; layers as usize]),
+                        _ => None,
+                    }
+                };
+                if let Some(limits) = clamp_list("swiglu_limits") {
+                    meta.push((format!("{arch}.expert_swiglu_clamp"), Meta::F32s(limits)));
+                }
+                if let Some(limits) = clamp_list("swiglu_limits_shared") {
+                    meta.push((format!("{arch}.expert_swiglu_clamp_shared"), Meta::F32s(limits)));
+                }
                 match cfg.get("gating") {
                     Some(Value::String(s)) if s == "per-element" => meta.push((format!("{arch}.attention.gate_per_element"), Meta::Bool(true))),
                     _ => {}

@@ -230,6 +230,7 @@ mod nvfp4_tests {
 }
 
 pub mod quant_extra;
+mod glm5_gguf;
 mod qwen4_gguf;
 pub mod quant_i2s;
 pub mod quant_iq;

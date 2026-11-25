@@ -266,7 +266,7 @@ impl RustDecoder {
         };
         let mut g = gate.forward(f)?;
         let u = up.forward(f)?;
-        self.gate_activation_clamped(&mut g, &u, false, false);
+        self.gate_activation_clamped(&mut g, &u, false, None);
         let mut out = down.forward(&g)?;
         out.iter_mut().for_each(|v| *v *= scale);
         Ok(out)
@@ -310,7 +310,7 @@ impl RustDecoder {
     }
 
     fn ink_expert(&self, e: &Expert, f: &[f32], workspace: &mut compute::ProjectionGroupWorkspace) -> Result<Vec<f32>, String> {
-        self.expert_forward_clamped(e, f, workspace, false)
+        self.expert_forward_clamped(e, f, workspace, None)
     }
 }
 

@@ -380,20 +380,21 @@ impl RustDecoder {
     /// The feed-forward of a layer including the sum over the tensor-parallel group.
     pub(super) fn ffn_forward(
         &self,
+        layer_idx: usize,
         layer: &Layer,
         input: &[f32],
         workspace: &mut compute::ProjectionGroupWorkspace,
     ) -> Result<Vec<f32>, String> {
         let Some(par) = &self.par else {
-            return self.ffn_forward_local(layer, input, workspace);
+            return self.ffn_forward_local(layer_idx, layer, input, workspace);
         };
         if par.tp_size() == 1 {
-            return self.ffn_forward_local(layer, input, workspace);
+            return self.ffn_forward_local(layer_idx, layer, input, workspace);
         }
         if let (Ffn::Moe(moe), true, EpDispatch::AllToAll) = (&layer.ffn, par.cfg.expert_parallel, par.cfg.ep_dispatch) {
-            return self.moe_alltoall(par, moe, input, workspace);
+            return self.moe_alltoall(layer_idx, par, moe, input, workspace);
         }
-        let mut out = self.ffn_forward_local(layer, input, workspace)?;
+        let mut out = self.ffn_forward_local(layer_idx, layer, input, workspace)?;
         comm(par.tp_reduce(&mut out))?;
         Ok(out)
     }
@@ -404,6 +405,7 @@ impl RustDecoder {
     /// per-token sum runs over the experts in ascending order, like the single-device code.
     fn moe_alltoall(
         &self,
+        layer_idx: usize,
         par: &ParCtx,
         moe: &Moe,
         input: &[f32],
@@ -459,7 +461,7 @@ impl RustDecoder {
             for &i in list {
                 gathered.extend_from_slice(&recv[i * entry + 3..(i + 1) * entry]);
             }
-            let out = self.expert_forward(&moe.experts[e], &gathered, workspace)?;
+            let out = self.expert_forward_clamped(&moe.experts[e], &gathered, workspace, cfg.routed_clamp(layer_idx))?;
             for (slot, &i) in list.iter().enumerate() {
                 results[i * hidden..(i + 1) * hidden].copy_from_slice(&out[slot * hidden..(slot + 1) * hidden]);
             }
@@ -490,7 +492,7 @@ impl RustDecoder {
         if let Some((shared, gate)) = &moe.shared {
             if !mine.is_empty() {
                 let x = &input[mine.start * hidden..mine.end * hidden];
-                let result = self.expert_forward(shared, x, workspace)?;
+                let result = self.expert_forward_clamped(shared, x, workspace, cfg.shared_clamp(layer_idx))?;
                 for (local, t) in mine.clone().enumerate() {
                     let xt = &input[t * hidden..(t + 1) * hidden];
                     let scale = gate.as_ref().map_or(1.0, |g| {

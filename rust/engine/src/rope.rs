@@ -39,7 +39,14 @@ pub fn build(rope: &RopeConfig, base: f32, positions: usize) -> RopeTables {
         .map(|lane| {
             let frequency = 1.0f32 / base.powf((lane * 2) as f32 / rope.dims as f32);
             match long.or(rope.factors.as_ref()) {
-                Some(factors) => frequency / factors[lane],
+                Some(factors) => {
+                    let factor = factors.get(lane).copied().unwrap_or(1.0);
+                    if factor.is_finite() && factor != 0.0 {
+                        frequency / factor
+                    } else {
+                        frequency
+                    }
+                }
                 None => frequency,
             }
         })
@@ -171,5 +178,19 @@ mod tests {
         assert!((norm - magnitude).abs() < 1e-5);
         // the slowest lane is interpolated: a quarter of the angle
         assert!((angle(&scaled, 30, 3) - angle(&plain, 30, 3) / 4.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn zero_or_non_finite_factors_fall_back_to_unscaled_frequency() {
+        let plain = build(&config(RopeScaling::None), 10_000.0, 4);
+        let mut cfg = config(RopeScaling::None);
+        cfg.factors = Some(vec![2.0, 0.0, f32::NAN, f32::INFINITY]);
+        let scaled = build(&cfg, 10_000.0, 4);
+        assert!(scaled.cos.iter().chain(&scaled.sin).all(|v| v.is_finite()));
+        assert!((scaled.sin[4] - 0.5f32.sin()).abs() < 1e-7);
+        for lane in 1..4 {
+            assert!((scaled.cos[4 + lane] - plain.cos[4 + lane]).abs() < 1e-7);
+            assert!((scaled.sin[4 + lane] - plain.sin[4 + lane]).abs() < 1e-7);
+        }
     }
 }

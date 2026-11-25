@@ -738,3 +738,284 @@ fn ungated_and_newly_registered_architectures_run_on_backend() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn dspine_device_snapshot_restore_preserves_tokens() {
+    let dir = scratch("dspine-dev-snap");
+    let target_gguf = build_gguf(&dir.join("t-qwen3"), Arch::Qwen3, Encoding::F32, 0x3311);
+    let dspine_ckpt = dir.join("dspine-ckpt");
+    write_draft_checkpoint(&dspine_ckpt, true, 0x4422);
+    let dspine_gguf = dir.join("dspine.gguf");
+    convert_checkpoint(&dspine_ckpt, &dspine_gguf, ConvertOptions {
+        output_dtype: OutputDType::Preserve,
+        overwrite: true,
+        spec_head: None,
+    }).unwrap();
+
+    let target_model = GgufModel::load(target_gguf.to_str().unwrap(), 64, 4, 2).unwrap();
+    let draft_model = GgufModel::load(dspine_gguf.to_str().unwrap(), 64, 4, 2).unwrap();
+    let backend: std::sync::Arc<dyn crate::backend::Backend> =
+        std::sync::Arc::new(crate::backend::cpu::CpuBackend::new());
+    let mut dec = crate::rust_decoder::RustDecoder::load(&target_model, "cpu").unwrap();
+    dec.init_backend(std::sync::Arc::clone(&backend)).unwrap();
+    let mut eng = crate::dspine::DSpineEngine::new(&draft_model).unwrap();
+    eng.attach_compute("gpu", Some(backend)).unwrap();
+
+    let prompt: Vec<i64> = vec![1, 4, 9, 16];
+    let lengths: Vec<i64> = (1..=prompt.len() as i64).collect();
+    let table: Vec<i64> = (0..target_model.table_stride() as i64).collect();
+    let tables: Vec<i64> = (0..prompt.len()).flat_map(|_| table.iter().copied()).collect();
+    dec.set_layer_tap(&eng.cfg.target_layer_ids);
+    let mut dk = vec![0u16; target_model.key_buffer_len().unwrap()];
+    let mut dv = vec![0u16; target_model.value_buffer_len().unwrap()];
+    dec.forward(&prompt, &lengths, &tables, &mut dk, &mut dv, &[prompt.len() - 1], false).unwrap();
+    let taps = dec.take_layer_tap();
+    eng.observe_target_hidden(1, prompt.len(), &taps).unwrap();
+
+    let params = SamplingParams { temperature: 0.7, top_k: 8, ..SamplingParams::default() };
+    let mut s1 = crate::sampling::SamplingState::new(&params, 0x99);
+    let (tok1, _) = eng.propose(1, 16, 3, 8, &params, &mut s1, &prompt, &dec).unwrap();
+    assert!(!tok1.is_empty());
+
+    let snap = eng.snapshot_seq(1);
+    let s_saved = s1.clone();
+    let mut s_trial = s1.clone();
+    let hist2 = [1, 4, 9, 16, tok1[0]];
+    let (tok2_a, _) = eng.propose(1, tok1[0], 3, 7, &params, &mut s_trial, &hist2, &dec).unwrap();
+    eng.restore_seq(1, snap);
+    let mut s_replay = s_saved;
+    let (tok2_b, _) = eng.propose(1, tok1[0], 3, 7, &params, &mut s_replay, &hist2, &dec).unwrap();
+    assert_eq!(tok2_a, tok2_b);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn step37_plain_moe_and_value_moe_match_host_on_backend() {
+    use fllm_checkpoint::gguf::{write_to, Meta, OutTensor};
+    use fllm_checkpoint::safetensors::Payload;
+    let dir = scratch("gpu-gaps-parity");
+    let mut rng = Rng(0xABCD);
+    let backend: std::sync::Arc<dyn crate::backend::Backend> =
+        std::sync::Arc::new(crate::backend::cpu::CpuBackend::new());
+    let f32_t = |name: &str, dims: Vec<u64>, data: &[f32]| {
+        let mut bytes = Vec::with_capacity(data.len() * 4);
+        for v in data {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let data_len = bytes.len() as u64;
+        OutTensor {
+            name: name.to_owned(),
+            dims,
+            source_dtype: "F32".into(),
+            dtype: "F32".into(),
+            data: Payload::Owned(std::sync::Arc::new(Vec::new()), 0..0),
+            packed: None,
+            data_len,
+            source_for_output: None,
+            add: 0.0,
+            owned: Some(bytes),
+            parts: Vec::new(),
+        }
+    };
+
+    // 1. Step-3.7-Flash (`step3p5` -> `laguna`) with per-layer SwiGLU clamps (`swiglu_limits`, `swiglu_limits_shared`)
+    {
+        let ckpt = dir.join("step37");
+        fs::create_dir_all(&ckpt).unwrap();
+        let (h, heads, kvh, hd, ff, sff, layers, vocab, experts, topk) = (32, 4, 2, 8, 64, 32, 2, 48, 4, 2);
+        let cfg = json!({
+            "model_type": "step3p5",
+            "hidden_size": h,
+            "intermediate_size": ff,
+            "moe_intermediate_size": ff,
+            "shared_expert_intermediate_size": sff,
+            "num_experts": experts,
+            "num_experts_per_tok": topk,
+            "num_hidden_layers": layers,
+            "num_attention_heads": heads,
+            "num_key_value_heads": kvh,
+            "head_dim": hd,
+            "vocab_size": vocab,
+            "max_position_embeddings": 64,
+            "rms_norm_eps": 1e-5,
+            "rope_theta": 10000.0,
+            "mlp_layer_types": ["dense", "sparse"],
+            "swiglu_limits": [0.0, 5.5],
+            "swiglu_limits_shared": [0.0, 3.5]
+        });
+        fs::write(ckpt.join("config.json"), serde_json::to_vec_pretty(&cfg).unwrap()).unwrap();
+        write_minimal_tokenizer(&ckpt, vocab);
+        let mut entries = vec![
+            f32_entry("model.embed_tokens.weight", &[vocab, h], &rng.vec(vocab * h, 0.1)),
+            f32_entry("model.norm.weight", &[h], &vec![0.0; h]),
+            f32_entry("lm_head.weight", &[vocab, h], &rng.vec(vocab * h, 0.1)),
+        ];
+        for l in 0..layers {
+            let p = format!("model.layers.{l}");
+            entries.extend([
+                f32_entry(&format!("{p}.input_layernorm.weight"), &[h], &vec![0.0; h]),
+                f32_entry(&format!("{p}.post_attention_layernorm.weight"), &[h], &vec![0.0; h]),
+                f32_entry(&format!("{p}.self_attn.q_proj.weight"), &[heads * hd, h], &rng.vec(heads * hd * h, 0.08)),
+                f32_entry(&format!("{p}.self_attn.k_proj.weight"), &[kvh * hd, h], &rng.vec(kvh * hd * h, 0.08)),
+                f32_entry(&format!("{p}.self_attn.v_proj.weight"), &[kvh * hd, h], &rng.vec(kvh * hd * h, 0.08)),
+                f32_entry(&format!("{p}.self_attn.o_proj.weight"), &[h, heads * hd], &rng.vec(h * heads * hd, 0.08)),
+                f32_entry(&format!("{p}.self_attn.q_norm.weight"), &[hd], &vec![0.0; hd]),
+                f32_entry(&format!("{p}.self_attn.k_norm.weight"), &[hd], &vec![0.0; hd]),
+                f32_entry(&format!("{p}.self_attn.g_proj.weight"), &[heads, h], &rng.vec(heads * h, 0.08)),
+            ]);
+            if l == 0 {
+                entries.extend([
+                    f32_entry(&format!("{p}.mlp.gate_proj.weight"), &[ff, h], &rng.vec(ff * h, 0.08)),
+                    f32_entry(&format!("{p}.mlp.up_proj.weight"), &[ff, h], &rng.vec(ff * h, 0.08)),
+                    f32_entry(&format!("{p}.mlp.down_proj.weight"), &[h, ff], &rng.vec(h * ff, 0.08)),
+                ]);
+            } else {
+                entries.extend([
+                    f32_entry(&format!("{p}.moe.gate.weight"), &[experts, h], &rng.vec(experts * h, 0.1)),
+                    f32_entry(&format!("{p}.moe.router_bias"), &[experts], &rng.vec(experts, 0.05)),
+                    f32_entry(&format!("{p}.share_expert.gate_proj.weight"), &[sff, h], &rng.vec(sff * h, 0.08)),
+                    f32_entry(&format!("{p}.share_expert.up_proj.weight"), &[sff, h], &rng.vec(sff * h, 0.08)),
+                    f32_entry(&format!("{p}.share_expert.down_proj.weight"), &[h, sff], &rng.vec(h * sff, 0.08)),
+                ]);
+                for e in 0..experts {
+                    entries.extend([
+                        f32_entry(&format!("{p}.mlp.experts.{e}.gate_proj.weight"), &[ff, h], &rng.vec(ff * h, 0.08)),
+                        f32_entry(&format!("{p}.mlp.experts.{e}.up_proj.weight"), &[ff, h], &rng.vec(ff * h, 0.08)),
+                        f32_entry(&format!("{p}.mlp.experts.{e}.down_proj.weight"), &[h, ff], &rng.vec(h * ff, 0.08)),
+                    ]);
+                }
+            }
+        }
+        write_safetensors(&ckpt.join("model.safetensors"), &entries);
+        let model = load_direct(&ckpt);
+        let moe_cfg = model.config().moe.as_ref().unwrap();
+        assert_eq!(moe_cfg.routed_clamp(0), None);
+        assert_eq!(moe_cfg.routed_clamp(1), Some(5.5));
+        assert_eq!(moe_cfg.shared_clamp(1), Some(3.5));
+
+        let host = crate::rust_decoder::RustDecoder::load(&model, "cpu").unwrap();
+        let mut dev = crate::rust_decoder::RustDecoder::load(&model, "cpu").unwrap();
+        dev.init_backend(std::sync::Arc::clone(&backend)).unwrap();
+        assert!(dev.uses_accelerator());
+
+        let mut hk = vec![0u16; model.key_buffer_len().unwrap()];
+        let mut hv = vec![0u16; model.value_buffer_len().unwrap()];
+        let mut dk = hk.clone();
+        let mut dv = hv.clone();
+        let table: Vec<i64> = (0..model.table_stride() as i64).collect();
+        let hl = host.forward(&[1], &[1], &table, &mut hk, &mut hv, &[0], false).unwrap();
+        let dl = dev.forward(&[1], &[1], &table, &mut dk, &mut dv, &[0], false).unwrap();
+        let diff = hl.iter().zip(&dl).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(diff < 1e-4, "step37 device vs host diff={diff}");
+    }
+
+    // 2. K2 Horizon `ValueMoe` (`attn_v_exps.weight`) GPU execution & host parity
+    {
+        let gguf_path = dir.join("value_moe.gguf");
+        let (h, heads, kvh, hd, ff, vocab, ve_count, ve_used) = (32, 2, 2, 16, 64, 32, 4, 2);
+        let vr = kvh * hd;
+        let meta = vec![
+            ("general.architecture".into(), Meta::Str("qwen2".into())),
+            ("qwen2.embedding_length".into(), Meta::U32(h as u32)),
+            ("qwen2.block_count".into(), Meta::U32(1)),
+            ("qwen2.feed_forward_length".into(), Meta::U32(ff as u32)),
+            ("qwen2.attention.head_count".into(), Meta::U32(heads as u32)),
+            ("qwen2.attention.head_count_kv".into(), Meta::U32(kvh as u32)),
+            ("qwen2.attention.key_length".into(), Meta::U32(hd as u32)),
+            ("qwen2.attention.value_expert_count".into(), Meta::U32(ve_count as u32)),
+            ("qwen2.attention.value_expert_used_count".into(), Meta::U32(ve_used as u32)),
+            ("qwen2.rope.dimension_count".into(), Meta::U32(hd as u32)),
+            ("qwen2.attention.layer_norm_rms_epsilon".into(), Meta::F32(1e-5)),
+            ("qwen2.rope.freq_base".into(), Meta::F32(10000.0)),
+        ];
+        let tensors = vec![
+            f32_t("token_embd.weight", vec![h as u64, vocab as u64], &rng.vec(vocab * h, 0.1)),
+            f32_t("output_norm.weight", vec![h as u64], &vec![1.0; h]),
+            f32_t("output.weight", vec![h as u64, vocab as u64], &rng.vec(vocab * h, 0.1)),
+            f32_t("blk.0.attn_norm.weight", vec![h as u64], &vec![1.0; h]),
+            f32_t("blk.0.ffn_norm.weight", vec![h as u64], &vec![1.0; h]),
+            f32_t("blk.0.attn_q.weight", vec![h as u64, (heads * hd) as u64], &rng.vec(heads * hd * h, 0.08)),
+            f32_t("blk.0.attn_k.weight", vec![h as u64, (kvh * hd) as u64], &rng.vec(kvh * hd * h, 0.08)),
+            f32_t("blk.0.attn_v.weight", vec![h as u64, (kvh * hd) as u64], &vec![0.0; kvh * hd * h]),
+            f32_t("blk.0.attn_output.weight", vec![(heads * hd) as u64, h as u64], &rng.vec(h * heads * hd, 0.08)),
+            f32_t("blk.0.attn_v_gate.weight", vec![h as u64, ve_count as u64], &rng.vec(ve_count * h, 0.1)),
+            f32_t("blk.0.attn_v_exps.weight", vec![h as u64, (ve_count * vr) as u64], &rng.vec(ve_count * vr * h, 0.08)),
+            f32_t("blk.0.ffn_gate.weight", vec![h as u64, ff as u64], &rng.vec(ff * h, 0.08)),
+            f32_t("blk.0.ffn_up.weight", vec![h as u64, ff as u64], &rng.vec(ff * h, 0.08)),
+            f32_t("blk.0.ffn_down.weight", vec![ff as u64, h as u64], &rng.vec(h * ff, 0.08)),
+        ];
+        {
+            let mut file = fs::File::create(&gguf_path).unwrap();
+            write_to(&mut file, &meta, &tensors).unwrap();
+        }
+        let model = GgufModel::load(gguf_path.to_str().unwrap(), 32, 2, 1).unwrap();
+        let host = crate::rust_decoder::RustDecoder::load(&model, "cpu").unwrap();
+        let mut dev = crate::rust_decoder::RustDecoder::load(&model, "cpu").unwrap();
+        dev.init_backend(std::sync::Arc::clone(&backend)).unwrap();
+        assert!(dev.uses_accelerator());
+
+        let mut hk = vec![0u16; model.key_buffer_len().unwrap()];
+        let mut hv = vec![0u16; model.value_buffer_len().unwrap()];
+        let mut dk = hk.clone();
+        let mut dv = hv.clone();
+        let table: Vec<i64> = (0..model.table_stride() as i64).collect();
+        let hl = host.forward(&[1], &[1], &table, &mut hk, &mut hv, &[0], false).unwrap();
+        let dl = dev.forward(&[1], &[1], &table, &mut dk, &mut dv, &[0], false).unwrap();
+        let diff = hl.iter().zip(&dl).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(diff < 1e-4, "value_moe device vs host diff={diff}");
+    }
+
+    // 3. Plain non-gated MoE (`nemotron_h_moe` / `e.gate = None`) GPU parity
+    {
+        let gguf_path = dir.join("plain_moe.gguf");
+        let (h, heads, kvh, hd, ff, vocab, experts, topk) = (32, 2, 2, 16, 48, 32, 4, 2);
+        let meta = vec![
+            ("general.architecture".into(), Meta::Str("nemotron_h_moe".into())),
+            ("nemotron_h_moe.embedding_length".into(), Meta::U32(h as u32)),
+            ("nemotron_h_moe.block_count".into(), Meta::U32(1)),
+            ("nemotron_h_moe.feed_forward_length".into(), Meta::U32(ff as u32)),
+            ("nemotron_h_moe.expert_feed_forward_length".into(), Meta::U32(ff as u32)),
+            ("nemotron_h_moe.expert_count".into(), Meta::U32(experts as u32)),
+            ("nemotron_h_moe.expert_used_count".into(), Meta::U32(topk as u32)),
+            ("nemotron_h_moe.attention.head_count".into(), Meta::U32(heads as u32)),
+            ("nemotron_h_moe.attention.head_count_kv".into(), Meta::U32(kvh as u32)),
+            ("nemotron_h_moe.attention.key_length".into(), Meta::U32(hd as u32)),
+            ("nemotron_h_moe.rope.dimension_count".into(), Meta::U32(hd as u32)),
+            ("nemotron_h_moe.attention.layer_norm_rms_epsilon".into(), Meta::F32(1e-5)),
+            ("nemotron_h_moe.rope.freq_base".into(), Meta::F32(10000.0)),
+            ("nemotron_h_moe.hybrid_override_pattern".into(), Meta::Str("E".into())),
+        ];
+        let tensors = vec![
+            f32_t("token_embd.weight", vec![h as u64, vocab as u64], &rng.vec(vocab * h, 0.1)),
+            f32_t("output_norm.weight", vec![h as u64], &vec![1.0; h]),
+            f32_t("output.weight", vec![h as u64, vocab as u64], &rng.vec(vocab * h, 0.1)),
+            f32_t("blk.0.attn_norm.weight", vec![h as u64], &vec![1.0; h]),
+            f32_t("blk.0.ffn_gate_inp.weight", vec![h as u64, experts as u64], &rng.vec(experts * h, 0.1)),
+            f32_t("blk.0.ffn_up_exps.weight", vec![h as u64, ff as u64, experts as u64], &rng.vec(experts * ff * h, 0.08)),
+            f32_t("blk.0.ffn_down_exps.weight", vec![ff as u64, h as u64, experts as u64], &rng.vec(experts * h * ff, 0.08)),
+        ];
+        {
+            let mut file = fs::File::create(&gguf_path).unwrap();
+            write_to(&mut file, &meta, &tensors).unwrap();
+        }
+        let model = GgufModel::load(gguf_path.to_str().unwrap(), 32, 2, 1).unwrap();
+        let host = crate::rust_decoder::RustDecoder::load(&model, "cpu").unwrap();
+        let mut dev = crate::rust_decoder::RustDecoder::load(&model, "cpu").unwrap();
+        dev.init_backend(std::sync::Arc::clone(&backend)).unwrap();
+        assert!(dev.uses_accelerator());
+
+        let mut hk = vec![0u16; model.key_buffer_len().unwrap()];
+        let mut hv = vec![0u16; model.value_buffer_len().unwrap()];
+        let mut dk = hk.clone();
+        let mut dv = hv.clone();
+        let table: Vec<i64> = (0..model.table_stride() as i64).collect();
+        let hl = host.forward(&[1], &[1], &table, &mut hk, &mut hv, &[0], false).unwrap();
+        let dl = dev.forward(&[1], &[1], &table, &mut dk, &mut dv, &[0], false).unwrap();
+        let diff = hl.iter().zip(&dl).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(diff < 1e-4, "plain MoE device vs host diff={diff}");
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+
