@@ -88,11 +88,7 @@ struct LayerKvCache {
 
 impl LayerKvCache {
     fn kept_rows(&self, kv_dim: usize) -> usize {
-        if kv_dim == 0 {
-            0
-        } else {
-            self.k.len() / kv_dim
-        }
+        self.k.len().checked_div(kv_dim).unwrap_or(0)
     }
 
     fn append(&mut self, k_rows: &[f32], v_rows: &[f32], rows: usize, kv_dim: usize, window: Option<usize>) {
@@ -663,11 +659,7 @@ impl DSpineEngine {
     }
 
     fn ensure_rope_len(&mut self, needed: usize) {
-        let current = if self.rope.half == 0 {
-            0
-        } else {
-            self.rope.cos.len() / self.rope.half
-        };
+        let current = self.rope.cos.len().checked_div(self.rope.half).unwrap_or(0);
         if needed > current {
             self.rope = rope::build(&self.rope_cfg, self.rope_base, needed.next_power_of_two());
         }
@@ -675,6 +667,7 @@ impl DSpineEngine {
 
     /// Generates up to `min(block_size - 1, limit, remaining)` speculative draft tokens for `sid`
     /// starting from `anchor`, together with candidate probability distributions (when non-greedy).
+    #[allow(clippy::too_many_arguments)]
     pub fn propose(
         &mut self,
         sid: u64,
@@ -1016,13 +1009,13 @@ fn draft_layer_attention(
             }
 
             let mut sum_exp = 0.0f32;
-            for ki in 0..cached_rows {
+            for (ki, score) in scores.iter_mut().enumerate().take(cached_rows) {
                 let kpos = cache_start_pos + ki;
                 if kpos < min_kpos || kpos > max_kpos {
-                    scores[ki] = 0.0;
+                    *score = 0.0;
                 } else {
-                    let e = (scores[ki] - max_s).exp();
-                    scores[ki] = e;
+                    let e = (*score - max_s).exp();
+                    *score = e;
                     sum_exp += e;
                 }
             }
@@ -1187,9 +1180,7 @@ fn refine_tail(
     let cand = topk_ids(&logits, n, vocab, k);
 
     let mut sid = vec![0usize; n * k];
-    for c_i in 0..k {
-        sid[c_i] = anchor as usize;
-    }
+    sid[..k].fill(anchor as usize);
     for row in 1..n {
         for c_i in 0..k {
             sid[row * k + c_i] = cand[(row - 1) * k + c_i];
@@ -1452,8 +1443,7 @@ fn softmax_and_filter_small(scaled_logits: &[f32], top_k: usize, top_p: f32, min
         let pc = p[c];
         let mut rank = 0usize;
         let mut before = 0.0f32;
-        for d in 0..k {
-            let pd = p[d];
+        for (d, &pd) in p.iter().enumerate().take(k) {
             if pd > pc || (pd == pc && d < c) {
                 rank += 1;
                 before += pd;

@@ -141,7 +141,7 @@ pub(crate) fn plan(cfg: &Value) -> Result<Plan, String> {
     let block_size = num(cfg, "block_size")
         .or_else(|| num(&dflash_val, "block_size"))
         .unwrap_or(16);
-    if block_size < 2 || block_size > 32 {
+    if !(2..=32).contains(&block_size) {
         return Err(format!(
             "DSpine/DFlash block_size must be in 2..=32, got {block_size}"
         ));
