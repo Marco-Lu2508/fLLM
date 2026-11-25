@@ -248,7 +248,7 @@ impl RustDecoder {
         let mut gate_scale = None;
         if let Some(sh) = dm.shared.as_ref() {
             let sh_mode = if sh.gate.is_some() { shared_mode } else { GluMode::Plain(plain_act) };
-            let use_s2 = !stream.graph_capturing();
+            let use_s2 = !stream.graph_capturing() && (rows > graph_max_rows() || graph_switch() == GraphSwitch::Off);
             if let Some(s2_lock) = self.backend_stream2.as_ref().filter(|_| use_s2) {
                 if let Ok(mut stream2) = s2_lock.try_lock() {
                     stream2.wait_stream(stream).map_err(err)?;

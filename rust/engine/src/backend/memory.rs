@@ -186,7 +186,7 @@ impl MemoryPlan {
 
         // Weights per kind of tensor, from the GGUF index
         let (mut layer_attn, mut layer_ffn, mut total_model_bytes, mut head_bytes) = (0u64, 0u64, 0u64, 0u64);
-        let mut tied_head = 0u64;
+        let (mut tied_head, mut untied_device_embd) = (0u64, 0u64);
         for t in &model.mapping().index().tensors {
             let bytes = device_tensor_bytes(t, backend);
             total_model_bytes += bytes;
@@ -200,15 +200,19 @@ impl MemoryPlan {
                 head_bytes = bytes;
             } else if t.name == "token_embd.weight" {
                 tied_head = bytes;
+                if backend == "cuda" && matches!(t.type_id, 0 | 1 | 30) {
+                    untied_device_embd = bytes;
+                }
             }
         }
-        // The output projection lives on the device (the embedding table does not); a float head is stored as Q6_K
-        let head_bytes = if head_bytes > 0 { head_bytes } else { tied_head };
-        let non_layer_bytes = if head_bytes >= (hidden * vocab) as u64 * 2 {
+        // The output projection lives on the device, and CUDA also uploads an untied float token embedding (`ahead_embed`) for
+        // asynchronous decode scheduling and large prompt chunks; a float output head is stored as Q6_K.
+        let head_out = if head_bytes > 0 { head_bytes } else { tied_head };
+        let non_layer_bytes = if head_out >= (hidden * vocab) as u64 * 2 {
             (hidden * vocab) as u64 * 224 / 256
         } else {
-            head_bytes
-        };
+            head_out
+        } + if head_bytes > 0 { untied_device_embd } else { 0 };
         let layers = total_layers.max(1) as u64;
         // The experts of a mixture-of-experts layer are feed-forward weights like any other: the leading layers keep
         // them on the device, the others run on the host (decode) or stream over PCIe (prompts)

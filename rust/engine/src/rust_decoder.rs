@@ -4179,10 +4179,81 @@ impl RustDecoder {
                             down: up_w("down", &e.down)?,
                         }))
                     };
-                    let mut experts = Vec::with_capacity(moe.experts.len());
-                    for (n, e) in moe.experts.iter().enumerate() {
-                        experts.push(up_expert(e, &format!("exp{n}"), use_grouped_expert_layout)?);
+                    let mut packed_experts: Option<Vec<Option<DeviceExpert>>> = None;
+                    if use_grouped_expert_layout && !moe.experts.is_empty() {
+                        let pack_proj = |proj: &str, ls: Vec<&Linear>| -> Result<Option<Vec<crate::backend::DeviceWeight>>, String> {
+                            let Some(l0) = ls.first() else {
+                                return Ok(None);
+                            };
+                            let Some((k0, _)) = l0.packed_weights() else {
+                                return Ok(None);
+                            };
+                            let mut slices = Vec::with_capacity(ls.len());
+                            for l in &ls {
+                                let Some((k, bytes)) = l.packed_weights() else {
+                                    return Ok(None);
+                                };
+                                if k != k0 || l.rows != l0.rows || l.cols != l0.cols {
+                                    return Ok(None);
+                                }
+                                slices.push((bytes, l.bias.as_deref()));
+                            }
+                            let q = crate::backend::QuantType::from_gguf_type_id(k0);
+                            crate::load_progress::copying(&format!("blk.{i}.exp.{proj}"));
+                            let res = backend
+                                .upload_expert_projection(&format!("blk.{i}.{proj}"), &slices, q, l0.rows, l0.cols)
+                                .map_err(|e| e.to_string())?;
+                            if res.is_some() {
+                                for l in &ls {
+                                    if let Some((_, bytes)) = l.packed_weights() {
+                                        crate::load_progress::note_uploaded(bytes.len());
+                                    }
+                                    if release_pages {
+                                        if let Some((_, storage)) = l.packed_storage() {
+                                            if crate::expert_cache::release_mapped_pages(storage) {
+                                                crate::load_progress::note_released(storage.len());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(res)
+                        };
+                        let plain = moe.experts[0].gate.is_none();
+                        let gates = if plain {
+                            Some(Vec::new())
+                        } else {
+                            let gs: Option<Vec<&Linear>> = moe.experts.iter().map(|e| e.gate.as_ref()).collect();
+                            match gs {
+                                Some(list) => pack_proj("gate", list)?,
+                                None => None,
+                            }
+                        };
+                        let ups = pack_proj("up", moe.experts.iter().map(|e| &e.up).collect())?;
+                        let downs = pack_proj("down", moe.experts.iter().map(|e| &e.down).collect())?;
+                        if let (Some(mut gs), Some(us), Some(ds)) = (gates, ups, downs) {
+                            let mut list = Vec::with_capacity(moe.experts.len());
+                            let g_iter: Vec<Option<crate::backend::DeviceWeight>> = if plain {
+                                (0..moe.experts.len()).map(|_| None).collect()
+                            } else {
+                                gs.drain(..).map(Some).collect()
+                            };
+                            for ((gate, up), down) in g_iter.into_iter().zip(us).zip(ds) {
+                                list.push(Some(DeviceExpert { gate, up, down }));
+                            }
+                            packed_experts = Some(list);
+                        }
                     }
+                    let experts = match packed_experts {
+                        Some(list) => list,
+                        None => {
+                            let mut list = Vec::with_capacity(moe.experts.len());
+                            for (n, e) in moe.experts.iter().enumerate() {
+                                list.push(up_expert(e, &format!("exp{n}"), use_grouped_expert_layout)?);
+                            }
+                            list
+                        }
+                    };
                     let shared = match &moe.shared {
                         Some((e, _)) => up_expert(e, "shared", false)?,
                         None => None,

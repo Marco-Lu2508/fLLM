@@ -3081,6 +3081,19 @@ pub trait Backend: Send + Sync {
         self.upload_weight(name, raw_bytes, quant_type, rows, cols, bias)
     }
 
+    /// Pack all `experts` of one grouped MoE projection (`rows x cols` of `quant_type`) into one device allocation when supported,
+    /// avoiding thousands of separate driver allocations. Returns `Ok(None)` to fall back to per-expert `upload_expert_weight`.
+    fn upload_expert_projection(
+        &self,
+        _name: &str,
+        _experts: &[(&[u8], Option<&[f32]>)],
+        _quant_type: QuantType,
+        _rows: usize,
+        _cols: usize,
+    ) -> Result<Option<Vec<DeviceWeight>>, BackendError> {
+        Ok(None)
+    }
+
     /// Whether the device mixture-of-experts operations (`moe_route_ex`, `moe_align`, `moe_grouped_linear`, `moe_combine_ex`,
     /// `moe_gate_scale`) are available on this device.
     fn moe_device_available(&self) -> bool {

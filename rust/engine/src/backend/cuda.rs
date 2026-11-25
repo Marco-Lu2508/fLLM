@@ -2068,6 +2068,79 @@ impl Backend for CudaBackend {
         self.upload_weight(name, raw_bytes, quant_type, rows, cols, bias)
     }
 
+    fn upload_expert_projection(
+        &self,
+        name: &str,
+        experts: &[(&[u8], Option<&[f32]>)],
+        quant_type: QuantType,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Option<Vec<DeviceWeight>>, BackendError> {
+        let Some(group) = quant_type.q4z_group() else {
+            return Ok(None);
+        };
+        if experts.is_empty() || quant_type.is_q4zp() || !self.moe_grouped_supported(quant_type, cols, 16) {
+            return Ok(None);
+        }
+        let raw_len = rows * (cols / group) * (group / 2 + 3);
+        let all_bias = experts.iter().all(|(_, b)| b.is_some());
+        let any_bias = experts.iter().any(|(_, b)| b.is_some());
+        if any_bias && !all_bias {
+            return Ok(None);
+        }
+        for (idx, (bytes, bias)) in experts.iter().enumerate() {
+            if bytes.len() != raw_len {
+                return Err(invalid(format!("{name}.exp{idx}: {} bytes are not {rows} x {cols} {quant_type:?}", bytes.len())));
+            }
+            if bias.is_some_and(|b| b.len() != rows) {
+                return Err(invalid(format!("{name}.exp{idx}: bias does not have {rows} values")));
+            }
+        }
+        let stride = raw_len.max(1).div_ceil(256) * 256;
+        let mut packed = vec![0u8; experts.len() * stride];
+        for (idx, (bytes, _)) in experts.iter().enumerate() {
+            let at = idx * stride;
+            packed[at..at + raw_len].copy_from_slice(bytes);
+        }
+        let arena = self.alloc(packed.len().max(1))?;
+        self.upload_sync(&arena, &packed)?;
+        let bias_arena = if all_bias {
+            let bstride = (rows * 4).max(1).div_ceil(256) * 256;
+            let mut bpacked = vec![0u8; experts.len() * bstride];
+            for (idx, (_, bias)) in experts.iter().enumerate() {
+                if let Some(b) = bias {
+                    let at = idx * bstride;
+                    for (j, &v) in b.iter().enumerate() {
+                        bpacked[at + j * 4..at + (j + 1) * 4].copy_from_slice(&v.to_le_bytes());
+                    }
+                }
+            }
+            let bbuf = self.alloc(bpacked.len().max(1))?;
+            self.upload_sync(&bbuf, &bpacked)?;
+            Some((bbuf, bstride))
+        } else {
+            None
+        };
+        let mut out = Vec::with_capacity(experts.len());
+        for idx in 0..experts.len() {
+            let bias = match &bias_arena {
+                Some((bbuf, bstride)) => Some(bbuf.slice(idx * *bstride, rows * 4)?),
+                None => None,
+            };
+            out.push(DeviceWeight {
+                name: format!("{name}.exp{idx}"),
+                buffer: arena.slice(idx * stride, raw_len)?,
+                quant_type,
+                rows,
+                cols,
+                bias,
+                scale: 1.0,
+                perm: None,
+            });
+        }
+        Ok(Some(out))
+    }
+
     fn moe_device_available(&self) -> bool {
         !self.rocm && self.cc >= 75 && moe::moe_enabled()
     }
