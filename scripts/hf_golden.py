@@ -687,6 +687,15 @@ def config_for(arch: str, vocab: int):
             keep_window_size=8, max_position_embeddings=256, rms_norm_eps=1e-6, bos_token_id=1, eos_token_id=2, pad_token_id=3,
             tie_word_embeddings=False,
         ),
+        # compressed convolutional attention (a sliding-window layer in the middle) and a router MLP with the one-layer-back router state
+        "zaya": lambda: T.ZayaConfig(
+            vocab_size=vocab, hidden_size=64, num_hidden_layers=3, num_attention_heads=4, num_key_value_heads=2, head_dim=16,
+            max_position_embeddings=256, rms_norm_eps=1e-5, moe_intermediate_size=48, num_experts=4, num_experts_per_tok=1,
+            router_hidden_size=32, layer_types=["hybrid", "hybrid_sliding", "hybrid"], sliding_window=6,
+            rope_parameters={"hybrid": {"rope_type": "default", "rope_theta": 50000.0, "partial_rotary_factor": 0.5},
+                             "hybrid_sliding": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5}},
+            bos_token_id=1, eos_token_id=2, pad_token_id=3, tie_word_embeddings=True, cca_time0=2, cca_time1=2,
+        ),
         "doge_moe": lambda: T.DogeConfig(
             vocab_size=vocab, hidden_size=64, intermediate_size=128, num_hidden_layers=3, num_attention_heads=4, num_key_value_heads=2,
             keep_window_size=8, max_position_embeddings=256, rms_norm_eps=1e-6, bos_token_id=1, eos_token_id=2, pad_token_id=3,
@@ -1408,6 +1417,22 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
                 layer.self_attn.A.copy_(-2.0 * torch.rand_like(layer.self_attn.A))
                 layer.input_residual.copy_(0.7 + 0.6 * torch.rand_like(layer.input_residual))
                 layer.post_attention_residual.copy_(0.7 + 0.6 * torch.rand_like(layer.post_attention_residual))
+    if arch == "zaya":
+        # the released initialisation zeroes the key scale and the balancing biases and gives the experts tiny weights
+        with torch.no_grad():
+            model.model.input_hidden_states_scale.copy_(0.8 + 0.4 * torch.rand_like(model.model.input_hidden_states_scale))
+            model.model.input_hidden_states_bias.copy_(0.1 * torch.randn_like(model.model.input_hidden_states_bias))
+            for layer in model.model.layers:
+                layer.self_attn.qk_norm.temp.copy_(0.5 + torch.rand_like(layer.self_attn.qk_norm.temp))
+                layer.mlp.experts.gate_up_proj.normal_(0.0, 0.12)
+                layer.mlp.experts.down_proj.normal_(0.0, 0.12)
+                layer.mlp.gate.balancing_biases[:-1].copy_(0.05 * torch.randn(layer.mlp.gate.num_experts))
+                layer.mlp.gate.balancing_biases[-1] = -0.08
+                for m in (layer.post_attention_residual_scale, layer.post_mlp_residual_scale):
+                    m.hidden_states_scale.copy_(0.7 + 0.6 * torch.rand_like(m.hidden_states_scale))
+                    m.hidden_states_bias.copy_(0.1 * torch.randn_like(m.hidden_states_bias))
+                    m.residual_scale.copy_(0.7 + 0.6 * torch.rand_like(m.residual_scale))
+                    m.residual_bias.copy_(0.1 * torch.randn_like(m.residual_bias))
     if arch == "doge_moe":
         # transformers splits the router logits of all tokens of a batch with one view (`view(2, tokens, -1)`), which mixes the logits of different
         # tokens in a forward pass over more than one token; the model is meant to route every token on its own (what one-token decoding does)

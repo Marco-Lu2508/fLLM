@@ -248,6 +248,8 @@ pub fn prepare_checkpoint(
         crate::diffllama::config(&cfg)?
     } else if arch == "doge" {
         crate::doge::config(&cfg)?
+    } else if arch == "zaya" {
+        crate::zaya::config(&cfg)?
     } else if arch == "recurrent_gemma" {
         crate::recurrent_gemma::config(&cfg)?
     } else if arch == "dbrx" {
@@ -1026,6 +1028,15 @@ pub fn prepare_checkpoint(
         let mut required = vec!["attn_output.weight"];
         let moe_here = plan.moe && plan.moe_layers[i as usize];
         if plan.family == Family::Classic {
+            continue;
+        }
+        if arch == "zaya" {
+            for n in crate::zaya::layer_requirements(i == 0) {
+                let key = format!("blk.{i}.{n}");
+                if !byname.contains_key(key.as_str()) {
+                    return Err(format!("missing required tensor {key}").into());
+                }
+            }
             continue;
         }
         if arch == "doge" {
@@ -2641,6 +2652,7 @@ fn expected_shape(
         "output_norm.weight" | "output_norm.bias" | "token_embd_norm.weight" | "token_embd_norm.bias" => vec![h],
         "output.bias" => vec![vocab],
         "output.weight" => vec![vocab, h],
+        "zaya_input_scale.weight" | "zaya_input_bias.weight" => vec![h],
         _ => {
             let tail = n.strip_prefix("blk.").ok_or("bad mapped tensor")?;
             let (_, p) = tail.split_once('.').ok_or("bad layer tensor")?;

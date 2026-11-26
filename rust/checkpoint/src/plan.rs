@@ -899,6 +899,9 @@ impl Plan {
         if raw == "doge" {
             return crate::doge::plan(cfg);
         }
+        if raw == "zaya" {
+            return crate::zaya::plan(cfg);
+        }
         if raw == "jetmoe" {
             return crate::jetmoe::plan(cfg);
         }
@@ -2825,6 +2828,11 @@ impl Plan {
         if matches!(self.family, Family::Mamba | Family::Nemotron) {
             return self.map_mamba(n);
         }
+        if self.arch == "zaya" {
+            if let Some(m) = crate::zaya::map_global(n) {
+                return Ok(m);
+            }
+        }
         match n {
             "model.embedding_norm.weight" if matches!(self.arch.as_str(), "lfm2" | "lfm2moe") => {
                 return Ok(plain("output_norm.weight"))
@@ -2887,6 +2895,9 @@ impl Plan {
             }
             if self.arch == "jetmoe" {
                 return crate::jetmoe::map(idx, suf).ok_or_else(|| format!("unexpected JetMoE tensor {n:?}"));
+            }
+            if self.arch == "zaya" {
+                return crate::zaya::map(idx, suf).ok_or_else(|| format!("unexpected ZAYA tensor {n:?}"));
             }
             if self.arch == "doge" {
                 if let Some(m) = crate::doge::map(idx, suf) {

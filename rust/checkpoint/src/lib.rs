@@ -38,6 +38,7 @@ mod requant;
 mod diffllama;
 mod doge;
 mod jetmoe;
+mod zaya;
 mod recurrent_gemma;
 mod rwkv_vocab;
 pub mod safetensors;

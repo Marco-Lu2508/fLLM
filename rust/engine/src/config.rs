@@ -253,6 +253,14 @@ pub struct DogeConfig {
     pub norm_topk: bool,
 }
 
+/// ZAYA: kernel sizes of the two convolutions over time of the compressed convolutional attention, and the width of the router.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ZayaConfig {
+    pub k0: usize,
+    pub k1: usize,
+    pub router: usize,
+}
+
 /// Mamba-1 layers (per-channel state, low-rank time step); Falcon-Mamba also normalises the
 /// time step, B and C.
 #[derive(Clone, Debug, PartialEq)]
@@ -565,6 +573,7 @@ pub struct ModelConfig {
     /// RG-LRU recurrent layers (RecurrentGemma).
     pub rglru: Option<RgLruConfig>,
     pub doge: Option<DogeConfig>,
+    pub zaya: Option<ZayaConfig>,
     /// Layers that skip rotary embeddings (`None`: all rotate).
     pub rope_layers: Option<Vec<bool>>,
     /// Rotary base of every layer (Granite SWA); `0` marks a layer without rotary embeddings.
@@ -1204,6 +1213,7 @@ impl ModelConfig {
             shortconv: parse_shortconv(meta, a, layers)?,
             rglru: parse_rglru(meta, a, layers)?,
             doge: parse_doge(meta, a)?,
+            zaya: parse_zaya(meta, a)?,
             delta: parse_delta(meta, a),
             mamba: parse_mamba(meta, a),
             rwkv: matches!(a, "rwkv6" | "rwkv7")
@@ -1485,6 +1495,19 @@ fn parse_shortconv(
         kernel,
         layers: flags,
     }))
+}
+
+fn parse_zaya(meta: &Map<String, Value>, arch: &str) -> Result<Option<ZayaConfig>, String> {
+    if arch != "zaya" {
+        return Ok(None);
+    }
+    let kernels = key(meta, arch, "attention.cca_kernels").and_then(Value::as_array).ok_or("missing ZAYA attention.cca_kernels")?;
+    let (k0, k1) = match (kernels.first().and_then(Value::as_u64), kernels.get(1).and_then(Value::as_u64)) {
+        (Some(a), Some(b)) if a > 0 && b > 0 => (a as usize, b as usize),
+        _ => return Err("invalid ZAYA attention.cca_kernels".into()),
+    };
+    let router = uint(meta, arch, "router.hidden_size").ok_or("missing ZAYA router.hidden_size")?;
+    Ok(Some(ZayaConfig { k0, k1, router }))
 }
 
 fn parse_doge(meta: &Map<String, Value>, arch: &str) -> Result<Option<DogeConfig>, String> {
@@ -1800,6 +1823,7 @@ pub(crate) mod tests_support {
             shortconv: None,
             rglru: None,
             doge: None,
+            zaya: None,
             rope_layers: None,
             layer_rope_bases: None,
             qk_norm_after_rope: false,

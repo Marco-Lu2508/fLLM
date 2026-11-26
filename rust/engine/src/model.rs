@@ -131,6 +131,7 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "recurrent_gemma",
     "diffllama",
     "doge",
+    "zaya",
     "dspine",
     "dflash",
 ];
@@ -552,6 +553,7 @@ impl GgufModel {
             || self.config.mamba1.is_some()
             || self.config.rwkv.is_some()
             || self.config.rglru.is_some()
+            || self.config.zaya.is_some()
             || self.config.hybrid.stateful()
             || self
                 .config

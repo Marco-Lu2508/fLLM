@@ -359,6 +359,35 @@ fn moa_route(logits: &[f32], top_k: usize) -> Vec<(usize, f32)> {
     order.into_iter().zip(exps).map(|(e, x)| (e, x / sum)).collect()
 }
 
+/// ZAYA layer: the compressed convolutional attention (`cca`), the four residual vectors of each block (`hidden scale, hidden bias, residual scale,
+/// residual bias`) and the router in front of the experts (the final projection to `experts + 1` classes is the `router` of the layer's `Moe`).
+struct ZayaLayer {
+    v_delayed: Linear,
+    conv_dw: Vec<f32>,
+    conv_dw_bias: Vec<f32>,
+    conv_g: Vec<f32>,
+    conv_g_bias: Vec<f32>,
+    temp: Vec<f32>,
+    res_attn: [Vec<f32>; 4],
+    res_mlp: [Vec<f32>; 4],
+    router_down: Linear,
+    router_scale: Option<Vec<f32>>,
+    router_norm: Vec<f32>,
+    fc1: Linear,
+    fc2: Linear,
+    balancing: Vec<f32>,
+}
+
+/// `(branch + hidden_bias) * hidden_scale + (x + residual_bias) * residual_scale` on every row.
+fn zaya_residual(x: &mut [f32], branch: &[f32], p: &[Vec<f32>; 4]) {
+    let width = p[0].len();
+    for (row, b) in x.chunks_exact_mut(width).zip(branch.chunks_exact(width)) {
+        for c in 0..width {
+            row[c] = (b[c] + p[1][c]) * p[0][c] + (row[c] + p[3][c]) * p[2][c];
+        }
+    }
+}
+
 /// Doge: dynamic-mask attention (`a`, `dt`: `kv_heads x kv_heads * value_dim`), the two residual-stream vectors, and the product-key experts of the
 /// cross-domain mixture (`router`: `2 * keys x hidden`, `down` / `up`: `experts x hidden`; empty without a mixture).
 struct DogeLayer {
@@ -557,6 +586,7 @@ struct Layer {
     diff: Option<(f32, f32)>,
     /// Doge: dynamic mask attention, residual vectors and product-key experts.
     doge: Option<Box<DogeLayer>>,
+    zaya: Option<Box<ZayaLayer>>,
     /// JetMoE mixture of attention heads (the `q`, `k`, `v` of the layer are placeholders).
     moa: Option<Box<Moa>>,
     /// Bias added behind the sum of the feed-forward experts (JetMoE).
@@ -1524,6 +1554,8 @@ pub struct RustDecoder {
     prefill_pool: Option<rayon::ThreadPool>,
     /// Learned absolute position embeddings, `positions x hidden`.
     position_table: Option<Vec<f32>>,
+    /// ZAYA: scale and bias of the input embeddings.
+    zaya_input: Option<(Vec<f32>, Vec<f32>)>,
     /// LayerNorm applied to the embeddings before the first layer (BLOOM).
     embd_norm: Option<Norm>,
     /// Recurrent state of hybrid layers, per live sequence.
@@ -2314,7 +2346,9 @@ impl RustDecoder {
                         hidden,
                     )?,
                     k: if kv_shared { unused()? } else { linear(&format!("{p}.attn_k"), kr, hidden)? },
-                    v: if kv_shared || k_eq_v {
+                    v: if has_tensor(mapping, &format!("{p}.zaya_v_cur.weight")) {
+                        linear(&format!("{p}.zaya_v_cur"), vr / 2, hidden)?
+                    } else if kv_shared || k_eq_v {
                         unused()?
                     } else if has_tensor(mapping, &format!("{p}.attn_v_exps.weight")) {
                         // MoVA layers compute their values from routed experts
@@ -2431,7 +2465,10 @@ impl RustDecoder {
                     } else {
                         None
                     },
-                    router: linear(&format!("{p}.ffn_gate_inp"), moe.experts, hidden)?,
+                    router: match cfg.zaya.as_ref() {
+                        Some(z) => linear(&format!("{p}.ffn_gate_inp"), moe.experts + 1, z.router)?,
+                        None => linear(&format!("{p}.ffn_gate_inp"), moe.experts, hidden)?,
+                    },
                     experts,
                     shared,
                     latent: match moe.latent {
@@ -2528,6 +2565,36 @@ impl RustDecoder {
                 None
             };
             let ffn_bias = if has_tensor(mapping, &format!("{p}.ffn_moe_bias.weight")) { Some(vector(mapping, &format!("{p}.ffn_moe_bias.weight"), hidden)?) } else { None };
+            let zaya = if let Some(zc) = cfg.zaya.as_ref() {
+                let moe_experts = cfg.moe.as_ref().map_or(0, |m| m.experts);
+                let (cdw, cg) = ((heads + kv_heads) * dk, (heads + kv_heads) * dk);
+                let four = |name: &str| -> Result<[Vec<f32>; 4], String> {
+                    Ok([
+                        vector(mapping, &format!("{p}.zaya_res_{name}_hs.weight"), hidden)?,
+                        vector(mapping, &format!("{p}.zaya_res_{name}_hb.weight"), hidden)?,
+                        vector(mapping, &format!("{p}.zaya_res_{name}_rs.weight"), hidden)?,
+                        vector(mapping, &format!("{p}.zaya_res_{name}_rb.weight"), hidden)?,
+                    ])
+                };
+                Some(Box::new(ZayaLayer {
+                    v_delayed: linear(&format!("{p}.zaya_v_del"), vr / 2, hidden)?,
+                    conv_dw: vector(mapping, &format!("{p}.zaya_conv_dw.weight"), cdw * zc.k0)?,
+                    conv_dw_bias: vector(mapping, &format!("{p}.zaya_conv_dw.bias"), cdw)?,
+                    conv_g: vector(mapping, &format!("{p}.zaya_conv_g.weight"), cg * dk * zc.k1)?,
+                    conv_g_bias: vector(mapping, &format!("{p}.zaya_conv_g.bias"), cg)?,
+                    temp: vector(mapping, &format!("{p}.zaya_temp.weight"), kv_heads)?,
+                    res_attn: four("attn")?,
+                    res_mlp: four("mlp")?,
+                    router_down: linear(&format!("{p}.zaya_router_down"), zc.router, hidden)?,
+                    router_scale: if i > 0 { Some(vector(mapping, &format!("{p}.zaya_router_scale.weight"), zc.router)?) } else { None },
+                    router_norm: vector(mapping, &format!("{p}.zaya_router_norm.weight"), zc.router)?,
+                    fc1: linear(&format!("{p}.zaya_router_fc1"), zc.router, zc.router)?,
+                    fc2: linear(&format!("{p}.zaya_router_fc2"), zc.router, zc.router)?,
+                    balancing: vector(mapping, &format!("{p}.zaya_router_bias.weight"), moe_experts + 1)?,
+                }))
+            } else {
+                None
+            };
             let doge = if let Some(dc) = cfg.doge.as_ref() {
                 let moe = dc.experts > 0;
                 let keys = (dc.experts as f64).sqrt().floor() as usize;
@@ -2705,6 +2772,7 @@ impl RustDecoder {
                 dsa_shared,
                 diff,
                 doge,
+                zaya,
                 moa,
                 ffn_bias,
                 parallel: hybrid::ParallelMixer::load(&cfg, mapping, &p, i, &linear)?,
@@ -2856,6 +2924,11 @@ impl RustDecoder {
                 .map_err(|e| e.to_string())?,
             prefill_pool: if model.prefill_threads() > model.threads() {
                 rayon::ThreadPoolBuilder::new().num_threads(model.prefill_threads() as usize).build().ok()
+            } else {
+                None
+            },
+            zaya_input: if cfg.zaya.is_some() {
+                Some((vector(mapping, "zaya_input_scale.weight", hidden)?, vector(mapping, "zaya_input_bias.weight", hidden)?))
             } else {
                 None
             },
@@ -3421,6 +3494,9 @@ impl RustDecoder {
     #[allow(clippy::too_many_arguments)]
     fn layer_host_reason(&self, _i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool, rwkv_ok: bool, kda_ok: bool, mamba_ok: bool, zamba_ok: bool, q4_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
+        if layer.zaya.is_some() {
+            return Some("ZAYA convolutional attention, residual vectors and router (no device kernels)");
+        }
         if layer.doge.is_some() {
             return Some("Doge dynamic mask attention, residual vectors and product-key experts (no device kernels)");
         }
@@ -5065,6 +5141,7 @@ impl RustDecoder {
             && dev_weights.hc.is_none()
             && dev_weights.q4.is_none()
             && self.cfg.hybrid.zamba.is_none()
+            && self.cfg.zaya.is_none()
             && stream.async_launches()
             && !std::env::var("FLLM_PREFILL_DEVICE_EMBED").is_ok_and(|v| v == "0")
         {
@@ -5085,6 +5162,7 @@ impl RustDecoder {
                     *v *= cfg.embedding_scale;
                 }
             }
+            self.input_affine(&mut host_x);
             for (r, embedding) in overrides {
                 host_x[*r * hidden..(*r + 1) * hidden].copy_from_slice(embedding);
             }
@@ -7766,6 +7844,198 @@ impl RustDecoder {
         projection.forward(&output)
     }
 
+    /// ZAYA: `(embedding + bias) * scale` on every row (no-op for other models).
+    fn input_affine(&self, x: &mut [f32]) {
+        if let Some((scale, bias)) = &self.zaya_input {
+            for row in x.chunks_exact_mut(scale.len()) {
+                for ((v, s), b) in row.iter_mut().zip(scale).zip(bias) {
+                    *v = (*v + b) * s;
+                }
+            }
+        }
+    }
+
+    /// ZAYA's compressed convolutional attention for the rows of one batch (the rows of one sequence in order): queries, keys and values before the rotary embedding.
+    /// The state of a sequence holds the last `(k0 - 1) + (k1 - 1)` projected query / key columns and the delayed value half of the token before; it restarts at position 0.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn cca_forward(
+        &self,
+        z: &ZayaLayer,
+        layer: usize,
+        q_all: &[f32],
+        k_all: &[f32],
+        v_current: &[f32],
+        input: &[f32],
+        tables: &[i64],
+        lengths: &[i64],
+    ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
+        let zc = self.cfg.zaya.as_ref().ok_or("missing ZAYA configuration")?;
+        let (heads, kv_heads, hd) = (self.cfg.layer_heads(layer), self.cfg.layer_kv_heads(layer), self.cfg.layer_head_dim(layer));
+        let (qw, kw) = (heads * hd, kv_heads * hd);
+        let channels = qw + kw;
+        let history = (zc.k0 - 1) + (zc.k1 - 1);
+        let groups = heads / kv_heads;
+        let half = kw / 2;
+        let rows = lengths.len();
+        let delayed_all = z.v_delayed.forward(input)?;
+        let (mut q_out, mut k_out, mut v_out) = (vec![0.0f32; rows * qw], vec![0.0f32; rows * kw], vec![0.0f32; rows * kw]);
+        let mut store = self.states.lock().map_err(|_| "recurrent state lock poisoned")?;
+        for (row, &length) in lengths.iter().enumerate() {
+            let position = usize::try_from(length).ok().and_then(|n| n.checked_sub(1)).ok_or("invalid ZAYA sequence position")?;
+            let first = tables[row * self.stride];
+            store.clock += 1;
+            let clock = store.clock;
+            if !store.map.contains_key(&first) && store.map.len() >= self.state_capacity {
+                if let Some(oldest) = store.map.iter().min_by_key(|(_, s)| s.used).map(|(key, _)| *key) {
+                    store.map.remove(&oldest);
+                }
+            }
+            let seq = store.map.entry(first).or_insert_with(|| SeqState { used: clock, layers: (0..self.cfg.layers).map(|_| None).collect() });
+            seq.used = clock;
+            if position == 0 {
+                seq.layers[layer] = None;
+            }
+            let state = seq.layers[layer].get_or_insert_with(|| LayerState { len: 0, conv: vec![0.0; channels * history], rec: vec![0.0; half] });
+            if state.len != position {
+                return Err(format!("ZAYA layer {layer} state holds {} tokens, got position {position}", state.len));
+            }
+            state.len += 1;
+            let (q_in, k_in) = (&q_all[row * qw..(row + 1) * qw], &k_all[row * kw..(row + 1) * kw]);
+            // padded window of every channel: the history followed by the current column
+            let span = history + 1;
+            let column = |c: usize, t: usize| -> f32 {
+                if t < history {
+                    state.conv[c * history + t]
+                } else if c < qw {
+                    q_in[c]
+                } else {
+                    k_in[c - qw]
+                }
+            };
+            // depthwise convolution, one value per output position of the grouped convolution
+            let mut mid = vec![0.0f32; channels * zc.k1];
+            for c in 0..channels {
+                for j in 0..zc.k1 {
+                    let mut value = z.conv_dw_bias[c];
+                    for a in 0..zc.k0 {
+                        value += z.conv_dw[c * zc.k0 + a] * column(c, j + a);
+                    }
+                    mid[c * zc.k1 + j] = value;
+                }
+            }
+            let mut conv = vec![0.0f32; channels];
+            for (c, out) in conv.iter_mut().enumerate() {
+                let group = c / hd;
+                let mut value = z.conv_g_bias[c];
+                for ci in 0..hd {
+                    for j in 0..zc.k1 {
+                        value += z.conv_g[(c * hd + ci) * zc.k1 + j] * mid[(group * hd + ci) * zc.k1 + j];
+                    }
+                }
+                *out = value;
+            }
+            // the state keeps the last `history` columns
+            if history > 0 {
+                let mut next = vec![0.0f32; channels * history];
+                for c in 0..channels {
+                    for t in 0..history {
+                        next[c * history + t] = column(c, t + span - history);
+                    }
+                }
+                state.conv = next;
+            }
+            // residual paths
+            let mut query_res = vec![0.0f32; qw];
+            for h in 0..heads {
+                let g = h / groups;
+                for d in 0..hd {
+                    query_res[h * hd + d] = (q_in[h * hd + d] + k_in[g * hd + d]) * 0.5;
+                }
+            }
+            let q = &mut q_out[row * qw..(row + 1) * qw];
+            for (o, (c, r)) in q.iter_mut().zip(conv[..qw].iter().zip(&query_res)) {
+                *o = c + r;
+            }
+            let k = &mut k_out[row * kw..(row + 1) * kw];
+            for g in 0..kv_heads {
+                for d in 0..hd {
+                    let mean = (0..groups).map(|j| query_res[(g * groups + j) * hd + d]).sum::<f32>() / groups as f32;
+                    k[g * hd + d] = conv[qw + g * hd + d] + mean;
+                }
+            }
+            // L2 normalisation to sqrt(head_dim), the learned scale of the keys
+            let eps = f32::EPSILON;
+            let target = (hd as f32).sqrt();
+            for head in q.chunks_exact_mut(hd) {
+                let norm = head.iter().map(|v| v * v).sum::<f32>().sqrt().max(eps);
+                head.iter_mut().for_each(|v| *v *= target / norm);
+            }
+            for (g, head) in k.chunks_exact_mut(hd).enumerate() {
+                let norm = head.iter().map(|v| v * v).sum::<f32>().sqrt().max(eps);
+                head.iter_mut().for_each(|v| *v *= target / norm * z.temp[g]);
+            }
+            // values: the current half and the delayed half of the token before
+            let v = &mut v_out[row * kw..(row + 1) * kw];
+            v[..half].copy_from_slice(&v_current[row * half..(row + 1) * half]);
+            v[half..].copy_from_slice(&state.rec);
+            state.rec.copy_from_slice(&delayed_all[row * half..(row + 1) * half]);
+        }
+        Ok((q_out, k_out, v_out))
+    }
+
+    /// ZAYA's router and experts for a batch of rows. `previous` is the router state of the layer before (empty for the first layer); the new state replaces it.
+    fn zaya_ffn(
+        &self,
+        layer_idx: usize,
+        layer: &Layer,
+        z: &ZayaLayer,
+        input: &[f32],
+        previous: &mut Vec<f32>,
+        workspace: &mut compute::ProjectionGroupWorkspace,
+    ) -> Result<Vec<f32>, String> {
+        let Ffn::Moe(moe) = &layer.ffn else { return Err(format!("ZAYA layer {layer_idx} has no experts")) };
+        let zc = self.cfg.zaya.as_ref().ok_or("missing ZAYA configuration")?;
+        let (hidden, experts, top_k) = (self.cfg.hidden, moe.experts.len(), self.cfg.moe.as_ref().map_or(1, |m| m.used));
+        let rows = input.len() / hidden;
+        let mut state = z.router_down.forward(input)?;
+        if let (Some(scale), false) = (&z.router_scale, previous.is_empty()) {
+            for (row, prev) in state.chunks_exact_mut(zc.router).zip(previous.chunks_exact(zc.router)) {
+                for ((v, p), s) in row.iter_mut().zip(prev).zip(scale) {
+                    *v += p * s;
+                }
+            }
+        }
+        *previous = state.clone();
+        let mut h = state;
+        rms(&mut h, &z.router_norm, self.cfg.eps);
+        let mut h = z.fc1.forward(&h)?;
+        h.iter_mut().for_each(|v| *v = gelu_erf(*v));
+        let mut h = z.fc2.forward(&h)?;
+        h.iter_mut().for_each(|v| *v = gelu_erf(*v));
+        let logits = moe.router.forward(&h)?;
+        let classes = experts + 1;
+        let mut out = vec![0.0f32; rows * hidden];
+        for r in 0..rows {
+            let row = &logits[r * classes..(r + 1) * classes];
+            let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = row.iter().map(|v| (v - max).exp()).collect();
+            let sum: f32 = exps.iter().sum();
+            let probs: Vec<f32> = exps.iter().map(|e| e / sum).collect();
+            let mut order: Vec<usize> = (0..classes).collect();
+            order.sort_by(|&a, &b| (probs[b] + z.balancing[b]).total_cmp(&(probs[a] + z.balancing[a])).then(a.cmp(&b)));
+            for &e in order.iter().take(top_k) {
+                if e == experts {
+                    continue;
+                }
+                let y = self.expert_forward(&moe.experts[e], &input[r * hidden..(r + 1) * hidden], workspace)?;
+                for (o, v) in out[r * hidden..(r + 1) * hidden].iter_mut().zip(&y) {
+                    *o += probs[e] * v;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// RecurrentGemma's recurrent block for a batch of tokens (the rows of one sequence in order): `out(gelu(y(x)) * rglru(conv(x(x))))`. The state of a sequence
     /// holds the last `kernel - 1` convolution inputs and the recurrent state; it restarts at position 0 (the reset of the reference).
     fn rglru_forward(
@@ -9764,6 +10034,9 @@ impl RustDecoder {
                     *v *= cfg.embedding_scale;
                 }
             }
+            if first_stage {
+                self.input_affine(&mut x);
+            }
             for (r, embedding) in overrides.iter().filter(|_| first_stage) {
                 x[*r * cfg.hidden..(*r + 1) * cfg.hidden].copy_from_slice(embedding);
             }
@@ -9883,6 +10156,7 @@ impl RustDecoder {
             let mut rwkv_v_first: Vec<f32> = Vec::new();
             // LongCat-Flash: the shortcut experts of a layer join the stream after the layer that follows
             let mut pending_shortcut: Option<Vec<f32>> = None;
+            let mut zaya_router: Vec<f32> = Vec::new();
             // Kimi K3: sums of the finished blocks of layers
             let mut block_res: Vec<Vec<f32>> = Vec::new();
             for (i, layer) in self.layers.iter().enumerate().skip(range.start).take(range.len()) {
@@ -9950,6 +10224,7 @@ impl RustDecoder {
                     let mut dsa_rows: Option<Vec<Option<Vec<u32>>>> = None;
                     let mut latent_qkv: [Vec<f32>; 3];
                     let mut moe_values: Vec<f32>;
+                    let (mut zaya_q, mut zaya_k, mut zaya_v): (Vec<f32>, Vec<f32>, Vec<f32>);
                     let mut moa_q: Vec<f32>;
                     let mut moa_k: Vec<f32>;
                     let mut moa_v: Vec<f32>;
@@ -9959,7 +10234,17 @@ impl RustDecoder {
                     let mut shared_v: Vec<f32> = Vec::new();
                     let (q, k, v) = match &layer.attn {
                         Attn::Std { q, k, v } => {
-                            let (q, k, v) = if let Some(moa) = &layer.moa {
+                            let (q, k, v) = if let Some(z) = &layer.zaya {
+                                let qkv = Linear::forward_group_with_workspace(&[q, k, v], &normed, &mut qkv_workspace)?;
+                                let [q_all, k_all, v_current] = qkv else {
+                                    return Err("invalid QKV projection group".into());
+                                };
+                                let (cq, ck, cv) = self.cca_forward(z, i, q_all, k_all, v_current, &normed, tables, lengths)?;
+                                zaya_q = cq;
+                                zaya_k = ck;
+                                zaya_v = cv;
+                                (&mut zaya_q, &mut zaya_k, &mut zaya_v)
+                            } else if let Some(moa) = &layer.moa {
                                 // every selected expert gives a query of kv_heads heads; the heads of one key head are made adjacent (key head g, expert j: head g * top_k + j)
                                 moa_k = moa.k.forward(&normed)?;
                                 moa_v = moa.v.forward(&normed)?;
@@ -10299,7 +10584,11 @@ impl RustDecoder {
                                 row.iter_mut().zip(&d.input_res).for_each(|(v, s)| *v *= s);
                             }
                         }
-                        add_scaled(&mut x, &branch, residual);
+                        if let Some(z) = &layer.zaya {
+                            zaya_residual(&mut x, &branch, &z.res_attn);
+                        } else {
+                            add_scaled(&mut x, &branch, residual);
+                        }
                     }
                     dump_layer("attn", i, &x);
                     let mut next = match (cfg.attn_res, &layer.res) {
@@ -10315,7 +10604,10 @@ impl RustDecoder {
                 if let Some(moe) = &layer.shortcut {
                     pending_shortcut = Some(self.shortcut_forward(moe, &ffn_input, &mut ffn_workspace)?);
                 }
-                let mut ffn = self.ffn_forward(i, layer, &ffn_input, &mut ffn_workspace)?;
+                let mut ffn = match &layer.zaya {
+                    Some(z) => self.zaya_ffn(i, layer, z, &ffn_input, &mut zaya_router, &mut ffn_workspace)?,
+                    None => self.ffn_forward(i, layer, &ffn_input, &mut ffn_workspace)?,
+                };
                 if let Some(moe) = layer.gemma.as_ref().and_then(|g| g.has_moe()) {
                     self.gemma_moe_branch(moe, &x, &mut ffn, &mut ffn_workspace)?;
                 }
@@ -10333,7 +10625,11 @@ impl RustDecoder {
                             row.iter_mut().zip(&d.post_res).for_each(|(v, s)| *v *= s);
                         }
                     }
-                    add_scaled(&mut x, &ffn, residual);
+                    if let Some(z) = &layer.zaya {
+                        zaya_residual(&mut x, &ffn, &z.res_mlp);
+                    } else {
+                        add_scaled(&mut x, &ffn, residual);
+                    }
                     if layer.takes_shortcut {
                         if let Some(shortcut) = pending_shortcut.take() {
                             add_scaled(&mut x, &shortcut, 1.0);
@@ -10601,6 +10897,7 @@ impl RustDecoder {
                 *v *= cfg.embedding_scale;
             }
         }
+        self.input_affine(&mut host_x);
         if let Some(table) = &self.position_table {
             let table_rows = table.len() / hidden;
             for (r, &pos) in positions.iter().enumerate() {
@@ -10850,7 +11147,7 @@ impl RustDecoder {
                     Some("the embedding is split over ranks")
                 } else if emb.cols != cfg.hidden || emb.row_bytes != cfg.hidden * width || emb.data.len() != emb.rows * emb.row_bytes {
                     Some("the embedding rows are not plain")
-                } else if self.position_table.is_some() || self.embd_norm.is_some() || cfg.embedding_norm || self.ple.is_some() || self.altup.is_some() {
+                } else if self.position_table.is_some() || self.zaya_input.is_some() || self.embd_norm.is_some() || cfg.embedding_norm || self.ple.is_some() || self.altup.is_some() {
                     Some("the model adds to or normalizes the embedding")
                 } else {
                     None

@@ -31,6 +31,7 @@ pub(super) fn placeholder_layer() -> Layer {
         dsa_shared: false,
         diff: None,
         doge: None,
+        zaya: None,
         moa: None,
         ffn_bias: None,
         output_gate: false,
