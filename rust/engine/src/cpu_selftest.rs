@@ -796,7 +796,8 @@ fn q4z_dense_case(tier: CpuTier, report: &mut Report, rng: &mut Lcg, kind: u32) 
 /// Byte ranges of a block that hold floating-point scales (everything else may take any value).
 fn scale_fields(kind: u32) -> std::ops::Range<usize> {
     match kind {
-        2 | 6 | 8 | 20 | 23 | 42 | 16 | 17 | 18 | 21 | 22 => 0..2,
+        2 | 6 | 8 | 20 | 23 | 42 | 16 | 17 | 18 | 19 | 21 | 22 => 0..2,
+        29 => 48..56,
         3 | 7 | 12 | 13 => 0..4,
         10 => 80..84,
         11 => 108..110,
@@ -812,7 +813,7 @@ fn scale_fields(kind: u32) -> std::ops::Range<usize> {
 /// products of a `maddubs` pair then reach their maximum, which is where a kernel that
 /// saturates (instead of widening first) loses bits.
 fn saturation_cases(tier: CpuTier, report: &mut Report, rng: &mut Lcg) {
-    for kind in [2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 39, 42, 16, 17, 18, 21, 22] {
+    for kind in [2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 39, 42, 16, 17, 18, 19, 21, 22, 29] {
         let cols = match layout(kind).0 {
             256 => 768,
             64 => 384,
@@ -1328,7 +1329,7 @@ fn scan_gguf(
     let mut picked = Vec::new();
     for info in &model.index().tensors {
         let kind = info.type_id;
-        let supported = matches!(kind, 2 | 3 | 6 | 7 | 10..=14 | 16 | 17 | 18 | 20 | 21 | 22 | 23 | 39 | 42);
+        let supported = matches!(kind, 2 | 3 | 6 | 7 | 10..=14 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 29 | 39 | 42);
         if info.dimensions.len() == 2
             && supported
             && (info.dimensions[0] as usize).is_multiple_of(layout(kind).0)

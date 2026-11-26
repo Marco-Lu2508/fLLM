@@ -209,7 +209,7 @@ fn activation(kind: u32) -> Option<Activation> {
         3 | 7 => Some(Activation::Q8_1),
         10..=14 | 23 => Some(Activation::Q8K),
         // the grid IQ formats take the Q8_K records too
-        16 | 17 | 18 | 21 | 22 => Some(Activation::Q8K),
+        16 | 17 | 18 | 19 | 21 | 22 | 29 => Some(Activation::Q8K),
         _ => None,
     }
 }
@@ -228,7 +228,7 @@ fn layout(kind: u32) -> Option<(usize, usize)> {
         14 => (256, 210),
         20 => (32, 18),
         23 => (256, 136),
-        16 | 17 | 18 | 21 | 22 => (256, crate::cpu_iqgrid::block_bytes(kind)),
+        16 | 17 | 18 | 19 | 21 | 22 | 29 => (256, crate::cpu_iqgrid::block_bytes(kind)),
         39 => (32, 17),
         // Q2_0: 64 values, an fp16 scale and 16 bytes of 2-bit codes; the activation records stay
         // 32 values wide, so one block meets two consecutive records.
