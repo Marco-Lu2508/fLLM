@@ -1226,6 +1226,15 @@ fn sample_plans() -> Vec<OpPlan> {
             .unwrap(),
         );
     }
+    v.push(
+        plan_xlstm_cell(
+            0,
+            &RunSpec { first_row: 0, rows: 2, reset: false },
+            &crate::backend::XlstmShape { heads: 4, dqk: 16, dv: 32, gate_cap: 15.0, eps: 1e-6, norm_eps: 1e-6 },
+            0,
+        )
+        .unwrap(),
+    );
     for state in [8, 16, 32, 24] {
         let m1 = Mamba1Shape {
             inner: 64,

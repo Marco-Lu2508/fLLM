@@ -500,6 +500,10 @@ int fllm_mamba1_prep_launch(cudaStream_t s, float *split, float *dt_in, int rows
                             const float *w_c);
 int fllm_mamba1_scan_launch(cudaStream_t s, const void *runs, int nruns, int inner, int state, int rank, size_t state_off, const float *split,
                             const float *dt, const float *mixed, const float *proj, const float *decay, const float *skip, float *out);
+int fllm_xlstm_supported(int heads, int dqk, int dv);
+int fllm_xlstm_cell_launch(cudaStream_t s, const void *runs, int nruns, int heads, int dqk, int dv, size_t state_off, const float *q, const float *k,
+                           const float *v, const float *o, const float *ig, const float *fg, const float *nw, float cap, float eps, float norm_eps,
+                           float *out);
 #if !defined(__HIPCC__)
 // Activations in FP16 / BF16 (act_narrow.cu, FLLM_ACT_DTYPE). dt: 0 FP32, 1 FP16, 2 BF16. Buffers are arrays of that type; weights, norm weights, biases
 // and rotary tables stay FP32.

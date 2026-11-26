@@ -222,6 +222,32 @@ impl Mamba1Shape {
     }
 }
 
+/// Shape and constants of an xLSTM (mLSTM) layer: `heads` cells, each a matrix memory `dqk x dv`, a normaliser vector `dqk` and a stabiliser.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct XlstmShape {
+    pub heads: usize,
+    pub dqk: usize,
+    pub dv: usize,
+    /// Soft cap of the gate pre-activations (`cap * tanh(x / cap)`).
+    pub gate_cap: f32,
+    /// Epsilon behind the normaliser of the cell output.
+    pub eps: f32,
+    /// Epsilon of the per-head layer norm.
+    pub norm_eps: f32,
+}
+
+impl XlstmShape {
+    /// Floats of the recurrent state of one head: the matrix, the normaliser vector and the stabiliser.
+    pub fn head_floats(&self) -> usize {
+        self.dqk * self.dv + self.dqk + 1
+    }
+
+    /// Bytes one layer of one sequence occupies in a state buffer (FP32, rounded up to 256 bytes).
+    pub fn layer_state_bytes(&self) -> usize {
+        (self.heads * self.head_floats() * 4).next_multiple_of(256)
+    }
+}
+
 /// Device-resident parameters of a Mamba-2 layer (all FP32).
 pub struct MambaWeights<'a> {
     /// `conv_dim x conv_kernel`
@@ -2748,6 +2774,33 @@ pub trait Stream: Send {
         _out: &mut DeviceBuffer,
     ) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("mamba1_scan".into()))
+    }
+
+    /// Does this stream implement [`Stream::xlstm_cell`] for this shape?
+    fn supports_xlstm(&self, _shape: &XlstmShape) -> bool {
+        false
+    }
+
+    /// The mLSTM cell of one xLSTM layer for `runs`: `q`, `k` (`rows x heads x dqk`), `v`, `o` (`rows x heads x dv`), the gate pre-activations `i`, `f`
+    /// (`rows x heads`, before the soft cap), the weight `norm` of the per-head layer norm (`heads x dv`). `out` (`rows x heads x dv`) receives
+    /// `sigmoid(o) * layer_norm(cell output)` (the caller applies the output projection). The state of a layer (`heads` blocks of `dqk x dv` matrix,
+    /// `dqk` normaliser, one stabiliser) starts `state_offset` bytes into each run's state buffer.
+    #[allow(clippy::too_many_arguments)]
+    fn xlstm_cell(
+        &mut self,
+        _shape: &XlstmShape,
+        _norm: &DeviceBuffer,
+        _runs: &[DeltaRun<'_>],
+        _state_offset: usize,
+        _q: &DeviceBuffer,
+        _k: &DeviceBuffer,
+        _v: &DeviceBuffer,
+        _o: &DeviceBuffer,
+        _i: &DeviceBuffer,
+        _f: &DeviceBuffer,
+        _out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("xlstm_cell".into()))
     }
 
     /// Does this stream implement [`Stream::shortconv_layer`] for this width and kernel size?

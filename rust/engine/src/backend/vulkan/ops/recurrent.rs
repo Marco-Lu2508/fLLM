@@ -3,7 +3,7 @@
 //! `mamba_gate_norm`, plus `norm_rms` for the Mamba-1 B / C normalisation.
 
 use super::*;
-use crate::backend::DeltaShape;
+use crate::backend::{DeltaShape, XlstmShape};
 
 /// Tokens per workgroup column of the convolution shaders (must be >= conv_kernel - 1).
 pub const CONV_CHUNK: usize = 16;
@@ -891,4 +891,28 @@ pub fn plan_mamba1_bc_norms_with(shape: &Mamba1Shape, rows: usize, weighted: boo
         )
     })
     .collect()
+}
+
+/// `xlstm_cell` for one run: the mLSTM cell of an xLSTM layer, one workgroup per head (see the shader for the operands). Slots: `q`, `k`, `v`, `o`, `ig`, `fg`,
+/// `norm`, `state`, `out` (`rows x heads x dv`, final: gated and normalised).
+pub fn plan_xlstm_cell(run_index: usize, run: &RunSpec, shape: &XlstmShape, state_off: usize) -> Result<OpPlan, BackendError> {
+    if shape.heads == 0 || shape.dqk == 0 || shape.dqk > 512 || shape.dv == 0 || shape.dv > 1024 {
+        return Err(invalid("xLSTM head widths outside 1..=512 (query) and 1..=1024 (value)"));
+    }
+    if run.rows == 0 {
+        return Err(invalid("xLSTM cell of an empty run"));
+    }
+    let push = Push::new()
+        .u("heads", shape.heads)
+        .u("dqk", shape.dqk)
+        .u("dv", shape.dv)
+        .u("row0", run.first_row)
+        .u("n", run.rows)
+        .b("reset", run.reset)
+        .u("state_off", state_off)
+        .f("cap", shape.gate_cap)
+        .f("eps", shape.eps)
+        .f("norm_eps", shape.norm_eps);
+    let slots = Slots::new().read("q").read("k").read("v").read("o").read("ig").read("fg").read("norm").run_state("state", run_index).write("out");
+    plan("xlstm_cell", push, [shape.heads as u32, 1, 1], slots)
 }

@@ -608,7 +608,7 @@ pub fn recurrent_state_bytes(model: &crate::model::GgufModel) -> u64 {
     let mut layers = std::collections::BTreeSet::new();
     for t in &model.mapping().index().tensors {
         if let Some(rest) = t.name.strip_prefix("blk.") {
-            if t.name.contains(".ssm_") {
+            if t.name.contains(".ssm_") || t.name.contains(".xlstm_q.") {
                 if let Some(index) = rest.split('.').next().and_then(|n| n.parse::<usize>().ok()) {
                     layers.insert(index);
                 }
@@ -625,6 +625,12 @@ pub fn recurrent_state_bytes(model: &crate::model::GgufModel) -> u64 {
         m.inner * m.state * 4 + (m.inner + 2 * m.groups * m.state) * m.conv_kernel.saturating_sub(1) * 4
     } else if let Some(m) = &cfg.mamba1 {
         m.inner * m.state * 4 + m.inner * m.conv_kernel.saturating_sub(1) * 4
+    } else if cfg.xlstm.is_some() {
+        // heads x (matrix dqk x dv + normaliser dqk + stabiliser), the query width read from the first query projection
+        let rows = model.mapping().index().tensors.iter().find(|t| t.name.ends_with(".xlstm_q.weight")).and_then(|t| t.dimensions.get(1).copied()).unwrap_or(0) as usize;
+        let heads = cfg.heads.max(1);
+        let (dqk, dv) = (rows / heads, cfg.hidden / heads);
+        heads * (dqk * dv + dqk + 1) * 4
     } else {
         0
     };

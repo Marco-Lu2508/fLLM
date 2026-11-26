@@ -1,0 +1,141 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: xlstm_cell | bindings: q,k,v,o,ig,fg,norm,state,out | push: heads,dqk,dv,row0,n,reset,state_off,cap,eps,norm_eps | grid: [heads, 1, 1] per run
+// xLSTM (mLSTM) cell (reference: `xlstm_forward` in rust_decoder.rs) of one run (n consecutive tokens of one sequence); one workgroup per head. The state of head h is
+// state[state_off + h * (dqk * dv + dqk + 1) ...]: the matrix C [dqk][dv], the normaliser n [dqk] and the stabiliser m. Per token:
+//   i = cap * tanh(ig / cap), f = cap * tanh(fg / cap), log_f = logsigmoid(f), m' = max(log_f + m, i), f_act = exp(log_f + m - m'), i_act = exp(i - m')
+//   C = f_act * C + i_act * k v^T, n = f_act * n + i_act * k, h = (q / sqrt(dqk)) . C / (max(|(q / sqrt(dqk)) . n|, exp(-m')) + eps)
+//   out = sigmoid(o) * layer_norm(h) * norm[h * dv ...]       (layer norm over the dv values of the head, eps = norm_eps)
+// Thread t owns the columns t, t + WG, ... of C. dqk <= 512, dv <= 1024.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer QBuf { float qv[]; };
+layout(std430, binding = 1) readonly buffer KBuf { float kv[]; };
+layout(std430, binding = 2) readonly buffer VBuf { float vv[]; };
+layout(std430, binding = 3) readonly buffer OBuf { float ov[]; };
+layout(std430, binding = 4) readonly buffer IgBuf { float igv[]; };
+layout(std430, binding = 5) readonly buffer FgBuf { float fgv[]; };
+layout(std430, binding = 6) readonly buffer NormBuf { float nw[]; };
+layout(std430, binding = 7) buffer StateBuf { float state[]; };
+layout(std430, binding = 8) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint heads;
+    uint dqk;
+    uint dv;
+    uint row0;
+    uint n;
+    uint reset;
+    uint state_off;
+    float cap;
+    float eps;
+    float norm_eps;
+} p;
+
+shared float qs[512];
+shared float ks[512];
+shared float hv[1024];
+shared float red[WG];
+shared float misc[8];
+
+// tanh from exp (the built-in tanh of some drivers, Mesa lavapipe, is only accurate to a few 1e-6)
+float tanh_acc(float y) {
+    const float a = abs(y);
+    if (a < 0.25) {
+        const float y2 = y * y;
+        return y * (1.0 + y2 * (-1.0 / 3.0 + y2 * (2.0 / 15.0 + y2 * (-17.0 / 315.0 + y2 * (62.0 / 2835.0)))));
+    }
+    const float t = exp(-2.0 * a);
+    const float r = (1.0 - t) / (1.0 + t);
+    return y < 0.0 ? -r : r;
+}
+
+void reduce_sum() {
+    barrier();
+    for (uint s = WG / 2u; s > 0u; s >>= 1u) {
+        if (gl_LocalInvocationID.x < s) red[gl_LocalInvocationID.x] += red[gl_LocalInvocationID.x + s];
+        barrier();
+    }
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint h = gl_WorkGroupID.x;
+    const uint head_floats = p.dqk * p.dv + p.dqk + 1u;
+    const uint base = p.state_off + h * head_floats;
+    const uint nbase = base + p.dqk * p.dv;
+    const uint mbase = nbase + p.dqk;
+    if (p.reset != 0u) {
+        for (uint i = tid; i < head_floats; i += WG) state[base + i] = 0.0;
+    }
+    barrier();
+    memoryBarrierBuffer();
+    const float qscale = inversesqrt(float(p.dqk));
+    for (uint t = 0u; t < p.n; t++) {
+        const uint row = p.row0 + t;
+        for (uint a = tid; a < p.dqk; a += WG) {
+            qs[a] = qv[(row * p.heads + h) * p.dqk + a] * qscale;
+            ks[a] = kv[(row * p.heads + h) * p.dqk + a];
+        }
+        if (tid == 0u) {
+            const float ip = p.cap * tanh_acc(igv[row * p.heads + h] / p.cap);
+            const float fp = p.cap * tanh_acc(fgv[row * p.heads + h] / p.cap);
+            const float log_f = min(fp, 0.0) - log(1.0 + exp(-abs(fp)));
+            const float m_old = state[mbase];
+            const float m_new = max(log_f + m_old, ip);
+            misc[0] = exp(log_f + m_old - m_new);
+            misc[1] = exp(ip - m_new);
+            misc[2] = m_new;
+            state[mbase] = m_new;
+        }
+        barrier();
+        const float f_act = misc[0];
+        const float i_act = misc[1];
+        float part = 0.0;
+        for (uint a = tid; a < p.dqk; a += WG) {
+            const float nv = f_act * state[nbase + a] + i_act * ks[a];
+            state[nbase + a] = nv;
+            part += qs[a] * nv;
+        }
+        red[tid] = part;
+        reduce_sum();
+        if (tid == 0u) misc[3] = red[0];
+        barrier();
+        const float denom = max(abs(misc[3]), exp(-misc[2])) + p.eps;
+        float lsum = 0.0;
+        for (uint b = tid; b < p.dv; b += WG) {
+            const float vb = vv[(row * p.heads + h) * p.dv + b];
+            float acc = 0.0;
+            for (uint a = 0u; a < p.dqk; a++) {
+                const uint at = base + a * p.dv + b;
+                const float c = f_act * state[at] + i_act * ks[a] * vb;
+                state[at] = c;
+                acc += qs[a] * c;
+            }
+            const float hval = acc / denom;
+            hv[b] = hval;
+            lsum += hval;
+        }
+        red[tid] = lsum;
+        reduce_sum();
+        if (tid == 0u) misc[4] = red[0] / float(p.dv);
+        barrier();
+        const float mean = misc[4];
+        float vsum = 0.0;
+        for (uint b = tid; b < p.dv; b += WG) {
+            const float d = hv[b] - mean;
+            vsum += d * d;
+        }
+        red[tid] = vsum;
+        reduce_sum();
+        if (tid == 0u) misc[5] = inversesqrt(red[0] / float(p.dv) + p.norm_eps);
+        barrier();
+        const float inv = misc[5];
+        for (uint b = tid; b < p.dv; b += WG) {
+            const float gate = 1.0 / (1.0 + exp(-ov[(row * p.heads + h) * p.dv + b]));
+            outv[(row * p.heads + h) * p.dv + b] = gate * (hv[b] - mean) * inv * nw[h * p.dv + b];
+        }
+        barrier();
+    }
+}

@@ -502,6 +502,28 @@ extern "C" {
         out: *mut f32,
     ) -> c_int;
     fn fllm_cuda_mamba1_supported(inner: c_int, state: c_int, rank: c_int, ksz: c_int) -> c_int;
+    fn fllm_cuda_xlstm_supported(heads: c_int, dqk: c_int, dv: c_int) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_xlstm_cell(
+        st: *mut RawStream,
+        runs: *const c_void,
+        nruns: c_int,
+        heads: c_int,
+        dqk: c_int,
+        dv: c_int,
+        state_off: usize,
+        q: *const f32,
+        k: *const f32,
+        v: *const f32,
+        o: *const f32,
+        ig: *const f32,
+        fg: *const f32,
+        nw: *const f32,
+        cap: f32,
+        eps: f32,
+        norm_eps: f32,
+        out: *mut f32,
+    ) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn fllm_cuda_mamba1_conv(
         st: *mut RawStream,
@@ -5202,6 +5224,77 @@ impl Stream for CudaStream {
                 dev_ptr(proj)?.cast(),
                 dev_ptr(decay)?.cast(),
                 dev_ptr(skip)?.cast(),
+                dev_ptr(out)?.cast(),
+            )
+        })
+    }
+
+    fn supports_xlstm(&self, s: &XlstmShape) -> bool {
+        if !ssm_enabled_on_build() {
+            return false;
+        }
+        let dims = [s.heads, s.dqk, s.dv].map(|n| c_int::try_from(n).unwrap_or(0));
+        // SAFETY: plain arithmetic on the arguments.
+        unsafe { fllm_cuda_xlstm_supported(dims[0], dims[1], dims[2]) != 0 }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn xlstm_cell(
+        &mut self,
+        s: &XlstmShape,
+        norm: &DeviceBuffer,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        q: &DeviceBuffer,
+        k: &DeviceBuffer,
+        v: &DeviceBuffer,
+        o: &DeviceBuffer,
+        i: &DeviceBuffer,
+        f: &DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_xlstm(s) {
+            return Err(BackendError::UnsupportedOperation("xlstm_cell for this shape".into()));
+        }
+        let rows: usize = runs.iter().map(|r| r.rows).sum();
+        if rows == 0 {
+            return Ok(());
+        }
+        let state_end = state_offset + s.layer_state_bytes();
+        let (qk_len, v_len) = (rows * s.heads * s.dqk * 4, rows * s.heads * s.dv * 4);
+        if q.size < qk_len
+            || k.size < qk_len
+            || v.size < v_len
+            || o.size < v_len
+            || out.size < v_len
+            || i.size < rows * s.heads * 4
+            || f.size < rows * s.heads * 4
+            || norm.size < s.heads * s.dv * 4
+            || runs.iter().any(|r| r.state.size < state_end || r.first_row + r.rows > rows)
+        {
+            return Err(invalid("xLSTM buffers smaller than the layer needs"));
+        }
+        let list = ssm_runs(runs)?;
+        // SAFETY: sizes checked above; `list` outlives the call (the C side copies it before returning).
+        check(unsafe {
+            fllm_cuda_xlstm_cell(
+                self.raw,
+                list.as_ptr().cast(),
+                to_c(list.len(), "runs")?,
+                to_c(s.heads, "heads")?,
+                to_c(s.dqk, "query width")?,
+                to_c(s.dv, "value width")?,
+                state_offset,
+                dev_ptr(q)?.cast(),
+                dev_ptr(k)?.cast(),
+                dev_ptr(v)?.cast(),
+                dev_ptr(o)?.cast(),
+                dev_ptr(i)?.cast(),
+                dev_ptr(f)?.cast(),
+                dev_ptr(norm)?.cast(),
+                s.gate_cap,
+                s.eps,
+                s.norm_eps,
                 dev_ptr(out)?.cast(),
             )
         })

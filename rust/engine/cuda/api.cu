@@ -2547,6 +2547,16 @@ int fllm_cuda_mamba1_scan(FllmStream *st, const void *runs, int nruns, int inner
     if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
     return fllm_mamba1_scan_launch(st->s, d, nruns, inner, state, rank, state_off, split, dt, mixed, proj, decay, skip, out);
 }
+int fllm_cuda_xlstm_supported(int heads, int dqk, int dv) { return !ssm_kernels_off() && fllm_xlstm_supported(heads, dqk, dv); }
+// xLSTM cell of one layer; `runs` is nruns SsmRun records (24 bytes each) in host memory.
+int fllm_cuda_xlstm_cell(FllmStream *st, const void *runs, int nruns, int heads, int dqk, int dv, size_t state_off, const float *q, const float *k,
+                         const float *v, const float *o, const float *ig, const float *fg, const float *nw, float cap, float eps, float norm_eps,
+                         float *out) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
+    return fllm_xlstm_cell_launch(st->s, d, nruns, heads, dqk, dv, state_off, q, k, v, o, ig, fg, nw, cap, eps, norm_eps, out);
+}
 int fllm_cuda_sigmoid_mul(FllmStream *st, float *x, const float *g, size_t n) {
     PREP(st);
     return fllm_sigmoid_mul_launch(st->s, x, g, n);

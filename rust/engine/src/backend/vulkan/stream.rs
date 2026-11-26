@@ -30,7 +30,7 @@ use crate::backend::vulkan::ops::moe::{
     plan_gather_rows, plan_moe_combine, plan_moe_linear, plan_moe_topk, plan_scatter_add_rows, ExpertAccess, MoeLinear,
 };
 use crate::backend::vulkan::ops::recurrent::{
-    delta_supported, plan_delta_layer_scan, plan_mamba1_bc_norms_with, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, Mamba1Shape as VkMamba1,
+    delta_supported, plan_delta_layer_scan, plan_mamba1_bc_norms_with, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, plan_xlstm_cell, Mamba1Shape as VkMamba1,
     Mamba2Shape, RunSpec,
 };
 use crate::backend::vulkan::ops::{
@@ -40,7 +40,7 @@ use crate::backend::vulkan::ops::{
 use crate::backend::vulkan::weights::{format_info, DeviceLayout};
 use crate::backend::{
     validate_kv_write, AttentionParams, BackendError, DeltaRun, DeltaShape, DeltaWeights, DeviceBuffer, DeviceKvCache, DeviceWeight,
-    DsaParams, HcMode, Mamba1Shape, MambaShape, MambaWeights, MlaShape, QuantType, RopeParams, SamplingParams, Stream,
+    DsaParams, HcMode, Mamba1Shape, MambaShape, MambaWeights, MlaShape, QuantType, RopeParams, SamplingParams, Stream, XlstmShape,
 };
 use exec::Arg;
 use linear::LinTrace;
@@ -1770,6 +1770,59 @@ impl Stream for VulkanStream {
             Arg::r("skip", skip),
             Arg::w("out", out),
         ];
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        self.run_plans(&plans, &args, &states, false)
+    }
+
+    fn supports_xlstm(&self, shape: &XlstmShape) -> bool {
+        // xlstm_cell binds nine storage buffers
+        plan_xlstm_cell(0, &RunSpec { first_row: 0, rows: 1, reset: true }, shape, 0).is_ok() && self.sh.caps().max_per_stage_storage_buffers >= 9
+    }
+
+    fn xlstm_cell(
+        &mut self,
+        shape: &XlstmShape,
+        norm: &DeviceBuffer,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        q: &DeviceBuffer,
+        k: &DeviceBuffer,
+        v: &DeviceBuffer,
+        o: &DeviceBuffer,
+        i: &DeviceBuffer,
+        f: &DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        if !self.supports_xlstm(shape) {
+            return Err(BackendError::UnsupportedOperation("xlstm_cell for this shape".into()));
+        }
+        let state_end = state_offset + shape.layer_state_bytes();
+        let (qk_len, v_len) = (rows * shape.heads * shape.dqk * 4, rows * shape.heads * shape.dv * 4);
+        if q.size < qk_len
+            || k.size < qk_len
+            || v.size < v_len
+            || o.size < v_len
+            || out.size < v_len
+            || i.size < rows * shape.heads * 4
+            || f.size < rows * shape.heads * 4
+            || norm.size < shape.heads * shape.dv * 4
+            || runs.iter().any(|r| r.state.size < state_end)
+        {
+            return Err(invalid("xLSTM buffers are smaller than the layer needs"));
+        }
+        let mut plans = Vec::new();
+        for (index, r) in runs.iter().enumerate() {
+            if r.rows == 0 {
+                continue;
+            }
+            let spec = RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset };
+            plans.push(plan_xlstm_cell(index, &spec, shape, state_offset / 4)?);
+        }
+        let args = [Arg::r("q", q), Arg::r("k", k), Arg::r("v", v), Arg::r("o", o), Arg::r("ig", i), Arg::r("fg", f), Arg::r("norm", norm), Arg::w("out", out)];
         let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
         self.run_plans(&plans, &args, &states, false)
     }

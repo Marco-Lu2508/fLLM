@@ -4424,6 +4424,15 @@ impl Tester<'_> {
             let r = self.mamba1_check(&shape);
             self.record("mamba1", &format!("inner {inner} state {state} rank {rank}{}", if eps.is_some() { " +bc norm" } else { "" }), r);
         }
+        for (heads, dqk, dv) in [(2usize, 16usize, 32usize), (4, 64, 40), (3, 300, 130)] {
+            let shape = XlstmShape { heads, dqk, dv, gate_cap: 15.0, eps: 1e-6, norm_eps: 1e-6 };
+            match self.device.create_stream() {
+                Ok(st) if st.supports_xlstm(&shape) => {}
+                _ => continue,
+            }
+            let r = self.xlstm_check(&shape);
+            self.record("xlstm", &format!("{heads} heads, query {dqk}, value {dv}"), r);
+        }
         for (hidden, kernel) in [(64usize, 3usize), (200, 4), (1024, 3)] {
             if !self.device.create_stream().map(|st| st.supports_shortconv(hidden, kernel)).unwrap_or(false) {
                 continue;
@@ -4899,6 +4908,95 @@ impl Tester<'_> {
             worst_err = worst_err.max(worst(&have, &want, &scale));
         }
         Ok(Outcome { device: worst_err, cpu: 0.0, tol: 1e-5, cpu_tol: 1.0, ms: total_ms })
+    }
+
+    /// The mLSTM cell against a transcription of `xlstm_forward`: several sequences over several calls (a long run, single tokens, a run that
+    /// continues the state of an earlier one).
+    fn xlstm_check(&mut self, shape: &XlstmShape) -> Result<Outcome, BackendError> {
+        let (heads, dqk, dv) = (shape.heads, shape.dqk, shape.dv);
+        let norm_w = self.rng.vector(heads * dv, 1.0).iter().map(|v| 1.0 + 0.3 * v).collect::<Vec<f32>>();
+        let calls: [&[(usize, usize)]; 4] = [&[(0, 17), (1, 3), (2, 1)], &[(0, 1), (1, 1), (2, 1)], &[(2, 5), (0, 2), (1, 1)], &[(1, 1), (0, 1), (2, 1)]];
+        let mut stream = self.device.create_stream()?;
+        let norm_buf = put(self.device, stream.as_mut(), &norm_w)?;
+        let offset = 256;
+        let states: Vec<DeviceBuffer> = (0..3).map(|_| self.device.allocate_buffer(offset + shape.layer_state_bytes())).collect::<Result<_, _>>()?;
+        let head_floats = shape.head_floats();
+        let mut cells = vec![vec![0.0f32; heads * head_floats]; 3];
+        let mut started = [false; 3];
+        let (mut worst_err, mut total_ms) = (0.0f64, 0.0f64);
+        for call in calls {
+            let rows: usize = call.iter().map(|c| c.1).sum();
+            let q = self.rng.vector(rows * heads * dqk, 1.0);
+            let k = self.rng.vector(rows * heads * dqk, 1.0);
+            let v = self.rng.vector(rows * heads * dv, 1.0);
+            let o = self.rng.vector(rows * heads * dv, 2.0);
+            let ig: Vec<f32> = self.rng.vector(rows * heads, 25.0);
+            let fg: Vec<f32> = self.rng.vector(rows * heads, 25.0);
+            let mut want = vec![0.0f32; rows * heads * dv];
+            let mut runs = Vec::new();
+            let mut first = 0;
+            for &(seq, cnt) in call {
+                if !started[seq] {
+                    cells[seq].iter_mut().for_each(|x| *x = 0.0);
+                }
+                for t in 0..cnt {
+                    let row = first + t;
+                    for h in 0..heads {
+                        let cap = |x: f32| shape.gate_cap * (x / shape.gate_cap).tanh();
+                        let (i_pre, f_pre) = (cap(ig[row * heads + h]), cap(fg[row * heads + h]));
+                        let st = &mut cells[seq][h * head_floats..(h + 1) * head_floats];
+                        let (c, rest) = st.split_at_mut(dqk * dv);
+                        let (n, mm) = rest.split_at_mut(dqk);
+                        let log_f = -((-f_pre).max(0.0) + (-(f_pre.abs())).exp().ln_1p());
+                        let m_new = (log_f + mm[0]).max(i_pre);
+                        let (f_act, i_act) = ((log_f + mm[0] - m_new).exp(), (i_pre - m_new).exp());
+                        let qh = &q[(row * heads + h) * dqk..(row * heads + h + 1) * dqk];
+                        let kh = &k[(row * heads + h) * dqk..(row * heads + h + 1) * dqk];
+                        let vh = &v[(row * heads + h) * dv..(row * heads + h + 1) * dv];
+                        let scale = (dqk as f32).powf(-0.5);
+                        let mut num = vec![0.0f32; dv];
+                        let mut qn = 0.0f32;
+                        for a in 0..dqk {
+                            n[a] = f_act * n[a] + i_act * kh[a];
+                            qn += qh[a] * scale * n[a];
+                            for b in 0..dv {
+                                c[a * dv + b] = f_act * c[a * dv + b] + i_act * kh[a] * vh[b];
+                                num[b] += qh[a] * scale * c[a * dv + b];
+                            }
+                        }
+                        mm[0] = m_new;
+                        let denom = qn.abs().max((-m_new).exp()) + shape.eps;
+                        let hv: Vec<f32> = num.iter().map(|x| x / denom).collect();
+                        let mean = hv.iter().sum::<f32>() / dv as f32;
+                        let var = hv.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / dv as f32;
+                        let inv = (var + shape.norm_eps).sqrt().recip();
+                        for b in 0..dv {
+                            let gate = 1.0 / (1.0 + (-o[(row * heads + h) * dv + b]).exp());
+                            want[(row * heads + h) * dv + b] = gate * (hv[b] - mean) * inv * norm_w[h * dv + b];
+                        }
+                    }
+                }
+                runs.push(DeltaRun { state: &states[seq], first_row: first, rows: cnt, reset: !started[seq] });
+                started[seq] = true;
+                first += cnt;
+            }
+            let (qb, kb, vb, ob, ib, fb) = (
+                put(self.device, stream.as_mut(), &q)?,
+                put(self.device, stream.as_mut(), &k)?,
+                put(self.device, stream.as_mut(), &v)?,
+                put(self.device, stream.as_mut(), &o)?,
+                put(self.device, stream.as_mut(), &ig)?,
+                put(self.device, stream.as_mut(), &fg)?,
+            );
+            let mut out = put(self.device, stream.as_mut(), &vec![f32::NAN; rows * heads * dv])?;
+            let mut ms = 0.0;
+            timed(&mut ms, stream.as_mut(), |s| s.xlstm_cell(shape, &norm_buf, &runs, offset, &qb, &kb, &vb, &ob, &ib, &fb, &mut out))?;
+            total_ms += ms;
+            let want64: Vec<f64> = want.iter().map(|&v| f64::from(v)).collect();
+            let scale: Vec<f64> = want64.iter().map(|v| v.abs().max(1.0)).collect();
+            worst_err = worst_err.max(worst(&get(stream.as_mut(), &out, rows * heads * dv)?, &want64, &scale));
+        }
+        Ok(Outcome { device: worst_err, cpu: 0.0, tol: 2e-3, cpu_tol: 1.0, ms: total_ms })
     }
 
     /// Mamba-1 kernels (convolution, dt/B/C preparation, selective scan) against a transcription of `mamba1_forward`; the GEMMs of
