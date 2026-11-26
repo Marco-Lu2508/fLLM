@@ -1774,6 +1774,32 @@ impl Stream for VulkanStream {
         self.run_plans(&plans, &args, &states, false)
     }
 
+    fn supports_diff_attn(&self) -> bool {
+        true
+    }
+
+    fn diff_expand_v(&mut self, out: &mut DeviceBuffer, v: &DeviceBuffer, rows: usize, kv_heads: usize, d: usize) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if v.size < rows * kv_heads * d * 4 || out.size < rows * kv_heads * 2 * d * 4 {
+            return Err(invalid("differential attention values are smaller than the layer needs"));
+        }
+        let plan = crate::backend::vulkan::ops::recurrent::plan_diff_expand_v(rows, kv_heads, d)?;
+        self.run_plans(&[plan], &[Arg::r("v", v), Arg::w("out", out)], &[], false)
+    }
+
+    fn diff_attn_mix(&mut self, out: &mut DeviceBuffer, attn: &DeviceBuffer, rows: usize, heads: usize, width: usize, lambda: f32, scale: f32, eps: f32) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if attn.size < rows * heads * width * 4 || out.size < rows * (heads / 2) * width * 4 {
+            return Err(invalid("differential attention output is smaller than the layer needs"));
+        }
+        let plan = crate::backend::vulkan::ops::recurrent::plan_diff_attn_mix(rows, heads, width, lambda, scale, eps)?;
+        self.run_plans(&[plan], &[Arg::r("attn", attn), Arg::w("out", out)], &[], false)
+    }
+
     fn supports_rglru(&self, shape: &RgLruShape) -> bool {
         plan_rglru_cell(0, &RunSpec { first_row: 0, rows: 1, reset: true }, shape, 0).is_ok() && self.sh.caps().max_per_stage_storage_buffers >= 5
     }

@@ -4424,6 +4424,14 @@ impl Tester<'_> {
             let r = self.mamba1_check(&shape);
             self.record("mamba1", &format!("inner {inner} state {state} rank {rank}{}", if eps.is_some() { " +bc norm" } else { "" }), r);
         }
+        if self.device.create_stream().map(|st| st.supports_diff_attn()).unwrap_or(false) {
+            for (rows, heads, kv_heads, d) in [(3usize, 4usize, 2usize, 16usize), (5, 8, 4, 40)] {
+                let r = self.diff_attn_check(rows, heads, kv_heads, d);
+                self.record("diff_attn", &format!("{rows} rows, {heads} heads, {kv_heads} key heads of {d}"), r);
+            }
+        } else {
+            self.record_skip("diff_attn", "differential attention value expansion and head mix", "supports_diff_attn is false");
+        }
         for (width, kernel, blocks) in [(64usize, 4usize, 2usize), (192, 4, 3), (300, 3, 2), (512, 2, 1)] {
             let shape = RgLruShape { width, kernel, blocks };
             match self.device.create_stream() {
@@ -4917,6 +4925,49 @@ impl Tester<'_> {
             worst_err = worst_err.max(worst(&have, &want, &scale));
         }
         Ok(Outcome { device: worst_err, cpu: 0.0, tol: 1e-5, cpu_tol: 1.0, ms: total_ms })
+    }
+
+    /// DiffLlama's value expansion and head mix against their transcription in `rust_decoder.rs`.
+    fn diff_attn_check(&mut self, rows: usize, heads: usize, kv_heads: usize, d: usize) -> Result<Outcome, BackendError> {
+        let mut stream = self.device.create_stream()?;
+        let v = self.rng.vector(rows * kv_heads * d, 1.0);
+        let m = kv_heads / 2;
+        let mut want_v = Vec::new();
+        for row in v.chunks_exact(kv_heads * d) {
+            for g in 0..kv_heads {
+                want_v.extend_from_slice(&row[(g % m) * d..(g % m + 1) * d]);
+                want_v.extend_from_slice(&row[(m + g % m) * d..(m + g % m + 1) * d]);
+            }
+        }
+        let width = 2 * d;
+        let attn = self.rng.vector(rows * heads * width, 1.0);
+        let (lambda, scale, eps) = (0.37f32, 0.62f32, 1e-5f32);
+        let half = heads / 2;
+        let mut want_a = Vec::new();
+        for row in attn.chunks_exact(heads * width) {
+            for p in 0..half {
+                let (a, b) = (&row[p * width..(p + 1) * width], &row[(p + half) * width..(p + half + 1) * width]);
+                let z: Vec<f32> = a.iter().zip(b).map(|(x, y)| x - lambda * y).collect();
+                let inv = (z.iter().map(|v| v * v).sum::<f32>() / width as f32 + eps).sqrt().recip();
+                want_a.extend(z.iter().map(|v| v * inv * scale));
+            }
+        }
+        let vb = put(self.device, stream.as_mut(), &v)?;
+        let ab = put(self.device, stream.as_mut(), &attn)?;
+        let mut ve = put(self.device, stream.as_mut(), &vec![f32::NAN; want_v.len()])?;
+        let mut ao = put(self.device, stream.as_mut(), &vec![f32::NAN; want_a.len()])?;
+        let mut ms = 0.0;
+        timed(&mut ms, stream.as_mut(), |s| {
+            s.diff_expand_v(&mut ve, &vb, rows, kv_heads, d)?;
+            s.diff_attn_mix(&mut ao, &ab, rows, heads, width, lambda, scale, eps)
+        })?;
+        let cmp = |have: Vec<f32>, want: &[f32]| {
+            let want64: Vec<f64> = want.iter().map(|&v| f64::from(v)).collect();
+            let scale: Vec<f64> = want64.iter().map(|v| v.abs().max(1.0)).collect();
+            worst(&have, &want64, &scale)
+        };
+        let err = cmp(get(stream.as_mut(), &ve, want_v.len())?, &want_v).max(cmp(get(stream.as_mut(), &ao, want_a.len())?, &want_a));
+        Ok(Outcome { device: err, cpu: 0.0, tol: 2e-3, cpu_tol: 1.0, ms })
     }
 
     /// The RG-LRU kernel against a transcription of `rglru_forward` (convolution, block-diagonal gates, recurrence, GELU gate): several sequences over several calls.

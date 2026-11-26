@@ -2830,6 +2830,24 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("xlstm_cell".into()))
     }
 
+    /// Does this stream implement [`Stream::diff_expand_v`] and [`Stream::diff_attn_mix`] (DiffLlama's differential attention)?
+    fn supports_diff_attn(&self) -> bool {
+        false
+    }
+
+    /// DiffLlama: the value of key head `g` is `[v[g % m], v[m + g % m]]` (`m = kv_heads / 2` value heads of width `d`): `v` (`rows x kv_heads x d`) is
+    /// expanded into `out` (`rows x kv_heads x 2d`), the layout the cache stores.
+    fn diff_expand_v(&mut self, _out: &mut DeviceBuffer, _v: &DeviceBuffer, _rows: usize, _kv_heads: usize, _d: usize) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("diff_expand_v".into()))
+    }
+
+    /// DiffLlama: head `p` minus `lambda` times head `p + heads / 2` of the attention output `attn` (`rows x heads x width`), an RMS norm over `width`
+    /// (`eps`), times `scale`: `out` receives `rows x heads / 2 x width`.
+    #[allow(clippy::too_many_arguments)]
+    fn diff_attn_mix(&mut self, _out: &mut DeviceBuffer, _attn: &DeviceBuffer, _rows: usize, _heads: usize, _width: usize, _lambda: f32, _scale: f32, _eps: f32) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("diff_attn_mix".into()))
+    }
+
     /// Does this stream implement [`Stream::rglru_cell`] for this shape?
     fn supports_rglru(&self, _shape: &RgLruShape) -> bool {
         false

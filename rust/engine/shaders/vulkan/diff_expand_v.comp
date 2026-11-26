@@ -1,0 +1,31 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: diff_expand_v | bindings: v,out | push: count,kv_heads,d | grid: [min(ceil(count/256), 65535), 1, 1]
+// DiffLlama (differential attention): the value of key head g is [v[g % m], v[m + g % m]] with m = kv_heads / 2 value heads of width d: v (rows x kv_heads x d) is
+// expanded into out (rows x kv_heads x 2d), the layout the cache stores. count = rows * kv_heads * 2 * d.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer VBuf { float v[]; };
+layout(std430, binding = 1) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint count;
+    uint kv_heads;
+    uint d;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    const uint m = p.kv_heads / 2u;
+    for (uint i = gl_GlobalInvocationID.x; i < p.count; i += grid_items) {
+        const uint j = i % p.d;
+        const uint rest = i / p.d;
+        const uint half_index = rest % 2u;
+        const uint rg = rest / 2u;
+        const uint g = rg % p.kv_heads;
+        const uint r = rg / p.kv_heads;
+        const uint src = (half_index == 0u ? 0u : m) + g % m;
+        outv[i] = v[(r * p.kv_heads + src) * p.d + j];
+    }
+}

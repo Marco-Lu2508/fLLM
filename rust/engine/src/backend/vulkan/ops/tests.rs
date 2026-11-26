@@ -1235,6 +1235,8 @@ fn sample_plans() -> Vec<OpPlan> {
         )
         .unwrap(),
     );
+    v.push(crate::backend::vulkan::ops::recurrent::plan_diff_expand_v(3, 4, 16).unwrap());
+    v.push(crate::backend::vulkan::ops::recurrent::plan_diff_attn_mix(3, 4, 32, 0.3, 0.7, 1e-5).unwrap());
     v.push(
         plan_rglru_cell(0, &RunSpec { first_row: 0, rows: 2, reset: false }, &crate::backend::RgLruShape { width: 64, kernel: 4, blocks: 2 }, 0).unwrap(),
     );

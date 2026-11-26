@@ -2281,6 +2281,14 @@ int fllm_cuda_xielu(FllmStream *st, const float *x, float *out, size_t n, float 
     PREP(st);
     return fllm_xielu_launch(st->s, x, out, n, ap, an, beta, eps);
 }
+int fllm_cuda_diff_expand_v(FllmStream *st, float *out, const float *v, size_t rows, int kv_heads, int d) {
+    PREP(st);
+    return fllm_diff_expand_v_launch(st->s, out, v, rows, kv_heads, d);
+}
+int fllm_cuda_diff_attn_mix(FllmStream *st, float *out, const float *attn, size_t rows, int heads, int width, float lambda, float scale, float eps) {
+    PREP(st);
+    return fllm_diff_attn_mix_launch(st->s, out, attn, rows, heads, width, lambda, scale, eps);
+}
 int fllm_cuda_act_glu(FllmStream *st, const float *gate, const float *up, float *out, size_t n, int mode) {
     PREP(st);
     return fllm_act_glu_launch(st->s, gate, up, out, n, mode);

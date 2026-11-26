@@ -937,3 +937,25 @@ pub fn plan_rglru_cell(run_index: usize, run: &RunSpec, shape: &RgLruShape, stat
     let slots = Slots::new().read("xin").read("gate_y").read("wts").run_state("state", run_index).write("out");
     plan("rglru_cell", push, [shape.blocks as u32, 1, 1], slots)
 }
+
+/// `diff_expand_v` (DiffLlama): `rows x kv_heads x d` values expanded to `rows x kv_heads x 2d`.
+pub fn plan_diff_expand_v(rows: usize, kv_heads: usize, d: usize) -> Result<OpPlan, BackendError> {
+    if rows == 0 || kv_heads < 2 || kv_heads % 2 != 0 || d == 0 {
+        return Err(invalid("differential attention values need an even number of key heads"));
+    }
+    let count = rows * kv_heads * 2 * d;
+    plan("diff_expand_v", Push::new().u("count", count).u("kv_heads", kv_heads).u("d", d), groups_1d(count, 256), Slots::new().read("v").rw("out"))
+}
+
+/// `diff_attn_mix` (DiffLlama): head `p` minus `lambda` times head `p + heads / 2`, an RMS norm over `width`, times `scale`.
+pub fn plan_diff_attn_mix(rows: usize, heads: usize, width: usize, lambda: f32, scale: f32, eps: f32) -> Result<OpPlan, BackendError> {
+    if rows == 0 || heads < 2 || heads % 2 != 0 || width == 0 || ![lambda, scale, eps].iter().all(|v| v.is_finite()) {
+        return Err(invalid("differential attention needs an even number of heads and finite constants"));
+    }
+    plan(
+        "diff_attn_mix",
+        Push::new().u("heads", heads).u("width", width).f("lambda", lambda).f("scale", scale).f("eps", eps),
+        [(rows * heads / 2) as u32, 1, 1],
+        Slots::new().read("attn").rw("out"),
+    )
+}

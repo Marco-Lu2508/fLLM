@@ -585,6 +585,9 @@ extern "C" {
     ) -> c_int;
     fn fllm_cuda_act(st: *mut RawStream, x: *const f32, out: *mut f32, n: usize, mode: c_int) -> c_int;
     fn fllm_cuda_xielu(st: *mut RawStream, x: *const f32, out: *mut f32, n: usize, ap: f32, an: f32, beta: f32, eps: f32) -> c_int;
+    fn fllm_cuda_diff_expand_v(st: *mut RawStream, out: *mut f32, v: *const f32, rows: usize, kv_heads: c_int, d: c_int) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_diff_attn_mix(st: *mut RawStream, out: *mut f32, attn: *const f32, rows: usize, heads: c_int, width: c_int, lambda: f32, scale: f32, eps: f32) -> c_int;
     fn fllm_cuda_act_glu(st: *mut RawStream, gate: *const f32, up: *const f32, out: *mut f32, n: usize, mode: c_int) -> c_int;
     fn fllm_cuda_softplus_mul(st: *mut RawStream, x: *mut f32, g: *const f32, n: usize, beta: f32) -> c_int;
     fn fllm_cuda_head_gate_mul(st: *mut RawStream, x: *mut f32, g: *const f32, n: usize, dv: usize, beta: f32) -> c_int;
@@ -5241,6 +5244,29 @@ impl Stream for CudaStream {
                 dev_ptr(skip)?.cast(),
                 dev_ptr(out)?.cast(),
             )
+        })
+    }
+
+    fn supports_diff_attn(&self) -> bool {
+        !self.act.is_narrow()
+    }
+
+    fn diff_expand_v(&mut self, out: &mut DeviceBuffer, v: &DeviceBuffer, rows: usize, kv_heads: usize, d: usize) -> Result<(), BackendError> {
+        if kv_heads < 2 || kv_heads % 2 != 0 || v.size < rows * kv_heads * d * 4 || out.size < rows * kv_heads * 2 * d * 4 {
+            return Err(invalid("differential attention values smaller than the layer needs"));
+        }
+        // SAFETY: sizes checked above.
+        check(unsafe { fllm_cuda_diff_expand_v(self.raw, dev_ptr(out)?.cast(), dev_ptr(v)?.cast(), rows, to_c(kv_heads, "key heads")?, to_c(d, "head width")?) })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn diff_attn_mix(&mut self, out: &mut DeviceBuffer, attn: &DeviceBuffer, rows: usize, heads: usize, width: usize, lambda: f32, scale: f32, eps: f32) -> Result<(), BackendError> {
+        if heads < 2 || heads % 2 != 0 || attn.size < rows * heads * width * 4 || out.size < rows * (heads / 2) * width * 4 {
+            return Err(invalid("differential attention output smaller than the layer needs"));
+        }
+        // SAFETY: sizes checked above.
+        check(unsafe {
+            fllm_cuda_diff_attn_mix(self.raw, dev_ptr(out)?.cast(), dev_ptr(attn)?.cast(), rows, to_c(heads, "heads")?, to_c(width, "width")?, lambda, scale, eps)
         })
     }
 

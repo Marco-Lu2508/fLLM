@@ -1,0 +1,43 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: diff_attn_mix | bindings: attn,out | push: heads,width,lambda,scale,eps | grid: [rows * heads / 2, 1, 1]
+// DiffLlama (differential attention): per row and head pair p: z = attn[p] - lambda * attn[p + heads / 2] over `width` values, out[p] = z * rsqrt(mean(z^2) + eps) * scale.
+// attn is rows x heads x width, out rows x heads / 2 x width. One workgroup per (row, pair).
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer ABuf { float attn[]; };
+layout(std430, binding = 1) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint heads;
+    uint width;
+    float lambda;
+    float scale;
+    float eps;
+} p;
+
+shared float red[WG];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint half_heads = p.heads / 2u;
+    const uint r = gl_WorkGroupID.x / half_heads;
+    const uint pair = gl_WorkGroupID.x % half_heads;
+    const uint xa = (r * p.heads + pair) * p.width;
+    const uint ya = (r * p.heads + pair + half_heads) * p.width;
+    const uint oa = (r * half_heads + pair) * p.width;
+    float sum = 0.0;
+    for (uint j = tid; j < p.width; j += WG) {
+        const float z = attn[xa + j] - p.lambda * attn[ya + j];
+        sum += z * z;
+    }
+    red[tid] = sum;
+    barrier();
+    for (uint s = WG / 2u; s > 0u; s >>= 1u) {
+        if (tid < s) red[tid] += red[tid + s];
+        barrier();
+    }
+    const float inv = inversesqrt(red[0] / float(p.width) + p.eps) * p.scale;
+    for (uint j = tid; j < p.width; j += WG) outv[oa + j] = (attn[xa + j] - p.lambda * attn[ya + j]) * inv;
+}

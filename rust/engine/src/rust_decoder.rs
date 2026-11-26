@@ -1676,6 +1676,8 @@ pub struct RustDecoder {
     latent_device: bool,
     /// The device has `Stream::xielu` (Apertus' plain feed-forward runs on it).
     xielu_device: bool,
+    /// DiffLlama's differential attention runs on the device (value expansion and head mix kernels).
+    diff_device: bool,
     /// The accelerator runs DeepSeek-V4 completely (`hc_device` is set with it); set when the model is attached.
     v4_device: bool,
     /// Qwen3.8-Flash-Next runs on the device (streams, n-gram embeddings and token indexer included).
@@ -3065,6 +3067,7 @@ impl RustDecoder {
             ink_device: false,
             latent_device: false,
             xielu_device: false,
+            diff_device: false,
             hc_device: false,
             v4_device: false,
             q4_device: false,
@@ -3622,7 +3625,7 @@ impl RustDecoder {
             return Some("a shared transformer block in front of the Mamba-2 mixer");
         }
         match &layer.attn {
-            Attn::Std { .. } if layer.diff.is_some() => Some("differential attention (no device kernel)"),
+            Attn::Std { .. } if layer.diff.is_some() && !self.diff_device => Some("differential attention (no device kernel for this backend, or FLLM_DIFF_HOST=1)"),
             Attn::Std { .. } if layer.moa.is_some() => Some("a mixture of attention heads (no device kernel)"),
             Attn::Std { .. } => {
                 // the element-wise gate kernels would read a gate with one value per head (Laguna, Step-3.5) as garbage: that gate and
@@ -3902,6 +3905,7 @@ impl RustDecoder {
         self.m3_device = m3_device;
         self.ink_device = self.cfg.inkling.is_some() && self.ink_device_possible(&*backend);
         self.xielu_device = backend.create_stream().is_ok_and(|s| s.supports_xielu()) && !std::env::var_os("FLLM_XIELU_HOST").is_some();
+        self.diff_device = backend.create_stream().is_ok_and(|s| s.supports_diff_attn()) && !std::env::var_os("FLLM_DIFF_HOST").is_some();
         // checked on a Tesla T4 against the host (`nemotron_h_latent_wide`, Q8_0 and Q4_0: the same distance from the CPU as the host path). Still opt-in: a layer whose experts
         // cannot take the device path (unquantised, widths not a multiple of 32) is a load error here instead of a host layer. FLLM_LATENT=device
         self.latent_device = backend.moe_device_available()
@@ -4268,7 +4272,7 @@ impl RustDecoder {
                 .transpose()?;
             // FLLM_MERGE_PROJ: q/k/v and gate/up as one Marlin matrix each (instead of seven GEMMs per layer, four)
             let merged_qkv = match &layer.attn {
-                Attn::Std { q, k, v } if merge_on && layer.value_moe.is_none() && !layer.output_gate && self.cfg.qkv_clip.is_none() && !layer.kv_shared && !layer.k_eq_v => {
+                Attn::Std { q, k, v } if merge_on && layer.diff.is_none() && layer.value_moe.is_none() && !layer.output_gate && self.cfg.qkv_clip.is_none() && !layer.kv_shared && !layer.k_eq_v => {
                     upload_merged(&format!("blk.{i}.attn_qkv"), &[q, k, v])?
                 }
                 _ => None,
@@ -5639,7 +5643,7 @@ impl RustDecoder {
                 if let Some((q_w, k_w, v_w)) = std_qkv {
                 // 4-bit q/k/v: the three GEMMs leave FP16 and one kernel adds the bias, rotates q and k and writes k and v into the cache
                 let mut fused_qkv = false;
-                let plain_kv = !layer.kv_shared && !layer.k_eq_v && dev_layer.v_norm.is_none() && cfg.value_scale == 1.0;
+                let plain_kv = !layer.kv_shared && !layer.k_eq_v && layer.diff.is_none() && dev_layer.v_norm.is_none() && cfg.value_scale == 1.0;
                 if plain_kv
                     && cfg.rope.dims > 0
                     && cfg.layer_rotates(i)
@@ -5814,6 +5818,12 @@ impl RustDecoder {
                     }
                 }
 
+                // DiffLlama: the cache stores [v[g % m], v[m + g % m]] per key head
+                if layer.diff.is_some() {
+                    let mut expanded = scratch.acquire(rows * layer_kv_heads * dv * 4).map_err(err)?;
+                    stream.diff_expand_v(&mut expanded, &v_buf, rows, layer_kv_heads, dk).map_err(err)?;
+                    scratch.recycle(std::mem::replace(&mut v_buf, expanded));
+                }
                 if i == 0 {
                     debug_sum(&mut **stream, "Qcur-0 (proj+bias)", &q_buf);
                     debug_sum(&mut **stream, "Kcur-0 (proj+bias)", &k_buf);
@@ -5884,7 +5894,7 @@ impl RustDecoder {
                             stream.rope(&mut q_buf, &mut k_buf, &axis_positions, &axis_params).map_err(err)?;
                         }
                     } else {
-                        if !cfg.qk_norm_after_rope && !layer.kv_shared && std::env::var_os("FLLM_DEBUG_SUMS").is_none() {
+                        if !cfg.qk_norm_after_rope && !layer.kv_shared && layer.diff.is_none() && std::env::var_os("FLLM_DEBUG_SUMS").is_none() {
                             kv_written = stream
                                 .rope_kv_write(&mut q_buf, &k_buf, &v_buf, dev_kv, kvi, &positions, &slots, &rope_params)
                                 .map_err(err)?;
@@ -6090,6 +6100,11 @@ impl RustDecoder {
                             .attention_paged(&mut attn_buf, &q_buf, dev_kv, tables, lengths, read_layer, &attn_params)
                             .map_err(err)?;
                     }
+                }
+                if let Some((lambda, scale)) = layer.diff {
+                    let mut mixed = scratch.acquire(rows * (layer_heads / 2) * dv * 4).map_err(err)?;
+                    stream.diff_attn_mix(&mut mixed, &attn_buf, rows, layer_heads, dv, lambda, scale, cfg.eps).map_err(err)?;
+                    scratch.recycle(std::mem::replace(&mut attn_buf, mixed));
                 }
                 if let Some(gate) = gate_buf.take() {
                     match (layer.gate_per_head, cfg.attn_gate) {
