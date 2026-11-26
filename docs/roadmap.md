@@ -16,7 +16,9 @@ and [model-coverage.md](model-coverage.md).
 | Multi-GPU (tensor or pipeline parallel) | in progress | Implemented and proven on the CPU path ([multi-gpu.md](multi-gpu.md)); the CUDA forward does not call the collectives yet, so the server refuses it on a GPU |
 | Act-order GPTQ, other AWQ/GPTQ group sizes, GPTQ 8-bit | planned | Unsupported variants fall back to dense F16 at conversion |
 | Whole-model runs on Metal, ROCm, SYCL, NPU and TPU | needs hardware | The kernels exist; the levels are in the Status table |
-| Vulkan completeness (missing operations) | planned | Some operations fall back to the host |
+| Vulkan completeness (missing operations) | in progress | Done on Mesa lavapipe (2026-11-26): every KV cache format, attention heads up to 1024 wide, encoder attention, device MoE routing / combination / zero experts for every batch size, xIELU, final-logit cap. Open: `sample_rows` (sampling on the device), grouped MoE GEMMs for large prompts, TQ1_0 / TQ2_0 / NVFP4 W4A4 kernels; none of it has run on a real Vulkan GPU yet |
+| Latent-space MoE experts on CUDA (Nemotron-H, Kimi K3), xIELU on CUDA | in progress | Written and compiled for sm_75; off by default (`FLLM_LATENT=device`) until `scripts/colab/device_arch_check.py` has run on a GPU |
+| Attention residual blocks (Kimi K3), the unsupported architectures of architectures.md | planned | Host only / not started |
 
 ## Models and formats
 
