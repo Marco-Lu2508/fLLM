@@ -210,12 +210,12 @@ pub(crate) struct Group {
     pub(crate) scale: [i32; 2],
 }
 
-#[cfg(any(test, all(target_arch = "aarch64", target_endian = "little")))]
+#[cfg(any(test, target_arch = "x86_64", all(target_arch = "aarch64", target_endian = "little")))]
 fn le16(raw: &[u8], at: usize) -> usize {
     usize::from(u16::from_le_bytes([raw[at], raw[at + 1]]))
 }
 
-#[cfg(any(test, all(target_arch = "aarch64", target_endian = "little")))]
+#[cfg(any(test, target_arch = "x86_64", all(target_arch = "aarch64", target_endian = "little")))]
 fn le32(raw: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]])
 }
