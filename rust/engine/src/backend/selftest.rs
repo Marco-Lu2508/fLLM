@@ -106,7 +106,7 @@ const QUANT_GROUPS: &[&str] = &["linear", "embedding", "moe", "host"];
 
 /// Weight formats the self test knows (GGUF type ids; `format_name` gives the names).
 const KINDS: &[u32] = &[
-    0, 1, 30, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 29, 20, 23, 39, 42, 40, 0x8000_0010, 0x8000_0011, 0x8000_0012, 0x8000_0014,
+    0, 1, 30, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 29, 34, 35, 20, 23, 39, 42, 40, 0x8000_0010, 0x8000_0011, 0x8000_0012, 0x8000_0014,
     0x8000_0015, 0x8000_0016, 0x8000_0020, 0x8000_0021, 0x8000_0030, 0x8000_0031, fllm_gguf_probe::bnb::NF4_B64, fllm_gguf_probe::bnb::NF4_B128,
     fllm_gguf_probe::bnb::FP4_B64, fllm_gguf_probe::bnb::FP4_B128, fllm_gguf_probe::bnb::INT8_ROW,
 ];

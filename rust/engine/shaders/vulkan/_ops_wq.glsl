@@ -7,7 +7,7 @@
 //   WQ_W(i)     the 32-bit word i of the weight buffer (a macro, so the same decoders serve a bound buffer and a buffer reference)
 //   WQ_OFF1, WQ_OFF2, WQ_OFF3   word offsets of planes 1..3 (push constants)
 //   exactly one of FMT_Q4_0 FMT_Q4_1 FMT_Q5_0 FMT_Q5_1 FMT_Q8_0 FMT_Q2_K FMT_Q3_K FMT_Q4_K FMT_Q5_K FMT_Q6_K FMT_IQ4_NL FMT_MXFP4 FMT_Q2_0
-//   FMT_IQ2_XXS FMT_IQ2_XS FMT_IQ2_S FMT_IQ3_XXS FMT_IQ3_S FMT_IQ1_S FMT_IQ1_M (the IQ decoders use the pure helpers of _iq_common.glsl and the generated _iq_grid_*.glsl tables)
+//   FMT_IQ2_XXS FMT_IQ2_XS FMT_IQ2_S FMT_IQ3_XXS FMT_IQ3_S FMT_IQ1_S FMT_IQ1_M FMT_TQ1_0 FMT_TQ2_0 (the IQ decoders use the pure helpers of _iq_common.glsl and the generated _iq_grid_*.glsl tables)
 // This file defines QK (weights per block), HAS_WM and
 //   void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float wm)
 // g = global block index (row * blocks_per_row + block), cin = chunk (8 consecutive weights) inside the block: eight small signed integers q[0..7] as
@@ -248,6 +248,58 @@ void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float 
     p0 = wq_sub8(wq_spread2(h & 0xFFu), 1u);
     p1 = wq_sub8(wq_spread2(h >> 8), 1u);
     ws = wq_f16at(WQ_OFF1, g);
+    wm = 0.0;
+}
+#elif defined(FMT_TQ2_0)
+// TQ2_0 (see _q_fmt_tq2_0.glsl): plane 0 = qs (64 bytes per block), plane 1 = d (binary16).
+#define QK 256
+void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float wm) {
+    uint at = g * 16u + (cin >> 4) * 8u + ((cin & 3u) << 1);
+    uint shift = ((cin & 15u) >> 2) << 1;
+    p0 = wq_sub8((WQ_W(at) >> shift) & 0x03030303u, 1u);
+    p1 = wq_sub8((WQ_W(at + 1u) >> shift) & 0x03030303u, 1u);
+    ws = wq_f16at(WQ_OFF1, g);
+    wm = 0.0;
+}
+#elif defined(FMT_TQ1_0)
+// TQ1_0 (see _q_fmt_tq1_0.glsl): plane 0 = qs (48 bytes per block), plane 1 = qh (4 bytes), plane 2 = d (binary16).
+#define QK 256
+uint wq_tq1_pow3(uint n) {
+    uint r = 1u;
+    for (uint i = 0u; i < n; i++) r *= 3u;
+    return r;
+}
+uint wq_tq1_dec4(uint word, uint pw) {
+    uint r = 0u;
+    for (uint k = 0u; k < 4u; k++) {
+        uint b = (word >> (8u * k)) & 255u;
+        uint xi = (((b * pw) & 255u) * 3u) >> 8u;
+        r |= ((xi - 1u) & 255u) << (8u * k);
+    }
+    return r;
+}
+void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float wm) {
+    if (cin < 30u) {
+        uint n;
+        uint at;
+        if (cin < 20u) {
+            n = cin >> 2;
+            at = g * 12u + ((cin & 3u) << 1);
+        } else {
+            uint j = cin - 20u;
+            n = j >> 1;
+            at = g * 12u + 8u + ((j & 1u) << 1);
+        }
+        uint pw = wq_tq1_pow3(n);
+        p0 = wq_tq1_dec4(WQ_W(at), pw);
+        p1 = wq_tq1_dec4(WQ_W(at + 1u), pw);
+    } else {
+        uint qh = WQ_W(WQ_OFF1 + g);
+        uint n = (cin - 30u) << 1;
+        p0 = wq_tq1_dec4(qh, wq_tq1_pow3(n));
+        p1 = wq_tq1_dec4(qh, wq_tq1_pow3(n + 1u));
+    }
+    ws = wq_f16at(WQ_OFF2, g);
     wm = 0.0;
 }
 #elif defined(FMT_IQ2_XXS)

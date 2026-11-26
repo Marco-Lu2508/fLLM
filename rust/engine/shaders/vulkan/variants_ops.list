@@ -164,3 +164,10 @@ kda_rec_hk16 kda_rec.comp -DHK=16
 kda_rec_hk32 kda_rec.comp -DHK=32
 kda_rec_hk64 kda_rec.comp -DHK=64
 kda_rec_hk128 kda_rec.comp -DHK=128
+# ternary TQ1_0 / TQ2_0 (embedding rows, expert products)
+embed_tq1_0 embed.comp -DFMT_TQ1_0
+embed_tq2_0 embed.comp -DFMT_TQ2_0
+moe_linear_tq1_0_arena moe_linear.comp -DMOE_ARENA -DFMT_TQ1_0
+moe_linear_tq2_0_arena moe_linear.comp -DMOE_ARENA -DFMT_TQ2_0
+moe_linear_tq1_0_bda moe_linear.comp -DMOE_BDA -DFMT_TQ1_0
+moe_linear_tq2_0_bda moe_linear.comp -DMOE_BDA -DFMT_TQ2_0

@@ -159,6 +159,8 @@ pub fn format_info(quant: QuantType) -> Option<FormatInfo> {
         QuantType::IQ3_S => ("iq3_s", 256, 110, [64, 32, 16, 0]),
         QuantType::IQ1_S => ("iq1_s", 256, 50, [32, 16, 2, 0]),
         QuantType::IQ1_M => ("iq1_m", 256, 56, [32, 16, 8, 2]),
+        QuantType::Tq1_0 => ("tq1_0", 256, 54, [48, 4, 2, 0]),
+        QuantType::Tq2_0 => ("tq2_0", 256, 66, [64, 2, 0, 0]),
         QuantType::NvFp4 => ("nvfp4", 64, 36, [32, 4, 0, 0]),
         QuantType::Q4Z32 | QuantType::Q4ZP32 => ("q4z32", 32, 19, [16, 4, 0, 0]),
         QuantType::Q4Z64 | QuantType::Q4ZP64 => ("q4z64", 64, 35, [32, 4, 0, 0]),
@@ -204,6 +206,8 @@ pub fn supported_formats() -> &'static [QuantType] {
         QuantType::IQ3_S,
         QuantType::IQ1_S,
         QuantType::IQ1_M,
+        QuantType::Tq1_0,
+        QuantType::Tq2_0,
         QuantType::NvFp4,
         QuantType::Q4Z32,
         QuantType::Q4Z64,
@@ -752,6 +756,16 @@ pub fn pack_weight(
                 put(&mut out, at(0, g), &b[2..34]);
                 put(&mut out, at(1, g), &b[34..50]);
                 put(&mut out, at(2, g), &b[0..2]);
+            }
+            // TQ: the scale is the last two bytes of the block already, the planes follow the file
+            QuantType::Tq1_0 => {
+                put(&mut out, at(0, g), &b[0..48]);
+                put(&mut out, at(1, g), &b[48..52]);
+                put(&mut out, at(2, g), &b[52..54]);
+            }
+            QuantType::Tq2_0 => {
+                put(&mut out, at(0, g), &b[0..64]);
+                put(&mut out, at(1, g), &b[64..66]);
             }
             QuantType::IQ1_M => {
                 put(&mut out, at(0, g), &b[0..32]);

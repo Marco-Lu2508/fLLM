@@ -30,6 +30,10 @@
 #include "_q_fmt_mxfp4.glsl"
 #elif defined(FMT_Q2_0)
 #include "_q_fmt_q2_0.glsl"
+#elif defined(FMT_TQ1_0)
+#include "_q_fmt_tq1_0.glsl"
+#elif defined(FMT_TQ2_0)
+#include "_q_fmt_tq2_0.glsl"
 #elif defined(FMT_IQ2_XXS)
 #include "_q_fmt_iq2_xxs.glsl"
 #elif defined(FMT_IQ2_XS)

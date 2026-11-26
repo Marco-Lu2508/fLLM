@@ -214,6 +214,8 @@ impl CpuBackend {
             QuantType::Q6_K,
             QuantType::Q8_K,
             QuantType::IQ1_S,
+            QuantType::Tq1_0,
+            QuantType::Tq2_0,
             QuantType::IQ2_XXS,
             QuantType::IQ2_XS,
             QuantType::IQ2_S,

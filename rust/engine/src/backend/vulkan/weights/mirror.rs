@@ -210,6 +210,36 @@ pub fn chunk(layout: &DeviceLayout, buf: &[u8], g: usize, cin: usize) -> Chunk {
             ws = f16at(buf, off1, g);
             wm = 0.0;
         }
+        "tq2_0" => {
+            let at = g * 16 + (cin >> 4) * 8 + ((cin & 3) << 1);
+            let shift = (((cin & 15) >> 2) << 1) as u32;
+            p0 = sub8((w(at) >> shift) & 0x0303_0303, 1);
+            p1 = sub8((w(at + 1) >> shift) & 0x0303_0303, 1);
+            ws = f16at(buf, off1, g);
+            wm = 0.0;
+        }
+        "tq1_0" => {
+            let dec4 = |word: u32, pw: u32| -> u32 {
+                (0..4).fold(0u32, |r, k| {
+                    let b = (word >> (8 * k)) & 255;
+                    let xi = (((b * pw) & 255) * 3) >> 8;
+                    r | (xi.wrapping_sub(1) & 255) << (8 * k)
+                })
+            };
+            let pow3 = |n: u32| 3u32.pow(n);
+            if cin < 30 {
+                let (n, at) = if cin < 20 { ((cin >> 2) as u32, g * 12 + ((cin & 3) << 1)) } else { (((cin - 20) >> 1) as u32, g * 12 + 8 + (((cin - 20) & 1) << 1)) };
+                p0 = dec4(w(at), pow3(n));
+                p1 = dec4(w(at + 1), pow3(n));
+            } else {
+                let qh = w(off1 as usize + g);
+                let n = ((cin - 30) << 1) as u32;
+                p0 = dec4(qh, pow3(n));
+                p1 = dec4(qh, pow3(n + 1));
+            }
+            ws = f16at(buf, off2, g);
+            wm = 0.0;
+        }
         "iq2_xxs" => {
             let b = g * 16 + ((cin >> 2) << 1);
             let l = (cin & 3) as u32;

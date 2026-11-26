@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn iq_weights_stay_packed_on_upload() {
         let mut rng = crate::cpu_selftest::Lcg(9);
-        for quant in [QuantType::IQ2_XXS, QuantType::IQ2_XS, QuantType::IQ2_S, QuantType::IQ3_XXS, QuantType::IQ3_S, QuantType::IQ1_S, QuantType::IQ1_M] {
+        for quant in [QuantType::IQ2_XXS, QuantType::IQ2_XS, QuantType::IQ2_S, QuantType::IQ3_XXS, QuantType::IQ3_S, QuantType::IQ1_S, QuantType::IQ1_M, QuantType::Tq1_0, QuantType::Tq2_0] {
             let raw = crate::cpu_selftest::random_weights(quant.to_gguf_type_id(), 3, 512, &mut rng);
             let prepared = prepare("w", &raw, quant, 3, 512, 1.0, u64::MAX).unwrap();
             assert_eq!(prepared.quant, quant);

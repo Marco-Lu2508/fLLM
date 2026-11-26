@@ -285,3 +285,18 @@ bench_mma_dp4a bench_mma.comp -DMODE=3
 bench_mma_f16b bench_mma.comp -DMODE=0 -DFM=4 -DFN=4
 bench_mma_i8b bench_mma.comp -DMODE=1 -DFM=4 -DFN=4
 bench_mma_i8sb bench_mma.comp -DMODE=2 -DFM=4 -DFN=4
+# ternary TQ1_0 / TQ2_0
+mv_tq1_0_s mv_scalar.comp -DFMT_TQ1_0=1
+mv_tq2_0_s mv_scalar.comp -DFMT_TQ2_0=1
+mv_tq1_0_i mv_idot.comp -DFMT_TQ1_0=1
+mv_tq2_0_i mv_idot.comp -DFMT_TQ2_0=1
+mm_tq1_0_s mm_scalar.comp -DFMT_TQ1_0=1
+mm_tq2_0_s mm_scalar.comp -DFMT_TQ2_0=1
+mm_tq1_0_i mm_idot.comp -DFMT_TQ1_0=1
+mm_tq2_0_i mm_idot.comp -DFMT_TQ2_0=1
+mm_tq1_0_c mm_coopmat.comp -DFMT_TQ1_0=1 #optional
+mm_tq2_0_c mm_coopmat.comp -DFMT_TQ2_0=1 #optional
+mm_tq1_0_cw mm_coopmat_w.comp -DFMT_TQ1_0=1 #optional
+mm_tq2_0_cw mm_coopmat_w.comp -DFMT_TQ2_0=1 #optional
+mmq_tq1_0_i mm_q.comp -DFMT_TQ1_0=1
+mmq_tq2_0_i mm_q.comp -DFMT_TQ2_0=1

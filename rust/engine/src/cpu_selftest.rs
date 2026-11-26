@@ -94,6 +94,8 @@ pub(crate) fn format_name(kind: u32) -> &'static str {
         21 => "iq3_s",
         22 => "iq2_s",
         29 => "iq1_m",
+        34 => "tq1_0",
+        35 => "tq2_0",
         20 => "iq4_nl",
         23 => "iq4_xs",
         30 => "bf16",

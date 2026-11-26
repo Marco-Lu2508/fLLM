@@ -1088,6 +1088,8 @@ fn sample_plans() -> Vec<OpPlan> {
         QuantType::IQ3_S,
         QuantType::IQ1_S,
         QuantType::IQ1_M,
+        QuantType::Tq1_0,
+        QuantType::Tq2_0,
     ] {
         v.push(
             plan_embedding(

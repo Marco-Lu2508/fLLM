@@ -541,6 +541,10 @@ pub enum QuantType {
     Mxfp4,
     /// GGML Q2_0 (GGUF type 42): 64 values per block, an f16 scale and 2-bit codes; value = (code - 1) * scale, so -1, 0, 1 or 2 times the scale.
     Q2_0,
+    /// GGML TQ1_0 (GGUF type 34): 256 ternary values per block in base-3 digits (5 per byte) and an f16 scale at the end; value = (digit - 1) * scale.
+    Tq1_0,
+    /// GGML TQ2_0 (GGUF type 35): 256 ternary values per block as 2-bit codes and an f16 scale at the end; value = (code - 1) * scale.
+    Tq2_0,
     /// fLLM 4-bit group format for AWQ / GPTQ weights (GGUF type 0x8000_0010 + log2(group / 32)): per group of 32, 64 or 128 values
     /// `group / 2` code bytes (value `2j` in the low nibble), an f16 scale and a zero-point byte; weight = (code - zero) * scale.
     Q4Z32,
@@ -601,6 +605,8 @@ impl QuantType {
             0x8000_0001 => Self::Fp8E4m3,
             0x8000_0002 => Self::Fp8E5m2,
             39 => Self::Mxfp4,
+            34 => Self::Tq1_0,
+            35 => Self::Tq2_0,
             42 => Self::Q2_0,
             40 => Self::NvFp4,
             41 => Self::Q4_K_Marlin,
@@ -652,6 +658,8 @@ impl QuantType {
             Self::Fp8E4m3 => 0x8000_0001,
             Self::Fp8E5m2 => 0x8000_0002,
             Self::Mxfp4 => 39,
+            Self::Tq1_0 => 34,
+            Self::Tq2_0 => 35,
             Self::Q2_0 => 42,
             Self::NvFp4 => 40,
             Self::Q4_K_Marlin => 41,
@@ -732,7 +740,7 @@ impl QuantType {
                 256
             }
             Self::IQ4_NL => 32,
-            Self::IQ4_XS => 256,
+            Self::IQ4_XS | Self::Tq1_0 | Self::Tq2_0 => 256,
             Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block | Self::Exl2 | Self::Exl3 => 1,
             Self::Mxfp4 => 32,
             Self::NvFp4 | Self::Q2_0 => 64,
@@ -775,6 +783,8 @@ impl QuantType {
             Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block | Self::Exl2 | Self::Exl3 => 1,
             Self::Mxfp4 => 17,
             Self::Q2_0 => 18,
+            Self::Tq1_0 => 54,
+            Self::Tq2_0 => 66,
             Self::NvFp4 => 36,
             Self::Q4Z32 | Self::Q4ZP32 => 19,
             Self::Q4Z64 | Self::Q4ZP64 => 35,
