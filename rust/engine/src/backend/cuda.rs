@@ -1161,9 +1161,9 @@ extern "C" {
 }
 
 /// Weight formats the kernels decode natively; every other type is converted on upload. The 256-value formats Q2_K, Q3_K and
-/// IQ1_S .. IQ3_S (ids 10, 11, 16-19, 21, 22, 29) use the generic decoders of `iq_decode.cuh`. Q2_0 (id 42, blocks of 64 values) is read as stored
+/// IQ1_S .. IQ3_S (ids 10, 11, 16-19, 21, 22, 29) use the generic decoders of `iq_decode.cuh`. TQ1_0 / TQ2_0 (ids 34, 35, blocks of 256 ternary values; written for the same generic path, never run on a GPU) and Q2_0 (id 42, blocks of 64 values) are read as stored
 /// through `decode16` in `common.cuh` (generic FP32 and tensor-core kernels and the grouped MoE GEMM; no integer dot-product kernel yet).
-const NATIVE_KINDS: [u32; 21] = [0, 1, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 29, 30, 42];
+const NATIVE_KINDS: [u32; 23] = [0, 1, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 29, 30, 34, 35, 42];
 /// Widest attention head the kernel holds in shared memory.
 const MAX_ATTENTION_DIM: usize = 512;
 

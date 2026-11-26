@@ -66,6 +66,8 @@ enum FllmKind : uint32_t {
     KIND_NVFP4 = 40,
     // GGML Q2_0: blocks of 64 values [f16 d][16 bytes of 2-bit codes], value = (code - 1) * d (decode16 below)
     KIND_Q2_0 = 42,
+    // GGML TQ1_0 / TQ2_0: blocks of 256 ternary values, [qs][qh][f16 d] (54 bytes, base-3 digits) / [qs[64]][f16 d] (66 bytes, 2-bit codes), value = (digit - 1) * d
+    KIND_TQ1_0 = 34, KIND_TQ2_0 = 35,
     KIND_Q4Z32 = 0x80000010, KIND_Q4Z64 = 0x80000011, KIND_Q4Z128 = 0x80000012,
     KIND_Q4ZP32 = 0x80000014, KIND_Q4ZP64 = 0x80000015, KIND_Q4ZP128 = 0x80000016,
     KIND_FP8M = 0x80000020, KIND_FP8B = 0x80000021,
@@ -92,7 +94,7 @@ __host__ __device__ constexpr int kind_block_elems(uint32_t kind) {
            : kind == KIND_Q4Z64 || kind == KIND_Q4ZP64 ? 64
            : kind == KIND_Q4Z128 || kind == KIND_Q4ZP128 || kind == KIND_NF4B128 || kind == KIND_FP4B128 ? 128
            : kind == KIND_NVFP4 || kind == KIND_Q2_0 || kind == KIND_NF4B64 || kind == KIND_FP4B64 || kind == KIND_INT8R ? 64
-           : kind == KIND_Q4_K || kind == KIND_Q5_K || kind == KIND_Q6_K || kind_is_iq_or_kextra(kind) ? 256 : 32;
+           : kind == KIND_Q4_K || kind == KIND_Q5_K || kind == KIND_Q6_K || kind == KIND_TQ1_0 || kind == KIND_TQ2_0 || kind_is_iq_or_kextra(kind) ? 256 : 32;
 }
 __host__ __device__ constexpr int kind_block_bytes(uint32_t kind) {
     switch (kind) {
@@ -104,6 +106,8 @@ __host__ __device__ constexpr int kind_block_bytes(uint32_t kind) {
         case KIND_Q4Z128: case KIND_Q4ZP128: return 67;
         case KIND_NVFP4: return 36;
         case KIND_Q2_0: return 18;
+        case KIND_TQ1_0: return 54;
+        case KIND_TQ2_0: return 66;
         case KIND_NF4B64: case KIND_FP4B64: return 36;
         case KIND_NF4B128: case KIND_FP4B128: case KIND_INT8R: return 68;
         case KIND_Q4_0: case KIND_IQ4_NL: case KIND_MXFP4: return 18;
@@ -126,7 +130,7 @@ __host__ __device__ constexpr size_t kind_row_bytes(uint32_t kind, int cols) {
 __host__ __device__ constexpr bool kind_supported(uint32_t kind) {
     return kind == KIND_F32 || kind == KIND_F16 || kind == KIND_BF16 || kind == KIND_Q4_0 || kind == KIND_IQ4_NL || kind == KIND_MXFP4 ||
            kind == KIND_Q4_1 || kind == KIND_Q5_0 || kind == KIND_Q5_1 || kind == KIND_Q8_0 ||
-           kind == KIND_Q4_K || kind == KIND_Q5_K || kind == KIND_Q6_K || kind == KIND_Q2_0 || kind_is_iq_or_kextra(kind) || kind_is_bnb(kind);
+           kind == KIND_Q4_K || kind == KIND_Q5_K || kind == KIND_Q6_K || kind == KIND_Q2_0 || kind == KIND_TQ1_0 || kind == KIND_TQ2_0 || kind_is_iq_or_kextra(kind) || kind_is_bnb(kind);
 }
 
 // 16-entry code books of bitsandbytes NF4 / FP4 (identical to NF4_CODE / FP4_CODE of fllm_gguf_probe::bnb, 9 significant digits round-trip
@@ -236,6 +240,44 @@ __device__ __forceinline__ void decode16(const uint8_t *rp, int run, int cols, f
     }
     if (kind_is_iq_or_kextra(KIND)) {
         decode16_iq<KIND>(rp, run, w);
+        return;
+    }
+    if (KIND == KIND_TQ2_0) {
+        // blocks of 256 values, 66 bytes: [qs[64]][f16 d]; value v = ((qs[32 * (v / 128) + v % 32] >> 2 * ((v % 128) / 32)) & 3) - 1, times d.
+        // A run of 16 values lies in one block (16 runs per block) and in one 32-byte chunk.
+        const uint8_t *b = rp + (size_t)(run >> 4) * 66;
+        const float d = h2f_bits(ld16(b + 64));
+        const int v0 = (run & 15) * 16;
+        const uint8_t *qs = b + 32 * (v0 >> 7) + (v0 & 31);
+        const int shift = ((v0 & 127) >> 5) * 2;
+#pragma unroll
+        for (int i = 0; i < 16; i++) w[i] = d * (float)((int)((qs[i] >> shift) & 3u) - 1);
+        return;
+    }
+    if (KIND == KIND_TQ1_0) {
+        // blocks of 256 values, 54 bytes: [qs[48]][qh[4]][f16 d]; five base-3 digits per byte of qs for values 0..239 (160 from qs[0..32], 80 from qs[32..48]),
+        // four per byte of qh for 240..255; digit n of a byte x is ((x * 3^n mod 256) * 3) >> 8, value (digit - 1) * d
+        const uint8_t *b = rp + (size_t)(run >> 4) * 54;
+        const float d = h2f_bits(ld16(b + 52));
+        const int v0 = (run & 15) * 16;
+#pragma unroll
+        for (int i = 0; i < 16; i++) {
+            const int v = v0 + i;
+            uint32_t x, pw;
+            if (v < 160) {
+                x = b[v & 31];
+                pw = v >> 5;
+            } else if (v < 240) {
+                x = b[32 + ((v - 160) & 15)];
+                pw = (v - 160) >> 4;
+            } else {
+                x = b[48 + ((v - 240) & 3)];
+                pw = (v - 240) >> 2;
+            }
+            uint32_t m = 1u;
+            for (uint32_t k = 0; k < pw; k++) m *= 3u;
+            w[i] = d * (float)((int)((((x * m) & 255u) * 3u) >> 8) - 1);
+        }
         return;
     }
     if (KIND == KIND_Q2_0) {
@@ -473,6 +515,8 @@ __device__ __forceinline__ float weight_at(const uint8_t *w, uint32_t kind, size
         case KIND_IQ1_M: decode16<KIND_IQ1_M>(rp, (int)run, cols, v); break;
         case KIND_NVFP4: decode16<KIND_NVFP4>(rp, (int)run, cols, v); break;
         case KIND_Q2_0: decode16<KIND_Q2_0>(rp, (int)run, cols, v); break;
+        case KIND_TQ1_0: decode16<KIND_TQ1_0>(rp, (int)run, cols, v); break;
+        case KIND_TQ2_0: decode16<KIND_TQ2_0>(rp, (int)run, cols, v); break;
         case KIND_Q4Z32: decode16<KIND_Q4Z32>(rp, (int)run, cols, v); break;
         case KIND_Q4Z64: decode16<KIND_Q4Z64>(rp, (int)run, cols, v); break;
         case KIND_Q4Z128: decode16<KIND_Q4Z128>(rp, (int)run, cols, v); break;
