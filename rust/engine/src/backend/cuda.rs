@@ -503,6 +503,21 @@ extern "C" {
     ) -> c_int;
     fn fllm_cuda_mamba1_supported(inner: c_int, state: c_int, rank: c_int, ksz: c_int) -> c_int;
     fn fllm_cuda_xlstm_supported(heads: c_int, dqk: c_int, dv: c_int) -> c_int;
+    fn fllm_cuda_rglru_supported(width: c_int, kernel: c_int, blocks: c_int) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_rglru_cell(
+        st: *mut RawStream,
+        runs: *const c_void,
+        nruns: c_int,
+        width: c_int,
+        kernel: c_int,
+        blocks: c_int,
+        state_off: usize,
+        xin: *const f32,
+        gate_y: *const f32,
+        wts: *const f32,
+        out: *mut f32,
+    ) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn fllm_cuda_xlstm_cell(
         st: *mut RawStream,
@@ -5224,6 +5239,61 @@ impl Stream for CudaStream {
                 dev_ptr(proj)?.cast(),
                 dev_ptr(decay)?.cast(),
                 dev_ptr(skip)?.cast(),
+                dev_ptr(out)?.cast(),
+            )
+        })
+    }
+
+    fn supports_rglru(&self, s: &RgLruShape) -> bool {
+        if !ssm_enabled_on_build() {
+            return false;
+        }
+        let dims = [s.width, s.kernel, s.blocks].map(|n| c_int::try_from(n).unwrap_or(0));
+        // SAFETY: plain arithmetic on the arguments.
+        unsafe { fllm_cuda_rglru_supported(dims[0], dims[1], dims[2]) != 0 }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rglru_cell(
+        &mut self,
+        s: &RgLruShape,
+        weights: &DeviceBuffer,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        xin: &DeviceBuffer,
+        gate_y: &DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_rglru(s) {
+            return Err(BackendError::UnsupportedOperation("rglru_cell for this shape".into()));
+        }
+        let rows: usize = runs.iter().map(|r| r.rows).sum();
+        if rows == 0 {
+            return Ok(());
+        }
+        let state_end = state_offset + s.layer_state_bytes();
+        if xin.size < rows * s.width * 4
+            || gate_y.size < rows * s.width * 4
+            || out.size < rows * s.width * 4
+            || weights.size < s.weight_floats() * 4
+            || runs.iter().any(|r| r.state.size < state_end || r.first_row + r.rows > rows)
+        {
+            return Err(invalid("RG-LRU buffers smaller than the layer needs"));
+        }
+        let list = ssm_runs(runs)?;
+        // SAFETY: sizes checked above; `list` outlives the call (the C side copies it before returning).
+        check(unsafe {
+            fllm_cuda_rglru_cell(
+                self.raw,
+                list.as_ptr().cast(),
+                to_c(list.len(), "runs")?,
+                to_c(s.width, "width")?,
+                to_c(s.kernel, "kernel")?,
+                to_c(s.blocks, "blocks")?,
+                state_offset,
+                dev_ptr(xin)?.cast(),
+                dev_ptr(gate_y)?.cast(),
+                dev_ptr(weights)?.cast(),
                 dev_ptr(out)?.cast(),
             )
         })

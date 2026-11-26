@@ -1235,6 +1235,9 @@ fn sample_plans() -> Vec<OpPlan> {
         )
         .unwrap(),
     );
+    v.push(
+        plan_rglru_cell(0, &RunSpec { first_row: 0, rows: 2, reset: false }, &crate::backend::RgLruShape { width: 64, kernel: 4, blocks: 2 }, 0).unwrap(),
+    );
     for state in [8, 16, 32, 24] {
         let m1 = Mamba1Shape {
             inner: 64,

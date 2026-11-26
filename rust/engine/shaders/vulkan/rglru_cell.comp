@@ -1,0 +1,91 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: rglru_cell | bindings: xin,gate_y,wts,state,out | push: width,kernel,blocks,row0,n,reset,state_off | grid: [blocks, 1, 1] per run
+// RG-LRU core of a RecurrentGemma block (reference: `rglru_forward` in rust_decoder.rs) of one run; one workgroup per gate block of bw = width / blocks channels.
+// wts packs conv [width][kernel], conv_bias [width], a [width], input_gate [blocks][bw][bw] (input index first), input_gate_bias [width], recurrent_gate, recurrent_gate_bias.
+// The state is the convolution history [width][kernel - 1], then the recurrence [width], starting at state[state_off]. Per token and channel c:
+//   act = conv_bias + sum taps * history + last tap * x;  gi = sigmoid(act . Wi + bi), gr = sigmoid(act . Wr + br)  (the block's act values)
+//   log_a = -8 gr softplus(a);  h = (first ? 0 : exp(log_a) h) + act gi (first ? 1 : sqrt(1 - exp(2 log_a)));  out = gelu_tanh(gate_y) h
+// first: the first token of a run with reset. bw <= 1024.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer XBuf { float xin[]; };
+layout(std430, binding = 1) readonly buffer GBuf { float gate_y[]; };
+layout(std430, binding = 2) readonly buffer WBuf { float wts[]; };
+layout(std430, binding = 3) buffer StateBuf { float state[]; };
+layout(std430, binding = 4) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint width;
+    uint kernel;
+    uint blocks;
+    uint row0;
+    uint n;
+    uint reset;
+    uint state_off;
+} p;
+
+shared float act[1024];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint b = gl_WorkGroupID.x;
+    const uint bw = p.width / p.blocks;
+    const uint gate = p.blocks * bw * bw;
+    const uint o_conv_bias = p.width * p.kernel;
+    const uint o_a = o_conv_bias + p.width;
+    const uint o_ig = o_a + p.width;
+    const uint o_igb = o_ig + gate;
+    const uint o_rg = o_igb + p.width;
+    const uint o_rgb = o_rg + gate;
+    const uint hist = p.state_off;
+    const uint rec = hist + p.width * (p.kernel - 1u);
+    if (p.reset != 0u) {
+        for (uint c = b * bw + tid; c < (b + 1u) * bw; c += WG) {
+            for (uint i = 0u; i + 1u < p.kernel; i++) state[hist + c * (p.kernel - 1u) + i] = 0.0;
+            state[rec + c] = 0.0;
+        }
+    }
+    barrier();
+    memoryBarrierBuffer();
+    for (uint t = 0u; t < p.n; t++) {
+        const uint row = p.row0 + t;
+        const bool first = p.reset != 0u && t == 0u;
+        for (uint j = tid; j < bw; j += WG) {
+            const uint c = b * bw + j;
+            const float x = xin[row * p.width + c];
+            const uint h = hist + c * (p.kernel - 1u);
+            float value = wts[o_conv_bias + c];
+            for (uint i = 0u; i + 1u < p.kernel; i++) value += wts[c * p.kernel + i] * state[h + i];
+            value += wts[c * p.kernel + p.kernel - 1u] * x;
+            act[j] = value;
+            for (uint i = 0u; i + 2u < p.kernel; i++) state[h + i] = state[h + i + 1u];
+            if (p.kernel > 1u) state[h + p.kernel - 2u] = x;
+        }
+        barrier();
+        for (uint j = tid; j < bw; j += WG) {
+            const uint c = b * bw + j;
+            float gi = wts[o_igb + c];
+            float gr = wts[o_rgb + c];
+            for (uint k = 0u; k < bw; k++) {
+                const float av = act[k];
+                gi += av * wts[o_ig + (b * bw + k) * bw + j];
+                gr += av * wts[o_rg + (b * bw + k) * bw + j];
+            }
+            const float input_gate = 1.0 / (1.0 + exp(-gi));
+            const float recurrent_gate = 1.0 / (1.0 + exp(-gr));
+            const float av = wts[o_a + c];
+            const float sp = av > 20.0 ? av : log(1.0 + exp(av));
+            const float log_a = -8.0 * recurrent_gate * sp;
+            const float decay = exp(log_a);
+            const float mult = first ? 1.0 : sqrt(max(1.0 - exp(2.0 * log_a), 0.0));
+            const float hnew = (first ? 0.0 : decay * state[rec + c]) + act[j] * input_gate * mult;
+            state[rec + c] = hnew;
+            const float gy = gate_y[row * p.width + c];
+            const float ge = 0.5 * gy * (1.0 + tanh(0.7978846 * (gy + 0.044715 * gy * gy * gy)));
+            outv[row * p.width + c] = ge * hnew;
+        }
+        barrier();
+    }
+}

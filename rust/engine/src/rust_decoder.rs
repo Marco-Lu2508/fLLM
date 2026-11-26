@@ -278,6 +278,15 @@ struct DeviceXlstm {
     ordinal: usize,
 }
 
+/// Device copy of a RecurrentGemma recurrent block.
+struct DeviceRgLru {
+    x: crate::backend::DeviceWeight,
+    y: crate::backend::DeviceWeight,
+    /// Convolution, decay logits and gates packed as `RgLruShape::weight_floats` floats.
+    weights: crate::backend::DeviceBuffer,
+    ordinal: usize,
+}
+
 /// Recurrent state of one live sequence on the device: one buffer for all DeltaNet layers.
 struct DeviceSeq {
     used: u64,
@@ -955,6 +964,8 @@ pub struct DeviceLayerWeights {
     mamba1: Option<DeviceMamba1>,
     /// xLSTM mLSTM layer resident on the device.
     xlstm: Option<DeviceXlstm>,
+    /// RecurrentGemma recurrent block resident on the device.
+    rglru: Option<DeviceRgLru>,
     /// The shared transformer block call in front of the Mamba-2 mixer (Zamba2).
     zamba: Option<zamba::DeviceZamba>,
     /// The Mamba-2 branch next to the attention (Falcon-H1) and its output projection.
@@ -1033,6 +1044,7 @@ impl DeviceLayerWeights {
             shortconv: None,
             mamba1: None,
             xlstm: None,
+            rglru: None,
             rwkv: None,
             kda: None,
             v4: None,
@@ -3677,7 +3689,7 @@ impl RustDecoder {
                     Some("multi-head latent attention")
                 }
             }
-            Attn::Rglru(_) => Some("an RG-LRU recurrent block (no device operations yet)"),
+            Attn::Rglru(_) => None,
             Attn::Xlstm(_) => None,
             Attn::ShortConv(_) => {
                 if conv_ok && !cfg.parallel_residual {
@@ -4207,6 +4219,16 @@ impl RustDecoder {
                 && backend.create_stream().map(|st| st.supports_xlstm(s)).unwrap_or(false)
                 && std::env::var_os("FLLM_XLSTM_HOST").is_none()
         });
+        let rglru_shape = self.rglru_shape().filter(|s| {
+            delta_shape.is_none()
+                && mamba_shape.is_none()
+                && mamba1_shape.is_none()
+                && xlstm_shape.is_none()
+                && !conv_ok
+                && backend.create_stream().map(|st| st.supports_rglru(s)).unwrap_or(false)
+                && std::env::var_os("FLLM_RGLRU_HOST").is_none()
+        });
+        let mut rglru_layers = 0usize;
         let mut xlstm_layers = 0usize;
         let mut mamba_layers = 0usize;
         let mut conv_layers = 0usize;
@@ -4261,7 +4283,7 @@ impl RustDecoder {
                 _ => (None, None, None),
             };
             // only attention and the device DeltaNet use the output projection on the device (the other mixers apply it on the host)
-            let out = if matches!(layer.attn, Attn::Std { .. } | Attn::Mla(_)) || (matches!(layer.attn, Attn::ShortConv(_)) && conv_ok) || (matches!(layer.attn, Attn::Mamba1(_)) && mamba1_shape.is_some()) || (matches!(layer.attn, Attn::Xlstm(_)) && xlstm_shape.is_some()) || (matches!(layer.attn, Attn::Linear(_)) && delta_shape.is_some())
+            let out = if matches!(layer.attn, Attn::Std { .. } | Attn::Mla(_)) || (matches!(layer.attn, Attn::ShortConv(_)) && conv_ok) || (matches!(layer.attn, Attn::Mamba1(_)) && mamba1_shape.is_some()) || (matches!(layer.attn, Attn::Xlstm(_)) && xlstm_shape.is_some()) || (matches!(layer.attn, Attn::Rglru(_)) && rglru_shape.is_some()) || (matches!(layer.attn, Attn::Linear(_)) && delta_shape.is_some())
                 || (matches!(layer.attn, Attn::Rwkv(_)) && rwkv_ok)
                 || (matches!(layer.attn, Attn::Kda(_)) && kda_ok)
                 || (matches!(layer.attn, Attn::Mamba(_)) && mamba_shape.is_some())
@@ -4363,6 +4385,22 @@ impl RustDecoder {
                         f: upload_linear(&format!("blk.{i}.xlstm_f"), &m.f)?,
                         norm: upload_vec(&m.norm)?,
                         ordinal: xlstm_layers - 1,
+                    })
+                }
+                _ => None,
+            };
+            let rglru = match (&layer.attn, rglru_shape.as_ref()) {
+                (Attn::Rglru(m), Some(shape)) => {
+                    rglru_layers += 1;
+                    let mut packed: Vec<f32> = Vec::with_capacity(shape.weight_floats());
+                    for part in [&m.conv, &m.conv_bias, &m.a, &m.input_gate, &m.input_gate_bias, &m.recurrent_gate, &m.recurrent_gate_bias] {
+                        packed.extend_from_slice(part);
+                    }
+                    Some(DeviceRgLru {
+                        x: upload_linear(&format!("blk.{i}.rglru_x"), &m.x)?,
+                        y: upload_linear(&format!("blk.{i}.rglru_y"), &m.y)?,
+                        weights: upload_vec(&packed)?,
+                        ordinal: rglru_layers - 1,
                     })
                 }
                 _ => None,
@@ -4910,6 +4948,7 @@ impl RustDecoder {
                 shortconv,
                 mamba1,
                 xlstm,
+                rglru,
                 rwkv,
                 kda,
                 v4,
@@ -5061,6 +5100,7 @@ impl RustDecoder {
                     Attn::Mamba(_) => dl.mamba.is_none() && dl.par_mamba.is_none(),
                     Attn::Mamba1(_) => dl.mamba1.is_none(),
                     Attn::Xlstm(_) => dl.xlstm.is_none(),
+                    Attn::Rglru(_) => dl.rglru.is_none(),
                     _ => false,
                 };
                 if mixer_host {
@@ -5423,6 +5463,7 @@ impl RustDecoder {
         let mamba_shape = self.mamba_shape();
         let mamba1_shape = self.mamba1_shape();
         let xlstm_shape = self.xlstm_shape();
+        let rglru_shape = self.rglru_shape();
         let rwkv_shape = self.rwkv_shape();
         let kda_shape = self.kda_shape();
         // RWKV-7: the values of layer 0 of this pass, read by the value residual of every later layer
@@ -6210,6 +6251,13 @@ impl RustDecoder {
                 }
                 let plan = delta_plan.as_deref().unwrap_or(&[]);
                 self.mamba1_device(&mut **stream, &mut scratch, shape, dm, dev_layer, plan, &normed_buf, &mut x_buf, rows)?;
+            } else if let (Some(dr), Some(shape)) = (&dev_layer.rglru, &rglru_shape) {
+                if delta_plan.is_none() {
+                    let count = self.layers.iter().filter(|l| matches!(l.attn, Attn::Rglru(_))).count();
+                    delta_plan = Some(self.state_plan(count, shape.layer_state_bytes(), tables, lengths)?);
+                }
+                let plan = delta_plan.as_deref().unwrap_or(&[]);
+                self.rglru_device(&mut **stream, &mut scratch, shape, dr, dev_layer, plan, &normed_buf, &mut x_buf, rows)?;
             } else if let (Some(dx), Some(shape)) = (&dev_layer.xlstm, &xlstm_shape) {
                 if delta_plan.is_none() {
                     let count = self.layers.iter().filter(|l| matches!(l.attn, Attn::Xlstm(_))).count();
@@ -6252,6 +6300,9 @@ impl RustDecoder {
                     }
                     Attn::Xlstm(m) => {
                         self.xlstm_forward(m, &layer.out, i, &host_normed, tables, lengths)?
+                    }
+                    Attn::Rglru(m) => {
+                        self.rglru_forward(m, &layer.out, i, &host_normed, tables, lengths)?
                     }
                     _ => return Err("layer kind is not supported by the accelerator path".into()),
                 };
@@ -7366,6 +7417,65 @@ impl RustDecoder {
             conv_kernel: mc.conv_kernel,
             bc_rms_eps: mc.bc_rms_eps,
         })
+    }
+
+    fn rglru_shape(&self) -> Option<crate::backend::RgLruShape> {
+        let rg = self.cfg.rglru.as_ref()?;
+        self.layers.iter().any(|l| matches!(l.attn, Attn::Rglru(_))).then_some(crate::backend::RgLruShape { width: rg.width, kernel: rg.kernel, blocks: rg.blocks })
+    }
+
+    /// A RecurrentGemma recurrent block on the device: the two input projections, the convolution / gate / recurrence kernel, the output projection added to the residual.
+    #[allow(clippy::too_many_arguments)]
+    fn rglru_device(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        shape: &crate::backend::RgLruShape,
+        dr: &DeviceRgLru,
+        dev_layer: &DeviceLayerWeights,
+        plan: &[DeltaPlanRun],
+        normed: &crate::backend::DeviceBuffer,
+        x: &mut crate::backend::DeviceBuffer,
+        rows: usize,
+    ) -> Result<(), String> {
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let resets = self.delta_claim(dr.ordinal, plan)?;
+        let width = shape.width;
+        let mut xin = scratch.acquire(rows * width * 4).map_err(err)?;
+        let mut gate_y = scratch.acquire(rows * width * 4).map_err(err)?;
+        let mut out = scratch.acquire(rows * width * 4).map_err(err)?;
+        stream.quantized_linear(&mut xin, normed, &dr.x, dr.x.bias.as_ref()).map_err(err)?;
+        stream.quantized_linear(&mut gate_y, normed, &dr.y, dr.y.bias.as_ref()).map_err(err)?;
+        let runs: Vec<crate::backend::DeltaRun<'_>> = plan
+            .iter()
+            .zip(&resets)
+            .map(|(p, &reset)| crate::backend::DeltaRun { state: &p.buf, first_row: p.start, rows: p.n, reset })
+            .collect();
+        let offset = dr.ordinal * shape.layer_state_bytes();
+        stream.rglru_cell(shape, &dr.weights, &runs, offset, &xin, &gate_y, &mut out).map_err(err)?;
+        let residual_scale = self.cfg.residual_scale;
+        let out_w = dev_layer.out.as_ref().ok_or("RG-LRU layer without a device output projection")?;
+        let fused = dev_layer.post_attn_norm.is_none() && stream.quantized_linear_add(x, &out, out_w, out_w.bias.as_ref(), residual_scale).map_err(err)?;
+        if !fused {
+            let mut branch = scratch.acquire(rows * self.cfg.hidden * 4).map_err(err)?;
+            stream.quantized_linear(&mut branch, &out, out_w, out_w.bias.as_ref()).map_err(err)?;
+            device_post_norm_inplace(
+                stream,
+                scratch,
+                self.cfg.norm,
+                &mut branch,
+                dev_layer.post_attn_norm.as_ref(),
+                dev_layer.post_attn_norm_b.as_ref(),
+                self.cfg.post_eps,
+                self.groups,
+            )?;
+            stream.residual_add(x, &branch, residual_scale).map_err(err)?;
+            scratch.recycle(branch);
+        }
+        for buf in [xin, gate_y, out] {
+            scratch.recycle(buf);
+        }
+        Ok(())
     }
 
     fn xlstm_shape(&self) -> Option<crate::backend::XlstmShape> {

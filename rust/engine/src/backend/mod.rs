@@ -248,6 +248,33 @@ impl XlstmShape {
     }
 }
 
+/// Shape of a RecurrentGemma recurrent block (RG-LRU): `width` channels, a depthwise causal convolution of `kernel` taps and block-diagonal gates in `blocks` blocks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RgLruShape {
+    pub width: usize,
+    pub kernel: usize,
+    pub blocks: usize,
+}
+
+impl RgLruShape {
+    /// Channels of one gate block.
+    pub fn block_width(&self) -> usize {
+        self.width / self.blocks
+    }
+
+    /// Floats of the packed weight buffer of one layer: the convolution (`width x kernel`), its bias, the decay logits, the input gate matrices
+    /// (`blocks x bw x bw`, input index first) and bias, the recurrent gate matrices and bias.
+    pub fn weight_floats(&self) -> usize {
+        let gate = self.blocks * self.block_width() * self.block_width();
+        self.width * self.kernel + 2 * self.width + 2 * gate + 2 * self.width
+    }
+
+    /// Bytes one layer of one sequence occupies in a state buffer: the convolution history (`width x (kernel - 1)`), then the recurrent state (`width`), FP32.
+    pub fn layer_state_bytes(&self) -> usize {
+        (self.width * self.kernel * 4).next_multiple_of(256)
+    }
+}
+
 /// Device-resident parameters of a Mamba-2 layer (all FP32).
 pub struct MambaWeights<'a> {
     /// `conv_dim x conv_kernel`
@@ -2801,6 +2828,30 @@ pub trait Stream: Send {
         _out: &mut DeviceBuffer,
     ) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("xlstm_cell".into()))
+    }
+
+    /// Does this stream implement [`Stream::rglru_cell`] for this shape?
+    fn supports_rglru(&self, _shape: &RgLruShape) -> bool {
+        false
+    }
+
+    /// The recurrent core of a RecurrentGemma block for `runs`: `xin` (`rows x width`) is the output of the `linear_x` projection, `gate_y` the output of
+    /// `linear_y`; `weights` is the packed buffer of [`RgLruShape::weight_floats`] floats (`conv`, `conv_bias`, `a`, `input_gate`, `input_gate_bias`,
+    /// `recurrent_gate`, `recurrent_gate_bias`). `out` (`rows x width`) receives `gelu_tanh(gate_y) * h` (the caller applies `linear_out`). The state of a layer
+    /// (convolution history `width x (kernel - 1)`, then the recurrence `width`) starts `state_offset` bytes into each run's state buffer; a run that
+    /// `reset`s starts its first token from zero (and without the input scaling of the recurrence).
+    #[allow(clippy::too_many_arguments)]
+    fn rglru_cell(
+        &mut self,
+        _shape: &RgLruShape,
+        _weights: &DeviceBuffer,
+        _runs: &[DeltaRun<'_>],
+        _state_offset: usize,
+        _xin: &DeviceBuffer,
+        _gate_y: &DeviceBuffer,
+        _out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("rglru_cell".into()))
     }
 
     /// Does this stream implement [`Stream::shortconv_layer`] for this width and kernel size?

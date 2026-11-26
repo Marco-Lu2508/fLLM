@@ -30,7 +30,7 @@ use crate::backend::vulkan::ops::moe::{
     plan_gather_rows, plan_moe_combine, plan_moe_linear, plan_moe_topk, plan_scatter_add_rows, ExpertAccess, MoeLinear,
 };
 use crate::backend::vulkan::ops::recurrent::{
-    delta_supported, plan_delta_layer_scan, plan_mamba1_bc_norms_with, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, plan_xlstm_cell, Mamba1Shape as VkMamba1,
+    delta_supported, plan_delta_layer_scan, plan_mamba1_bc_norms_with, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, plan_rglru_cell, plan_xlstm_cell, Mamba1Shape as VkMamba1,
     Mamba2Shape, RunSpec,
 };
 use crate::backend::vulkan::ops::{
@@ -40,7 +40,7 @@ use crate::backend::vulkan::ops::{
 use crate::backend::vulkan::weights::{format_info, DeviceLayout};
 use crate::backend::{
     validate_kv_write, AttentionParams, BackendError, DeltaRun, DeltaShape, DeltaWeights, DeviceBuffer, DeviceKvCache, DeviceWeight,
-    DsaParams, HcMode, Mamba1Shape, MambaShape, MambaWeights, MlaShape, QuantType, RopeParams, SamplingParams, Stream, XlstmShape,
+    DsaParams, HcMode, Mamba1Shape, MambaShape, MambaWeights, MlaShape, QuantType, RopeParams, SamplingParams, RgLruShape, Stream, XlstmShape,
 };
 use exec::Arg;
 use linear::LinTrace;
@@ -1770,6 +1770,49 @@ impl Stream for VulkanStream {
             Arg::r("skip", skip),
             Arg::w("out", out),
         ];
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        self.run_plans(&plans, &args, &states, false)
+    }
+
+    fn supports_rglru(&self, shape: &RgLruShape) -> bool {
+        plan_rglru_cell(0, &RunSpec { first_row: 0, rows: 1, reset: true }, shape, 0).is_ok() && self.sh.caps().max_per_stage_storage_buffers >= 5
+    }
+
+    fn rglru_cell(
+        &mut self,
+        shape: &RgLruShape,
+        weights: &DeviceBuffer,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        xin: &DeviceBuffer,
+        gate_y: &DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        if !self.supports_rglru(shape) {
+            return Err(BackendError::UnsupportedOperation("rglru_cell for this shape".into()));
+        }
+        let state_end = state_offset + shape.layer_state_bytes();
+        if xin.size < rows * shape.width * 4
+            || gate_y.size < rows * shape.width * 4
+            || out.size < rows * shape.width * 4
+            || weights.size < shape.weight_floats() * 4
+            || runs.iter().any(|r| r.state.size < state_end)
+        {
+            return Err(invalid("RG-LRU buffers are smaller than the layer needs"));
+        }
+        let mut plans = Vec::new();
+        for (index, r) in runs.iter().enumerate() {
+            if r.rows == 0 {
+                continue;
+            }
+            let spec = RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset };
+            plans.push(plan_rglru_cell(index, &spec, shape, state_offset / 4)?);
+        }
+        let args = [Arg::r("xin", xin), Arg::r("gate_y", gate_y), Arg::r("wts", weights), Arg::w("out", out)];
         let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
         self.run_plans(&plans, &args, &states, false)
     }

@@ -238,3 +238,87 @@ int fllm_xlstm_cell_launch(cudaStream_t s, const void *runs, int nruns, int head
     xlstm_cell_kernel<<<grid, XL_BLOCK, shared, s>>>(q, k, v, o, ig, fg, nw, r, out, heads, dqk, dv, state_off, cap, eps, norm_eps);
     return fllm_check_launch("xlstm_cell");
 }
+
+// ---- RG-LRU (RecurrentGemma) --------------------------------------------------------------------------------------------------------------
+// Mirrors `rglru_forward` in rust_decoder.rs. One block per (gate block, run); thread t owns the channels t, t + RG_BLOCK, ... of the gate block. Per token:
+//   act = causal depthwise convolution of xin (history in the state);  gi, gr = sigmoid(act . Wi + bi), sigmoid(act . Wr + br) (block-diagonal);
+//   log_a = -8 gr softplus(a);  h = (reset ? 0 : exp(log_a) h) + act gi (reset ? 1 : sqrt(1 - exp(2 log_a)));  out = gelu_tanh(gate_y) h
+#define RG_BLOCK 256
+
+int fllm_rglru_supported(int width, int kernel, int blocks) {
+    return width > 0 && blocks > 0 && width % blocks == 0 && width / blocks <= 1024 && kernel >= 1 && kernel <= 8;
+}
+
+__global__ void rglru_cell_kernel(const float *__restrict__ xin, const float *__restrict__ gate_y, const float *__restrict__ wts, const SsmRun1 *__restrict__ runs,
+                                  float *__restrict__ y, int width, int kernel, int blocks, size_t state_off) {
+    const SsmRun1 run = runs[blockIdx.y];
+    const int b = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int bw = width / blocks;
+    extern __shared__ float rg_act[];
+    const size_t gate = (size_t)blocks * bw * bw;
+    const float *conv = wts;
+    const float *conv_bias = conv + (size_t)width * kernel;
+    const float *a_log = conv_bias + width;
+    const float *ig = a_log + width;
+    const float *ig_bias = ig + gate;
+    const float *rg = ig_bias + width;
+    const float *rg_bias = rg + gate;
+    float *hist = reinterpret_cast<float *>(reinterpret_cast<char *>(run.state) + state_off);
+    float *rec = hist + (size_t)width * (kernel - 1);
+    if (run.reset) {
+        for (int c = b * bw + tid; c < (b + 1) * bw; c += RG_BLOCK) {
+            for (int i = 0; i < kernel - 1; i++) hist[(size_t)c * (kernel - 1) + i] = 0.f;
+            rec[c] = 0.f;
+        }
+    }
+    __syncthreads();
+    for (int t = 0; t < run.n; t++) {
+        const size_t row = (size_t)(run.row0 + t);
+        const bool first = run.reset && t == 0;
+        for (int j = tid; j < bw; j += RG_BLOCK) {
+            const int c = b * bw + j;
+            const float x = xin[row * width + c];
+            float *h = hist + (size_t)c * (kernel - 1);
+            const float *taps = conv + (size_t)c * kernel;
+            float value = conv_bias[c];
+            for (int i = 0; i < kernel - 1; i++) value += taps[i] * h[i];
+            value += taps[kernel - 1] * x;
+            rg_act[j] = value;
+            for (int i = 0; i + 1 < kernel - 1; i++) h[i] = h[i + 1];
+            if (kernel > 1) h[kernel - 2] = x;
+        }
+        __syncthreads();
+        for (int j = tid; j < bw; j += RG_BLOCK) {
+            const int c = b * bw + j;
+            float gi = ig_bias[c], gr = rg_bias[c];
+            for (int k = 0; k < bw; k++) {
+                const float av = rg_act[k];
+                gi += av * ig[((size_t)b * bw + k) * bw + j];
+                gr += av * rg[((size_t)b * bw + k) * bw + j];
+            }
+            const float input_gate = 1.f / (1.f + expf(-gi));
+            const float recurrent_gate = 1.f / (1.f + expf(-gr));
+            const float av = a_log[c];
+            const float sp = av > 20.f ? av : log1pf(expf(av));
+            const float log_a = -8.f * recurrent_gate * sp;
+            const float decay = expf(log_a);
+            const float mult = first ? 1.f : sqrtf(1.f - expf(2.f * log_a));
+            const float hnew = (first ? 0.f : decay * rec[c]) + rg_act[j] * input_gate * mult;
+            rec[c] = hnew;
+            const float gy = gate_y[row * width + c];
+            const float ge = 0.5f * gy * (1.f + tanhf(0.7978846f * (gy + 0.044715f * gy * gy * gy)));
+            y[row * width + c] = ge * hnew;
+        }
+        __syncthreads();
+    }
+}
+
+int fllm_rglru_cell_launch(cudaStream_t s, const void *runs, int nruns, int width, int kernel, int blocks, size_t state_off, const float *xin,
+                           const float *gate_y, const float *wts, float *out) {
+    if (nruns <= 0) return 0;
+    const SsmRun1 *r = static_cast<const SsmRun1 *>(runs);
+    const dim3 grid(blocks, nruns);
+    rglru_cell_kernel<<<grid, RG_BLOCK, (size_t)(width / blocks) * sizeof(float), s>>>(xin, gate_y, wts, r, out, width, kernel, blocks, state_off);
+    return fllm_check_launch("rglru_cell");
+}

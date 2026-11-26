@@ -4424,6 +4424,15 @@ impl Tester<'_> {
             let r = self.mamba1_check(&shape);
             self.record("mamba1", &format!("inner {inner} state {state} rank {rank}{}", if eps.is_some() { " +bc norm" } else { "" }), r);
         }
+        for (width, kernel, blocks) in [(64usize, 4usize, 2usize), (192, 4, 3), (300, 3, 2), (512, 2, 1)] {
+            let shape = RgLruShape { width, kernel, blocks };
+            match self.device.create_stream() {
+                Ok(st) if st.supports_rglru(&shape) => {}
+                _ => continue,
+            }
+            let r = self.rglru_check(&shape);
+            self.record("rglru", &format!("width {width} kernel {kernel} blocks {blocks}"), r);
+        }
         for (heads, dqk, dv) in [(2usize, 16usize, 32usize), (4, 64, 40), (3, 300, 130)] {
             let shape = XlstmShape { heads, dqk, dv, gate_cap: 15.0, eps: 1e-6, norm_eps: 1e-6 };
             match self.device.create_stream() {
@@ -4908,6 +4917,98 @@ impl Tester<'_> {
             worst_err = worst_err.max(worst(&have, &want, &scale));
         }
         Ok(Outcome { device: worst_err, cpu: 0.0, tol: 1e-5, cpu_tol: 1.0, ms: total_ms })
+    }
+
+    /// The RG-LRU kernel against a transcription of `rglru_forward` (convolution, block-diagonal gates, recurrence, GELU gate): several sequences over several calls.
+    fn rglru_check(&mut self, shape: &RgLruShape) -> Result<Outcome, BackendError> {
+        let (w, k, blocks) = (shape.width, shape.kernel, shape.blocks);
+        let bw = shape.block_width();
+        let conv = self.rng.vector(w * k, 0.6);
+        let conv_bias = self.rng.vector(w, 0.3);
+        let a_log = self.rng.vector(w, 1.0);
+        let gate_len = blocks * bw * bw;
+        let ig = self.rng.vector(gate_len, 0.5 / (bw as f32).sqrt());
+        let ig_bias = self.rng.vector(w, 0.5);
+        let rg = self.rng.vector(gate_len, 0.5 / (bw as f32).sqrt());
+        let rg_bias = self.rng.vector(w, 0.5);
+        let mut packed = Vec::new();
+        for part in [&conv, &conv_bias, &a_log, &ig, &ig_bias, &rg, &rg_bias] {
+            packed.extend_from_slice(part);
+        }
+        let calls: [&[(usize, usize)]; 4] = [&[(0, 17), (1, 3), (2, 1)], &[(0, 1), (1, 1), (2, 1)], &[(2, 5), (0, 2), (1, 1)], &[(1, 1), (0, 1), (2, 1)]];
+        let mut stream = self.device.create_stream()?;
+        let weights = put(self.device, stream.as_mut(), &packed)?;
+        let offset = 256;
+        let states: Vec<DeviceBuffer> = (0..3).map(|_| self.device.allocate_buffer(offset + shape.layer_state_bytes())).collect::<Result<_, _>>()?;
+        let mut hist = vec![vec![0.0f32; w * (k - 1)]; 3];
+        let mut rec = vec![vec![0.0f32; w]; 3];
+        let mut started = [false; 3];
+        let (mut worst_err, mut total_ms) = (0.0f64, 0.0f64);
+        for call in calls {
+            let rows: usize = call.iter().map(|c| c.1).sum();
+            let xin = self.rng.vector(rows * w, 1.5);
+            let gate_y = self.rng.vector(rows * w, 2.0);
+            let mut want = vec![0.0f32; rows * w];
+            let mut runs = Vec::new();
+            let mut first = 0;
+            for &(seq, cnt) in call {
+                if !started[seq] {
+                    hist[seq].iter_mut().for_each(|x| *x = 0.0);
+                    rec[seq].iter_mut().for_each(|x| *x = 0.0);
+                }
+                for t in 0..cnt {
+                    let row = first + t;
+                    let reset = !started[seq] && t == 0;
+                    let x = &xin[row * w..(row + 1) * w];
+                    let mut act = vec![0.0f32; w];
+                    for c in 0..w {
+                        let h = &mut hist[seq][c * (k - 1)..(c + 1) * (k - 1)];
+                        let taps = &conv[c * k..(c + 1) * k];
+                        let mut value = conv_bias[c];
+                        for (tap, prev) in taps.iter().zip(h.iter()) {
+                            value += tap * prev;
+                        }
+                        value += taps[k - 1] * x[c];
+                        act[c] = value;
+                        if k > 1 {
+                            h.copy_within(1.., 0);
+                            h[k - 2] = x[c];
+                        }
+                    }
+                    for b in 0..blocks {
+                        for j in 0..bw {
+                            let (mut gi, mut gr) = (ig_bias[b * bw + j], rg_bias[b * bw + j]);
+                            for kk in 0..bw {
+                                gi += act[b * bw + kk] * ig[(b * bw + kk) * bw + j];
+                                gr += act[b * bw + kk] * rg[(b * bw + kk) * bw + j];
+                            }
+                            let c = b * bw + j;
+                            let (input_gate, recurrent_gate) = (1.0 / (1.0 + (-gi).exp()), 1.0 / (1.0 + (-gr).exp()));
+                            let sp = if a_log[c] > 20.0 { a_log[c] } else { a_log[c].exp().ln_1p() };
+                            let log_a = -8.0 * recurrent_gate * sp;
+                            let mult = if reset { 1.0 } else { (1.0 - (2.0 * log_a).exp()).sqrt() };
+                            let hn = if reset { 0.0 } else { log_a.exp() * rec[seq][c] } + act[c] * input_gate * mult;
+                            rec[seq][c] = hn;
+                            let gy = gate_y[row * w + c];
+                            let ge = 0.5 * gy * (1.0 + (0.797_884_6 * (gy + 0.044_715 * gy * gy * gy)).tanh());
+                            want[row * w + c] = ge * hn;
+                        }
+                    }
+                }
+                runs.push(DeltaRun { state: &states[seq], first_row: first, rows: cnt, reset: !started[seq] });
+                started[seq] = true;
+                first += cnt;
+            }
+            let (xb, gb) = (put(self.device, stream.as_mut(), &xin)?, put(self.device, stream.as_mut(), &gate_y)?);
+            let mut out = put(self.device, stream.as_mut(), &vec![f32::NAN; rows * w])?;
+            let mut ms = 0.0;
+            timed(&mut ms, stream.as_mut(), |s| s.rglru_cell(shape, &weights, &runs, offset, &xb, &gb, &mut out))?;
+            total_ms += ms;
+            let want64: Vec<f64> = want.iter().map(|&v| f64::from(v)).collect();
+            let scale: Vec<f64> = want64.iter().map(|v| v.abs().max(1.0)).collect();
+            worst_err = worst_err.max(worst(&get(stream.as_mut(), &out, rows * w)?, &want64, &scale));
+        }
+        Ok(Outcome { device: worst_err, cpu: 0.0, tol: 2e-3, cpu_tol: 1.0, ms: total_ms })
     }
 
     /// The mLSTM cell against a transcription of `xlstm_forward`: several sequences over several calls (a long run, single tokens, a run that

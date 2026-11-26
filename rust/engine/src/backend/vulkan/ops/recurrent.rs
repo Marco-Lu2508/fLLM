@@ -3,7 +3,7 @@
 //! `mamba_gate_norm`, plus `norm_rms` for the Mamba-1 B / C normalisation.
 
 use super::*;
-use crate::backend::{DeltaShape, XlstmShape};
+use crate::backend::{DeltaShape, RgLruShape, XlstmShape};
 
 /// Tokens per workgroup column of the convolution shaders (must be >= conv_kernel - 1).
 pub const CONV_CHUNK: usize = 16;
@@ -915,4 +915,25 @@ pub fn plan_xlstm_cell(run_index: usize, run: &RunSpec, shape: &XlstmShape, stat
         .f("norm_eps", shape.norm_eps);
     let slots = Slots::new().read("q").read("k").read("v").read("o").read("ig").read("fg").read("norm").run_state("state", run_index).write("out");
     plan("xlstm_cell", push, [shape.heads as u32, 1, 1], slots)
+}
+
+/// `rglru_cell` for one run: the recurrent core of a RecurrentGemma block, one workgroup per gate block (see the shader for the operands). Slots: `xin`,
+/// `gate_y`, `wts` (the packed weights), `state`, `out` (`rows x width`, final: `gelu(gate_y) * h`).
+pub fn plan_rglru_cell(run_index: usize, run: &RunSpec, shape: &RgLruShape, state_off: usize) -> Result<OpPlan, BackendError> {
+    if shape.width == 0 || shape.blocks == 0 || shape.width % shape.blocks != 0 || shape.block_width() > 1024 || shape.kernel == 0 || shape.kernel > 8 {
+        return Err(invalid("RG-LRU shape outside the supported range (blocks of at most 1024 channels, kernel 1..=8)"));
+    }
+    if run.rows == 0 {
+        return Err(invalid("RG-LRU cell of an empty run"));
+    }
+    let push = Push::new()
+        .u("width", shape.width)
+        .u("kernel", shape.kernel)
+        .u("blocks", shape.blocks)
+        .u("row0", run.first_row)
+        .u("n", run.rows)
+        .b("reset", run.reset)
+        .u("state_off", state_off);
+    let slots = Slots::new().read("xin").read("gate_y").read("wts").run_state("state", run_index).write("out");
+    plan("rglru_cell", push, [shape.blocks as u32, 1, 1], slots)
 }
