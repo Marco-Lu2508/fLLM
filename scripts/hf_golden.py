@@ -675,6 +675,11 @@ def config_for(arch: str, vocab: int):
         ),
         "g9v3": lambda: _g9_config(vocab),
         "internlm2": lambda: _il2_config(vocab),
+        "jetmoe": lambda: T.JetMoeConfig(
+            vocab_size=vocab, hidden_size=64, num_hidden_layers=2, num_key_value_heads=2, kv_channels=16, intermediate_size=96,
+            max_position_embeddings=256, activation_function="silu", num_local_experts=4, num_experts_per_tok=2, num_attention_heads=4,
+            rms_norm_eps=1e-6, bos_token_id=1, eos_token_id=2, tie_word_embeddings=True,
+        ),
         "diffllama": lambda: T.DiffLlamaConfig(**common, **dense, rms_norm_eps=1e-5, lambda_std_dev=0.1),
         # Griffin: two RG-LRU recurrent blocks, then one local-attention block (window 8, one KV head, half the head width rotated), twice
         "recurrent_gemma": lambda: T.RecurrentGemmaConfig(

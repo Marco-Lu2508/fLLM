@@ -242,6 +242,8 @@ pub fn prepare_checkpoint(
             patched["intermediate_size"] = first;
         }
         patched
+    } else if arch == "jetmoe" {
+        crate::jetmoe::config(&cfg)?
     } else if arch == "diffllama" {
         crate::diffllama::config(&cfg)?
     } else if arch == "recurrent_gemma" {
@@ -1022,6 +1024,15 @@ pub fn prepare_checkpoint(
         let mut required = vec!["attn_output.weight"];
         let moe_here = plan.moe && plan.moe_layers[i as usize];
         if plan.family == Family::Classic {
+            continue;
+        }
+        if arch == "jetmoe" {
+            for n in crate::jetmoe::layer_requirements() {
+                let key = format!("blk.{i}.{n}");
+                if !byname.contains_key(key.as_str()) {
+                    return Err(format!("missing required tensor {key}").into());
+                }
+            }
             continue;
         }
         if arch == "recurrent_gemma" {

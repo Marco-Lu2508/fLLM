@@ -30,6 +30,8 @@ pub(super) fn placeholder_layer() -> Layer {
         res: None,
         dsa_shared: false,
         diff: None,
+        moa: None,
+        ffn_bias: None,
         output_gate: false,
         chunk: None,
         attn_gate: None,

@@ -335,6 +335,30 @@ struct ShortConv {
     bias: Option<Vec<f32>>,
 }
 
+/// JetMoE's mixture of attention heads: `top_k` of `experts` experts per token each project the token to a query of `kv_heads` heads, all attend over the shared
+/// key / value of the token, and the per-expert outputs are mixed by the experts' output projections and the gates (`attn_moa_*`).
+struct Moa {
+    router: Linear,
+    k: Linear,
+    v: Linear,
+    /// Per expert: `hidden -> kv_heads * head_dim` query projection and `kv_heads * head_dim -> hidden` output projection.
+    q: Vec<Linear>,
+    out: Vec<Linear>,
+    bias: Vec<f32>,
+    top_k: usize,
+}
+
+/// Routing of JetMoE: the `top_k` largest logits (ties to the lower index) and the softmax over those.
+fn moa_route(logits: &[f32], top_k: usize) -> Vec<(usize, f32)> {
+    let mut order: Vec<usize> = (0..logits.len()).collect();
+    order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]).then(a.cmp(&b)));
+    order.truncate(top_k);
+    let max = order.iter().map(|&e| logits[e]).fold(f32::NEG_INFINITY, f32::max);
+    let exps: Vec<f32> = order.iter().map(|&e| (logits[e] - max).exp()).collect();
+    let sum: f32 = exps.iter().sum();
+    order.into_iter().zip(exps).map(|(e, x)| (e, x / sum)).collect()
+}
+
 /// RecurrentGemma's recurrent block: `linear_y` (GELU gate), `linear_x` into a depthwise causal convolution and the RG-LRU, their product through `linear_out`
 /// (the output projection of the layer). The gates are block-diagonal (`blocks` blocks of `width / blocks` channels).
 struct RgLru {
@@ -462,6 +486,10 @@ struct Layer {
     dsa_shared: bool,
     /// DiffLlama differential attention: `(lambda, 1 - lambda_init)` of this layer; the layer attends with two value halves per key head and combines head `h` with head `h + heads / 2`.
     diff: Option<(f32, f32)>,
+    /// JetMoE mixture of attention heads (the `q`, `k`, `v` of the layer are placeholders).
+    moa: Option<Box<Moa>>,
+    /// Bias added behind the sum of the feed-forward experts (JetMoE).
+    ffn_bias: Option<Vec<f32>>,
     /// A second mixer that runs next to the attention of this layer (Falcon-H1: Mamba-2 and attention in parallel).
     parallel: Option<Box<hybrid::ParallelMixer>>,
     /// Zamba2: this layer starts with a call of a shared transformer block whose output joins the input of its Mamba mixer.
@@ -2186,6 +2214,7 @@ impl RustDecoder {
                 Attn::Rwkv(Box::new(rw))
             } else if !has_tensor(mapping, &format!("{p}.attn_q.weight"))
                 && !has_tensor(mapping, &format!("{p}.attn_qkv.weight"))
+                && !has_tensor(mapping, &format!("{p}.attn_moa_in.weight"))
             {
                 Attn::None
             } else if has_tensor(mapping, &format!("{p}.attn_qkv.weight")) {
@@ -2204,6 +2233,9 @@ impl RustDecoder {
                 }
             } else {
                 let unused = || Linear::from_parts(Tensor { shape: vec![1, 1], data: vec![0.0] }, 1, 1, None);
+                if has_tensor(mapping, &format!("{p}.attn_moa_in.weight")) {
+                    Attn::Std { q: unused()?, k: unused()?, v: unused()? }
+                } else {
                 Attn::Std {
                     q: linear(
                         &format!("{p}.attn_q"),
@@ -2219,6 +2251,7 @@ impl RustDecoder {
                     } else {
                         linear(&format!("{p}.attn_v"), vr, hidden)?
                     },
+                }
                 }
             };
             let ffn = if !has_tensor(mapping, &format!("{p}.ffn_up.weight"))
@@ -2402,7 +2435,30 @@ impl RustDecoder {
             } else {
                 None
             };
+            let moa = if has_tensor(mapping, &format!("{p}.attn_moa_in.weight")) {
+                let get = |key: &str| meta.get(&format!("{}.attention.{key}", cfg.arch)).and_then(Value::as_u64).map(|n| n as usize);
+                let (experts, top_k) = (get("expert_count").ok_or("missing attention.expert_count")?, get("expert_used_count").ok_or("missing attention.expert_used_count")?);
+                let attn_hidden = kv_heads * dk;
+                let rows = |name: &str, first: usize, rows: usize, cols: usize| -> Result<Linear, String> {
+                    let mut l = Linear::load_rows(mapping, &format!("{p}.{name}.weight"), None, first, rows, cols)?;
+                    l.enable_fast_cpu();
+                    Ok(l)
+                };
+                Some(Box::new(Moa {
+                    router: linear(&format!("{p}.attn_moa_router"), experts, hidden)?,
+                    k: rows("attn_kv", 0, attn_hidden, hidden)?,
+                    v: rows("attn_kv", attn_hidden, attn_hidden, hidden)?,
+                    q: (0..experts).map(|e| rows("attn_moa_in", e * attn_hidden, attn_hidden, hidden)).collect::<Result<_, _>>()?,
+                    out: (0..experts).map(|e| rows("attn_moa_out", e * hidden, hidden, attn_hidden)).collect::<Result<_, _>>()?,
+                    bias: vector(mapping, &format!("{p}.attn_moa_bias.weight"), hidden)?,
+                    top_k,
+                }))
+            } else {
+                None
+            };
+            let ffn_bias = if has_tensor(mapping, &format!("{p}.ffn_moe_bias.weight")) { Some(vector(mapping, &format!("{p}.ffn_moe_bias.weight"), hidden)?) } else { None };
             let out = match (&attn, &cfg.delta, &cfg.mamba) {
+                (Attn::Std { .. }, _, _) if moa.is_some() => Linear::from_parts(Tensor { shape: vec![1, 1], data: vec![0.0] }, 1, 1, None)?,
                 (Attn::Rglru(_), _, _) => linear(&format!("{p}.rglru_out"), hidden, cfg.rglru.as_ref().map_or(hidden, |r| r.width))?,
                 (Attn::ShortConv(_), _, _) => {
                     linear(&format!("{p}.shortconv_out"), hidden, hidden)?
@@ -2561,6 +2617,8 @@ impl RustDecoder {
                 },
                 dsa_shared,
                 diff,
+                moa,
+                ffn_bias,
                 parallel: hybrid::ParallelMixer::load(&cfg, mapping, &p, i, &linear)?,
                 zamba: zamba::ZambaCall::load(&cfg, mapping, i, &linear)?,
                 attn,
@@ -3309,6 +3367,7 @@ impl RustDecoder {
         }
         match &layer.attn {
             Attn::Std { .. } if layer.diff.is_some() => Some("differential attention (no device kernel)"),
+            Attn::Std { .. } if layer.moa.is_some() => Some("a mixture of attention heads (no device kernel)"),
             Attn::Std { .. } => {
                 // the element-wise gate kernels would read a gate with one value per head (Laguna, Step-3.5) as garbage: that gate and
                 // the value scale of MiMo-V2 have their own device operations (`head_gate_mul`, `scale_inplace`)
@@ -3388,6 +3447,9 @@ impl RustDecoder {
     /// Why the feed-forward of `layer` has to use the host reference code although the mixer runs on the device.
     fn ffn_host_reason(&self, layer_idx: usize, layer: &Layer, arch_ok: bool, clamp_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
+        if layer.ffn_bias.is_some() {
+            return Some("a bias behind the sum of the experts");
+        }
         let native = |a: Activation| matches!(a, Activation::Silu | Activation::GeluTanh) || arch_ok;
         // the clamped SwiGLU (Hy4, GLM-5-Next, Step-3.7) and SiTU (Kimi K3) need clamp kernels; earlier unclamped layers run natively
         if !clamp_ok
@@ -9112,7 +9174,15 @@ impl RustDecoder {
                 down.forward(g)
             }
             Ffn::None => Err("layer without a feed-forward".into()),
-            Ffn::Moe(moe) => self.moe_forward(layer_idx, moe, input, workspace),
+            Ffn::Moe(moe) => {
+                let mut out = self.moe_forward(layer_idx, moe, input, workspace)?;
+                if let Some(bias) = &layer.ffn_bias {
+                    for row in out.chunks_exact_mut(bias.len()) {
+                        row.iter_mut().zip(bias).for_each(|(o, b)| *o += b);
+                    }
+                }
+                Ok(out)
+            }
             Ffn::Plain { up, down } => {
                 let mut hidden = up.forward(input)?;
                 let activation = self.cfg.activation;
@@ -9753,11 +9823,36 @@ impl RustDecoder {
                     let mut dsa_rows: Option<Vec<Option<Vec<u32>>>> = None;
                     let mut latent_qkv: [Vec<f32>; 3];
                     let mut moe_values: Vec<f32>;
+                    let mut moa_q: Vec<f32>;
+                    let mut moa_k: Vec<f32>;
+                    let mut moa_v: Vec<f32>;
+                    let mut moa_gates: Vec<(usize, f32)> = Vec::new();
+                    let hidden_size = cfg.hidden;
                     let mut shared_kv: Vec<f32> = Vec::new();
                     let mut shared_v: Vec<f32> = Vec::new();
                     let (q, k, v) = match &layer.attn {
                         Attn::Std { q, k, v } => {
-                            let (q, k, v) = if let Some(value_moe) = &layer.value_moe {
+                            let (q, k, v) = if let Some(moa) = &layer.moa {
+                                // every selected expert gives a query of kv_heads heads; the heads of one key head are made adjacent (key head g, expert j: head g * top_k + j)
+                                moa_k = moa.k.forward(&normed)?;
+                                moa_v = moa.v.forward(&normed)?;
+                                let logits = moa.router.forward(&normed)?;
+                                let experts = moa.q.len();
+                                let attn_hidden = kv_heads * dk;
+                                moa_q = vec![0.0; rows * moa.top_k * attn_hidden];
+                                for r in 0..rows {
+                                    let route = moa_route(&logits[r * experts..(r + 1) * experts], moa.top_k);
+                                    for (j, &(e, gate)) in route.iter().enumerate() {
+                                        let qj = moa.q[e].forward(&normed[r * hidden_size..(r + 1) * hidden_size])?;
+                                        for g in 0..kv_heads {
+                                            let dst = r * moa.top_k * attn_hidden + (g * moa.top_k + j) * dk;
+                                            moa_q[dst..dst + dk].copy_from_slice(&qj[g * dk..(g + 1) * dk]);
+                                        }
+                                        moa_gates.push((e, gate));
+                                    }
+                                }
+                                (&mut moa_q, &mut moa_k, &mut moa_v)
+                            } else if let Some(value_moe) = &layer.value_moe {
                                 let qk = Linear::forward_group_with_workspace(
                                     &[q, k],
                                     &normed,
@@ -10012,7 +10107,31 @@ impl RustDecoder {
                         rms(&mut attn, weight, cfg.eps);
                     }
                     dump_layer("attnout", i, &attn);
-                    layer.out.forward(&attn)?
+                    if let Some(moa) = &layer.moa {
+                        // the mixture of attention heads: expert j's output is the heads g * top_k + j of every key head g, through the expert's output projection
+                        let attn_hidden = kv_heads * dk;
+                        let mut mixed = vec![0.0f32; rows * cfg.hidden];
+                        for r in 0..rows {
+                            let row = &attn[r * moa.top_k * attn_hidden..(r + 1) * moa.top_k * attn_hidden];
+                            for j in 0..moa.top_k {
+                                let (e, gate) = moa_gates[r * moa.top_k + j];
+                                let mut part = Vec::with_capacity(attn_hidden);
+                                for g in 0..kv_heads {
+                                    part.extend_from_slice(&row[(g * moa.top_k + j) * dk..(g * moa.top_k + j + 1) * dk]);
+                                }
+                                let y = moa.out[e].forward(&part)?;
+                                for (m, v) in mixed[r * cfg.hidden..(r + 1) * cfg.hidden].iter_mut().zip(&y) {
+                                    *m += gate * v;
+                                }
+                            }
+                            for (m, b) in mixed[r * cfg.hidden..(r + 1) * cfg.hidden].iter_mut().zip(&moa.bias) {
+                                *m += b;
+                            }
+                        }
+                        mixed
+                    } else {
+                        layer.out.forward(&attn)?
+                    }
                 };
                 if let Some(parallel) = &layer.parallel {
                     for (b, m) in branch.iter_mut().zip(self.parallel_branch(parallel, i, &normed, tables, lengths)?) {

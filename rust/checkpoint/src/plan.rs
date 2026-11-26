@@ -896,6 +896,9 @@ impl Plan {
         if raw == "diffllama" {
             return crate::diffllama::plan(cfg);
         }
+        if raw == "jetmoe" {
+            return crate::jetmoe::plan(cfg);
+        }
         if raw == "dbrx" {
             let mut normalized = dbrx_config(cfg)?;
             normalized["model_type"] = "qwen3_moe".into();
@@ -2878,6 +2881,9 @@ impl Plan {
             if idx >= self.layers {
                 let mtp_idx = idx - self.layers;
                 return self.map_mtp(&format!("{mtp_idx}.{suf}"));
+            }
+            if self.arch == "jetmoe" {
+                return crate::jetmoe::map(idx, suf).ok_or_else(|| format!("unexpected JetMoE tensor {n:?}"));
             }
             if self.arch == "diffllama" {
                 if let Some(m) = crate::diffllama::map(idx, suf) {

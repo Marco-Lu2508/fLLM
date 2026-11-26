@@ -36,6 +36,7 @@ mod plan;
 mod quantize;
 mod requant;
 mod diffllama;
+mod jetmoe;
 mod recurrent_gemma;
 mod rwkv_vocab;
 pub mod safetensors;
