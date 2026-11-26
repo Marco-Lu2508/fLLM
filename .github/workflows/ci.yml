@@ -45,6 +45,9 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: CUDA/HIP prototypes match their definitions
+        run: python3 scripts/check_cuda_signatures.py
+
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
