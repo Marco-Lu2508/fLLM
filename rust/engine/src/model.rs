@@ -128,6 +128,7 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "step3",
     "telechat",
     "zaya1",
+    "recurrent_gemma",
     "dspine",
     "dflash",
 ];
@@ -548,6 +549,7 @@ impl GgufModel {
             || self.config.mamba.is_some()
             || self.config.mamba1.is_some()
             || self.config.rwkv.is_some()
+            || self.config.rglru.is_some()
             || self.config.hybrid.stateful()
             || self
                 .config

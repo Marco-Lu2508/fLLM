@@ -232,6 +232,18 @@ pub struct ShortConvConfig {
     pub layers: Vec<bool>,
 }
 
+/// RecurrentGemma / Griffin: layers whose temporal mixer is a gated convolution plus an RG-LRU (`true`), the others are local attention.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RgLruConfig {
+    /// Width of the recurrence (`lru_width`).
+    pub width: usize,
+    /// Kernel of the depthwise causal convolution.
+    pub kernel: usize,
+    /// Blocks of the block-diagonal gate matrices (the attention heads of the checkpoint).
+    pub blocks: usize,
+    pub layers: Vec<bool>,
+}
+
 /// Mamba-1 layers (per-channel state, low-rank time step); Falcon-Mamba also normalises the
 /// time step, B and C.
 #[derive(Clone, Debug, PartialEq)]
@@ -541,6 +553,8 @@ pub struct ModelConfig {
     pub mamba1: Option<Mamba1Config>,
     pub rwkv: Option<RwkvConfig>,
     pub shortconv: Option<ShortConvConfig>,
+    /// RG-LRU recurrent layers (RecurrentGemma).
+    pub rglru: Option<RgLruConfig>,
     /// Layers that skip rotary embeddings (`None`: all rotate).
     pub rope_layers: Option<Vec<bool>>,
     /// Rotary base of every layer (Granite SWA); `0` marks a layer without rotary embeddings.
@@ -1107,7 +1121,7 @@ impl ModelConfig {
             rope,
             qk_norm,
             activation: match a {
-                _ if gemma => Activation::GeluTanh,
+                _ if gemma || a == "recurrent_gemma" => Activation::GeluTanh,
                 "starcoder2" | "gpt2" | "starcoder" | "gpt_neo" | "gptj" | "bloom" | "phi" => {
                     Activation::GeluTanh
                 }
@@ -1178,6 +1192,7 @@ impl ModelConfig {
                 head_mean: key(meta, a, "hc_head_mean").and_then(Value::as_bool).unwrap_or(false),
             }),
             shortconv: parse_shortconv(meta, a, layers)?,
+            rglru: parse_rglru(meta, a, layers)?,
             delta: parse_delta(meta, a),
             mamba: parse_mamba(meta, a),
             rwkv: matches!(a, "rwkv6" | "rwkv7")
@@ -1461,6 +1476,28 @@ fn parse_shortconv(
     }))
 }
 
+fn parse_rglru(meta: &Map<String, Value>, arch: &str, layers: usize) -> Result<Option<RgLruConfig>, String> {
+    if arch != "recurrent_gemma" {
+        return Ok(None);
+    }
+    let width = uint(meta, arch, "rglru.width").ok_or("missing RecurrentGemma rglru.width")?;
+    let kernel = uint(meta, arch, "rglru.kernel").ok_or("missing RecurrentGemma rglru.kernel")?;
+    let blocks = uint(meta, arch, "rglru.blocks").ok_or("missing RecurrentGemma rglru.blocks")?;
+    if width == 0 || kernel == 0 || blocks == 0 || !width.is_multiple_of(blocks) {
+        return Err("RecurrentGemma rglru width, kernel and blocks must be positive and the width a multiple of the blocks".into());
+    }
+    let flags = key(meta, arch, "rglru.layer_flags")
+        .and_then(Value::as_array)
+        .ok_or("missing RecurrentGemma rglru.layer_flags")?
+        .iter()
+        .map(|v| v.as_bool().ok_or("RecurrentGemma rglru.layer_flags must be booleans"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if flags.len() != layers {
+        return Err("RecurrentGemma rglru.layer_flags length differs from block_count".into());
+    }
+    Ok(Some(RgLruConfig { width, kernel, blocks, layers: flags }))
+}
+
 fn parse_mamba(meta: &Map<String, Value>, arch: &str) -> Option<MambaConfig> {
     if !matches!(arch, "mamba2" | "granitehybrid" | "bamba" | "nemotron_h" | "nemotron_h_moe" | "falcon-h1" | "zamba2") {
         return None;
@@ -1737,6 +1774,7 @@ pub(crate) mod tests_support {
             mamba1: None,
             rwkv: None,
             shortconv: None,
+            rglru: None,
             rope_layers: None,
             layer_rope_bases: None,
             qk_norm_after_rope: false,

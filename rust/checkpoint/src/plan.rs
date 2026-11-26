@@ -890,6 +890,9 @@ impl Plan {
         if matches!(raw.as_str(), "lfm2" | "lfm2_moe") {
             return Self::from_lfm2(cfg);
         }
+        if raw == "recurrent_gemma" {
+            return crate::recurrent_gemma::plan(cfg);
+        }
         if raw == "dbrx" {
             let mut normalized = dbrx_config(cfg)?;
             normalized["model_type"] = "qwen3_moe".into();
@@ -2817,6 +2820,7 @@ impl Plan {
             "model.embedding_norm.weight" if matches!(self.arch.as_str(), "lfm2" | "lfm2moe") => {
                 return Ok(plain("output_norm.weight"))
             }
+            "model.final_norm.weight" if self.arch == "recurrent_gemma" => return Ok(norm("output_norm.weight")),
             "model.embed_tokens.weight"
             | "model.word_embeddings.weight"
             | "transformer.wte.weight"
@@ -2871,6 +2875,9 @@ impl Plan {
             if idx >= self.layers {
                 let mtp_idx = idx - self.layers;
                 return self.map_mtp(&format!("{mtp_idx}.{suf}"));
+            }
+            if self.arch == "recurrent_gemma" {
+                return crate::recurrent_gemma::map(idx, suf, self.norm_add).ok_or_else(|| format!("unexpected RecurrentGemma tensor {n:?}"));
             }
             if matches!(self.arch.as_str(), "lfm2" | "lfm2moe") {
                 match suf {

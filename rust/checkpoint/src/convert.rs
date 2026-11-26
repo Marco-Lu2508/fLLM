@@ -242,6 +242,8 @@ pub fn prepare_checkpoint(
             patched["intermediate_size"] = first;
         }
         patched
+    } else if arch == "recurrent_gemma" {
+        crate::recurrent_gemma::config(&cfg)?
     } else if arch == "dbrx" {
         crate::plan::dbrx_config(&cfg)?
     } else if arch == "zamba2" {
@@ -1018,6 +1020,15 @@ pub fn prepare_checkpoint(
         let mut required = vec!["attn_output.weight"];
         let moe_here = plan.moe && plan.moe_layers[i as usize];
         if plan.family == Family::Classic {
+            continue;
+        }
+        if arch == "recurrent_gemma" {
+            for n in crate::recurrent_gemma::layer_requirements(plan.kinds[i as usize] == b'R') {
+                let key = format!("blk.{i}.{n}");
+                if !byname.contains_key(key.as_str()) {
+                    return Err(format!("missing required tensor {key}").into());
+                }
+            }
             continue;
         }
         if let Some(need) = crate::hybrid::layer_requirements(arch, i, &cfg) {

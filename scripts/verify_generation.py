@@ -82,11 +82,8 @@ def verify(arch, fllm, work, port, workers=4):
                 if server.poll() is not None:
                     return {"arch": arch, "ok": False, "error": server.stdout.read().decode()[-400:]}
                 time.sleep(0.5)
-        with concurrent.futures.ThreadPoolExecutor(4) as pool:
-            got = list(pool.map(lambda p: post(port, p), PROMPTS))
         with concurrent.futures.ThreadPoolExecutor(workers) as pool:
-            name = model_name(port)
-            got = list(pool.map(lambda p: post(port, p, name), PROMPTS))
+            got = list(pool.map(lambda p: post(port, p), PROMPTS))
     finally:
         server.terminate()
     # a random model may emit the end-of-sequence token that transformers was told to suppress

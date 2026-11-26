@@ -35,6 +35,7 @@ mod packed_quant;
 mod plan;
 mod quantize;
 mod requant;
+mod recurrent_gemma;
 mod rwkv_vocab;
 pub mod safetensors;
 mod st;

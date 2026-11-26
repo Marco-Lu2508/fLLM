@@ -335,8 +335,26 @@ struct ShortConv {
     bias: Option<Vec<f32>>,
 }
 
+/// RecurrentGemma's recurrent block: `linear_y` (GELU gate), `linear_x` into a depthwise causal convolution and the RG-LRU, their product through `linear_out`
+/// (the output projection of the layer). The gates are block-diagonal (`blocks` blocks of `width / blocks` channels).
+struct RgLru {
+    y: Linear,
+    x: Linear,
+    /// `width x kernel` convolution taps, the bias of the convolution.
+    conv: Vec<f32>,
+    conv_bias: Vec<f32>,
+    /// `recurrent_param`: the decay logit of every channel.
+    a: Vec<f32>,
+    /// `blocks x bw x bw` (input index, then output index) and `blocks x bw`.
+    input_gate: Vec<f32>,
+    input_gate_bias: Vec<f32>,
+    recurrent_gate: Vec<f32>,
+    recurrent_gate_bias: Vec<f32>,
+}
+
 #[allow(clippy::large_enum_variant)]
 enum Attn {
+    Rglru(Box<RgLru>),
     ShortConv(Box<ShortConv>),
     Mamba1(Box<Mamba1>),
     /// Feed-forward-only layer (Nemotron-H keeps one mixer per layer).
@@ -495,6 +513,7 @@ impl Layer {
             Attn::Linear(d) => all.extend([&mut d.qkv, &mut d.gate, &mut d.beta, &mut d.alpha]),
             Attn::Kda(k) => all.extend(k.linears_mut()),
             Attn::Rwkv(r) => all.extend(r.linears_mut()),
+            Attn::Rglru(m) => all.extend([&mut m.y, &mut m.x]),
             Attn::ShortConv(m) => all.push(&mut m.input),
             Attn::Mamba(m) => all.push(&mut m.input),
             Attn::Mamba1(m) => all.extend([&mut m.input, &mut m.x_proj, &mut m.dt_proj]),
@@ -1998,7 +2017,21 @@ impl RustDecoder {
             let (qr, kr, vr) = (heads * dk, kv_heads * dk, kv_heads * dv);
             let q_rows = tensor_rows(mapping, &format!("{p}.attn_q.weight"));
             let output_gate = q_rows == Some(2 * qr) && cfg.mla.is_none();
-            let attn = if cfg
+            let attn = if let (Some(rg), true) = (cfg.rglru.as_ref(), cfg.rglru.as_ref().is_some_and(|r| r.layers.get(i).copied().unwrap_or(false))) {
+                let (w, k, blocks) = (rg.width, rg.kernel, rg.blocks);
+                let bw = w / blocks;
+                Attn::Rglru(Box::new(RgLru {
+                    y: linear(&format!("{p}.rglru_y"), w, hidden)?,
+                    x: linear(&format!("{p}.rglru_x"), w, hidden)?,
+                    conv: vector(mapping, &format!("{p}.rglru_conv.weight"), w * k)?,
+                    conv_bias: vector(mapping, &format!("{p}.rglru_conv.bias"), w)?,
+                    a: vector(mapping, &format!("{p}.rglru_a.weight"), w)?,
+                    input_gate: vector(mapping, &format!("{p}.rglru_input_gate.weight"), blocks * bw * bw)?,
+                    input_gate_bias: vector(mapping, &format!("{p}.rglru_input_gate.bias"), w)?,
+                    recurrent_gate: vector(mapping, &format!("{p}.rglru_recurrent_gate.weight"), blocks * bw * bw)?,
+                    recurrent_gate_bias: vector(mapping, &format!("{p}.rglru_recurrent_gate.bias"), w)?,
+                }))
+            } else if cfg
                 .shortconv
                 .as_ref()
                 .is_some_and(|s| s.layers.get(i).copied().unwrap_or(false))
@@ -2355,6 +2388,7 @@ impl RustDecoder {
                 None
             };
             let out = match (&attn, &cfg.delta, &cfg.mamba) {
+                (Attn::Rglru(_), _, _) => linear(&format!("{p}.rglru_out"), hidden, cfg.rglru.as_ref().map_or(hidden, |r| r.width))?,
                 (Attn::ShortConv(_), _, _) => {
                     linear(&format!("{p}.shortconv_out"), hidden, hidden)?
                 }
@@ -3323,6 +3357,7 @@ impl RustDecoder {
                     Some("multi-head latent attention")
                 }
             }
+            Attn::Rglru(_) => Some("an RG-LRU recurrent block (no device operations yet)"),
             Attn::ShortConv(_) => {
                 if conv_ok && !cfg.parallel_residual {
                     None
@@ -7532,6 +7567,93 @@ impl RustDecoder {
         projection.forward(&output)
     }
 
+    /// RecurrentGemma's recurrent block for a batch of tokens (the rows of one sequence in order): `out(gelu(y(x)) * rglru(conv(x(x))))`. The state of a sequence
+    /// holds the last `kernel - 1` convolution inputs and the recurrent state; it restarts at position 0 (the reset of the reference).
+    fn rglru_forward(
+        &self,
+        m: &RgLru,
+        projection: &Linear,
+        layer: usize,
+        input: &[f32],
+        tables: &[i64],
+        lengths: &[i64],
+    ) -> Result<Vec<f32>, String> {
+        let rg = self.cfg.rglru.as_ref().ok_or("missing RG-LRU configuration")?;
+        let (w, k, blocks) = (rg.width, rg.kernel, rg.blocks);
+        let bw = w / blocks;
+        let rows = lengths.len();
+        let gate_y = m.y.forward(input)?;
+        let xin = m.x.forward(input)?;
+        let mut mixed = vec![0.0f32; rows * w];
+        let mut store = self.states.lock().map_err(|_| "recurrent state lock poisoned")?;
+        for (row, &length) in lengths.iter().enumerate() {
+            let position = usize::try_from(length).ok().and_then(|n| n.checked_sub(1)).ok_or("invalid RG-LRU sequence position")?;
+            let first = tables[row * self.stride];
+            store.clock += 1;
+            let clock = store.clock;
+            if !store.map.contains_key(&first) && store.map.len() >= self.state_capacity {
+                if let Some(oldest) = store.map.iter().min_by_key(|(_, s)| s.used).map(|(key, _)| *key) {
+                    store.map.remove(&oldest);
+                }
+            }
+            let seq = store.map.entry(first).or_insert_with(|| SeqState { used: clock, layers: (0..self.cfg.layers).map(|_| None).collect() });
+            seq.used = clock;
+            if position == 0 {
+                seq.layers[layer] = None;
+            }
+            let state = seq.layers[layer].get_or_insert_with(|| LayerState { len: 0, conv: vec![0.0; w * (k - 1)], rec: vec![0.0; w] });
+            if state.len != position {
+                return Err(format!("RG-LRU layer {layer} state holds {} tokens, got position {position}", state.len));
+            }
+            let reset = position == 0;
+            let x = &xin[row * w..(row + 1) * w];
+            // depthwise causal convolution
+            let mut act = vec![0.0f32; w];
+            for c in 0..w {
+                let history = &mut state.conv[c * (k - 1)..(c + 1) * (k - 1)];
+                let taps = &m.conv[c * k..(c + 1) * k];
+                let mut value = m.conv_bias[c];
+                for (tap, previous) in taps.iter().zip(history.iter()) {
+                    value += tap * previous;
+                }
+                value += taps[k - 1] * x[c];
+                act[c] = value;
+                if k > 1 {
+                    history.copy_within(1.., 0);
+                    history[k - 2] = x[c];
+                }
+            }
+            // gates: block-diagonal matrices, out[j] = sum_k act[k] * W[k][j] + bias[j]
+            let out_row = &mut mixed[row * w..(row + 1) * w];
+            for b in 0..blocks {
+                let block = &act[b * bw..(b + 1) * bw];
+                for j in 0..bw {
+                    let (mut gi, mut gr) = (m.input_gate_bias[b * bw + j], m.recurrent_gate_bias[b * bw + j]);
+                    for (kk, a) in block.iter().enumerate() {
+                        gi += a * m.input_gate[(b * bw + kk) * bw + j];
+                        gr += a * m.recurrent_gate[(b * bw + kk) * bw + j];
+                    }
+                    let c = b * bw + j;
+                    let input_gate = 1.0 / (1.0 + (-gi).exp());
+                    let recurrent_gate = 1.0 / (1.0 + (-gr).exp());
+                    let softplus = if m.a[c] > 20.0 { m.a[c] } else { m.a[c].exp().ln_1p() };
+                    let log_a = -8.0 * recurrent_gate * softplus;
+                    let decay = log_a.exp();
+                    let multiplier = if reset { 1.0 } else { (1.0 - (2.0 * log_a).exp()).sqrt() };
+                    let h = if reset { 0.0 } else { decay * state.rec[c] } + act[c] * input_gate * multiplier;
+                    state.rec[c] = h;
+                    out_row[c] = h;
+                }
+            }
+            state.len += 1;
+        }
+        drop(store);
+        for (o, y) in mixed.iter_mut().zip(&gate_y) {
+            *o *= activate(Activation::GeluTanh, *y);
+        }
+        projection.forward(&mixed)
+    }
+
     /// Mamba-1 mixer for a batch of tokens (selective scan with a per-channel state).
     fn mamba1_forward(
         &self,
@@ -9596,7 +9718,9 @@ impl RustDecoder {
                     self.record_layer_tap_host(i, &x, rows);
                     continue;
                 }
-                let mut branch = if let Attn::ShortConv(conv) = &layer.attn {
+                let mut branch = if let Attn::Rglru(rg) = &layer.attn {
+                    self.rglru_forward(rg, &layer.out, i, &normed, tables, lengths)?
+                } else if let Attn::ShortConv(conv) = &layer.attn {
                     self.shortconv_forward(conv, &layer.out, i, &normed, tables, lengths)?
                 } else if let Attn::Linear(delta) = &layer.attn {
                     self.delta_forward(delta, &layer.out, i, &normed, tables, lengths)?
@@ -9745,7 +9869,8 @@ impl RustDecoder {
                             }
                             (q, k, v)
                         }
-                        Attn::ShortConv(_)
+                        Attn::Rglru(_)
+                        | Attn::ShortConv(_)
                         | Attn::Linear(_)
                         | Attn::Mamba(_)
                         | Attn::Mamba1(_)

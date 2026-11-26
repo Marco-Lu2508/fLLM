@@ -675,6 +675,14 @@ def config_for(arch: str, vocab: int):
         ),
         "g9v3": lambda: _g9_config(vocab),
         "internlm2": lambda: _il2_config(vocab),
+        # Griffin: two RG-LRU recurrent blocks, then one local-attention block (window 8, one KV head, half the head width rotated), twice
+        "recurrent_gemma": lambda: T.RecurrentGemmaConfig(
+            vocab_size=vocab, hidden_size=64, intermediate_size=192, num_hidden_layers=6, num_attention_heads=4,
+            num_key_value_heads=1, lru_width=64, attention_window_size=8, conv1d_width=4,
+            block_types=("recurrent", "recurrent", "attention"), logits_soft_cap=30.0, rms_norm_eps=1e-6,
+            rope_parameters={"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5},
+            bos_token_id=1, eos_token_id=2, pad_token_id=3, tie_word_embeddings=True, max_position_embeddings=256,
+        ),
         "nemotron_h_latent": lambda: T.NemotronHConfig(
             vocab_size=vocab, hidden_size=64, layers_block_type=[
                 "linear_attention", "full_attention", "moe", "moe", "linear_attention"],
