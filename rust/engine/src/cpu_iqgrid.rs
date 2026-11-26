@@ -29,6 +29,9 @@ pub(crate) const IQ3_S: u32 = 21;
 pub(crate) const IQ2_S: u32 = 22;
 pub(crate) const IQ1_S: u32 = 19;
 pub(crate) const IQ1_M: u32 = 29;
+/// Ternary formats of llama.cpp: TQ1_0 (base-3 packed, 54 bytes) and TQ2_0 (2-bit codes, 66 bytes) hold values -1, 0, 1 times a binary16 scale at the END of the block.
+pub(crate) const TQ1_0: u32 = 34;
+pub(crate) const TQ2_0: u32 = 35;
 
 /// Values per block of every grid format.
 #[cfg(test)]
@@ -44,7 +47,7 @@ const TILE: usize = 16;
 
 /// Whether `kind` is one of the formats of this module.
 pub(crate) const fn handles(kind: u32) -> bool {
-    matches!(kind, IQ2_XXS | IQ2_XS | IQ3_XXS | IQ3_S | IQ2_S | IQ1_S | IQ1_M)
+    matches!(kind, IQ2_XXS | IQ2_XS | IQ3_XXS | IQ3_S | IQ2_S | IQ1_S | IQ1_M | TQ1_0 | TQ2_0)
 }
 
 /// Bytes of one 256-value block.
@@ -56,6 +59,8 @@ pub(crate) const fn block_bytes(kind: u32) -> usize {
         IQ3_S => 110,
         IQ1_S => 50,
         IQ1_M => 56,
+        TQ1_0 => 54,
+        TQ2_0 => 66,
         _ => 82,
     }
 }
@@ -65,7 +70,7 @@ pub(crate) const fn block_bytes(kind: u32) -> usize {
 pub(crate) const fn unit(kind: u32) -> f32 {
     match kind {
         IQ3_XXS => 0.25,
-        IQ3_S => 1.0,
+        IQ3_S | TQ1_0 | TQ2_0 => 1.0,
         _ => 0.125,
     }
 }
@@ -171,8 +176,30 @@ fn iq1_group<const KIND: u32>(raw: &[u8], g: usize) -> ([usize; 4], [i32; 2]) {
     }
 }
 
+/// Ternary value (-1, 0, 1) number `index` (0..256) of a TQ1_0 or TQ2_0 block (`quant_extra::dequantize`): TQ2_0 keeps four 2-bit codes per byte in
+/// two chunks of 32 bytes; TQ1_0 five base-3 digits per byte for the first 240 values (160 from `qs[0..32]`, 80 from `qs[32..48]`) and four per
+/// byte of `qh` for the last 16.
+#[inline(always)]
+fn tq_value<const KIND: u32>(raw: &[u8], index: usize) -> i32 {
+    if KIND == TQ2_0 {
+        let (chunk, rest) = (index / 128, index % 128);
+        i32::from((raw[chunk * 32 + rest % 32] >> (2 * (rest / 32))) & 3) - 1
+    } else {
+        const POW3: [u16; 5] = [1, 3, 9, 27, 81];
+        let (byte, power) = if index < 160 {
+            (raw[index % 32], POW3[index / 32])
+        } else if index < 240 {
+            (raw[32 + (index - 160) % 16], POW3[(index - 160) / 16])
+        } else {
+            (raw[48 + (index - 240) % 4], POW3[(index - 240) / 4])
+        };
+        let q = (u16::from(byte) * power) as u8;
+        (i32::from((u16::from(q) * 3) >> 8)) - 1
+    }
+}
+
 /// One decoded group of 32 values.
-#[cfg(any(test, all(target_arch = "aarch64", target_endian = "little")))]
+#[cfg(any(test, target_arch = "x86_64", all(target_arch = "aarch64", target_endian = "little")))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Group {
     /// Lattice bytes in value order (little-endian words of 8 bytes).
@@ -201,12 +228,16 @@ pub(crate) fn head(kind: u32, raw: &[u8]) -> f32 {
         let bits = nibble(0) | (nibble(1) << 4) | (nibble(2) << 8) | (nibble(3) << 12);
         return half::f16::from_bits(bits).to_f32() * unit(kind);
     }
+    if kind == TQ1_0 || kind == TQ2_0 {
+        let at = block_bytes(kind) - 2;
+        return half::f16::from_le_bytes([raw[at], raw[at + 1]]).to_f32();
+    }
     half::f16::from_le_bytes([raw[0], raw[1]]).to_f32() * unit(kind)
 }
 
 /// Group `g` (0..8) of the block `raw` (`block_bytes(KIND)` bytes) of format `KIND`.
 #[inline(always)]
-#[cfg(any(test, all(target_arch = "aarch64", target_endian = "little")))]
+#[cfg(any(test, target_arch = "x86_64", all(target_arch = "aarch64", target_endian = "little")))]
 pub(crate) fn group<const KIND: u32>(raw: &[u8], g: usize) -> Group {
     let mut out = Group::default();
     match KIND {
@@ -247,6 +278,15 @@ pub(crate) fn group<const KIND: u32>(raw: &[u8], g: usize) -> Group {
                 out.sign[l] = KSIGNS64[((signs >> (7 * l)) & 0x7f) as usize];
             }
             out.scale = [2 * (signs >> 28) as i32 + 1; 2];
+        }
+        TQ1_0 | TQ2_0 => {
+            // magnitude 0 / 1 and a +-1 sign byte per value; scale 1 and the block scale `head` carries the rest
+            for j in 0..32 {
+                let v = tq_value::<KIND>(raw, g * 32 + j);
+                out.grid[j / 8] |= u64::from(v.unsigned_abs() as u8) << (8 * (j % 8));
+                out.sign[j / 8] |= u64::from(if v < 0 { 0xffu8 } else { 1 }) << (8 * (j % 8));
+            }
+            out.scale = [1; 2];
         }
         IQ1_S | IQ1_M => {
             let (index, scale) = iq1_group::<KIND>(raw, g);
@@ -304,6 +344,8 @@ pub(crate) mod x86 {
             super::IQ2_S => panel_k::<22>(w, first, valid, x, nb, batch, out),
             super::IQ1_S => panel_k::<19>(w, first, valid, x, nb, batch, out),
             super::IQ1_M => panel_k::<29>(w, first, valid, x, nb, batch, out),
+            super::TQ1_0 => panel_k::<34>(w, first, valid, x, nb, batch, out),
+            super::TQ2_0 => panel_k::<35>(w, first, valid, x, nb, batch, out),
             other => unreachable!("not a grid IQ format: {other}"),
         }
     }
@@ -344,7 +386,6 @@ pub(crate) mod x86 {
         scale: __m256i,
     }
 
-    #[cfg(test)]
     #[inline]
     #[target_feature(enable = "avx2")]
     unsafe fn vectors(g: &super::Group) -> Vectors {
@@ -410,6 +451,7 @@ pub(crate) mod x86 {
                 let scale = (2 * (signs >> 28) + 1) as i32;
                 Vectors { grid, sign: ksign(signs), scale: two(scale, scale) }
             }
+            super::TQ1_0 | super::TQ2_0 => vectors(&super::group::<KIND>(raw, g)),
             super::IQ1_S | super::IQ1_M => {
                 let (index, scale) = super::iq1_group::<KIND>(raw, g);
                 let index = _mm_setr_epi32(index[0] as i32, index[1] as i32, index[2] as i32, index[3] as i32);
@@ -524,6 +566,8 @@ pub(crate) mod x86 {
             check::<22>(&mut rng);
             check::<19>(&mut rng);
             check::<29>(&mut rng);
+            check::<34>(&mut rng);
+            check::<35>(&mut rng);
         }
     }
 }
@@ -561,6 +605,8 @@ pub(crate) mod neon {
             super::IQ2_S => panel_k::<22>(w, first, valid, x, nb, batch, out),
             super::IQ1_S => panel_k::<19>(w, first, valid, x, nb, batch, out),
             super::IQ1_M => panel_k::<29>(w, first, valid, x, nb, batch, out),
+            super::TQ1_0 => panel_k::<34>(w, first, valid, x, nb, batch, out),
+            super::TQ2_0 => panel_k::<35>(w, first, valid, x, nb, batch, out),
             other => unreachable!("not a grid IQ format: {other}"),
         }
     }
@@ -662,7 +708,7 @@ mod tests {
     use crate::cpu_quantized::{linear, linear_group, prepare, Projection};
     use crate::cpu_selftest::{compare, random_weights, reference_packed, Lcg};
 
-    const KINDS: [u32; 7] = [IQ2_XXS, IQ2_XS, IQ3_XXS, IQ3_S, IQ2_S, IQ1_S, IQ1_M];
+    const KINDS: [u32; 9] = [IQ2_XXS, IQ2_XS, IQ3_XXS, IQ3_S, IQ2_S, IQ1_S, IQ1_M, TQ1_0, TQ2_0];
 
     fn block_group(kind: u32, raw: &[u8], g: usize) -> Group {
         match kind {
@@ -672,6 +718,8 @@ mod tests {
             IQ3_S => group::<21>(raw, g),
             IQ1_S => group::<19>(raw, g),
             IQ1_M => group::<29>(raw, g),
+            TQ1_0 => group::<34>(raw, g),
+            TQ2_0 => group::<35>(raw, g),
             _ => group::<22>(raw, g),
         }
     }
@@ -692,7 +740,7 @@ mod tests {
             let weights = random_weights(kind, 6, 512, &mut rng);
             let width = block_bytes(kind);
             for raw in weights.chunks_exact(width) {
-                let want = crate::quant_iq::dequantize_iq(raw, kind, BLOCK_VALUES).unwrap();
+                let want = crate::compute::dequantize(raw, kind, BLOCK_VALUES).unwrap();
                 let d = head(kind, raw);
                 for g in 0..GROUPS {
                     let grp = block_group(kind, raw, g);

@@ -1,0 +1,37 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: moe_zero_fold | bindings: ids,w,zs | push: rows,k,routed,rewrite | grid: [min(ceil(rows/128), 65535), 1, 1]
+// Stream::moe_zero_fold: zero experts of the LongCat-Flash router (an expert id >= routed returns its input). zs[r] = sum of the weights w[r * k + j] of
+// the pairs of row r with ids[r * k + j] >= routed, in pair order; with `rewrite` those pairs are redirected to expert 0 with weight 0 (the kernels that
+// index the expert tables by id stay inside them). One invocation per row.
+#define WG 128
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer IdBuf { int ids[]; };
+layout(std430, binding = 1) buffer WBuf { float w[]; };
+layout(std430, binding = 2) buffer ZBuf { float zs[]; };
+layout(push_constant) uniform P {
+    uint rows;
+    uint k;
+    uint routed;
+    uint rewrite;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint r = gl_GlobalInvocationID.x; r < p.rows; r += grid_items) {
+        float sum = 0.0;
+        for (uint j = 0u; j < p.k; j++) {
+            const uint i = r * p.k + j;
+            if (uint(ids[i]) >= p.routed) {
+                sum += w[i];
+                if (p.rewrite != 0u) {
+                    ids[i] = 0;
+                    w[i] = 0.0;
+                }
+            }
+        }
+        zs[r] = sum;
+    }
+}

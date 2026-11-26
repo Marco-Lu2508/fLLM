@@ -60,6 +60,8 @@ pub(crate) fn layout(kind: u32) -> (usize, usize) {
         21 => (256, 110),
         22 => (256, 82),
         29 => (256, 56),
+        34 => (256, 54),
+        35 => (256, 66),
         20 => (32, 18),
         23 => (256, 136),
         39 => (32, 17),
@@ -182,6 +184,8 @@ pub(crate) fn random_weights(kind: u32, rows: usize, cols: usize, rng: &mut Lcg)
                     b[at..at + 2].copy_from_slice(&word.to_le_bytes());
                 }
             }
+            34 => b[52..54].copy_from_slice(&d),
+            35 => b[64..66].copy_from_slice(&d),
             39 => b[0] = 118 + (rng.next() % 16) as u8,
             40 => {
                 // four E4M3 scales (0.25 .. 0.9), then the nibbles
@@ -798,6 +802,8 @@ fn scale_fields(kind: u32) -> std::ops::Range<usize> {
     match kind {
         2 | 6 | 8 | 20 | 23 | 42 | 16 | 17 | 18 | 19 | 21 | 22 => 0..2,
         29 => 48..56,
+        34 => 52..54,
+        35 => 64..66,
         3 | 7 | 12 | 13 => 0..4,
         10 => 80..84,
         11 => 108..110,
@@ -813,7 +819,7 @@ fn scale_fields(kind: u32) -> std::ops::Range<usize> {
 /// products of a `maddubs` pair then reach their maximum, which is where a kernel that
 /// saturates (instead of widening first) loses bits.
 fn saturation_cases(tier: CpuTier, report: &mut Report, rng: &mut Lcg) {
-    for kind in [2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 39, 42, 16, 17, 18, 19, 21, 22, 29] {
+    for kind in [2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 39, 42, 16, 17, 18, 19, 21, 22, 29, 34, 35] {
         let cols = match layout(kind).0 {
             256 => 768,
             64 => 384,
@@ -1329,7 +1335,7 @@ fn scan_gguf(
     let mut picked = Vec::new();
     for info in &model.index().tensors {
         let kind = info.type_id;
-        let supported = matches!(kind, 2 | 3 | 6 | 7 | 10..=14 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 29 | 39 | 42);
+        let supported = matches!(kind, 2 | 3 | 6 | 7 | 10..=14 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 29 | 34 | 35 | 39 | 42);
         if info.dimensions.len() == 2
             && supported
             && (info.dimensions[0] as usize).is_multiple_of(layout(kind).0)
