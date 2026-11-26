@@ -681,6 +681,17 @@ def config_for(arch: str, vocab: int):
             rms_norm_eps=1e-6, bos_token_id=1, eos_token_id=2, tie_word_embeddings=True,
         ),
         "diffllama": lambda: T.DiffLlamaConfig(**common, **dense, rms_norm_eps=1e-5, lambda_std_dev=0.1),
+        # dynamic mask attention keeping 8 keys per query; the MoE variant has 16 product-key experts (4 x 4), 2 of them per token
+        "doge": lambda: T.DogeConfig(
+            vocab_size=vocab, hidden_size=64, intermediate_size=128, num_hidden_layers=3, num_attention_heads=4, num_key_value_heads=2,
+            keep_window_size=8, max_position_embeddings=256, rms_norm_eps=1e-6, bos_token_id=1, eos_token_id=2, pad_token_id=3,
+            tie_word_embeddings=False,
+        ),
+        "doge_moe": lambda: T.DogeConfig(
+            vocab_size=vocab, hidden_size=64, intermediate_size=128, num_hidden_layers=3, num_attention_heads=4, num_key_value_heads=2,
+            keep_window_size=8, max_position_embeddings=256, rms_norm_eps=1e-6, bos_token_id=1, eos_token_id=2, pad_token_id=3,
+            tie_word_embeddings=False, is_moe=True, num_experts=16, num_experts_per_tok=3, norm_topk_prob=True,
+        ),
         # Griffin: two RG-LRU recurrent blocks, then one local-attention block (window 8, one KV head, half the head width rotated), twice
         "recurrent_gemma": lambda: T.RecurrentGemmaConfig(
             vocab_size=vocab, hidden_size=64, intermediate_size=192, num_hidden_layers=6, num_attention_heads=4,
@@ -1390,6 +1401,38 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
                 or getattr(mod, "BaichuanForCausalLM", None)
             )
         model = cls._from_config(cfg, dtype=torch.float32, attn_implementation="eager")
+    if arch in ("doge", "doge_moe"):
+        # the released initialisation (A = 0) makes the dynamic mask a constant: give every layer real decays and residual scales
+        with torch.no_grad():
+            for layer in model.model.layers:
+                layer.self_attn.A.copy_(-2.0 * torch.rand_like(layer.self_attn.A))
+                layer.input_residual.copy_(0.7 + 0.6 * torch.rand_like(layer.input_residual))
+                layer.post_attention_residual.copy_(0.7 + 0.6 * torch.rand_like(layer.post_attention_residual))
+    if arch == "doge_moe":
+        # transformers splits the router logits of all tokens of a batch with one view (`view(2, tokens, -1)`), which mixes the logits of different
+        # tokens in a forward pass over more than one token; the model is meant to route every token on its own (what one-token decoding does)
+        import torch.nn.functional as F
+        from transformers.models.doge import modeling_doge as md
+
+        def routed(self, hidden_states, **kwargs):
+            bsz, seq_len, _ = hidden_states.shape
+            router_logits = self.router_gate(hidden_states).view(bsz * seq_len, 2, -1).transpose(0, 1)
+            (scores_x, scores_y), (indices_x, indices_y) = router_logits.topk(self.num_keys, dim=-1)
+            all_scores = (scores_x.unsqueeze(-1) + scores_y.unsqueeze(-2)).flatten(-2)
+            all_indices = (indices_x.unsqueeze(-1) * self.num_keys + indices_y.unsqueeze(-2)).flatten(-2)
+            scores, position_indices = all_scores.topk(self.top_k, dim=-1)
+            indices = all_indices.gather(-1, position_indices)
+            routing_weights = F.softmax(scores, dim=-1)
+            if self.norm_topk_prob:
+                routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
+            down_embed, up_embed = self.down_embed(indices), self.up_embed(indices)
+            weights = torch.matmul(down_embed, hidden_states.view(bsz * seq_len, -1, 1)).view(bsz * seq_len, -1)
+            weights = self.act_fn(weights) * routing_weights
+            routed_states = torch.matmul(weights.view(bsz * seq_len, 1, -1), up_embed).view(bsz, seq_len, -1)
+            shared = self.down_proj(self.act_fn(self.gate_proj(hidden_states)) * self.up_proj(hidden_states))
+            return shared + routed_states, router_logits
+
+        md.DogeCDMoE.forward = routed
     if arch == "qwen":
         import inspect
         mod = inspect.getmodule(type(model))

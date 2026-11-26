@@ -896,6 +896,9 @@ impl Plan {
         if raw == "diffllama" {
             return crate::diffllama::plan(cfg);
         }
+        if raw == "doge" {
+            return crate::doge::plan(cfg);
+        }
         if raw == "jetmoe" {
             return crate::jetmoe::plan(cfg);
         }
@@ -2884,6 +2887,11 @@ impl Plan {
             }
             if self.arch == "jetmoe" {
                 return crate::jetmoe::map(idx, suf).ok_or_else(|| format!("unexpected JetMoE tensor {n:?}"));
+            }
+            if self.arch == "doge" {
+                if let Some(m) = crate::doge::map(idx, suf) {
+                    return Ok(m);
+                }
             }
             if self.arch == "diffllama" {
                 if let Some(m) = crate::diffllama::map(idx, suf) {

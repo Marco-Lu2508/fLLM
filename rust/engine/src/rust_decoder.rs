@@ -359,6 +359,75 @@ fn moa_route(logits: &[f32], top_k: usize) -> Vec<(usize, f32)> {
     order.into_iter().zip(exps).map(|(e, x)| (e, x / sum)).collect()
 }
 
+/// Doge: dynamic-mask attention (`a`, `dt`: `kv_heads x kv_heads * value_dim`), the two residual-stream vectors, and the product-key experts of the
+/// cross-domain mixture (`router`: `2 * keys x hidden`, `down` / `up`: `experts x hidden`; empty without a mixture).
+struct DogeLayer {
+    a: Vec<f32>,
+    dt: Vec<f32>,
+    input_res: Vec<f32>,
+    post_res: Vec<f32>,
+    router: Vec<f32>,
+    down: Vec<f32>,
+    up: Vec<f32>,
+    keys: usize,
+}
+
+/// `softplus` as PyTorch computes it (linear above 20).
+fn softplus(x: f32) -> f32 {
+    if x > 20.0 { x } else { x.exp().ln_1p() }
+}
+
+impl DogeLayer {
+    /// The decay bias `exp(A * softplus(dt_proj(value)))` of every key head for one key's values (`kv_heads * value_dim`).
+    fn decay(&self, values: &[f32], out: &mut [f32]) {
+        let width = values.len();
+        for (g, o) in out.iter_mut().enumerate() {
+            let logit = compute::dot(&self.dt[g * width..(g + 1) * width], values);
+            *o = (self.a[g] * softplus(logit)).exp();
+        }
+    }
+
+    /// The routed experts of the mixture for every row of `input` (`hidden` per row): the product-key lookup keeps the best `keys` entries of both
+    /// halves of the router logits, scores all pairs, picks the `top_k` best, and mixes `act(down . x) * weight` into the up vectors.
+    fn experts(&self, input: &[f32], hidden: usize, top_k: usize, norm: bool, act: Activation) -> Vec<f32> {
+        let mut out = vec![0.0f32; input.len()];
+        let keys = self.keys;
+        for (row, o) in input.chunks_exact(hidden).zip(out.chunks_exact_mut(hidden)) {
+            let logits: Vec<f32> = (0..2 * keys).map(|j| compute::dot(&self.router[j * hidden..(j + 1) * hidden], row)).collect();
+            let best = |half: &[f32]| {
+                let mut order: Vec<usize> = (0..keys).collect();
+                order.sort_by(|&a, &b| half[b].total_cmp(&half[a]).then(a.cmp(&b)));
+                order
+            };
+            let (x_idx, y_idx) = (best(&logits[..keys]), best(&logits[keys..]));
+            let mut pairs: Vec<(f32, usize, usize)> = Vec::with_capacity(keys * keys);
+            for (px, &ix) in x_idx.iter().enumerate() {
+                for (py, &iy) in y_idx.iter().enumerate() {
+                    pairs.push((logits[ix] + logits[keys + iy], ix * keys + iy, px * keys + py));
+                }
+            }
+            // torch.topk over the flattened (sorted-x, sorted-y) grid: ties go to the earlier grid position
+            pairs.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)));
+            pairs.truncate(top_k);
+            let max = pairs.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = pairs.iter().map(|p| (p.0 - max).exp()).collect();
+            let sum: f32 = exps.iter().sum();
+            let mut weights: Vec<f32> = exps.iter().map(|e| e / sum).collect();
+            if norm {
+                let total: f32 = weights.iter().sum();
+                weights.iter_mut().for_each(|w| *w /= total);
+            }
+            for (&(_, expert, _), w) in pairs.iter().zip(&weights) {
+                let gate = activate(act, compute::dot(&self.down[expert * hidden..(expert + 1) * hidden], row)) * w;
+                for (o, u) in o.iter_mut().zip(&self.up[expert * hidden..(expert + 1) * hidden]) {
+                    *o += gate * u;
+                }
+            }
+        }
+        out
+    }
+}
+
 /// RecurrentGemma's recurrent block: `linear_y` (GELU gate), `linear_x` into a depthwise causal convolution and the RG-LRU, their product through `linear_out`
 /// (the output projection of the layer). The gates are block-diagonal (`blocks` blocks of `width / blocks` channels).
 struct RgLru {
@@ -486,6 +555,8 @@ struct Layer {
     dsa_shared: bool,
     /// DiffLlama differential attention: `(lambda, 1 - lambda_init)` of this layer; the layer attends with two value halves per key head and combines head `h` with head `h + heads / 2`.
     diff: Option<(f32, f32)>,
+    /// Doge: dynamic mask attention, residual vectors and product-key experts.
+    doge: Option<Box<DogeLayer>>,
     /// JetMoE mixture of attention heads (the `q`, `k`, `v` of the layer are placeholders).
     moa: Option<Box<Moa>>,
     /// Bias added behind the sum of the feed-forward experts (JetMoE).
@@ -2457,6 +2528,22 @@ impl RustDecoder {
                 None
             };
             let ffn_bias = if has_tensor(mapping, &format!("{p}.ffn_moe_bias.weight")) { Some(vector(mapping, &format!("{p}.ffn_moe_bias.weight"), hidden)?) } else { None };
+            let doge = if let Some(dc) = cfg.doge.as_ref() {
+                let moe = dc.experts > 0;
+                let keys = (dc.experts as f64).sqrt().floor() as usize;
+                Some(Box::new(DogeLayer {
+                    a: vector(mapping, &format!("{p}.doge_a.weight"), kv_heads)?,
+                    dt: vector(mapping, &format!("{p}.doge_dt.weight"), kv_heads * kv_heads * dv)?,
+                    input_res: vector(mapping, &format!("{p}.doge_input_residual.weight"), hidden)?,
+                    post_res: vector(mapping, &format!("{p}.doge_post_residual.weight"), hidden)?,
+                    router: if moe { vector(mapping, &format!("{p}.doge_router.weight"), 2 * keys * hidden)? } else { Vec::new() },
+                    down: if moe { vector(mapping, &format!("{p}.doge_down_embed.weight"), dc.experts * hidden)? } else { Vec::new() },
+                    up: if moe { vector(mapping, &format!("{p}.doge_up_embed.weight"), dc.experts * hidden)? } else { Vec::new() },
+                    keys,
+                }))
+            } else {
+                None
+            };
             let out = match (&attn, &cfg.delta, &cfg.mamba) {
                 (Attn::Std { .. }, _, _) if moa.is_some() => Linear::from_parts(Tensor { shape: vec![1, 1], data: vec![0.0] }, 1, 1, None)?,
                 (Attn::Rglru(_), _, _) => linear(&format!("{p}.rglru_out"), hidden, cfg.rglru.as_ref().map_or(hidden, |r| r.width))?,
@@ -2617,6 +2704,7 @@ impl RustDecoder {
                 },
                 dsa_shared,
                 diff,
+                doge,
                 moa,
                 ffn_bias,
                 parallel: hybrid::ParallelMixer::load(&cfg, mapping, &p, i, &linear)?,
@@ -3333,6 +3421,9 @@ impl RustDecoder {
     #[allow(clippy::too_many_arguments)]
     fn layer_host_reason(&self, _i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool, rwkv_ok: bool, kda_ok: bool, mamba_ok: bool, zamba_ok: bool, q4_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
+        if layer.doge.is_some() {
+            return Some("Doge dynamic mask attention, residual vectors and product-key experts (no device kernels)");
+        }
         if cfg.v4.is_some() {
             return if self.v4_device { None } else { Some("DeepSeek-V4 hyper-connections and compressed attention (the backend has no kernels for them, or FLLM_V4=host)") };
         }
@@ -6611,6 +6702,28 @@ impl RustDecoder {
                     );
                 }
                 let mut scores = vec![0.0f32; count];
+                // Doge: decay bias per key and key head, and the keys each key head keeps (the `keep` largest decays)
+                let doge_bias: Option<Vec<f32>> = self.layers[layer].doge.as_ref().map(|d| {
+                    let mut bias = vec![0.0f32; count * kv_heads];
+                    for i in 0..count {
+                        d.decay(&v_rows[i * kv_heads * dv..(i + 1) * kv_heads * dv], &mut bias[i * kv_heads..(i + 1) * kv_heads]);
+                    }
+                    bias
+                });
+                let doge_keep: Option<Vec<Vec<bool>>> = match (&doge_bias, cfg.doge.as_ref()) {
+                    (Some(bias), Some(dc)) if count > dc.keep => Some(
+                        (0..kv_heads)
+                            .map(|g| {
+                                let mut order: Vec<usize> = (0..count).collect();
+                                order.sort_by(|&a, &b| bias[b * kv_heads + g].total_cmp(&bias[a * kv_heads + g]).then(a.cmp(&b)));
+                                let mut keep = vec![false; count];
+                                order.iter().take(dc.keep).for_each(|&i| keep[i] = true);
+                                keep
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                };
                 for h in 0..heads {
                     let kh = h / group;
                     let query = &q[(r * heads + h) * dk..(r * heads + h + 1) * dk];
@@ -6628,6 +6741,13 @@ impl RustDecoder {
                         }
                         let k = &k_rows[(i * kv_heads + kh) * dk..(i * kv_heads + kh + 1) * dk];
                         let mut s = compute::dot(query, k) * scale;
+                        if let Some(bias) = &doge_bias {
+                            s += bias[i * kv_heads + kh];
+                            if doge_keep.as_ref().is_some_and(|keep| !keep[kh][i]) {
+                                *score = f32::NEG_INFINITY;
+                                continue;
+                            }
+                        }
                         if let Some(slopes) = &cfg.alibi_slopes {
                             s += slopes[h] * (p as f32 - (n - 1) as f32);
                         }
@@ -9171,7 +9291,14 @@ impl RustDecoder {
                 if let Some(weight) = &layer.ffn_sub_norm {
                     rms(g, weight, self.cfg.eps);
                 }
-                down.forward(g)
+                let mut shared = down.forward(g)?;
+                if let (Some(d), Some(dc)) = (&layer.doge, &self.cfg.doge) {
+                    if dc.experts > 0 {
+                        let routed = d.experts(input, self.cfg.hidden, dc.top_k, dc.norm_topk, self.cfg.activation);
+                        shared.iter_mut().zip(&routed).for_each(|(a, b)| *a += b);
+                    }
+                }
+                Ok(shared)
             }
             Ffn::None => Err("layer without a feed-forward".into()),
             Ffn::Moe(moe) => {
@@ -10036,6 +10163,7 @@ impl RustDecoder {
                     dump_layer("k", i, k);
                     dump_layer("v", i, v);
                     let tiled = cfg.alibi_slopes.is_none()
+                        && layer.doge.is_none()
                         && layer.chunk.is_none()
                         && layer.sinks.is_none()
                         && cfg.attention_softcap.is_none()
@@ -10166,6 +10294,11 @@ impl RustDecoder {
                             *x = (*x + b + l) * std::f32::consts::FRAC_1_SQRT_2;
                         }
                     } else {
+                        if let Some(d) = &layer.doge {
+                            for row in x.chunks_exact_mut(cfg.hidden) {
+                                row.iter_mut().zip(&d.input_res).for_each(|(v, s)| *v *= s);
+                            }
+                        }
                         add_scaled(&mut x, &branch, residual);
                     }
                     dump_layer("attn", i, &x);
@@ -10195,6 +10328,11 @@ impl RustDecoder {
                         *x += (b + f) * residual;
                     }
                 } else {
+                    if let Some(d) = &layer.doge {
+                        for row in x.chunks_exact_mut(cfg.hidden) {
+                            row.iter_mut().zip(&d.post_res).for_each(|(v, s)| *v *= s);
+                        }
+                    }
                     add_scaled(&mut x, &ffn, residual);
                     if layer.takes_shortcut {
                         if let Some(shortcut) = pending_shortcut.take() {

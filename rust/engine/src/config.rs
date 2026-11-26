@@ -244,6 +244,15 @@ pub struct RgLruConfig {
     pub layers: Vec<bool>,
 }
 
+/// Doge: dynamic mask attention (a query keeps the `keep` keys with the largest learned decay) and, with `experts > 0`, the cross-domain mixture of experts of the feed-forward.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DogeConfig {
+    pub keep: usize,
+    pub experts: usize,
+    pub top_k: usize,
+    pub norm_topk: bool,
+}
+
 /// Mamba-1 layers (per-channel state, low-rank time step); Falcon-Mamba also normalises the
 /// time step, B and C.
 #[derive(Clone, Debug, PartialEq)]
@@ -555,6 +564,7 @@ pub struct ModelConfig {
     pub shortconv: Option<ShortConvConfig>,
     /// RG-LRU recurrent layers (RecurrentGemma).
     pub rglru: Option<RgLruConfig>,
+    pub doge: Option<DogeConfig>,
     /// Layers that skip rotary embeddings (`None`: all rotate).
     pub rope_layers: Option<Vec<bool>>,
     /// Rotary base of every layer (Granite SWA); `0` marks a layer without rotary embeddings.
@@ -1193,6 +1203,7 @@ impl ModelConfig {
             }),
             shortconv: parse_shortconv(meta, a, layers)?,
             rglru: parse_rglru(meta, a, layers)?,
+            doge: parse_doge(meta, a)?,
             delta: parse_delta(meta, a),
             mamba: parse_mamba(meta, a),
             rwkv: matches!(a, "rwkv6" | "rwkv7")
@@ -1474,6 +1485,19 @@ fn parse_shortconv(
         kernel,
         layers: flags,
     }))
+}
+
+fn parse_doge(meta: &Map<String, Value>, arch: &str) -> Result<Option<DogeConfig>, String> {
+    if arch != "doge" {
+        return Ok(None);
+    }
+    let keep = uint(meta, arch, "attention.keep_window_size").ok_or("missing Doge attention.keep_window_size")?;
+    let experts = uint(meta, arch, "expert_count").unwrap_or(0);
+    let top_k = uint(meta, arch, "expert_used_count").unwrap_or(0);
+    if keep == 0 || (experts > 0 && (top_k == 0 || top_k > (experts as f64).sqrt().floor() as usize * (experts as f64).sqrt().floor() as usize)) {
+        return Err("invalid Doge keep_window_size or expert counts".into());
+    }
+    Ok(Some(DogeConfig { keep, experts, top_k, norm_topk: key(meta, arch, "norm_topk_prob").and_then(Value::as_bool).unwrap_or(false) }))
 }
 
 fn parse_rglru(meta: &Map<String, Value>, arch: &str, layers: usize) -> Result<Option<RgLruConfig>, String> {
@@ -1775,6 +1799,7 @@ pub(crate) mod tests_support {
             rwkv: None,
             shortconv: None,
             rglru: None,
+            doge: None,
             rope_layers: None,
             layer_rope_bases: None,
             qk_norm_after_rope: false,

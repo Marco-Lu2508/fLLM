@@ -130,6 +130,7 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "zaya1",
     "recurrent_gemma",
     "diffllama",
+    "doge",
     "dspine",
     "dflash",
 ];

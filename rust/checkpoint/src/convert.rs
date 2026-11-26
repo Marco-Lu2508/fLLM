@@ -246,6 +246,8 @@ pub fn prepare_checkpoint(
         crate::jetmoe::config(&cfg)?
     } else if arch == "diffllama" {
         crate::diffllama::config(&cfg)?
+    } else if arch == "doge" {
+        crate::doge::config(&cfg)?
     } else if arch == "recurrent_gemma" {
         crate::recurrent_gemma::config(&cfg)?
     } else if arch == "dbrx" {
@@ -1025,6 +1027,15 @@ pub fn prepare_checkpoint(
         let moe_here = plan.moe && plan.moe_layers[i as usize];
         if plan.family == Family::Classic {
             continue;
+        }
+        if arch == "doge" {
+            let moe = byname.contains_key(format!("blk.{i}.doge_router.weight").as_str());
+            for n in crate::doge::layer_requirements(moe) {
+                let key = format!("blk.{i}.{n}");
+                if !byname.contains_key(key.as_str()) {
+                    return Err(format!("missing required tensor {key}").into());
+                }
+            }
         }
         if arch == "jetmoe" {
             for n in crate::jetmoe::layer_requirements() {
