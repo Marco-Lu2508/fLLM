@@ -261,6 +261,13 @@ pub struct ZayaConfig {
     pub router: usize,
 }
 
+/// xLSTM: soft cap of the gate pre-activations and the epsilon of the normaliser of the mLSTM cell.
+#[derive(Clone, Debug, PartialEq)]
+pub struct XlstmConfig {
+    pub gate_cap: f32,
+    pub eps: f32,
+}
+
 /// Mamba-1 layers (per-channel state, low-rank time step); Falcon-Mamba also normalises the
 /// time step, B and C.
 #[derive(Clone, Debug, PartialEq)]
@@ -574,6 +581,7 @@ pub struct ModelConfig {
     pub rglru: Option<RgLruConfig>,
     pub doge: Option<DogeConfig>,
     pub zaya: Option<ZayaConfig>,
+    pub xlstm: Option<XlstmConfig>,
     /// Layers that skip rotary embeddings (`None`: all rotate).
     pub rope_layers: Option<Vec<bool>>,
     /// Rotary base of every layer (Granite SWA); `0` marks a layer without rotary embeddings.
@@ -1214,6 +1222,7 @@ impl ModelConfig {
             rglru: parse_rglru(meta, a, layers)?,
             doge: parse_doge(meta, a)?,
             zaya: parse_zaya(meta, a)?,
+            xlstm: (a == "xlstm").then(|| XlstmConfig { gate_cap: float(meta, a, "gate_soft_cap").unwrap_or(15.0), eps: float(meta, a, "cell_epsilon").unwrap_or(1e-6) }),
             delta: parse_delta(meta, a),
             mamba: parse_mamba(meta, a),
             rwkv: matches!(a, "rwkv6" | "rwkv7")
@@ -1824,6 +1833,7 @@ pub(crate) mod tests_support {
             rglru: None,
             doge: None,
             zaya: None,
+            xlstm: None,
             rope_layers: None,
             layer_rope_bases: None,
             qk_norm_after_rope: false,

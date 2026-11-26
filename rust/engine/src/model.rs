@@ -132,6 +132,7 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "diffllama",
     "doge",
     "zaya",
+    "xlstm",
     "dspine",
     "dflash",
 ];
@@ -554,6 +555,7 @@ impl GgufModel {
             || self.config.rwkv.is_some()
             || self.config.rglru.is_some()
             || self.config.zaya.is_some()
+            || self.config.xlstm.is_some()
             || self.config.hybrid.stateful()
             || self
                 .config

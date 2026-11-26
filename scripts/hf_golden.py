@@ -696,6 +696,12 @@ def config_for(arch: str, vocab: int):
                              "hybrid_sliding": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5}},
             bos_token_id=1, eos_token_id=2, pad_token_id=3, tie_word_embeddings=True, cca_time0=2, cca_time1=2,
         ),
+        # mLSTM blocks: matrix memory with exponential input gate, no attention; the sequence is shorter than the chunked kernel's smallest chunk (recurrent form)
+        "xlstm": lambda: T.xLSTMConfig(
+            vocab_size=vocab, hidden_size=128, embedding_dim=128, num_hidden_layers=3, num_blocks=3, num_heads=4, qk_dim_factor=0.5, v_dim_factor=1.0,
+            ffn_proj_factor=2.0, ffn_round_up_to_multiple_of=16, chunk_size=64, max_inference_chunksize=256, bos_token_id=1, eos_token_id=2,
+            pad_token_id=3, tie_word_embeddings=False, autocast_kernel_dtype="float32",
+        ),
         "doge_moe": lambda: T.DogeConfig(
             vocab_size=vocab, hidden_size=64, intermediate_size=128, num_hidden_layers=3, num_attention_heads=4, num_key_value_heads=2,
             keep_window_size=8, max_position_embeddings=256, rms_norm_eps=1e-6, bos_token_id=1, eos_token_id=2, pad_token_id=3,
@@ -1417,6 +1423,13 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
                 layer.self_attn.A.copy_(-2.0 * torch.rand_like(layer.self_attn.A))
                 layer.input_residual.copy_(0.7 + 0.6 * torch.rand_like(layer.input_residual))
                 layer.post_attention_residual.copy_(0.7 + 0.6 * torch.rand_like(layer.post_attention_residual))
+    if arch == "xlstm":
+        # biases of the gates start at fixed values: spread them so the exponential gate and the stabiliser both matter
+        with torch.no_grad():
+            for block in model.backbone.blocks:
+                block.mlstm_layer.igate_preact.bias.copy_(torch.randn_like(block.mlstm_layer.igate_preact.bias))
+                block.mlstm_layer.fgate_preact.bias.copy_(2.0 + torch.randn_like(block.mlstm_layer.fgate_preact.bias))
+                block.mlstm_layer.multihead_norm.weight.copy_(0.8 + 0.4 * torch.rand_like(block.mlstm_layer.multihead_norm.weight))
     if arch == "zaya":
         # the released initialisation zeroes the key scale and the balancing biases and gives the experts tiny weights
         with torch.no_grad():

@@ -902,6 +902,9 @@ impl Plan {
         if raw == "zaya" {
             return crate::zaya::plan(cfg);
         }
+        if raw == "xlstm" {
+            return crate::xlstm::plan(cfg);
+        }
         if raw == "jetmoe" {
             return crate::jetmoe::plan(cfg);
         }
@@ -2827,6 +2830,9 @@ impl Plan {
         }
         if matches!(self.family, Family::Mamba | Family::Nemotron) {
             return self.map_mamba(n);
+        }
+        if self.arch == "xlstm" {
+            return crate::xlstm::map_any(n).ok_or_else(|| format!("unexpected xLSTM tensor {n:?}"));
         }
         if self.arch == "zaya" {
             if let Some(m) = crate::zaya::map_global(n) {

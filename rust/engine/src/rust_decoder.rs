@@ -474,8 +474,22 @@ struct RgLru {
     recurrent_gate_bias: Vec<f32>,
 }
 
+/// xLSTM's mLSTM layer: queries / keys / values / output gate and the two gate pre-activations (one per head), and the weight of the per-head layer norm.
+struct Xlstm {
+    q: Linear,
+    k: Linear,
+    v: Linear,
+    o: Linear,
+    i: Linear,
+    f: Linear,
+    norm: Vec<f32>,
+    heads: usize,
+    dqk: usize,
+}
+
 #[allow(clippy::large_enum_variant)]
 enum Attn {
+    Xlstm(Box<Xlstm>),
     Rglru(Box<RgLru>),
     ShortConv(Box<ShortConv>),
     Mamba1(Box<Mamba1>),
@@ -645,6 +659,7 @@ impl Layer {
             Attn::Kda(k) => all.extend(k.linears_mut()),
             Attn::Rwkv(r) => all.extend(r.linears_mut()),
             Attn::Rglru(m) => all.extend([&mut m.y, &mut m.x]),
+            Attn::Xlstm(m) => all.extend([&mut m.q, &mut m.k, &mut m.v, &mut m.o, &mut m.i, &mut m.f]),
             Attn::ShortConv(m) => all.push(&mut m.input),
             Attn::Mamba(m) => all.push(&mut m.input),
             Attn::Mamba1(m) => all.extend([&mut m.input, &mut m.x_proj, &mut m.dt_proj]),
@@ -2152,7 +2167,21 @@ impl RustDecoder {
             let (qr, kr, vr) = (heads * dk, kv_heads * dk, if diff_layer { kv_heads * dv / 2 } else { kv_heads * dv });
             let q_rows = tensor_rows(mapping, &format!("{p}.attn_q.weight"));
             let output_gate = q_rows == Some(2 * qr) && cfg.mla.is_none();
-            let attn = if let (Some(rg), true) = (cfg.rglru.as_ref(), cfg.rglru.as_ref().is_some_and(|r| r.layers.get(i).copied().unwrap_or(false))) {
+            let attn = if has_tensor(mapping, &format!("{p}.xlstm_q.weight")) {
+                let heads = cfg.layer_heads(i);
+                let dqk = tensor_rows(mapping, &format!("{p}.xlstm_q.weight")).ok_or("xLSTM layer without query projection")? / heads;
+                Attn::Xlstm(Box::new(Xlstm {
+                    q: linear(&format!("{p}.xlstm_q"), heads * dqk, hidden)?,
+                    k: linear(&format!("{p}.xlstm_k"), heads * dqk, hidden)?,
+                    v: linear(&format!("{p}.xlstm_v"), hidden, hidden)?,
+                    o: linear(&format!("{p}.xlstm_o"), hidden, hidden)?,
+                    i: linear(&format!("{p}.xlstm_i"), heads, hidden)?,
+                    f: linear(&format!("{p}.xlstm_f"), heads, hidden)?,
+                    norm: vector(mapping, &format!("{p}.xlstm_norm.weight"), hidden)?,
+                    heads,
+                    dqk,
+                }))
+            } else if let (Some(rg), true) = (cfg.rglru.as_ref(), cfg.rglru.as_ref().is_some_and(|r| r.layers.get(i).copied().unwrap_or(false))) {
                 let (w, k, blocks) = (rg.width, rg.kernel, rg.blocks);
                 let bw = w / blocks;
                 Attn::Rglru(Box::new(RgLru {
@@ -3601,6 +3630,7 @@ impl RustDecoder {
                 }
             }
             Attn::Rglru(_) => Some("an RG-LRU recurrent block (no device operations yet)"),
+            Attn::Xlstm(_) => Some("an xLSTM mLSTM layer (no device operations yet)"),
             Attn::ShortConv(_) => {
                 if conv_ok && !cfg.parallel_residual {
                     None
@@ -8036,6 +8066,80 @@ impl RustDecoder {
         Ok(out)
     }
 
+    /// xLSTM's mLSTM layer for a batch of tokens (the rows of one sequence in order). The state of a sequence holds, per head, the matrix `C` (`dqk x dv`), the
+    /// vector `n` (`dqk`) and the stabiliser `m`; it restarts at position 0.
+    fn xlstm_forward(&self, m: &Xlstm, projection: &Linear, layer: usize, input: &[f32], tables: &[i64], lengths: &[i64]) -> Result<Vec<f32>, String> {
+        let xc = self.cfg.xlstm.as_ref().ok_or("missing xLSTM configuration")?;
+        let hidden = self.cfg.hidden;
+        let (heads, dqk) = (m.heads, m.dqk);
+        let dv = hidden / heads;
+        let rows = lengths.len();
+        let (q_all, k_all, v_all, o_all, i_all, f_all) = (m.q.forward(input)?, m.k.forward(input)?, m.v.forward(input)?, m.o.forward(input)?, m.i.forward(input)?, m.f.forward(input)?);
+        let cap = |x: f32| xc.gate_cap * (x / xc.gate_cap).tanh();
+        let per_head = dqk * dv + dqk + 1;
+        let mut mixed = vec![0.0f32; rows * hidden];
+        let mut store = self.states.lock().map_err(|_| "recurrent state lock poisoned")?;
+        for (row, &length) in lengths.iter().enumerate() {
+            let position = usize::try_from(length).ok().and_then(|n| n.checked_sub(1)).ok_or("invalid xLSTM sequence position")?;
+            let first = tables[row * self.stride];
+            store.clock += 1;
+            let clock = store.clock;
+            if !store.map.contains_key(&first) && store.map.len() >= self.state_capacity {
+                if let Some(oldest) = store.map.iter().min_by_key(|(_, s)| s.used).map(|(key, _)| *key) {
+                    store.map.remove(&oldest);
+                }
+            }
+            let seq = store.map.entry(first).or_insert_with(|| SeqState { used: clock, layers: (0..self.cfg.layers).map(|_| None).collect() });
+            seq.used = clock;
+            if position == 0 {
+                seq.layers[layer] = None;
+            }
+            let state = seq.layers[layer].get_or_insert_with(|| LayerState { len: 0, conv: Vec::new(), rec: vec![0.0; heads * per_head] });
+            if state.len != position {
+                return Err(format!("xLSTM layer {layer} state holds {} tokens, got position {position}", state.len));
+            }
+            state.len += 1;
+            let out = &mut mixed[row * hidden..(row + 1) * hidden];
+            for h in 0..heads {
+                let (i_pre, f_pre) = (cap(i_all[row * heads + h]), cap(f_all[row * heads + h]));
+                let st = &mut state.rec[h * per_head..(h + 1) * per_head];
+                let (c, rest) = st.split_at_mut(dqk * dv);
+                let (n, mm) = rest.split_at_mut(dqk);
+                let log_f = -(-f_pre).max(0.0) - (-(f_pre.abs())).exp().ln_1p();
+                let m_new = (log_f + mm[0]).max(i_pre);
+                let f_act = (log_f + mm[0] - m_new).exp();
+                let i_act = (i_pre - m_new).exp();
+                let q = &q_all[row * heads * dqk + h * dqk..row * heads * dqk + (h + 1) * dqk];
+                let k = &k_all[row * heads * dqk + h * dqk..row * heads * dqk + (h + 1) * dqk];
+                let v = &v_all[row * hidden + h * dv..row * hidden + (h + 1) * dv];
+                let scale = (dqk as f32).powf(-0.5);
+                let mut num = vec![0.0f32; dv];
+                let mut qn = 0.0f32;
+                for a in 0..dqk {
+                    n[a] = f_act * n[a] + i_act * k[a];
+                    qn += q[a] * scale * n[a];
+                    for b in 0..dv {
+                        c[a * dv + b] = f_act * c[a * dv + b] + i_act * k[a] * v[b];
+                        num[b] += q[a] * scale * c[a * dv + b];
+                    }
+                }
+                mm[0] = m_new;
+                let denom = qn.abs().max((-m_new).exp()) + xc.eps;
+                // per-head layer norm of the output, then the output gate
+                let hv: Vec<f32> = num.iter().map(|x| x / denom).collect();
+                let mean = hv.iter().sum::<f32>() / dv as f32;
+                let var = hv.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / dv as f32;
+                let inv = (var + self.cfg.eps).sqrt().recip();
+                for b in 0..dv {
+                    let gate = 1.0 / (1.0 + (-o_all[row * hidden + h * dv + b]).exp());
+                    out[h * dv + b] = gate * (hv[b] - mean) * inv * m.norm[h * dv + b];
+                }
+            }
+        }
+        drop(store);
+        projection.forward(&mixed)
+    }
+
     /// RecurrentGemma's recurrent block for a batch of tokens (the rows of one sequence in order): `out(gelu(y(x)) * rglru(conv(x(x))))`. The state of a sequence
     /// holds the last `kernel - 1` convolution inputs and the recurrent state; it restarts at position 0 (the reset of the reference).
     fn rglru_forward(
@@ -10206,7 +10310,9 @@ impl RustDecoder {
                     self.record_layer_tap_host(i, &x, rows);
                     continue;
                 }
-                let mut branch = if let Attn::Rglru(rg) = &layer.attn {
+                let mut branch = if let Attn::Xlstm(xl) = &layer.attn {
+                    self.xlstm_forward(xl, &layer.out, i, &normed, tables, lengths)?
+                } else if let Attn::Rglru(rg) = &layer.attn {
                     self.rglru_forward(rg, &layer.out, i, &normed, tables, lengths)?
                 } else if let Attn::ShortConv(conv) = &layer.attn {
                     self.shortconv_forward(conv, &layer.out, i, &normed, tables, lengths)?
@@ -10394,6 +10500,7 @@ impl RustDecoder {
                             (q, k, v)
                         }
                         Attn::Rglru(_)
+                        | Attn::Xlstm(_)
                         | Attn::ShortConv(_)
                         | Attn::Linear(_)
                         | Attn::Mamba(_)
