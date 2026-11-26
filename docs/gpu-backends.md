@@ -71,7 +71,8 @@ The engine handles this transparently via **One-Time Fallback Logging**:
 | `residual_add` | native | |
 | `kv_cache_write` | native | f16 and q8_0 (`d = amax/127`, round half away from zero); on CUDA and the CPU also every format of [KV cache formats](#kv-cache-formats) (wgpu: f16 and q8_0 only) |
 | `attention_paged` | native, head width <= 1024 on Vulkan (decode kernel; the prompt tile up to 512) | decode and prefill rows, GQA, scale, soft cap, sliding window, chunks, sinks, ALiBi, key width != value width; wider heads fall back to the host with a logged reason |
-| `layer_norm`, `moe_*`, `sampling_logits` | host fallback | logged once per operation with the reason |
+| `layer_norm`, `sampling_logits` | host fallback | logged once per operation with the reason |
+| `moe_route_ex`, `moe_combine_ex`, `moe_gate_scale`, `moe_zero_fold` (Vulkan, since 2026-11-26) | native | routing with every gating variant, the combination, the shared-expert gate and the zero experts run on the device; the experts go through the per-pair `moe_linear` kernels for every batch size (no grouped GEMM on Vulkan, so large prompts are slower than on CUDA); `FLLM_VK_MOE=host` keeps the earlier host routing |
 
 Fallbacks copy their operands to a CPU stream and back and are logged once per operation (`warn_fallback_reason`). Layers whose features the device decoder path does not implement run on the host between the device layers (section 3a); the wgpu backend has no LayerNorm / element-wise architecture kernels, so those layers (and models that need them everywhere) stay on the CPU. Recurrent mixers without a device kernel (DeltaNet, Mamba-1/2, ShortConv, KDA and RWKV on wgpu) run on the host as well.
 
