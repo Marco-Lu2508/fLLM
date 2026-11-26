@@ -3874,7 +3874,8 @@ impl RustDecoder {
         self.m3_device = m3_device;
         self.ink_device = self.cfg.inkling.is_some() && self.ink_device_possible(&*backend);
         self.xielu_device = backend.create_stream().is_ok_and(|s| s.supports_xielu()) && !std::env::var_os("FLLM_XIELU_HOST").is_some();
-        // opt-in until a GPU run has checked it against the host (`scripts/hf_golden.py nemotron_h_latent`): FLLM_LATENT=device
+        // checked on a Tesla T4 against the host (`nemotron_h_latent_wide`, Q8_0 and Q4_0: the same distance from the CPU as the host path). Still opt-in: a layer whose experts
+        // cannot take the device path (unquantised, widths not a multiple of 32) is a load error here instead of a host layer. FLLM_LATENT=device
         self.latent_device = backend.moe_device_available()
             && !std::env::var_os("FLLM_MOE_DEVICE").is_some_and(|v| v == "0")
             && std::env::var("FLLM_LATENT").is_ok_and(|v| v.eq_ignore_ascii_case("device"));

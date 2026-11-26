@@ -17,7 +17,7 @@ and [model-coverage.md](model-coverage.md).
 | Act-order GPTQ, other AWQ/GPTQ group sizes, GPTQ 8-bit | planned | Unsupported variants fall back to dense F16 at conversion |
 | Whole-model runs on Metal, ROCm, SYCL, NPU and TPU | needs hardware | The kernels exist; the levels are in the Status table |
 | Vulkan completeness (missing operations) | in progress | Done on Mesa lavapipe (2026-11-26): every KV cache format, attention heads up to 1024 wide, encoder attention, device MoE routing / combination / zero experts for every batch size, xIELU, final-logit cap. Open: `sample_rows` (sampling on the device), grouped MoE GEMMs for large prompts, TQ1_0 / TQ2_0 / NVFP4 W4A4 kernels; none of it has run on a real Vulkan GPU yet |
-| Latent-space MoE experts on CUDA (Nemotron-H, Kimi K3), xIELU on CUDA | in progress | Written and compiled for sm_75; off by default (`FLLM_LATENT=device`) until `scripts/colab/device_arch_check.py` has run on a GPU |
+| Latent-space MoE experts on CUDA (Nemotron-H, Kimi K3), xIELU on CUDA | verified, opt-in | Run on a Tesla T4 (sm_75): xIELU in `selftest-gpu` and on a tiny Apertus (|dlogp| 2e-6 against the CPU), the latent experts on a Nemotron-H fixture with Q8_0 and Q4_0 experts (`nemotron_h_latent_wide`: the same distance from the CPU as the host path, 0.016 against 0.012 for Q8_0). The latent path stays opt-in (`FLLM_LATENT=device`) because a layer whose experts cannot take the device path (unquantised, widths not a multiple of 32) is a load error there instead of a host layer |
 | Attention residual blocks (Kimi K3), the unsupported architectures of architectures.md | planned | Host only / not started |
 
 ## Models and formats
