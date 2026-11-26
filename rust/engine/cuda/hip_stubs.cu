@@ -107,10 +107,10 @@ int fllm_moe_grouped_launch(cudaStream_t, uint32_t, int, const void *const *, co
                             int, int, int, float, float) {
     return fllm_set_error("grouped MoE GEMM needs an NVIDIA GPU");
 }
-int fllm_moe_combine2_launch(cudaStream_t, float *, const float *, const float *, const float *, const float *, int, int, int) {
+int fllm_moe_combine2_launch(cudaStream_t, float *, const float *, const float *, const float *, const float *, int, int, int, int) {
     return fllm_set_error("device MoE combine needs an NVIDIA GPU");
 }
-int fllm_moe_gate_scale_launch(cudaStream_t, float *, const float *, const float *, int, int) {
+int fllm_moe_gate_scale_launch(cudaStream_t, float *, const float *, const float *, int, int, int) {
     return fllm_set_error("device MoE gate needs an NVIDIA GPU");
 }
 int fllm_moe_zero_fold_launch(cudaStream_t, float *, int32_t *, float *, int, int, int, int) {
