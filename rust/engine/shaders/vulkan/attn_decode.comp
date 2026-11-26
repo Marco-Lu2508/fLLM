@@ -1,8 +1,8 @@
 #version 450
 #extension GL_GOOGLE_include_directive : enable
-// FLLM-SHADER: attn_decode | bindings: q,kpool,vpool,meta,bias,out,part | push: heads,kv_heads,dk,dv,stride,block_size,scale,softcap,window,chunk,flags,nsplit,rows_total,row0,k_base,v_base,k_scale,v_scale,k_group,v_group | grid: [nsplit, heads, rows in this dispatch]
+// FLLM-SHADER: attn_decode | bindings: q,kpool,vpool,meta,bias,out,part | push: heads,kv_heads,dk,dv,stride,block_size,scale,softcap,window,chunk,flags,nsplit,rows_total,row0,k_base,v_base,k_scale,v_scale,k_group,v_group,k_fmt,v_fmt,k_hi,v_hi,k_mn,v_mn | grid: [nsplit, heads, rows in this dispatch]
 // Paged attention for decode and for short batches (Stream::attention_paged), split over the key range (split-KV / flash-decoding), one KV format per
-// variant (macro KV_Q8 = 0: f16 cache, 1: q8_0 cache). One workgroup of 64 lanes per (row, query head, split):
+// variant (macro KV_Q8 = 0: f16 cache, 1: q8_0 cache, 2: any other format of kv_format.rs, keys and values separately, through _ops_kvgen.glsl). One workgroup of 64 lanes per (row, query head, split):
 //   * the lanes score 64 keys at a time (one key per lane: dot(q, key) * scale, ALiBi, soft cap, mask), fold the tile into an online softmax
 //     (running maximum m, denominator l) and accumulate the value rows: lane `l` owns the value dimensions l, l + 64, ... (dv <= 512);
 //   * nsplit == 1: the result is final (sink folded in) and written to `out`; nsplit > 1: the split writes m, l and the unnormalised accumulator to
@@ -48,7 +48,22 @@ layout(push_constant) uniform P {
     uint v_scale;
     uint k_group;
     uint v_group;
+    uint k_fmt;
+    uint v_fmt;
+    uint k_hi;
+    uint v_hi;
+    uint k_mn;
+    uint v_mn;
 } p;
+
+#if KV_Q8 == 2
+#define KV_GEN_POOL kpool
+#define KV_GEN_NAME kv_gen_k
+#include "_ops_kvgen.glsl"
+#define KV_GEN_POOL vpool
+#define KV_GEN_NAME kv_gen_v
+#include "_ops_kvgen.glsl"
+#endif
 
 shared float qs[512];
 shared float sc_s[WG];
@@ -81,6 +96,9 @@ float key_dot(uint slot, uint kh) {
     } else {
         for (uint d = 0u; d < p.dk; d++) s += qs[d] * KV_HALF(kpool, h0 + d);
     }
+#elif KV_Q8 == 2
+    const uint n0 = slot * kvk + kh * p.dk;
+    for (uint d = 0u; d < p.dk; d++) s += qs[d] * kv_gen_k(p.k_fmt, p.k_base, p.k_hi, p.k_scale, p.k_mn, p.k_group, n0 + d);
 #else
     const uint group = p.k_group;
     const uint b0 = p.k_base * 2u + slot * kvk + kh * p.dk;
@@ -109,6 +127,8 @@ float val_at(uint slot, uint c) {
     const uint kvv = p.kv_heads * p.dv;
 #if KV_Q8 == 0
     return KV_HALF(vpool, p.v_base + slot * kvv + c);
+#elif KV_Q8 == 2
+    return kv_gen_v(p.v_fmt, p.v_base, p.v_hi, p.v_scale, p.v_mn, p.v_group, slot * kvv + c);
 #else
     return KV_I8(vpool, p.v_base * 2u + slot * kvv + c) * KV_HALF(vpool, p.v_base + p.v_scale + slot * (kvv / p.v_group) + c / p.v_group);
 #endif

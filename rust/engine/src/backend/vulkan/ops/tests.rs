@@ -1122,7 +1122,7 @@ fn sample_plans() -> Vec<OpPlan> {
             }
         }
     }
-    for kind in [1, 2] {
+    for kind in [1, 2, 9, 2 | (4 << 8)] {
         let kv = kv_layout(kind, 2, 64, 64, 16, 32);
         v.extend(plan_kv_write(&kv, &[0, 5]).unwrap());
         for dv in [64usize, 160, 300] {

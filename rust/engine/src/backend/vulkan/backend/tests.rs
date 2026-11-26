@@ -305,14 +305,14 @@ fn all_op_plans() -> Vec<OpPlan> {
     }
     plans.push(plan_argmax(3, 1000).unwrap());
 
-    for kind in [1, 2] {
+    for kind in [1, 2, 9, 2 | (4 << 8)] {
         for (kv_heads, dk, dv) in [(2, 64, 64), (2, 80, 64), (1, 128, 128)] {
             plans.extend(plan_kv_write(&kv_layout(kind, kv_heads, dk, dv), &[0, 5, 9]).unwrap());
         }
     }
     let wide = AttentionTuning { prefill_rows: crate::backend::vulkan::ops::attention::PREFILL_ROWS_WIDE, ..AttentionTuning::default() };
     for tuning in [AttentionTuning::default(), wide, AttentionTuning { coop_prefill: true, ..wide }] {
-    for kind in [1, 2] {
+    for kind in [1, 2, 9, 2 | (4 << 8)] {
         for (heads, kv_heads, dk, dv) in [
             (8, 2, 64, 64),
             (4, 4, 128, 128),

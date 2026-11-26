@@ -2,7 +2,8 @@
 //! `attn_merge`, `attn_prefill_*`; layouts in `shaders/vulkan/INTERFACE_OPS.md`.
 
 use super::*;
-use crate::backend::{kv_layer_words, kv_quant_group, AttentionParams, DeviceKvCache};
+use crate::backend::{AttentionParams, DeviceKvCache};
+use crate::kv_format::{unpack_kind, KvFormat, KvLayout as RegionLayout};
 
 /// Widest key or value head the attention shaders take (shared memory of the query / accumulators).
 pub const MAX_HEAD_WIDTH: usize = 512;
@@ -16,7 +17,8 @@ pub const PREFILL_ROWS_WIDE: usize = 64;
 /// Geometry of one layer of a [`DeviceKvCache`] as seen by the shaders. Positions are 16-bit words.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KvLayout {
-    /// 1 = f16, 2 = q8_0.
+    /// Packed key / value formats (`kv_format::pack_kind`): 1 = f16, 2 = q8_0, 6 = int8 for both pools have shaders of their own, every other
+    /// format (and every mix of two) goes through the generic `kv_write_gen` and `attn_*_gen` variants.
     pub kind: i32,
     pub kv_heads: usize,
     pub head_dim: usize,
@@ -74,30 +76,47 @@ impl KvLayout {
         self.kv_heads * self.value_dim
     }
 
+    /// (key, value) formats; f16 for a kind that `check` rejects.
+    pub fn formats(&self) -> (KvFormat, KvFormat) {
+        unpack_kind(self.kind).unwrap_or((KvFormat::F16, KvFormat::F16))
+    }
+
+    /// Region offsets of one layer of the key pool.
+    pub fn key_region(&self) -> RegionLayout {
+        RegionLayout::new(self.formats().0, self.slots(), self.kv_heads, self.head_dim)
+    }
+
+    /// Region offsets of one layer of the value pool.
+    pub fn value_region(&self) -> RegionLayout {
+        RegionLayout::new(self.formats().1, self.slots(), self.kv_heads, self.value_dim)
+    }
+
     /// 16-bit words of one layer of the key / value pool.
     pub fn key_words(&self) -> usize {
-        kv_layer_words(self.kind, self.slots(), self.kv_heads, self.head_dim)
+        self.key_region().words
     }
 
     pub fn value_words(&self) -> usize {
-        kv_layer_words(self.kind, self.slots(), self.kv_heads, self.value_dim)
+        self.value_region().words
     }
 
-    /// q8: 16-bit words from the layer start to the first scale.
-    pub fn scale_base(&self, dim: usize) -> usize {
-        if self.kind == 2 {
-            (self.slots() * self.kv_heads * dim).div_ceil(2)
-        } else {
-            0
-        }
+    /// The pools have formats without a shader of their own (everything but f16, q8_0 and int8, for both pools).
+    pub fn is_generic(&self) -> bool {
+        !matches!(self.kind, 1 | 2 | 6)
+    }
+
+    /// The pools are q8_0 or int8 (the `_q8` shaders; their group comes from the region layout).
+    pub fn is_q8(&self) -> bool {
+        matches!(self.kind, 2 | 6)
     }
 
     fn check(&self) -> Result<(), BackendError> {
-        if !matches!(self.kind, 1 | 2) {
-            return Err(BackendError::UnsupportedOperation(format!(
-                "KV cache kind {} (expected 1 = f16 or 2 = q8_0)",
-                self.kind
-            )));
+        let Some((kf, vf)) = unpack_kind(self.kind) else {
+            return Err(BackendError::UnsupportedOperation(format!("KV cache kind {} is not a combination of the formats of kv_format.rs", self.kind)));
+        };
+        if self.head_dim != 0 && self.value_dim != 0 {
+            kf.check_dim(self.head_dim).map_err(BackendError::UnsupportedOperation)?;
+            vf.check_dim(self.value_dim).map_err(BackendError::UnsupportedOperation)?;
         }
         if self.kv_heads == 0
             || self.head_dim == 0
@@ -138,35 +157,43 @@ pub fn plan_kv_write(kv: &KvLayout, slots: &[usize]) -> Result<Vec<OpPlan>, Back
     let host = Arc::new(pack_u32(slots)?);
     let rows = slots.len();
     let mut plans = Vec::with_capacity(2);
-    for (src, pool, dim, base) in [
-        ("k", "key_pool", kv.head_dim, kv.key_base),
-        ("v", "value_pool", kv.value_dim, kv.value_base),
+    let (kf, vf) = kv.formats();
+    let (kr, vr) = (kv.key_region(), kv.value_region());
+    for (src, pool, base, fmt, region) in [
+        ("k", "key_pool", kv.key_base, kf, kr),
+        ("v", "value_pool", kv.value_base, vf, vr),
     ] {
-        let width = kv.kv_heads * dim;
+        let width = region.kv;
         let slots_slot = Slots::new().read(src).host("slots", host.clone());
         let slots_slot = slots_slot.rw(pool);
-        if kv.kind == 1 {
-            let push = Push::new().u("rows", rows).u("kv", width).u("base", base);
-            plans.push(plan(
-                "kv_write_f16",
-                push,
-                groups_1d(rows * (width / 2 + 1), 256),
-                slots_slot,
-            )?);
-        } else {
-            let group = kv_quant_group(dim);
-            let push = Push::new()
-                .u("rows", rows)
-                .u("kv", width)
-                .u("group", group)
-                .u("base", base)
-                .u("scale_base", kv.scale_base(dim));
-            plans.push(plan(
-                "kv_write_q8",
-                push,
-                groups_1d(rows * (width / group), 128),
-                slots_slot,
-            )?);
+        match fmt {
+            KvFormat::F16 => {
+                let push = Push::new().u("rows", rows).u("kv", width).u("base", base);
+                plans.push(plan("kv_write_f16", push, groups_1d(rows * (width / 2 + 1), 256), slots_slot)?);
+            }
+            KvFormat::Q8_0 | KvFormat::Int8 => {
+                let push = Push::new()
+                    .u("rows", rows)
+                    .u("kv", width)
+                    .u("group", region.group)
+                    .u("base", base)
+                    .u("scale_base", region.scale_off);
+                plans.push(plan("kv_write_q8", push, groups_1d(rows * (width / region.group), 128), slots_slot)?);
+            }
+            _ => {
+                // scaled formats encode one quantization group per invocation, the others 16 values
+                let unit = if matches!(fmt, KvFormat::F32 | KvFormat::Bf16 | KvFormat::Fp8E5m2) { 16 } else { region.group };
+                let push = Push::new()
+                    .u("rows", rows)
+                    .u("kv", width)
+                    .u("unit", unit)
+                    .u("base", base)
+                    .u("hi", region.hi_off)
+                    .u("sc", region.scale_off)
+                    .u("mn", region.min_off)
+                    .u("fmt", fmt.code() as usize);
+                plans.push(plan("kv_write_gen", push, groups_1d(rows * width.div_ceil(unit), 128), slots_slot)?);
+            }
         }
     }
     Ok(plans)
@@ -409,7 +436,11 @@ struct Common<'a> {
 
 impl Common<'_> {
     fn is_q8(&self) -> bool {
-        self.kv.kind == 2
+        self.kv.is_q8()
+    }
+
+    fn is_generic(&self) -> bool {
+        self.kv.is_generic()
     }
 
     fn slots(&self, part: Option<usize>) -> Slots {
@@ -445,12 +476,20 @@ impl Common<'_> {
 
     fn cache_push(&self, push: Push) -> Push {
         let kv = self.kv;
+        let (kf, vf) = kv.formats();
+        let (kr, vr) = (kv.key_region(), kv.value_region());
         push.u("k_base", kv.key_base)
             .u("v_base", kv.value_base)
-            .u("k_scale", kv.scale_base(kv.head_dim))
-            .u("v_scale", kv.scale_base(kv.value_dim))
-            .u("k_group", kv_quant_group(kv.head_dim))
-            .u("v_group", kv_quant_group(kv.value_dim))
+            .u("k_scale", kr.scale_off)
+            .u("v_scale", vr.scale_off)
+            .u("k_group", kr.group)
+            .u("v_group", vr.group)
+            .u("k_fmt", kf.code() as usize)
+            .u("v_fmt", vf.code() as usize)
+            .u("k_hi", kr.hi_off)
+            .u("v_hi", vr.hi_off)
+            .u("k_mn", kr.min_off)
+            .u("v_mn", vr.min_off)
     }
 
     fn decode_plans(
@@ -485,7 +524,9 @@ impl Common<'_> {
         } else {
             self.slots(Some(part_bytes))
         };
-        let name = if self.is_q8() {
+        let name = if self.is_generic() {
+            "attn_decode_gen"
+        } else if self.is_q8() {
             "attn_decode_q8"
         } else {
             "attn_decode_f16"
@@ -520,7 +561,7 @@ impl Common<'_> {
     fn prefill_plan(&self, first: usize, end: usize) -> Result<OpPlan, BackendError> {
         let p = self.params;
         let wide = self.tuning.prefill_rows == PREFILL_ROWS_WIDE;
-        let cm = if self.tuning.coop_prefill && wide && !self.is_q8() && p.head_dim == p.value_dim {
+        let cm = if self.tuning.coop_prefill && wide && self.kv.kind == 1 && p.head_dim == p.value_dim {
             match p.head_dim {
                 128 => Some("attn_prefill_cm_d128"),
                 64 => Some("attn_prefill_cm_d64"),
@@ -530,21 +571,36 @@ impl Common<'_> {
         } else {
             None
         };
-        let name = match (self.is_q8(), p.value_dim, wide) {
-            (false, 0..=128, false) => "attn_prefill_f16_d128",
-            (false, 129..=256, false) => "attn_prefill_f16_d256",
-            (false, _, false) => "attn_prefill_f16_d512",
-            (true, 0..=128, false) => "attn_prefill_q8_d128",
-            (true, 129..=256, false) => "attn_prefill_q8_d256",
-            (true, _, false) => "attn_prefill_q8_d512",
-            (false, 0..=128, true) => "attn_prefill_f16_d128_r64",
-            (false, 129..=256, true) => "attn_prefill_f16_d256_r64",
-            (false, _, true) => "attn_prefill_f16_d512_r64",
-            (true, 0..=128, true) => "attn_prefill_q8_d128_r64",
-            (true, 129..=256, true) => "attn_prefill_q8_d256_r64",
-            (true, _, true) => "attn_prefill_q8_d512_r64",
+        let family = if self.is_generic() {
+            2
+        } else if self.is_q8() {
+            1
+        } else {
+            0
         };
-        let name = cm.unwrap_or(name);
+        let width = match p.value_dim {
+            0..=128 => 0,
+            129..=256 => 1,
+            _ => 2,
+        };
+        const NAMES: [[[&str; 2]; 3]; 3] = [
+            [
+                ["attn_prefill_f16_d128", "attn_prefill_f16_d128_r64"],
+                ["attn_prefill_f16_d256", "attn_prefill_f16_d256_r64"],
+                ["attn_prefill_f16_d512", "attn_prefill_f16_d512_r64"],
+            ],
+            [
+                ["attn_prefill_q8_d128", "attn_prefill_q8_d128_r64"],
+                ["attn_prefill_q8_d256", "attn_prefill_q8_d256_r64"],
+                ["attn_prefill_q8_d512", "attn_prefill_q8_d512_r64"],
+            ],
+            [
+                ["attn_prefill_gen_d128", "attn_prefill_gen_d128_r64"],
+                ["attn_prefill_gen_d256", "attn_prefill_gen_d256_r64"],
+                ["attn_prefill_gen_d512", "attn_prefill_gen_d512_r64"],
+            ],
+        ];
+        let name = cm.unwrap_or(NAMES[family][width][usize::from(wide)]);
         let push = self.cache_push(
             self.head_push()
                 .u("rows_total", self.rows)

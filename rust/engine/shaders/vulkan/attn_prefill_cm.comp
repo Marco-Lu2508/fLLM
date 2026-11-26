@@ -1,6 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : enable
-// FLLM-SHADER: attn_prefill_cm | bindings: q,kpool,vpool,meta,bias,out | push: heads,kv_heads,dk,dv,stride,block_size,scale,softcap,window,chunk,flags,rows_total,row0,rows_end,k_base,v_base,k_scale,v_scale,k_group,v_group | grid: [ceil((rows_end - row0) / 64), heads, 1]
+// FLLM-SHADER: attn_prefill_cm | bindings: q,kpool,vpool,meta,bias,out | push: heads,kv_heads,dk,dv,stride,block_size,scale,softcap,window,chunk,flags,rows_total,row0,rows_end,k_base,v_base,k_scale,v_scale,k_group,v_group,k_fmt,v_fmt,k_hi,v_hi,k_mn,v_mn | grid: [ceil((rows_end - row0) / 64), heads, 1]
 // Paged attention for prompt processing on cooperative matrices (VK_KHR_cooperative_matrix, 16x16x16 float16 inputs, float32 accumulators): the same
 // contract as attn_prefill.comp with 64 query rows per workgroup (all rows of a block read the keys through ONE block table, checked by the planner),
 // for an f16 KV cache and key and value width DK (macro, 64 or 128; dk == dv). Four subgroups of 32 invocations (128 per workgroup), subgroup s owns
@@ -61,6 +61,12 @@ layout(push_constant) uniform P {
     uint v_scale;
     uint k_group;
     uint v_group;
+    uint k_fmt;
+    uint v_fmt;
+    uint k_hi;
+    uint v_hi;
+    uint k_mn;
+    uint v_mn;
 } p;
 
 shared f16vec4 Ks[BC * LDK / 4u];        // K tile; at the start it holds the Q tiles of rows 0..31 of the block

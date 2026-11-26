@@ -1,10 +1,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : enable
-// FLLM-SHADER: attn_prefill | bindings: q,kpool,vpool,meta,bias,out | push: heads,kv_heads,dk,dv,stride,block_size,scale,softcap,window,chunk,flags,rows_total,row0,rows_end,k_base,v_base,k_scale,v_scale,k_group,v_group | grid: [ceil((rows_end - row0) / BR), heads, 1]
+// FLLM-SHADER: attn_prefill | bindings: q,kpool,vpool,meta,bias,out | push: heads,kv_heads,dk,dv,stride,block_size,scale,softcap,window,chunk,flags,rows_total,row0,rows_end,k_base,v_base,k_scale,v_scale,k_group,v_group,k_fmt,v_fmt,k_hi,v_hi,k_mn,v_mn | grid: [ceil((rows_end - row0) / BR), heads, 1]
 // Paged attention for prompt processing (Stream::attention_paged with one row per token): a workgroup of 8 * BR lanes handles one query head of a BLOCK
 // of BR consecutive rows (BR = 16, or 64 for devices with workgroups of 512 invocations: the key and value tiles and the barriers then serve four times
 // as many queries) and walks the keys in tiles of 32, so each key / value row is decoded once per BR query rows instead of once per row.
-// Variants (macros): KV_Q8 = 0 / 1 (f16 / q8_0 cache), DVMAX = 128 / 256 / 512 (largest value width dv the accumulators hold; dk is free up to 512), BR.
+// Variants (macros): KV_Q8 = 0 / 1 / 2 (f16 / q8_0 / any other format of kv_format.rs through _ops_kvgen.glsl), DVMAX = 128 / 256 / 512 (largest value width dv the accumulators hold; dk is free up to 512), BR.
 //   Lane = (li, jl) with li = lane / 8 the query row inside the block and jl = lane % 8: scoring gives lane the keys jl, jl + 8, jl + 16, jl + 24 of the
 //   tile for its row (K and Q are staged in shared memory in chunks of 32 dimensions), the value accumulation gives it the dimensions jl + 8 e of every
 //   value chunk (V staged in shared memory in chunks of 32 dimensions). Online softmax per row; masks per row (chunk / window / causal length).
@@ -57,7 +57,22 @@ layout(push_constant) uniform P {
     uint v_scale;
     uint k_group;
     uint v_group;
+    uint k_fmt;
+    uint v_fmt;
+    uint k_hi;
+    uint v_hi;
+    uint k_mn;
+    uint v_mn;
 } p;
+
+#if KV_Q8 == 2
+#define KV_GEN_POOL kpool
+#define KV_GEN_NAME kv_gen_k
+#include "_ops_kvgen.glsl"
+#define KV_GEN_POOL vpool
+#define KV_GEN_NAME kv_gen_v
+#include "_ops_kvgen.glsl"
+#endif
 
 const uint PT_LD = BC + 1u;
 shared float kt[BC * (DC + 1)];
@@ -74,6 +89,8 @@ uint g_kvv;  // kv_heads * dv
 float k_at(uint slot, uint c) {
 #if KV_Q8 == 0
     return KV_HALF(kpool, p.k_base + slot * g_kvk + c);
+#elif KV_Q8 == 2
+    return kv_gen_k(p.k_fmt, p.k_base, p.k_hi, p.k_scale, p.k_mn, p.k_group, slot * g_kvk + c);
 #else
     return KV_I8(kpool, p.k_base * 2u + slot * g_kvk + c) * KV_HALF(kpool, p.k_base + p.k_scale + slot * (g_kvk / p.k_group) + c / p.k_group);
 #endif
@@ -82,6 +99,8 @@ float k_at(uint slot, uint c) {
 float v_at(uint slot, uint c) {
 #if KV_Q8 == 0
     return KV_HALF(vpool, p.v_base + slot * g_kvv + c);
+#elif KV_Q8 == 2
+    return kv_gen_v(p.v_fmt, p.v_base, p.v_hi, p.v_scale, p.v_mn, p.v_group, slot * g_kvv + c);
 #else
     return KV_I8(vpool, p.v_base * 2u + slot * g_kvv + c) * KV_HALF(vpool, p.v_base + p.v_scale + slot * (g_kvv / p.v_group) + c / p.v_group);
 #endif

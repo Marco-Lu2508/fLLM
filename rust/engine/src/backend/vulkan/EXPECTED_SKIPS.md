@@ -12,8 +12,6 @@ adds nothing to this list; if it prints other skips, the capability reporting of
 
 What the lines mean:
 
-- `attention` / `kv_write` / `moe | attention ...`: KV cache formats other than f16 and q8_0 (bf16, f32, fp8, int8, q4_0, q4_1, q5_0, q5_1, iq4_nl,
-  nvfp4 and the mixed key/value pairs). The attention and cache-write shaders only know f16 and q8_0.
 - `fuse | ...`: fused decode kernels of the CUDA backend (add + RMSNorm, rotary + cache write, SwiGLU + int8 quantization, Marlin add): the Vulkan
   stream runs the unfused sequence instead.
 - `linear | nvfp4 w4a4`: activation-quantizing NVFP4 GEMM on FP4 tensor cores (Blackwell); Vulkan stores NVFP4 weights in its own layout.
@@ -22,42 +20,6 @@ What the lines mean:
 
 ```expected-skips
 # group | op | skipped checks (both passes together)
-attention | attention bf16 | 11    # KV cache format other than f16 / q8_0
-attention | attention f16/q4_0 | 11    # KV cache format other than f16 / q8_0
-attention | attention f16/q8_0 | 11    # KV cache format other than f16 / q8_0
-attention | attention f32 | 11    # KV cache format other than f16 / q8_0
-attention | attention fp8_e4m3 | 11    # KV cache format other than f16 / q8_0
-attention | attention fp8_e4m3/f16 | 11    # KV cache format other than f16 / q8_0
-attention | attention fp8_e5m2 | 11    # KV cache format other than f16 / q8_0
-attention | attention int8 | 11    # KV cache format other than f16 / q8_0
-attention | attention iq4_nl | 11    # KV cache format other than f16 / q8_0
-attention | attention nvfp4 | 10    # KV cache format other than f16 / q8_0
-attention | attention nvfp4/bf16 | 10    # KV cache format other than f16 / q8_0
-attention | attention q4_0 | 11    # KV cache format other than f16 / q8_0
-attention | attention q4_1 | 11    # KV cache format other than f16 / q8_0
-attention | attention q5_0 | 11    # KV cache format other than f16 / q8_0
-attention | attention q5_0/fp8_e4m3 | 11    # KV cache format other than f16 / q8_0
-attention | attention q5_1 | 11    # KV cache format other than f16 / q8_0
-attention | attention q8_0/f16 | 11    # KV cache format other than f16 / q8_0
-attention | attention q8_0/q4_0 | 11    # KV cache format other than f16 / q8_0
-attention | kv_write bf16 | 8    # KV cache format other than f16 / q8_0
-attention | kv_write f16/q4_0 | 8    # KV cache format other than f16 / q8_0
-attention | kv_write f16/q8_0 | 8    # KV cache format other than f16 / q8_0
-attention | kv_write f32 | 8    # KV cache format other than f16 / q8_0
-attention | kv_write fp8_e4m3 | 8    # KV cache format other than f16 / q8_0
-attention | kv_write fp8_e4m3/f16 | 8    # KV cache format other than f16 / q8_0
-attention | kv_write fp8_e5m2 | 8    # KV cache format other than f16 / q8_0
-attention | kv_write int8 | 8    # KV cache format other than f16 / q8_0
-attention | kv_write iq4_nl | 8    # KV cache format other than f16 / q8_0
-attention | kv_write nvfp4 | 6    # KV cache format other than f16 / q8_0
-attention | kv_write nvfp4/bf16 | 6    # KV cache format other than f16 / q8_0
-attention | kv_write q4_0 | 8    # KV cache format other than f16 / q8_0
-attention | kv_write q4_1 | 8    # KV cache format other than f16 / q8_0
-attention | kv_write q5_0 | 8    # KV cache format other than f16 / q8_0
-attention | kv_write q5_0/fp8_e4m3 | 8    # KV cache format other than f16 / q8_0
-attention | kv_write q5_1 | 8    # KV cache format other than f16 / q8_0
-attention | kv_write q8_0/f16 | 8    # KV cache format other than f16 / q8_0
-attention | kv_write q8_0/q4_0 | 8    # KV cache format other than f16 / q8_0
 fuse | add_rms_norm | 5    # add_rms_norm
 fuse | add_rms_norm +nvfp4 | 4    # add_rms_norm
 fuse | add_rms_norm +q4_k | 2    # add_rms_norm
@@ -73,15 +35,4 @@ fuse | swiglu + int8 quantization q4_k | 2    # swiglu + int8 quantization
 fuse | swiglu + int8 quantization q5_k | 2    # swiglu + int8 quantization
 fuse | swiglu + int8 quantization q6_k | 2    # swiglu + int8 quantization
 linear | nvfp4 w4a4 | 20    # NVFP4 W4A4 needs the CUDA tensor-core layout
-moe | attention bf16 fast | 2    # KV cache format other than f16 / q8_0
-moe | attention f32 fast | 2    # KV cache format other than f16 / q8_0
-moe | attention fp8_e4m3 fast | 2    # KV cache format other than f16 / q8_0
-moe | attention fp8_e5m2 fast | 2    # KV cache format other than f16 / q8_0
-moe | attention int8 fast | 2    # KV cache format other than f16 / q8_0
-moe | attention iq4_nl fast | 2    # KV cache format other than f16 / q8_0
-moe | attention nvfp4 fast | 2    # KV cache format other than f16 / q8_0
-moe | attention q4_0 fast | 2    # KV cache format other than f16 / q8_0
-moe | attention q4_1 fast | 2    # KV cache format other than f16 / q8_0
-moe | attention q5_0 fast | 2    # KV cache format other than f16 / q8_0
-moe | attention q5_1 fast | 2    # KV cache format other than f16 / q8_0
 ```

@@ -1,0 +1,178 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: kv_write_gen | bindings: src,slots,pool | push: rows,kv,unit,base,hi,sc,mn,fmt | grid: [min(ceil(rows*ceil(kv/unit)/128), 65535), 1, 1]
+// Stream::kv_cache_write for the formats of kv_format.rs that have no shader of their own (bf16, f32, fp8 e4m3 / e5m2, q5_0, q5_1, q4_0, q4_1, iq4_nl,
+// nvfp4), one pool (keys or values) per dispatch. `fmt` = KvFormat code; positions are 16-bit words from the start of the bound pool window: the layer
+// starts at `base`, the 5th-bit region at `base + hi`, the scales at `base + sc`, the minima at `base + mn` (`KvLayout` of kv_format.rs). One invocation
+// encodes one unit of `unit` consecutive values of one row: a quantization group for the scaled formats (the encoders are those of
+// `quantize_group`: the same scale rules, rounding and tie-breaking, with the division and the f16 rounding of the GPU), 16 values for the unscaled
+// ones (the last unit of a row may be shorter). Codes are merged into the shared 32-bit words with atomicAnd / atomicOr.
+#define WG 128
+#include "_ops_common.glsl"
+#include "_ops_kv.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer SrcBuf { float src[]; };
+layout(std430, binding = 1) readonly buffer SlotBuf { uint slots[]; };
+layout(std430, binding = 2) buffer PoolBuf { uint pool[]; };
+layout(push_constant) uniform P {
+    uint rows;
+    uint kv;
+    uint unit;
+    uint base;
+    uint hi;
+    uint sc;
+    uint mn;
+    uint fmt;
+} p;
+
+// replace `bits` bits at bit offset `shift` of the 16-bit word at 16-bit position `pos16` (the other bits are kept)
+void put16(uint pos16, uint shift, uint bits, uint value) {
+    const uint sh = ((pos16 & 1u) << 4u) + shift;
+    const uint mask = ((1u << bits) - 1u) << sh;
+    const uint w = pos16 >> 1u;
+    atomicAnd(pool[w], ~mask);
+    atomicOr(pool[w], (value << sh) & mask);
+}
+
+// byte `b` (position from the start of the window) of the pool
+void put8(uint b, uint value) {
+    const uint sh = (b & 3u) << 3u;
+    atomicAnd(pool[b >> 2u], ~(0xFFu << sh));
+    atomicOr(pool[b >> 2u], (value & 0xFFu) << sh);
+}
+
+uint bf16_bits(float x) {
+    const uint bits = floatBitsToUint(x);
+    if (isnan(x)) return (bits >> 16) | 0x40u;
+    return (bits + 0x7FFFu + ((bits >> 16) & 1u)) >> 16;
+}
+
+float h(uint bits) { return unpackHalf2x16(bits)[0]; }
+
+// element with the largest magnitude (the first of equals), with its sign
+float signed_max(uint first, uint n) {
+    float v = 0.0;
+    for (uint j = 0u; j < n; j++) {
+        const float e = src[first + j];
+        if (abs(e) > abs(v)) v = e;
+    }
+    return v;
+}
+
+// index of the IQ4_NL value nearest to t (the first of equals)
+uint nearest_iq4nl(float t) {
+    uint best = 0u;
+    float best_err = uintBitsToFloat(0x7F800000u);
+    for (uint k = 0u; k < 16u; k++) {
+        const float err = abs(t - KV_IQ4NL[k]);
+        if (err < best_err) {
+            best_err = err;
+            best = k;
+        }
+    }
+    return best;
+}
+
+void main() {
+    const uint per_row = (p.kv + p.unit - 1u) / p.unit;
+    const uint total = p.rows * per_row;
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < total; i += grid_items) {
+        const uint r = i / per_row;
+        const uint u = i - r * per_row;
+        const uint slot = slots[r];
+        const uint c0 = u * p.unit;
+        const uint n = min(p.unit, p.kv - c0);
+        const uint first = r * p.kv + c0;     // first source value
+        const uint n0 = slot * p.kv + c0;     // first channel index in the pool
+        const uint g = n0 / p.unit;           // group index (scaled formats: unit = group)
+        if (p.fmt == 13u) {
+            for (uint j = 0u; j < n; j++) {
+                const uint bits = floatBitsToUint(src[first + j]);
+                put16(p.base + 2u * (n0 + j), 0u, 16u, bits & 0xFFFFu);
+                put16(p.base + 2u * (n0 + j) + 1u, 0u, 16u, bits >> 16);
+            }
+        } else if (p.fmt == 1u) {
+            for (uint j = 0u; j < n; j++) put16(p.base + n0 + j, 0u, 16u, f16_bits(src[first + j]));
+        } else if (p.fmt == 3u) {
+            for (uint j = 0u; j < n; j++) put16(p.base + n0 + j, 0u, 16u, bf16_bits(src[first + j]));
+        } else if (p.fmt == 5u) {
+            for (uint j = 0u; j < n; j++) put8(p.base * 2u + n0 + j, kv_to_fp8(src[first + j], 2u, 15, 123u));
+        } else if (p.fmt == 4u) {
+            float amax = 0.0;
+            for (uint j = 0u; j < n; j++) amax = max(amax, abs(src[first + j]));
+            const uint sb = f16_bits(amax / 448.0);
+            const float d = h(sb);
+            put16(p.base + p.sc + g, 0u, 16u, sb);
+            for (uint j = 0u; j < n; j++) put8(p.base * 2u + n0 + j, d == 0.0 ? 0u : kv_to_fp8(src[first + j] / d, 3u, 7, 126u));
+        } else if (p.fmt == 9u || p.fmt == 7u) {
+            const bool q5 = p.fmt == 7u;
+            const float zero = q5 ? 16.0 : 8.0;
+            const float levels = q5 ? 31.0 : 15.0;
+            const uint sb = f16_bits(signed_max(first, n) / -zero);
+            const float d = h(sb);
+            put16(p.base + p.sc + g, 0u, 16u, sb);
+            for (uint j = 0u; j < n; j++) {
+                const uint code = d == 0.0 ? uint(zero) : uint(clamp(floor(src[first + j] / d + (zero + 0.5)), 0.0, levels));
+                put16(p.base + ((n0 + j) >> 2u), ((n0 + j) & 3u) << 2u, 4u, code & 15u);
+                if (q5) put16(p.base + p.hi + ((n0 + j) >> 4u), (n0 + j) & 15u, 1u, code >> 4u);
+            }
+        } else if (p.fmt == 10u || p.fmt == 8u) {
+            const bool q5 = p.fmt == 8u;
+            const float levels = q5 ? 31.0 : 15.0;
+            float mnv = src[first];
+            float mxv = src[first];
+            for (uint j = 1u; j < n; j++) {
+                mnv = min(mnv, src[first + j]);
+                mxv = max(mxv, src[first + j]);
+            }
+            const uint sb = f16_bits((mxv - mnv) / levels);
+            const uint mb = f16_bits(mnv);
+            const float d = h(sb);
+            const float m = h(mb);
+            put16(p.base + p.sc + g, 0u, 16u, sb);
+            put16(p.base + p.mn + g, 0u, 16u, mb);
+            for (uint j = 0u; j < n; j++) {
+                const uint code = d == 0.0 ? 0u : uint(clamp(floor((src[first + j] - m) / d + 0.5), 0.0, levels));
+                put16(p.base + ((n0 + j) >> 2u), ((n0 + j) & 3u) << 2u, 4u, code & 15u);
+                if (q5) put16(p.base + p.hi + ((n0 + j) >> 4u), (n0 + j) & 15u, 1u, code >> 4u);
+            }
+        } else if (p.fmt == 11u) {
+            const float v = signed_max(first, n);
+            if (v == 0.0) {
+                put16(p.base + p.sc + g, 0u, 16u, 0u);
+                for (uint j = 0u; j < n; j++) put16(p.base + ((n0 + j) >> 2u), ((n0 + j) & 3u) << 2u, 4u, 8u);
+            } else {
+                const float d0 = v / -127.0;
+                float sxg = 0.0;
+                float sgg = 0.0;
+                for (uint j = 0u; j < n; j++) {
+                    const float e = src[first + j];
+                    const uint best = nearest_iq4nl(e / d0);
+                    const float gv = KV_IQ4NL[best];
+                    sxg = fma(e, gv, sxg);
+                    sgg += gv * gv;
+                }
+                put16(p.base + p.sc + g, 0u, 16u, f16_bits(sxg / sgg));
+                for (uint j = 0u; j < n; j++) put16(p.base + ((n0 + j) >> 2u), ((n0 + j) & 3u) << 2u, 4u, nearest_iq4nl(src[first + j] / d0));
+            }
+        } else if (p.fmt == 12u) {
+            float amax = 0.0;
+            for (uint j = 0u; j < n; j++) amax = max(amax, abs(src[first + j]));
+            const uint sb = kv_to_fp8(amax / 6.0, 3u, 7, 126u);
+            const float d = kv_fp8(sb, 3u, 7);
+            put8((p.base + p.sc) * 2u + g, sb);
+            for (uint j = 0u; j < n; j++) {
+                const float e = src[first + j];
+                uint idx = 0u;
+                if (d != 0.0) {
+                    const float a = abs(e) / d;
+                    for (uint k = 0u; k < 7u; k++) idx += a > KV_FP4_MID[k] ? 1u : 0u;
+                }
+                const uint code = ((floatBitsToUint(e) >> 31) != 0u ? 8u : 0u) | idx;
+                put16(p.base + ((n0 + j) >> 2u), ((n0 + j) & 3u) << 2u, 4u, code);
+            }
+        }
+    }
+}
