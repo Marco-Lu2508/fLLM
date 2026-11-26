@@ -179,6 +179,15 @@ impl Tester<'_> {
             let r = self.moe_grouped_check(kind, 8, 6, 2, 260, 144, 16, 1, None, false, false, usize::MAX);
             self.record("moe grouped fp8b", "8 experts 6 tokens k2 260x144 tile 16", r);
         }
+        // Marlin-packed Q4Z experts (`upload_expert_projection`): grouped TC (tile 16/64, GLU=0/1, +bias) and per-slot GEMV / fused GEMV GLU
+        for kind in self.kinds(&[0x8000_0010u32, 0x8000_0011, 0x8000_0012]) {
+            let r = self.moe_marlin_grouped_check(kind, 8, 6, 2, 128, 256, 16, 2, None, true);
+            self.record(&format!("moe marlin {}", format_name(kind)), "8 experts 6 tokens k2 128x256 tile 16 +bias", r);
+            let r = self.moe_marlin_grouped_check(kind, 8, 24, 4, 256, 256, 64, 4, Some(mode_swiglu), true);
+            self.record(&format!("moe marlin gu {}", format_name(kind)), "8 experts 24 tokens k4 256x256 tile 64 swiglu +bias", r);
+            let r = self.moe_marlin_decode_check(kind, 6, 2, 4, 128, 256, mode_swiglu);
+            self.record(&format!("moe marlin gemv {}", format_name(kind)), "6 experts 2 tokens k4 128x256 fused+down", r);
+        }
         let glu_modes = [
             ("geglu", MoeGlu { mode: 1, alpha: 0.0, limit: 0.0 }),
             ("swiglu_oai", MoeGlu { mode: 2, alpha: 1.702, limit: 7.0 }),
@@ -636,6 +645,215 @@ impl Tester<'_> {
                         scale.push(products[0].1);
                     }
                 }
+            }
+        }
+        Ok(Outcome { device: worst(&got, &want, &scale), cpu: 0.0, tol: Self::FAST_TOL, cpu_tol: 1.0, ms })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn moe_marlin_grouped_check(
+        &mut self,
+        kind: u32,
+        experts: usize,
+        tokens: usize,
+        k: usize,
+        rows: usize,
+        cols: usize,
+        block: usize,
+        x_div: usize,
+        glu: Option<MoeGlu>,
+        with_bias: bool,
+    ) -> Result<Outcome, BackendError> {
+        let quant = QuantType::from_gguf_type_id(kind);
+        let pairs = tokens * k;
+        let projections = if glu.is_some() { 2 } else { 1 };
+        let (mut raws, mut dense, mut biases) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..projections {
+            let (mut r, mut d, mut b) = (Vec::new(), Vec::new(), Vec::new());
+            for _ in 0..experts {
+                let raw = random_kind(&mut self.rng, kind, rows, cols);
+                d.push(crate::compute::dequantize(&raw, kind, rows * cols).map_err(BackendError::DriverError)?);
+                r.push(raw);
+                b.push(if with_bias { self.rng.vector(rows, 1.0) } else { Vec::new() });
+            }
+            raws.push(r);
+            dense.push(d);
+            biases.push(b);
+        }
+        let mut weights: Vec<Vec<crate::backend::DeviceWeight>> = Vec::new();
+        for p in 0..projections {
+            let exp_refs: Vec<(&[u8], Option<&[f32]>)> = (0..experts)
+                .map(|e| (raws[p][e].as_slice(), with_bias.then_some(biases[p][e].as_slice())))
+                .collect();
+            let list = self
+                .device
+                .upload_expert_projection("selftest", &exp_refs, quant, rows, cols)?
+                .ok_or(BackendError::UnsupportedQuant(quant))?;
+            weights.push(list);
+        }
+        let device_quant = weights[0][0].quant_type;
+        let refs: Vec<Vec<&crate::backend::DeviceWeight>> = weights.iter().map(|l| l.iter().collect()).collect();
+        let tables: Vec<DeviceBuffer> = refs.iter().map(|r| self.device.upload_pointer_table(r)).collect::<Result<_, _>>()?;
+        let bias_tables: Vec<Option<DeviceBuffer>> = refs
+            .iter()
+            .map(|r| if with_bias { self.device.upload_bias_table(r).map(Some) } else { Ok(None) })
+            .collect::<Result<_, _>>()?;
+
+        let ids = self.route_ids(tokens, k, experts);
+        let inputs = pairs.div_ceil(x_div);
+        let x = self.rng.vector(inputs * cols, 1.0);
+        let mut stream = self.device.create_stream()?;
+        let xb = put(self.device, stream.as_mut(), &x)?;
+        let mut idb = self.alloc(pairs * 4)?;
+        stream.upload(&mut idb, &i32_bytes(&ids))?;
+        let (sb, bb, pb) = moe_sort_bytes(pairs, experts, block);
+        let mut sort = MoeSort { sorted: self.alloc(sb)?, block_expert: self.alloc(bb)?, post: self.alloc(pb)?, pairs, block, max_blocks: bb / 4 };
+        stream.moe_align(&idb, &mut sort, 0, experts)?;
+        let mut out = self.alloc(pairs * rows * 4)?;
+        let mut ms = 0.0;
+        timed(&mut ms, stream.as_mut(), |s| {
+            s.moe_grouped_linear(MoeGrouped {
+                out: &mut out,
+                x: &xb,
+                table: &tables[0],
+                table_up: glu.map(|_| &tables[1]),
+                bias: bias_tables[0].as_ref(),
+                bias_up: if glu.is_some() { bias_tables[1].as_ref() } else { None },
+                input_weights: None,
+                sort: &sort,
+                quant_type: device_quant,
+                rows,
+                cols,
+                x_div,
+                glu,
+            })
+        })?;
+        let have = get(stream.as_mut(), &out, pairs * rows)?;
+        let (mut got, mut want, mut scale) = (Vec::new(), Vec::new(), Vec::new());
+        for p in 0..pairs {
+            let e = ids[p] as usize;
+            let xv = &x[(p / x_div) * cols..(p / x_div + 1) * cols];
+            for r in 0..rows {
+                let mut products = [(0.0f64, 0.0f64); 2];
+                for (q, slot) in products.iter_mut().enumerate().take(projections) {
+                    let w = &dense[q][e][r * cols..(r + 1) * cols];
+                    let (mut sum, mut mag) = (0.0f64, 0.0f64);
+                    for (&a, &b) in xv.iter().zip(w) {
+                        let term = f64::from(a) * f64::from(b);
+                        sum += term;
+                        mag += term.abs();
+                    }
+                    if with_bias {
+                        let bv = f64::from(biases[q][e][r]);
+                        sum += bv;
+                        mag += bv.abs();
+                    }
+                    *slot = (sum, mag);
+                }
+                got.push(have[p * rows + r]);
+                match glu {
+                    Some(g) => {
+                        let (gv, uv) = (products[0].0, products[1].0);
+                        let (lg, lu) = glu_lipschitz(gv, uv, g, products[0].1, products[1].1, Self::FAST_TOL);
+                        let reference = glu_reference(gv, uv, g);
+                        want.push(reference);
+                        scale.push(lg * products[0].1 + lu * products[1].1 + reference.abs() * 4.9e-4);
+                    }
+                    None => {
+                        want.push(products[0].0);
+                        scale.push(products[0].1);
+                    }
+                }
+            }
+        }
+        Ok(Outcome { device: worst(&got, &want, &scale), cpu: 0.0, tol: Self::FAST_TOL, cpu_tol: 1.0, ms })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn moe_marlin_decode_check(
+        &mut self,
+        kind: u32,
+        experts: usize,
+        tokens: usize,
+        k: usize,
+        rows: usize,
+        cols: usize,
+        glu: MoeGlu,
+    ) -> Result<Outcome, BackendError> {
+        let quant = QuantType::from_gguf_type_id(kind);
+        let pairs = tokens * k;
+        let (mut raws, mut dense, mut biases) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..2 {
+            let (mut r, mut d, mut b) = (Vec::new(), Vec::new(), Vec::new());
+            for _ in 0..experts {
+                let raw = random_kind(&mut self.rng, kind, rows, cols);
+                d.push(crate::compute::dequantize(&raw, kind, rows * cols).map_err(BackendError::DriverError)?);
+                r.push(raw);
+                b.push(self.rng.vector(rows, 1.0));
+            }
+            raws.push(r);
+            dense.push(d);
+            biases.push(b);
+        }
+        let mut weights = Vec::new();
+        for p in 0..2 {
+            let exp_refs: Vec<(&[u8], Option<&[f32]>)> = (0..experts).map(|e| (raws[p][e].as_slice(), Some(biases[p][e].as_slice()))).collect();
+            let list = self
+                .device
+                .upload_expert_projection("selftest", &exp_refs, quant, rows, cols)?
+                .ok_or(BackendError::UnsupportedQuant(quant))?;
+            weights.push(list);
+        }
+        let dq = weights[0][0].quant_type;
+        let refs: Vec<Vec<&crate::backend::DeviceWeight>> = weights.iter().map(|l| l.iter().collect()).collect();
+        let tables: Vec<DeviceBuffer> = refs.iter().map(|r| self.device.upload_pointer_table(r)).collect::<Result<_, _>>()?;
+        let btables: Vec<DeviceBuffer> = refs.iter().map(|r| self.device.upload_bias_table(r)).collect::<Result<_, _>>()?;
+
+        let ids = self.route_ids(tokens, k, experts);
+        let x = self.rng.vector(tokens * cols, 1.0);
+        let mut stream = self.device.create_stream()?;
+        let xb = put(self.device, stream.as_mut(), &x)?;
+        let mut idb = self.alloc(pairs * 4)?;
+        stream.upload(&mut idb, &i32_bytes(&ids))?;
+        let mut out_glu = self.alloc(pairs * rows * 4)?;
+        let mut out_plain = self.alloc(pairs * rows * 4)?;
+        let mut ms = 0.0;
+        timed(&mut ms, stream.as_mut(), |s| {
+            let ok = s.moe_linear_glu(&mut out_glu, &xb, &tables[0], &tables[1], Some(&btables[0]), Some(&btables[1]), &idb, dq, rows, cols, pairs, k, glu)?;
+            if !ok {
+                return Err(BackendError::UnsupportedQuant(dq));
+            }
+            s.moe_linear(&mut out_plain, &xb, &tables[0], Some(&btables[0]), &idb, dq, rows, cols, pairs, k)
+        })?;
+        let have_glu = get(stream.as_mut(), &out_glu, pairs * rows)?;
+        let have_plain = get(stream.as_mut(), &out_plain, pairs * rows)?;
+        let (mut got, mut want, mut scale) = (Vec::new(), Vec::new(), Vec::new());
+        for p in 0..pairs {
+            let e = ids[p] as usize;
+            let xv = &x[(p / k) * cols..(p / k + 1) * cols];
+            for r in 0..rows {
+                let mut products = [(0.0f64, 0.0f64); 2];
+                for (q, slot) in products.iter_mut().enumerate() {
+                    let w = &dense[q][e][r * cols..(r + 1) * cols];
+                    let (mut sum, mut mag) = (0.0f64, 0.0f64);
+                    for (&a, &b) in xv.iter().zip(w) {
+                        let term = f64::from(a) * f64::from(b);
+                        sum += term;
+                        mag += term.abs();
+                    }
+                    let bv = f64::from(biases[q][e][r]);
+                    *slot = (sum + bv, mag + bv.abs());
+                }
+                got.push(have_plain[p * rows + r]);
+                want.push(products[0].0);
+                scale.push(products[0].1);
+
+                got.push(have_glu[p * rows + r]);
+                let (gv, uv) = (products[0].0, products[1].0);
+                let (lg, lu) = glu_lipschitz(gv, uv, glu, products[0].1, products[1].1, Self::FAST_TOL);
+                let reference = glu_reference(gv, uv, glu);
+                want.push(reference);
+                scale.push(lg * products[0].1 + lu * products[1].1 + reference.abs() * 4.9e-4);
             }
         }
         Ok(Outcome { device: worst(&got, &want, &scale), cpu: 0.0, tol: Self::FAST_TOL, cpu_tol: 1.0, ms })

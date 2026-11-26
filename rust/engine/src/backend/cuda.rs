@@ -416,7 +416,10 @@ extern "C" {
     fn fllm_cuda_moe_route(st: *mut RawStream, logits: *const f32, ids: *mut i32, w: *mut f32, rows: c_int, experts: c_int, k: c_int, normalize: c_int, scale: f32) -> c_int;
     fn fllm_cuda_moe_combine(st: *mut RawStream, out: *mut f32, y: *const f32, w: *const f32, tokens: c_int, k: c_int, hidden: c_int) -> c_int;
     fn fllm_cuda_swiglu_oai(st: *mut RawStream, gate: *const f32, up: *const f32, out: *mut f32, count: usize, alpha: f32, limit: f32) -> c_int;
-    fn fllm_cuda_moe_linear(st: *mut RawStream, tab: *const *const c_void, btab: *const *const c_void, kind: c_int, ids: *const i32, x: *const f32, y: *mut f32, rows: c_int, cols: c_int, slots: c_int, xdiv: c_int) -> c_int;
+    fn fllm_cuda_moe_linear(st: *mut RawStream, tab: *const *const c_void, btab: *const *const c_void, kind: c_int, ids: *const i32, x: *const f32, y: *mut f32, rows: c_int, cols: c_int, slots: c_int, xdiv: c_int, act_dt: c_int) -> c_int;
+    fn fllm_cuda_moe_marlin_expert_bytes(rows: c_int, cols: c_int, group: c_int) -> usize;
+    fn fllm_cuda_moe_marlin_pack(dev: c_int, raw_arena: *const c_void, raw_stride: usize, dst_arena: *mut c_void, dst_stride: usize, experts: c_int, rows: c_int, cols: c_int, group: c_int) -> c_int;
+    fn fllm_cuda_moe_marlin_linear_glu(st: *mut RawStream, wtab_gate: *const *const c_void, wtab_up: *const *const c_void, btab_gate: *const *const c_void, btab_up: *const *const c_void, kind: c_int, ids: *const i32, x: *const f32, y: *mut f32, rows: c_int, cols: c_int, slots: c_int, xdiv: c_int, glu_mode: c_int, alpha: f32, limit: f32, act_dt: c_int) -> c_int;
     fn fllm_cuda_set_exact(on: c_int) -> c_int;
     fn fllm_cuda_repack(st: *mut RawStream, dst: *mut c_void, src: *const c_void, kind: c_int, rows: usize, cols: usize) -> c_int;
     fn fllm_cuda_glu(
@@ -2102,8 +2105,45 @@ impl Backend for CudaBackend {
             let at = idx * stride;
             packed[at..at + raw_len].copy_from_slice(bytes);
         }
-        let arena = self.alloc(packed.len().max(1))?;
-        self.upload_sync(&arena, &packed)?;
+        let use_marlin = !self.rocm
+            && self.cc >= 75
+            && rows.is_multiple_of(64)
+            && cols.is_multiple_of(128)
+            && cols.is_multiple_of(group)
+            && matches!(group, 32 | 64 | 128)
+            && !matches!(std::env::var("FLLM_MOE_MARLIN").ok().as_deref(), Some("0" | "off" | "false" | "no"));
+        let (arena, expert_stride, expert_len, out_quant) = if use_marlin {
+            let mstride = unsafe { fllm_cuda_moe_marlin_expert_bytes(to_c(rows, "rows")?, to_c(cols, "cols")?, to_c(group, "group")?) };
+            let marlin_arena = self.alloc((experts.len() * mstride).max(1))?;
+            {
+                let staging = self.alloc(packed.len().max(1))?;
+                self.upload_sync(&staging, &packed)?;
+                check(unsafe {
+                    fllm_cuda_moe_marlin_pack(
+                        self.device,
+                        dev_ptr(&staging)?.cast(),
+                        stride,
+                        dev_ptr(&marlin_arena)?.cast(),
+                        mstride,
+                        to_c(experts.len(), "experts")?,
+                        to_c(rows, "rows")?,
+                        to_c(cols, "cols")?,
+                        to_c(group, "group")?,
+                    )
+                })?;
+            }
+            let mq = match group {
+                32 => QuantType::Other(0x8000_0110),
+                64 => QuantType::Other(0x8000_0111),
+                128 => QuantType::Other(0x8000_0112),
+                _ => unreachable!(),
+            };
+            (marlin_arena, mstride, mstride, mq)
+        } else {
+            let arena = self.alloc(packed.len().max(1))?;
+            self.upload_sync(&arena, &packed)?;
+            (arena, stride, raw_len, quant_type)
+        };
         let bias_arena = if all_bias {
             let bstride = (rows * 4).max(1).div_ceil(256) * 256;
             let mut bpacked = vec![0u8; experts.len() * bstride];
@@ -2129,8 +2169,8 @@ impl Backend for CudaBackend {
             };
             out.push(DeviceWeight {
                 name: format!("{name}.exp{idx}"),
-                buffer: arena.slice(idx * stride, raw_len)?,
-                quant_type,
+                buffer: arena.slice(idx * expert_stride, expert_len)?,
+                quant_type: out_quant,
                 rows,
                 cols,
                 bias,
@@ -2147,6 +2187,9 @@ impl Backend for CudaBackend {
 
     fn moe_linear_supported(&self, quant_type: QuantType, cols: usize) -> bool {
         let kind = quant_type.to_gguf_type_id();
+        if matches!(kind, 0x8000_0110..=0x8000_0112) {
+            return !self.rocm && self.cc >= 75 && cols.is_multiple_of(128);
+        }
         let k_quant = matches!(kind, 12..=14);
         if let Some(group) = quant_type.q4z_group() {
             return !quant_type.is_q4zp() && cols.is_multiple_of(group);
@@ -2996,6 +3039,14 @@ impl Stream for CudaStream {
         self.widen_into(dst, src, count)
     }
 
+    fn narrow_activations(&mut self, dst: &mut DeviceBuffer, src: &DeviceBuffer) -> Result<(), BackendError> {
+        if !self.act.is_narrow() {
+            return self.copy_buffer(dst, src);
+        }
+        let count = dst.size.min(src.size) / 4;
+        self.narrow_into(dst, src, count)
+    }
+
     fn check_activations(&mut self, buf: &DeviceBuffer, count: usize) -> Result<Option<(f32, u32)>, BackendError> {
         let (mut max_abs, mut bad) = (0f32, 0 as c_int);
         // SAFETY: `buf` holds at least `count` values of the stream's activation type (callers pass rows x width).
@@ -3436,16 +3487,26 @@ impl Stream for CudaStream {
         x_div: usize,
     ) -> Result<(), BackendError> {
         let kind = quant_type.to_gguf_type_id();
+        let q4zm = matches!(kind, 0x8000_0110..=0x8000_0112);
         let k_quant = matches!(kind, 12..=14);
         let q4z_group = quant_type.q4z_group().filter(|_| !quant_type.is_q4zp());
-        let align = k_quant.then_some(256).or(q4z_group).unwrap_or(32);
-        if !(k_quant || q4z_group.is_some() || matches!(kind, 2 | 3 | 6 | 7 | 8 | 20 | 39)) || !cols.is_multiple_of(align) || x_div == 0 {
+        let align = if q4zm {
+            128
+        } else {
+            k_quant.then_some(256).or(q4z_group).unwrap_or(32)
+        };
+        if !(q4zm || k_quant || q4z_group.is_some() || matches!(kind, 2 | 3 | 6 | 7 | 8 | 20 | 39))
+            || !cols.is_multiple_of(align)
+            || (q4zm && !rows.is_multiple_of(64))
+            || x_div == 0
+        {
             return Err(BackendError::UnsupportedQuant(quant_type));
         }
         let inputs = slots.div_ceil(x_div);
         if x.size < inputs * cols * 4 || out.size < slots * rows * 4 || ids.size < slots * 4 {
             return Err(invalid("moe_linear: buffers too small"));
         }
+        let act_dt = c_int::from(q4zm && self.act == ActDtype::F16);
         // SAFETY: sizes checked above; the table was built by `upload_pointer_table` for weights of `quant_type`.
         check(unsafe {
             fllm_cuda_moe_linear(
@@ -3463,8 +3524,64 @@ impl Stream for CudaStream {
                 to_c(cols, "cols")?,
                 to_c(slots, "slots")?,
                 to_c(x_div, "x_div")?,
+                act_dt,
             )
         })
+    }
+
+    fn moe_linear_glu(
+        &mut self,
+        out: &mut DeviceBuffer,
+        x: &DeviceBuffer,
+        table_gate: &DeviceBuffer,
+        table_up: &DeviceBuffer,
+        bias_gate: Option<&DeviceBuffer>,
+        bias_up: Option<&DeviceBuffer>,
+        ids: &DeviceBuffer,
+        quant_type: QuantType,
+        rows: usize,
+        cols: usize,
+        slots: usize,
+        x_div: usize,
+        glu: MoeGlu,
+    ) -> Result<bool, BackendError> {
+        let kind = quant_type.to_gguf_type_id();
+        if self.cc < 75 || !matches!(kind, 0x8000_0110..=0x8000_0112) || !rows.is_multiple_of(64) || !cols.is_multiple_of(128) || x_div == 0 {
+            return Ok(false);
+        }
+        let inputs = slots.div_ceil(x_div);
+        if x.size < inputs * cols * 4 || out.size < slots * rows * 4 || ids.size < slots * 4 {
+            return Err(invalid("moe_linear_glu: buffers too small"));
+        }
+        let act_dt = c_int::from(self.act == ActDtype::F16);
+        check(unsafe {
+            fllm_cuda_moe_marlin_linear_glu(
+                self.raw,
+                dev_ptr(table_gate)?.cast(),
+                dev_ptr(table_up)?.cast(),
+                match bias_gate {
+                    Some(b) => dev_ptr(b)?.cast(),
+                    None => std::ptr::null(),
+                },
+                match bias_up {
+                    Some(b) => dev_ptr(b)?.cast(),
+                    None => std::ptr::null(),
+                },
+                kind as c_int,
+                dev_ptr(ids)?.cast(),
+                dev_ptr(x)?.cast(),
+                dev_ptr(out)?.cast(),
+                to_c(rows, "rows")?,
+                to_c(cols, "cols")?,
+                to_c(slots, "slots")?,
+                to_c(x_div, "x_div")?,
+                glu.mode as c_int,
+                glu.alpha,
+                glu.limit,
+                act_dt,
+            )
+        })?;
+        Ok(true)
     }
 
     fn moe_combine(
@@ -3512,7 +3629,8 @@ impl Stream for CudaStream {
     }
 
     fn moe_grouped_linear(&mut self, call: MoeGrouped<'_>) -> Result<(), BackendError> {
-        moe::grouped(self.raw, self.cc, call)
+        let act_dt = c_int::from(self.act == ActDtype::F16 && matches!(call.quant_type.to_gguf_type_id(), 0x8000_0110..=0x8000_0112));
+        moe::grouped(self.raw, self.cc, act_dt, call)
     }
 
     fn moe_combine_ex(
@@ -3526,11 +3644,13 @@ impl Stream for CudaStream {
         k: usize,
         hidden: usize,
     ) -> Result<(), BackendError> {
-        moe::combine_ex(self.raw, out, y, weights, shared, gate, tokens, k, hidden)
+        let act_dt = c_int::from(self.act == ActDtype::F16);
+        moe::combine_ex(self.raw, act_dt, out, y, weights, shared, gate, tokens, k, hidden)
     }
 
     fn moe_gate_scale(&mut self, gate: &mut DeviceBuffer, x: &DeviceBuffer, g: &DeviceBuffer, tokens: usize, hidden: usize) -> Result<(), BackendError> {
-        moe::gate_scale(self.raw, gate, x, g, tokens, hidden)
+        let act_dt = c_int::from(self.act == ActDtype::F16);
+        moe::gate_scale(self.raw, act_dt, gate, x, g, tokens, hidden)
     }
 
     fn moe_zero_fold(

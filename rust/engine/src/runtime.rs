@@ -2817,17 +2817,30 @@ impl InferenceRuntime {
         self.batch_stats.model_forward_ns += forward_started.elapsed().as_nanos() as u64;
         let postprocess_started = Instant::now();
 
+        let mut immediate_decode = Vec::new();
         for (sid, count, final_row) in prefill_commits {
             self.scheduler
                 .commit_chunk(sid, count)
                 .map_err(|e| e.to_string())?;
             if let Some(row) = final_row {
-                let compact_row = logit_rows
-                    .binary_search(&row)
-                    .map_err(|_| "missing prompt LM-head result")?;
-                self.pending_logits
-                    .insert(sid, self.logit_row(&batch_logits, compact_row));
-                self.fork_prompt_choices(sid)?;
+                if !self.beam_seq.contains_key(&sid)
+                    && !self.pending_choices.contains_key(&sid)
+                    && self
+                        .scheduler
+                        .sequences
+                        .get(&sid)
+                        .is_some_and(|s| s.remaining_max() > 0)
+                {
+                    decode_row.insert(sid, row);
+                    immediate_decode.push(sid);
+                } else {
+                    let compact_row = logit_rows
+                        .binary_search(&row)
+                        .map_err(|_| "missing prompt LM-head result")?;
+                    self.pending_logits
+                        .insert(sid, self.logit_row(&batch_logits, compact_row));
+                    self.fork_prompt_choices(sid)?;
+                }
             }
         }
         self.take_state_checkpoints()?;
@@ -2842,7 +2855,9 @@ impl InferenceRuntime {
         {
             self.plain_round = Some(step.decode.clone());
         }
-        for sid in step.decode {
+        let mut decode_sids = step.decode;
+        decode_sids.extend(immediate_decode);
+        for sid in decode_sids {
             if self.beam_seq.contains_key(&sid) {
                 // a beam does not sample: its logits wait until every beam of the search has them (`drive_beams`)
                 if let std::collections::hash_map::Entry::Vacant(slot) = self.pending_logits.entry(sid) {

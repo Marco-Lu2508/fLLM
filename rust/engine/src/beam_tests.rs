@@ -169,9 +169,9 @@ fn forking_shares_full_blocks_and_copies_the_tail() {
     assert!(block_size <= 16, "the test prompt must cross a block boundary");
     rt.submit_with_sampling("f".into(), PROMPT.to_vec(), 4, SamplingParams::default()).unwrap();
     let leader = 1;
-    // run until the prompt is computed (the logits are pending)
+    // run until the prompt is computed
     let mut guard = 0;
-    while !rt.pending_logits.contains_key(&leader) {
+    while rt.scheduler.sequences.get(&leader).is_none_or(|s| s.num_computed < PROMPT.len()) {
         guard += 1;
         assert!(guard < 100);
         rt.step().unwrap();

@@ -48,7 +48,7 @@ int fllm_cuda_moe_route(FllmStream *st, const float *logits, int32_t *ids, float
                         int normalize, float scale);
 int fllm_cuda_moe_combine(FllmStream *st, float *out, const float *y, const float *w, int tokens, int k, int hidden);
 int fllm_cuda_moe_linear(FllmStream *st, const void *const *tab, const void *const *btab, int kind, const int32_t *ids,
-                         const float *x, float *y, int rows, int cols, int slots, int xdiv);
+                         const float *x, float *y, int rows, int cols, int slots, int xdiv, int act_dt);
 int fllm_cuda_moe_route2(FllmStream *st, const float *logits, const float *bias, int32_t *ids, float *w, int rows, int experts, int k,
                          int sigmoid, int normalize, float scale, float eps, int groups, int groups_used, int top2);
 int fllm_cuda_moe_align(FllmStream *st, const int32_t *ids, int32_t *sorted, int32_t *block_expert, int32_t *num_post, int pairs,
@@ -57,10 +57,10 @@ int fllm_cuda_moe_grouped_supported(int kind, int cols, int block);
 int fllm_cuda_moe_grouped(FllmStream *st, int kind, int glu, const void *const *wtab, const void *const *wtab2, const void *const *btab,
                           const void *const *btab2, const float *x, const float *pw, float *y, const int32_t *sorted,
                           const int32_t *block_expert, const int32_t *num_post, int rows, int cols, int pairs, int xdiv, int block,
-                          int max_blocks, int glu_mode, float alpha, float limit);
+                          int max_blocks, int glu_mode, float alpha, float limit, int act_dt);
 int fllm_cuda_moe_combine2(FllmStream *st, float *out, const float *y, const float *w, const float *shared, const float *gate, int tokens,
-                           int k, int hidden);
-int fllm_cuda_moe_gate_scale(FllmStream *st, float *gate, const float *x, const float *g, int tokens, int hidden);
+                           int k, int hidden, int act_dt);
+int fllm_cuda_moe_gate_scale(FllmStream *st, float *gate, const float *x, const float *g, int tokens, int hidden, int act_dt);
 int fllm_cuda_swiglu_oai(FllmStream *st, const float *gate, const float *up, float *out, size_t count, float alpha, float limit);
 int fllm_cuda_glu(FllmStream *st, const float *gate, const float *up, float *out, size_t count, int mode);
 int fllm_cuda_residual(FllmStream *st, float *x, const float *res, size_t count, float scale);

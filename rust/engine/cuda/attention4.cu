@@ -117,6 +117,9 @@ __global__ void __launch_bounds__(A4_WARPS * 32) attn4_kernel(Attn4Args a) {
     const size_t kvw = (size_t)a.kv_heads * D;
     const uint16_t *kbase = a.kpool + (size_t)kh * D + sub * 8;
     const uint16_t *vbase = a.vpool + (size_t)kh * D + sub * 8;
+    const bool pow2 = (a.block_size & (a.block_size - 1)) == 0;
+    const int bs_shift = pow2 ? (__ffs(a.block_size) - 1) : 0;
+    const int bs_mask = a.block_size - 1;
 
     for (int base = begin; base < end; base += NG * A4_UK) {
         uint4 kvec[A4_UK], vvec[A4_UK];
@@ -126,7 +129,9 @@ __global__ void __launch_bounds__(A4_WARPS * 32) attn4_kernel(Attn4Args a) {
         for (int j = 0; j < A4_UK; j++) {
             const int p = base + gid * A4_UK + j;
             ok[j] = p < end;
-            const size_t slot = ok[j] ? (size_t)table[p / a.block_size] * a.block_size + p % a.block_size : 0;
+            const int blk = pow2 ? (p >> bs_shift) : (p / a.block_size);
+            const int boff = pow2 ? (p & bs_mask) : (p % a.block_size);
+            const size_t slot = ok[j] ? (size_t)table[blk] * a.block_size + boff : 0;
             if (Q8) {
                 // 8 int8 values per lane; one f16 scale per 32 values
                 const int8_t *kp = reinterpret_cast<const int8_t *>(a.kpool) + slot * kvw + (size_t)kh * D + sub * 8;
@@ -316,6 +321,9 @@ __global__ void __launch_bounds__(128) attn4tc_kernel(Attn4Args a) {
     const size_t kvw = (size_t)a.kv_heads * D;
     const uint16_t *kbase = a.kpool + (size_t)kh * D;
     const uint16_t *vbase = a.vpool + (size_t)kh * D;
+    const bool pow2 = (a.block_size & (a.block_size - 1)) == 0;
+    const int bs_shift = pow2 ? (__ffs(a.block_size) - 1) : 0;
+    const int bs_mask = a.block_size - 1;
 
     for (int p0 = begin + warp * 16; p0 < end; p0 += 4 * 16) {
         // the cache rows of the keys g and g + 8 of the tile (K^T fragments: B[k = dimension][n = key]; V: one 8 x 8 block of keys x dimensions per 8 dimensions)
@@ -325,7 +333,9 @@ __global__ void __launch_bounds__(128) attn4tc_kernel(Attn4Args a) {
         for (int j = 0; j < 2; j++) {
             const int p = p0 + g + 8 * j;
             live[j] = p < end;
-            const size_t slot = live[j] ? (size_t)table[p / a.block_size] * a.block_size + p % a.block_size : 0;
+            const int blk = pow2 ? (p >> bs_shift) : (p / a.block_size);
+            const int boff = pow2 ? (p & bs_mask) : (p % a.block_size);
+            const size_t slot = live[j] ? (size_t)table[blk] * a.block_size + boff : 0;
             kr[j] = kbase + slot * kvw + 2 * q;
             vr[j] = vbase + slot * kvw + 2 * q;
         }
@@ -489,7 +499,7 @@ static int launch4(cudaStream_t st, Attn4Args a, int rows, int max_len, float *w
     a.ws = ws;
 #if !defined(__HIPCC__)
     static const bool no_tc = getenv("FLLM_CUDA_NO_ATTN4TC") != nullptr;
-    if constexpr (D == 128 && !Q8 && G <= 8) {
+    if constexpr (D == 128 && !Q8 && G >= 4 && G <= 8) {
         if (!no_tc && fllm_cc() >= 80 && !fllm_exact_math()) {
             attn4tc_kernel<G><<<dim3(a.kv_heads, rows, splits), 128, 0, st>>>(a);
             if (splits > 1) attn4_merge_kernel<D><<<dim3(a.heads, rows), D, 0, st>>>(a);

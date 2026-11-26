@@ -580,32 +580,52 @@ int fllm_moe_grouped_launch(cudaStream_t s, uint32_t kind, int glu, const void *
 // Combination: out[t][h] = sum_j w[t][j] * y[t * k + j][h] (+ shared[t][h] * gate[t]). A null `w` means weight 1 (Llama 4 scales the
 // expert input instead); a null `gate` means 1. Summation order is fixed, so the result does not depend on the sort.
 // ---------------------------------------------------------------------------------------------
+template <bool F16_IO>
 __global__ void moe_combine2_kernel(float *__restrict__ out, const float *__restrict__ y, const float *__restrict__ w,
                                     const float *__restrict__ shared, const float *__restrict__ gate, int tokens, int k, int hidden) {
     const size_t total = (size_t)tokens * hidden;
+    const __half *yh = F16_IO ? reinterpret_cast<const __half *>(y) : nullptr;
+    const __half *sh = (F16_IO && shared) ? reinterpret_cast<const __half *>(shared) : nullptr;
+    __half *oh = F16_IO ? reinterpret_cast<__half *>(out) : nullptr;
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += (size_t)gridDim.x * blockDim.x) {
         const int t = (int)(i / hidden), h = (int)(i % hidden);
         float acc = 0.f;
-        for (int j = 0; j < k; j++) acc += (w ? w[(size_t)t * k + j] : 1.f) * y[((size_t)t * k + j) * hidden + h];
-        if (shared) acc += shared[i] * (gate ? gate[t] : 1.f);
-        out[i] = acc;
+        for (int j = 0; j < k; j++) {
+            const size_t yidx = ((size_t)t * k + j) * hidden + h;
+            const float yv = F16_IO ? __half2float(yh[yidx]) : y[yidx];
+            acc += (w ? w[(size_t)t * k + j] : 1.f) * yv;
+        }
+        if (shared) {
+            const float sv = F16_IO ? __half2float(sh[i]) : shared[i];
+            acc += sv * (gate ? gate[t] : 1.f);
+        }
+        if constexpr (F16_IO) oh[i] = __float2half(acc);
+        else out[i] = acc;
     }
 }
 
 int fllm_moe_combine2_launch(cudaStream_t s, float *out, const float *y, const float *w, const float *shared, const float *gate, int tokens,
-                             int k, int hidden) {
+                             int k, int hidden, int act_dt) {
     const size_t total = (size_t)tokens * hidden;
     if (total == 0) return 0;
+    if (act_dt != 0 && act_dt != 1) return fllm_set_error("moe_combine2: unsupported activation dtype");
     const size_t blocks = (total + 255) / 256;
-    moe_combine2_kernel<<<(unsigned)(blocks < 65535 * 4 ? blocks : 65535 * 4), 256, 0, s>>>(out, y, w, shared, gate, tokens, k, hidden);
+    const unsigned grid = (unsigned)(blocks < 65535 * 4 ? blocks : 65535 * 4);
+    if (act_dt == 1) moe_combine2_kernel<true><<<grid, 256, 0, s>>>(out, y, w, shared, gate, tokens, k, hidden);
+    else moe_combine2_kernel<false><<<grid, 256, 0, s>>>(out, y, w, shared, gate, tokens, k, hidden);
     return fllm_check_launch("moe_combine2");
 }
 
 // gate[t] = sigmoid(g . x[t]) for the gated shared expert (Qwen2-MoE, Qwen3-Next)
+template <bool F16_IO>
 __global__ void moe_gate_scale_kernel(float *__restrict__ gate, const float *__restrict__ x, const float *__restrict__ g, int hidden) {
-    const float *xt = x + (size_t)blockIdx.x * hidden;
+    const float *xt = F16_IO ? nullptr : (x + (size_t)blockIdx.x * hidden);
+    const __half *xh = F16_IO ? (reinterpret_cast<const __half *>(x) + (size_t)blockIdx.x * hidden) : nullptr;
     float sum = 0.f;
-    for (int i = threadIdx.x; i < hidden; i += blockDim.x) sum += xt[i] * g[i];
+    for (int i = threadIdx.x; i < hidden; i += blockDim.x) {
+        const float xv = F16_IO ? __half2float(xh[i]) : xt[i];
+        sum += xv * g[i];
+    }
     sum = warp_sum(sum);
     __shared__ float part[8];
     if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = sum;
@@ -617,9 +637,11 @@ __global__ void moe_gate_scale_kernel(float *__restrict__ gate, const float *__r
     }
 }
 
-int fllm_moe_gate_scale_launch(cudaStream_t s, float *gate, const float *x, const float *g, int tokens, int hidden) {
+int fllm_moe_gate_scale_launch(cudaStream_t s, float *gate, const float *x, const float *g, int tokens, int hidden, int act_dt) {
     if (tokens <= 0) return 0;
-    moe_gate_scale_kernel<<<tokens, 256, 0, s>>>(gate, x, g, hidden);
+    if (act_dt != 0 && act_dt != 1) return fllm_set_error("moe_gate_scale: unsupported activation dtype");
+    if (act_dt == 1) moe_gate_scale_kernel<true><<<tokens, 256, 0, s>>>(gate, x, g, hidden);
+    else moe_gate_scale_kernel<false><<<tokens, 256, 0, s>>>(gate, x, g, hidden);
     return fllm_check_launch("moe_gate_scale");
 }
 

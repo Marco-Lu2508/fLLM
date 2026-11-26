@@ -518,7 +518,7 @@ fn cuda_kernels() {
     if nvcc_major >= 13 {
         extra.push("-static-global-template-stub=false".into());
     }
-    let sources = ["api.cu", "kda.cu", "sampling.cu", "attn_tree.cu", "comm_kernels.cu", "moe.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "tc_gemm.cu", "qgemm4k.cu", "attention3.cu", "qgemm6k.cu", "qgemm5k.cu", "qgemm8.cu", "qgemm_leg.cu", "attention4.cu", "mmvq.cu", "nvfp4.cu", "nvfp4_cutlass.cu", "flashinfer_prefill.cu", "marlin_q4k.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "dsa.cu", "block_sparse.cu", "inkling.cu", "hc.cu", "qwen4.cu", "v4.cu", "mla.cu", "mamba2.cu", "shortconv.cu", "mamba1.cu", "fused.cu", "attn_encoder.cu", "act_narrow.cu", "exl.cu", "mlx_affine.cu", "rwkv.cu", "scan.cu"];
+    let sources = ["api.cu", "kda.cu", "sampling.cu", "attn_tree.cu", "comm_kernels.cu", "moe.cu", "moe_marlin.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "tc_gemm.cu", "qgemm4k.cu", "attention3.cu", "qgemm6k.cu", "qgemm5k.cu", "qgemm8.cu", "qgemm_leg.cu", "attention4.cu", "mmvq.cu", "nvfp4.cu", "nvfp4_cutlass.cu", "flashinfer_prefill.cu", "marlin_q4k.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "dsa.cu", "block_sparse.cu", "inkling.cu", "hc.cu", "qwen4.cu", "v4.cu", "mla.cu", "mamba2.cu", "shortconv.cu", "mamba1.cu", "fused.cu", "attn_encoder.cu", "act_narrow.cu", "exl.cu", "mlx_affine.cu", "rwkv.cu", "scan.cu"];
     let mut objects = Vec::new();
     // Every nvcc call of this build goes into one queue and runs on several threads (`run_nvcc_jobs`): the files are independent, and
     // one after the other a build on a 12 core Colab VM was still running after 44 minutes with the cores idle (7 min 23 s in parallel).

@@ -3408,19 +3408,25 @@ impl RustDecoder {
     }
 
     /// First reason the narrow-activation pipeline cannot run this model (`act_dtype::eligibility`).
-    fn narrow_blocker(&self, layer_reasons: &[Option<&'static str>]) -> Option<&'static str> {
+    fn narrow_blocker(&self, backend: &dyn crate::backend::Backend, layer_reasons: &[Option<&'static str>]) -> Option<&'static str> {
         use crate::backend::act_dtype::{eligibility, ModelShape};
         let cfg = &self.cfg;
         if self.par.is_some() {
             // the stages of a parallel group hand each other FP32 activations through host memory
             return Some("tensor / pipeline parallel stages");
         }
+        let moe_ok = backend.moe_device_available()
+            && !std::env::var_os("FLLM_MOE_DEVICE").is_some_and(|v| v == "0")
+            && self.layers.iter().all(|l| match &l.ffn {
+                Ffn::Moe(m) => !l.takes_shortcut && l.shortcut.is_none() && self.device_routing_ok(m, true),
+                _ => true,
+            });
         let shape = ModelShape {
             all_layers_standard_attention: self.layers.iter().all(|l| matches!(l.attn, Attn::Std { .. })),
             host_layers: layer_reasons.iter().any(Option::is_some)
                 || self.layers.iter().enumerate().any(|(i, l)| l.value_moe.is_some() || self.ffn_host_reason(i, l, true, true).is_some())
                 || FFN_HOST_FROM.lock().ok().and_then(|slot| *slot).is_some_and(|(layers, _)| layers == self.layers.len()),
-            moe: self.layers.iter().any(|l| matches!(l.ffn, Ffn::Moe(_))),
+            moe: self.layers.iter().any(|l| matches!(l.ffn, Ffn::Moe(_))) && !moe_ok,
             mla: cfg.mla.is_some(),
             gated_attention: self.layers.iter().any(|l| l.output_gate || l.attn_gate.is_some()),
             qkv_clip: cfg.qkv_clip.is_some(),
@@ -3451,7 +3457,7 @@ impl RustDecoder {
             (1, Some(1)) => Some(ActDtype::F16),
             _ => None,
         };
-        let facts = ModelFacts { arch: self.cfg.arch.clone(), source_bf16: self.act_source_bf16, blocker: self.narrow_blocker(layer_reasons), marlin_weights, dense_dtype };
+        let facts = ModelFacts { arch: self.cfg.arch.clone(), source_bf16: self.act_source_bf16, blocker: self.narrow_blocker(backend, layer_reasons), marlin_weights, dense_dtype };
         let decision = decide(request_from_env(), &facts);
         let mut dtype = decision.dtype;
         if let Some(note) = &decision.note {
@@ -4274,7 +4280,7 @@ impl RustDecoder {
                                         && e.up.quant_type == kinds[1]
                                         && e.down.quant_type == kinds[2]
                                 });
-                                let ok_kind = |q: crate::backend::QuantType| matches!(q.to_gguf_type_id(), 1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 0x8000_0010..=0x8000_0012);
+                                let ok_kind = |q: crate::backend::QuantType| matches!(q.to_gguf_type_id(), 1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 0x8000_0010..=0x8000_0012 | 0x8000_0110..=0x8000_0112);
                                 let (ff, hid) = (list[0].up.rows, list[0].up.cols);
                                 let dims = list.iter().all(|e| e.gate.as_ref().is_none_or(|g| g.rows == ff && g.cols == hid))
                                     && list[0].down.rows == hid
@@ -6059,9 +6065,18 @@ impl RustDecoder {
                             }
                         }
                         Ffn::Moe(moe) => {
+                            let narrow = stream.act_dtype().is_narrow();
+                            let ffn_wide = if narrow {
+                                let mut w = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                                stream.widen_activations(&mut w, &ffn_normed).map_err(err)?;
+                                Some(w)
+                            } else {
+                                None
+                            };
+                            let in_f32 = ffn_wide.as_ref().unwrap_or(&ffn_normed);
                             host_in = vec![0.0f32; rows * hidden];
                             stream
-                                .download(cast_f32_to_u8_mut(&mut host_in), &ffn_normed)
+                                .download(cast_f32_to_u8_mut(&mut host_in), in_f32)
                                 .map_err(err)?;
                             streamed = self.moe_on_device(
                                 &mut **stream,
@@ -6069,10 +6084,19 @@ impl RustDecoder {
                                 i,
                                 moe,
                                 dev_layer.moe.as_ref(),
-                                &ffn_normed,
+                                in_f32,
                                 &host_in,
                                 rows,
                             )?;
+                            if let Some(w) = ffn_wide {
+                                scratch.recycle(w);
+                            }
+                            if let (true, Some(out_f32)) = (narrow, streamed.as_mut()) {
+                                let mut out_n = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                                stream.narrow_activations(&mut out_n, out_f32).map_err(err)?;
+                                let old = std::mem::replace(out_f32, out_n);
+                                scratch.recycle(old);
+                            }
                         }
                         _ => {}
                     }
@@ -6080,18 +6104,33 @@ impl RustDecoder {
                 let mut ffn_out_buf = match streamed {
                     Some(buf) => buf,
                     None => {
+                        let narrow = stream.act_dtype().is_narrow();
                         if host_in.is_empty() {
                             host_in = vec![0.0f32; rows * hidden];
-                            stream
-                                .download(cast_f32_to_u8_mut(&mut host_in), &ffn_normed)
-                                .map_err(err)?;
+                            if narrow {
+                                let mut w = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                                stream.widen_activations(&mut w, &ffn_normed).map_err(err)?;
+                                stream.download(cast_f32_to_u8_mut(&mut host_in), &w).map_err(err)?;
+                                scratch.recycle(w);
+                            } else {
+                                stream
+                                    .download(cast_f32_to_u8_mut(&mut host_in), &ffn_normed)
+                                    .map_err(err)?;
+                            }
                         }
                         let mut workspace = compute::ProjectionGroupWorkspace::default();
                         let host_out = self.ffn_forward(i, layer, &host_in, &mut workspace)?;
                         let mut buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
-                        stream
-                            .upload(&mut buf, cast_f32_to_u8(&host_out))
-                            .map_err(err)?;
+                        if narrow {
+                            let mut wide = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                            stream.upload(&mut wide, cast_f32_to_u8(&host_out)).map_err(err)?;
+                            stream.narrow_activations(&mut buf, &wide).map_err(err)?;
+                            scratch.recycle(wide);
+                        } else {
+                            stream
+                                .upload(&mut buf, cast_f32_to_u8(&host_out))
+                                .map_err(err)?;
+                        }
                         buf
                     }
                 };
@@ -7936,36 +7975,62 @@ impl RustDecoder {
         let err = |e: crate::backend::BackendError| e.to_string();
         let (experts, k, hidden, ff) = (cfg.experts, cfg.used, self.cfg.hidden, fast.ff);
         let slots = rows * k;
-        let mut logits = scratch.acquire(rows * experts * 4).map_err(err)?;
-        stream.quantized_linear(&mut logits, x, &fast.router, fast.router.bias.as_ref()).map_err(err)?;
-        let mut ids = scratch.acquire(slots * 4).map_err(err)?;
-        let mut weights = scratch.acquire(slots * 4).map_err(err)?;
-        stream
-            .moe_topk(&logits, &mut ids, &mut weights, rows, experts, k, cfg.normalize, cfg.weight_scale)
-            .map_err(err)?;
-        let mut up = scratch.acquire(slots * ff * 4).map_err(err)?;
-        let mut act = scratch.acquire(slots * ff * 4).map_err(err)?;
-        let mut y = scratch.acquire(slots * hidden * 4).map_err(err)?;
-        let mut out = scratch.acquire(rows * hidden * 4).map_err(err)?;
-        stream
-            .moe_linear(&mut up, x, &fast.up, fast.up_bias.as_ref(), &ids, fast.kinds[1], ff, hidden, slots, k)
-            .map_err(err)?;
-        if let Some(gate_tbl) = fast.gate.as_ref() {
-            let mut gate = scratch.acquire(slots * ff * 4).map_err(err)?;
-            stream
-                .moe_linear(&mut gate, x, gate_tbl, fast.gate_bias.as_ref(), &ids, fast.kinds[0], ff, hidden, slots, k)
-                .map_err(err)?;
-            Self::device_glu(stream, mode, &mut act, &gate, &up)?;
-            scratch.recycle(gate);
+        let saved_act = stream.act_dtype();
+        let x_f32 = if saved_act.is_narrow() {
+            let mut w = scratch.acquire(rows * hidden * 4).map_err(err)?;
+            stream.widen_activations(&mut w, x).map_err(err)?;
+            stream.set_act_dtype(crate::backend::act_dtype::ActDtype::F32);
+            Some(w)
         } else {
-            stream.activation(&mut act, &up, act_code(self.cfg.activation)).map_err(err)?;
+            None
+        };
+        let x_in = x_f32.as_ref().unwrap_or(x);
+        let res = (|| -> Result<crate::backend::DeviceBuffer, String> {
+            let mut logits = scratch.acquire(rows * experts * 4).map_err(err)?;
+            stream.quantized_linear(&mut logits, x_in, &fast.router, fast.router.bias.as_ref()).map_err(err)?;
+            let mut ids = scratch.acquire(slots * 4).map_err(err)?;
+            let mut weights = scratch.acquire(slots * 4).map_err(err)?;
+            stream
+                .moe_topk(&logits, &mut ids, &mut weights, rows, experts, k, cfg.normalize, cfg.weight_scale)
+                .map_err(err)?;
+            let mut up = scratch.acquire(slots * ff * 4).map_err(err)?;
+            let mut act = scratch.acquire(slots * ff * 4).map_err(err)?;
+            let mut y = scratch.acquire(slots * hidden * 4).map_err(err)?;
+            let mut out = scratch.acquire(rows * hidden * 4).map_err(err)?;
+            stream
+                .moe_linear(&mut up, x_in, &fast.up, fast.up_bias.as_ref(), &ids, fast.kinds[1], ff, hidden, slots, k)
+                .map_err(err)?;
+            if let Some(gate_tbl) = fast.gate.as_ref() {
+                let mut gate = scratch.acquire(slots * ff * 4).map_err(err)?;
+                stream
+                    .moe_linear(&mut gate, x_in, gate_tbl, fast.gate_bias.as_ref(), &ids, fast.kinds[0], ff, hidden, slots, k)
+                    .map_err(err)?;
+                Self::device_glu(stream, mode, &mut act, &gate, &up)?;
+                scratch.recycle(gate);
+            } else {
+                stream.activation(&mut act, &up, act_code(self.cfg.activation)).map_err(err)?;
+            }
+            stream
+                .moe_linear(&mut y, &act, &fast.down, fast.down_bias.as_ref(), &ids, fast.kinds[2], hidden, ff, slots, 1)
+                .map_err(err)?;
+            stream.moe_combine(&mut out, &y, &weights, rows, k, hidden).map_err(err)?;
+            for b in [logits, ids, weights, up, act, y] {
+                scratch.recycle(b);
+            }
+            Ok(out)
+        })();
+        if saved_act.is_narrow() {
+            stream.set_act_dtype(saved_act);
         }
-        stream
-            .moe_linear(&mut y, &act, &fast.down, fast.down_bias.as_ref(), &ids, fast.kinds[2], hidden, ff, slots, 1)
-            .map_err(err)?;
-        stream.moe_combine(&mut out, &y, &weights, rows, k, hidden).map_err(err)?;
-        for b in [logits, ids, weights, up, act, y] {
-            scratch.recycle(b);
+        if let Some(w) = x_f32 {
+            scratch.recycle(w);
+        }
+        let out = res?;
+        if saved_act.is_narrow() {
+            let mut out_n = scratch.acquire(rows * hidden * 4).map_err(err)?;
+            stream.narrow_activations(&mut out_n, &out).map_err(err)?;
+            scratch.recycle(out);
+            return Ok(Some(out_n));
         }
         Ok(Some(out))
     }

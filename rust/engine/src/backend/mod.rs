@@ -1572,6 +1572,11 @@ pub trait Stream: Send {
         self.copy_buffer(dst, src)
     }
 
+    /// The activation buffer `dst` (stream's type) = `src` (FP32, same element count). For FP32 streams a copy.
+    fn narrow_activations(&mut self, dst: &mut DeviceBuffer, src: &DeviceBuffer) -> Result<(), BackendError> {
+        self.copy_buffer(dst, src)
+    }
+
     /// `FLLM_ACT_CHECK`: largest finite |value| and the number of NaN / Inf values among the first `count` values of an activation buffer.
     /// `None` when the backend cannot say.
     fn check_activations(&mut self, _buf: &DeviceBuffer, _count: usize) -> Result<Option<(f32, u32)>, BackendError> {
@@ -1952,6 +1957,27 @@ pub trait Stream: Send {
         _x_div: usize,
     ) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedQuant(quant_type))
+    }
+
+    /// Fused `out[s] = glu(W_gate[e(s)] * x[s / x_div], W_up[e(s)] * x[s / x_div])` for small-batch decode (`Ok(false)` when unsupported).
+    #[allow(clippy::too_many_arguments)]
+    fn moe_linear_glu(
+        &mut self,
+        _out: &mut DeviceBuffer,
+        _x: &DeviceBuffer,
+        _table_gate: &DeviceBuffer,
+        _table_up: &DeviceBuffer,
+        _bias_gate: Option<&DeviceBuffer>,
+        _bias_up: Option<&DeviceBuffer>,
+        _ids: &DeviceBuffer,
+        _quant_type: QuantType,
+        _rows: usize,
+        _cols: usize,
+        _slots: usize,
+        _x_div: usize,
+        _glu: MoeGlu,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
     }
 
     /// `out[t] = sum_j weights[t * k + j] * y[t * k + j]` over rows of `hidden` floats.

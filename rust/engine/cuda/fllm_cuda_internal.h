@@ -115,9 +115,22 @@ int fllm_moe_grouped_launch(cudaStream_t s, uint32_t kind, int glu, const void *
                             const void *const *btab2, const float *X, const float *pw, float *Y, const int32_t *sorted,
                             const int32_t *block_expert, const int32_t *num_post, int rows, int cols, int pairs, int xdiv, int block,
                             int max_blocks, int glu_mode, float alpha, float limit);
+size_t fllm_moe_marlin_expert_bytes(int rows, int cols, int group);
+int fllm_moe_marlin_pack_launch(cudaStream_t s, const void *raw_arena, size_t raw_stride, void *dst_arena, size_t dst_stride, int experts,
+                                int rows, int cols, int group);
+int fllm_moe_marlin_grouped_launch(cudaStream_t s, uint32_t kind, int glu, const void *const *wtab, const void *const *wtab2,
+                                   const void *const *btab, const void *const *btab2, const float *X, const float *pw, float *Y,
+                                   const int32_t *sorted, const int32_t *block_expert, const int32_t *num_post, int rows, int cols,
+                                   int pairs, int xdiv, int block, int max_blocks, int glu_mode, float alpha, float limit, int act_dt);
+int fllm_moe_marlin_linear_launch(cudaStream_t s, const void *const *tab, const void *const *btab, int kind, const int32_t *ids,
+                                  const float *X, float *Y, int rows, int cols, int slots, int xdiv, int act_dt);
+int fllm_moe_marlin_linear_glu_launch(cudaStream_t s, const void *const *wtab_gate, const void *const *wtab_up,
+                                      const void *const *btab_gate, const void *const *btab_up, int kind, const int32_t *ids,
+                                      const float *X, float *Y, int rows, int cols, int slots, int xdiv, int glu_mode, float alpha,
+                                      float limit, int act_dt);
 int fllm_moe_combine2_launch(cudaStream_t s, float *out, const float *y, const float *w, const float *shared, const float *gate, int tokens,
-                             int k, int hidden);
-int fllm_moe_gate_scale_launch(cudaStream_t s, float *gate, const float *x, const float *g, int tokens, int hidden);
+                             int k, int hidden, int act_dt);
+int fllm_moe_gate_scale_launch(cudaStream_t s, float *gate, const float *x, const float *g, int tokens, int hidden, int act_dt);
 int fllm_moe_zero_fold_launch(cudaStream_t s, float *zs, int32_t *ids, float *w, int rows, int k, int routed, int rewrite);
 int fllm_swiglu_oai_launch(cudaStream_t s, const float *gate, const float *up, float *out, size_t count, float alpha, float limit);
 void fllm_convert_x16_pad(cudaStream_t s, const float *X, void *x16, int batch, int cols, int cols_pad);

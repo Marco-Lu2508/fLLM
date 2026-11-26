@@ -1750,8 +1750,20 @@ int fllm_cuda_moe_combine(FllmStream *st, float *out, const float *y, const floa
     return fllm_moe_combine_launch(st->s, out, y, w, tokens, k, hidden);
 }
 int fllm_cuda_moe_linear(FllmStream *st, const void *const *tab, const void *const *btab, int kind, const int32_t *ids,
-                         const float *x, float *y, int rows, int cols, int slots, int xdiv) {
+                         const float *x, float *y, int rows, int cols, int slots, int xdiv, int act_dt) {
     PREP(st);
+#if !defined(__HIPCC__)
+    const uint32_t uk = (uint32_t)kind;
+    if (uk == 0x80000110u || uk == 0x80000111u || uk == 0x80000112u) {
+        return fllm_moe_marlin_linear_launch(st->s, tab, btab, kind, ids, x, y, rows, cols, slots, xdiv, act_dt);
+    }
+    if (act_dt != 0) return fllm_set_error("moe_linear: narrow activations require Q4ZM Marlin experts");
+    if (uk == KIND_Q4Z32 || uk == KIND_Q4Z64 || uk == KIND_Q4Z128) {
+        return fllm_moe_linear_launch(st->s, tab, kind, ids, x, y, rows, cols, slots, xdiv, btab, nullptr, 0);
+    }
+#else
+    if (act_dt != 0) return fllm_set_error("moe_linear: narrow activations require Q4ZM Marlin experts");
+#endif
     // the int8 activations live in the same scratch as the FP16 copies of the GEMMs
     const int inputs = (slots + xdiv - 1) / xdiv;
     const size_t need = (((size_t)inputs * cols + 255) & ~size_t(255)) + (size_t)inputs * (cols / 32) * 8 + ((size_t)4 << 20);
@@ -1768,6 +1780,41 @@ int fllm_cuda_moe_linear(FllmStream *st, const void *const *tab, const void *con
     }
     return fllm_moe_linear_launch(st->s, tab, kind, ids, x, y, rows, cols, slots, xdiv, btab, st->x16, st->x16_bytes);
 }
+size_t fllm_cuda_moe_marlin_expert_bytes(int rows, int cols, int group) {
+#if !defined(__HIPCC__)
+    return fllm_moe_marlin_expert_bytes(rows, cols, group);
+#else
+    (void)rows; (void)cols; (void)group;
+    return 0;
+#endif
+}
+int fllm_cuda_moe_marlin_pack(int dev, const void *raw_arena, size_t raw_stride, void *dst_arena, size_t dst_stride, int experts,
+                              int rows, int cols, int group) {
+#if !defined(__HIPCC__)
+    CHECK(cudaSetDevice(dev), "cudaSetDevice");
+    int rc = fllm_moe_marlin_pack_launch(nullptr, raw_arena, raw_stride, dst_arena, dst_stride, experts, rows, cols, group);
+    if (rc != 0) return rc;
+    CHECK(cudaStreamSynchronize(nullptr), "cudaStreamSynchronize");
+    return 0;
+#else
+    (void)dev; (void)raw_arena; (void)raw_stride; (void)dst_arena; (void)dst_stride; (void)experts; (void)rows; (void)cols; (void)group;
+    return fllm_set_error("moe_marlin_pack needs NVIDIA CUDA");
+#endif
+}
+int fllm_cuda_moe_marlin_linear_glu(FllmStream *st, const void *const *wtab_gate, const void *const *wtab_up,
+                                    const void *const *btab_gate, const void *const *btab_up, int kind, const int32_t *ids,
+                                    const float *x, float *y, int rows, int cols, int slots, int xdiv, int glu_mode, float alpha,
+                                    float limit, int act_dt) {
+    PREP(st);
+#if !defined(__HIPCC__)
+    return fllm_moe_marlin_linear_glu_launch(st->s, wtab_gate, wtab_up, btab_gate, btab_up, kind, ids, x, y, rows, cols, slots, xdiv,
+                                             glu_mode, alpha, limit, act_dt);
+#else
+    (void)wtab_gate; (void)wtab_up; (void)btab_gate; (void)btab_up; (void)kind; (void)ids; (void)x; (void)y;
+    (void)rows; (void)cols; (void)slots; (void)xdiv; (void)glu_mode; (void)alpha; (void)limit; (void)act_dt;
+    return fllm_set_error("moe_marlin_linear_glu needs NVIDIA CUDA");
+#endif
+}
 int fllm_cuda_moe_route2(FllmStream *st, const float *logits, const float *bias, int32_t *ids, float *w, int rows, int experts, int k,
                          int sigmoid, int normalize, float scale, float eps, int groups, int groups_used, int top2) {
     PREP(st);
@@ -1778,23 +1825,39 @@ int fllm_cuda_moe_align(FllmStream *st, const int32_t *ids, int32_t *sorted, int
     PREP(st);
     return fllm_moe_align_launch(st->s, ids, sorted, block_expert, num_post, pairs, expert_offset, num_local, block);
 }
-int fllm_cuda_moe_grouped_supported(int kind, int cols, int block) { return fllm_moe_grouped_supported((uint32_t)kind, cols, block); }
+int fllm_cuda_moe_grouped_supported(int kind, int cols, int block) {
+#if !defined(__HIPCC__)
+    const uint32_t uk = (uint32_t)kind;
+    if (uk == 0x80000110u || uk == 0x80000111u || uk == 0x80000112u) {
+        return (block == 16 || block == 64) && (cols & 127) == 0 && fllm_cc() >= 75;
+    }
+#endif
+    return fllm_moe_grouped_supported((uint32_t)kind, cols, block);
+}
 int fllm_cuda_moe_grouped(FllmStream *st, int kind, int glu, const void *const *wtab, const void *const *wtab2, const void *const *btab,
                           const void *const *btab2, const float *x, const float *pw, float *y, const int32_t *sorted,
                           const int32_t *block_expert, const int32_t *num_post, int rows, int cols, int pairs, int xdiv, int block,
-                          int max_blocks, int glu_mode, float alpha, float limit) {
+                          int max_blocks, int glu_mode, float alpha, float limit, int act_dt) {
     PREP(st);
+#if !defined(__HIPCC__)
+    const uint32_t uk = (uint32_t)kind;
+    if (uk == 0x80000110u || uk == 0x80000111u || uk == 0x80000112u) {
+        return fllm_moe_marlin_grouped_launch(st->s, uk, glu, wtab, wtab2, btab, btab2, x, pw, y, sorted, block_expert, num_post, rows,
+                                              cols, pairs, xdiv, block, max_blocks, glu_mode, alpha, limit, act_dt);
+    }
+#endif
+    if (act_dt != 0) return fllm_set_error("moe_grouped: narrow activations require Q4ZM Marlin experts");
     return fllm_moe_grouped_launch(st->s, (uint32_t)kind, glu, wtab, wtab2, btab, btab2, x, pw, y, sorted, block_expert, num_post, rows, cols, pairs,
                                    xdiv, block, max_blocks, glu_mode, alpha, limit);
 }
 int fllm_cuda_moe_combine2(FllmStream *st, float *out, const float *y, const float *w, const float *shared, const float *gate, int tokens,
-                           int k, int hidden) {
+                           int k, int hidden, int act_dt) {
     PREP(st);
-    return fllm_moe_combine2_launch(st->s, out, y, w, shared, gate, tokens, k, hidden);
+    return fllm_moe_combine2_launch(st->s, out, y, w, shared, gate, tokens, k, hidden, act_dt);
 }
-int fllm_cuda_moe_gate_scale(FllmStream *st, float *gate, const float *x, const float *g, int tokens, int hidden) {
+int fllm_cuda_moe_gate_scale(FllmStream *st, float *gate, const float *x, const float *g, int tokens, int hidden, int act_dt) {
     PREP(st);
-    return fllm_moe_gate_scale_launch(st->s, gate, x, g, tokens, hidden);
+    return fllm_moe_gate_scale_launch(st->s, gate, x, g, tokens, hidden, act_dt);
 }
 int fllm_cuda_moe_zero_fold(FllmStream *st, float *zs, int32_t *ids, float *w, int rows, int k, int routed, int rewrite) {
     PREP(st);

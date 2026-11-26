@@ -59,6 +59,7 @@ extern "C" {
         glu_mode: c_int,
         alpha: f32,
         limit: f32,
+        act_dt: c_int,
     ) -> c_int;
     fn fllm_cuda_moe_combine2(
         st: *mut RawStream,
@@ -70,8 +71,9 @@ extern "C" {
         tokens: c_int,
         k: c_int,
         hidden: c_int,
+        act_dt: c_int,
     ) -> c_int;
-    fn fllm_cuda_moe_gate_scale(st: *mut RawStream, gate: *mut f32, x: *const f32, g: *const f32, tokens: c_int, hidden: c_int) -> c_int;
+    fn fllm_cuda_moe_gate_scale(st: *mut RawStream, gate: *mut f32, x: *const f32, g: *const f32, tokens: c_int, hidden: c_int, act_dt: c_int) -> c_int;
     fn fllm_cuda_moe_zero_fold(st: *mut RawStream, zs: *mut f32, ids: *mut i32, w: *mut f32, rows: c_int, k: c_int, routed: c_int, rewrite: c_int) -> c_int;
 }
 
@@ -85,7 +87,7 @@ pub(super) fn moe_enabled() -> bool {
 pub(super) fn grouped_kind(kind: u32) -> bool {
     matches!(
         kind,
-        1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 42 | 0x8000_0010..=0x8000_0012 | 0x8000_0021
+        1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 42 | 0x8000_0010..=0x8000_0012 | 0x8000_0021 | 0x8000_0110..=0x8000_0112
     )
 }
 
@@ -98,6 +100,8 @@ pub(super) fn grouped_supported(cc: u32, quant_type: QuantType, cols: usize, blo
         1
     } else if kind == 40 || kind == 42 {
         64
+    } else if matches!(kind, 0x8000_0110..=0x8000_0112) {
+        128
     } else {
         quant_type.q4z_group().unwrap_or(32)
     };
@@ -169,7 +173,8 @@ pub(super) fn align(raw: *mut RawStream, ids: &DeviceBuffer, sort: &mut MoeSort,
     })
 }
 
-pub(super) fn grouped(raw: *mut RawStream, cc: u32, call: MoeGrouped<'_>) -> Result<(), BackendError> {
+#[allow(clippy::too_many_arguments)]
+pub(super) fn grouped(raw: *mut RawStream, cc: u32, act_dt: c_int, call: MoeGrouped<'_>) -> Result<(), BackendError> {
     let MoeGrouped { out, x, table, table_up, bias, bias_up, input_weights, sort, quant_type, rows, cols, x_div, glu } = call;
     if !grouped_supported(cc, quant_type, cols, sort.block) || x_div == 0 {
         return Err(BackendError::UnsupportedQuant(quant_type));
@@ -208,6 +213,7 @@ pub(super) fn grouped(raw: *mut RawStream, cc: u32, call: MoeGrouped<'_>) -> Res
             g.mode,
             g.alpha,
             g.limit,
+            act_dt,
         )
     })
 }
@@ -215,6 +221,7 @@ pub(super) fn grouped(raw: *mut RawStream, cc: u32, call: MoeGrouped<'_>) -> Res
 #[allow(clippy::too_many_arguments)]
 pub(super) fn combine_ex(
     raw: *mut RawStream,
+    act_dt: c_int,
     out: &mut DeviceBuffer,
     y: &DeviceBuffer,
     weights: Option<&DeviceBuffer>,
@@ -244,16 +251,17 @@ pub(super) fn combine_ex(
             to_c(tokens, "tokens")?,
             to_c(k, "k")?,
             to_c(hidden, "hidden")?,
+            act_dt,
         )
     })
 }
 
-pub(super) fn gate_scale(raw: *mut RawStream, gate: &mut DeviceBuffer, x: &DeviceBuffer, g: &DeviceBuffer, tokens: usize, hidden: usize) -> Result<(), BackendError> {
+pub(super) fn gate_scale(raw: *mut RawStream, act_dt: c_int, gate: &mut DeviceBuffer, x: &DeviceBuffer, g: &DeviceBuffer, tokens: usize, hidden: usize) -> Result<(), BackendError> {
     if gate.size < tokens * 4 || x.size < tokens * hidden * 4 || g.size < hidden * 4 {
         return Err(invalid("moe_gate_scale: buffers too small"));
     }
     // SAFETY: sizes checked above.
-    check(unsafe { fllm_cuda_moe_gate_scale(raw, dev_ptr(gate)?.cast(), dev_ptr(x)?.cast(), dev_ptr(g)?.cast(), to_c(tokens, "tokens")?, to_c(hidden, "hidden")?) })
+    check(unsafe { fllm_cuda_moe_gate_scale(raw, dev_ptr(gate)?.cast(), dev_ptr(x)?.cast(), dev_ptr(g)?.cast(), to_c(tokens, "tokens")?, to_c(hidden, "hidden")?, act_dt) })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -343,7 +351,7 @@ impl CudaStream {
             x_div: top_k,
             glu: None,
         })?;
-        self.moe_combine_ex(out, &y, Some(weights), None, None, tokens, top_k, width)?;
+        combine_ex(self.raw, 0, out, &y, Some(weights), None, None, tokens, top_k, width)?;
         // the temporaries are freed when this function returns
         self.synchronize()?;
         Ok(true)
