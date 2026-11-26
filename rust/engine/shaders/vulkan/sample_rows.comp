@@ -1,0 +1,440 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: sample_rows | bindings: logits,work,meta,outbuf | push: vocab,mask_base,mask_words,pen_base,bias_base,top_stride,out_stride | grid: [rows, 1, 1]
+// Stream::sample_rows on the device: one workgroup of 256 lanes per row takes a row of logits through the steps of the CUDA sampler (cuda/sampling.cu): logit bias,
+// repetition / presence / frequency penalties, an optional grammar bitmask, temperature, top-k, min-p, typical-p, top-p, then draws the token (Gumbel-max over the
+// survivors, uniform numbers from Philox-4x32-10 keyed by seed and indexed by (draw, token id)) and extracts the log-probabilities of the chosen token and of the top
+// alternatives. The sums are f32 here (the CUDA kernel sums in f64): per-lane Kahan sums and a fixed-order tree, so thresholds that land within a few ulp of a
+// boundary can decide differently from the host reference.
+// `meta` (uint): per row 20 words of SampleRowParams (temperature, top_p, min_p, typical_p, top_k, repetition, presence, frequency penalty, seed lo / hi, draw lo / hi,
+// pen_off, pen_len, bias_off, bias_len, mask_row, logprobs_mode, top_n, pad), then at pen_base the (token, count) pairs, at bias_base the (token, f32 bits) pairs,
+// at mask_base the mask rows (mask_words words, a bit per token). `outbuf` (uint) per row out_stride words: the token (-1: none), the log-probability (f32 bits),
+// top_stride alternatives' ids, top_stride log-probabilities. `work` is f32 scratch, rows x vocab.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer LogitBuf { float logits[]; };
+layout(std430, binding = 1) buffer WorkBuf { float work[]; };
+layout(std430, binding = 2) readonly buffer MetaBuf { uint meta[]; };
+layout(std430, binding = 3) buffer OutBuf { uint outbuf[]; };
+layout(push_constant) uniform P {
+    uint vocab;
+    uint mask_base;
+    uint mask_words;
+    uint pen_base;
+    uint bias_base;
+    uint top_stride;
+    uint out_stride;
+} p;
+
+shared float red_f[WG];
+shared uint red_i[WG];
+shared uint hist[256];
+shared uint sh_prefix;
+shared int sh_remaining;
+shared float sh_scalar;
+
+float ninf() { return uintBitsToFloat(0xFF800000u); }
+float pinf() { return uintBitsToFloat(0x7F800000u); }
+bool finite(float v) { return ((floatBitsToUint(v) >> 23) & 255u) != 255u; }
+float sanitize(float v) { return finite(v) ? v : ninf(); }
+uint f2key(float f) {
+    const uint u = floatBitsToUint(f);
+    return (u & 0x80000000u) != 0u ? ~u : (u | 0x80000000u);
+}
+
+float block_max(float v) {
+    const uint lane = gl_LocalInvocationID.x;
+    barrier();
+    red_f[lane] = v;
+    barrier();
+    for (uint s = WG / 2u; s > 0u; s >>= 1) {
+        if (lane < s) red_f[lane] = max(red_f[lane], red_f[lane + s]);
+        barrier();
+    }
+    const float r = red_f[0];
+    barrier();
+    return r;
+}
+
+// sum of one value per lane in a fixed order (tree over the lanes)
+float block_sum(float v) {
+    const uint lane = gl_LocalInvocationID.x;
+    barrier();
+    red_f[lane] = v;
+    barrier();
+    for (uint s = WG / 2u; s > 0u; s >>= 1) {
+        if (lane < s) red_f[lane] += red_f[lane + s];
+        barrier();
+    }
+    const float r = red_f[0];
+    barrier();
+    return r;
+}
+
+// largest value, the lowest index wins a tie; index 0x7fffffff = no candidate
+void block_argmax(float v, uint idx, out float best, out uint besti) {
+    const uint lane = gl_LocalInvocationID.x;
+    barrier();
+    red_f[lane] = v;
+    red_i[lane] = idx;
+    barrier();
+    for (uint s = WG / 2u; s > 0u; s >>= 1) {
+        if (lane < s) {
+            const float ov = red_f[lane + s];
+            const uint oi = red_i[lane + s];
+            if (ov > red_f[lane] || (ov == red_f[lane] && oi < red_i[lane])) {
+                red_f[lane] = ov;
+                red_i[lane] = oi;
+            }
+        }
+        barrier();
+    }
+    best = red_f[0];
+    besti = red_i[0];
+    barrier();
+}
+
+// Kahan-compensated accumulation of one lane
+void kadd(inout float sum, inout float comp, float x) {
+    const float y = x - comp;
+    const float t = sum + y;
+    comp = (t - sum) - y;
+    sum = t;
+}
+
+uvec4 philox4x32_10(uvec4 c, uint k0, uint k1) {
+    for (int i = 0; i < 10; i++) {
+        uint hi0, lo0, hi1, lo1;
+        umulExtended(0xD2511F53u, c.x, hi0, lo0);
+        umulExtended(0xCD9E8D57u, c.z, hi1, lo1);
+        c = uvec4(hi1 ^ c.y ^ k0, lo1, hi0 ^ c.w ^ k1, lo0);
+        k0 += 0x9E3779B9u;
+        k1 += 0xBB67AE85u;
+    }
+    return c;
+}
+
+float philox_uniform(uint seed_lo, uint seed_hi, uint draw_lo, uint draw_hi, uint index) {
+    const uvec4 r = philox4x32_10(uvec4(index, 0u, draw_lo, draw_hi), seed_lo, seed_hi);
+    return (float(r.x >> 8) + 0.5) / 16777216.0;
+}
+
+// key of the k-th largest value of w[row] (every element counted, -inf included): radix select over the order-preserving keys
+uint kth_largest_key(uint base, int k) {
+    const uint lane = gl_LocalInvocationID.x;
+    if (lane == 0u) {
+        sh_prefix = 0u;
+        sh_remaining = k;
+    }
+    barrier();
+    for (int pass = 0; pass < 4; pass++) {
+        const uint shift = uint(24 - 8 * pass);
+        for (uint i = lane; i < 256u; i += WG) hist[i] = 0u;
+        barrier();
+        const uint prefix = sh_prefix;
+        for (uint i = lane; i < p.vocab; i += WG) {
+            const uint key = f2key(work[base + i]);
+            const bool match = pass == 0 || (key >> (shift + 8u)) == (prefix >> (shift + 8u));
+            if (match) atomicAdd(hist[(key >> shift) & 255u], 1u);
+        }
+        barrier();
+        if (lane == 0u) {
+            int acc = 0;
+            const int rem = sh_remaining;
+            uint bin = 0u;
+            for (int b = 255; b >= 0; b--) {
+                if (acc + int(hist[b]) >= rem) {
+                    bin = uint(b);
+                    break;
+                }
+                acc += int(hist[b]);
+            }
+            sh_prefix = prefix | (bin << shift);
+            sh_remaining = rem - acc;
+        }
+        barrier();
+    }
+    const uint r = sh_prefix;
+    barrier();
+    return r;
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x;
+    const uint pb = row * 20u;
+    const float temperature = uintBitsToFloat(meta[pb + 0u]);
+    const float top_p = uintBitsToFloat(meta[pb + 1u]);
+    const float min_p = uintBitsToFloat(meta[pb + 2u]);
+    const float typical_p = uintBitsToFloat(meta[pb + 3u]);
+    const int top_k = int(meta[pb + 4u]);
+    const float rep_pen = uintBitsToFloat(meta[pb + 5u]);
+    const float pres_pen = uintBitsToFloat(meta[pb + 6u]);
+    const float freq_pen = uintBitsToFloat(meta[pb + 7u]);
+    const uint seed_lo = meta[pb + 8u];
+    const uint seed_hi = meta[pb + 9u];
+    const uint draw_lo = meta[pb + 10u];
+    const uint draw_hi = meta[pb + 11u];
+    const int pen_off = int(meta[pb + 12u]);
+    const int pen_len = int(meta[pb + 13u]);
+    const int bias_off = int(meta[pb + 14u]);
+    const int bias_len = int(meta[pb + 15u]);
+    const int mask_row = int(meta[pb + 16u]);
+    const int logprobs_mode = int(meta[pb + 17u]);
+    const int top_n_req = int(meta[pb + 18u]);
+    const uint V = p.vocab;
+    const uint base = row * V;
+
+    for (uint i = lane; i < V; i += WG) work[base + i] = sanitize(logits[base + i]);
+    barrier();
+
+    // log-sum-exp of the raw distribution, for the raw log-probabilities
+    float raw_max = 0.0;
+    float raw_lse = 0.0;
+    if (logprobs_mode == 1) {
+        float m = ninf();
+        for (uint i = lane; i < V; i += WG) m = max(m, work[base + i]);
+        raw_max = block_max(m);
+        float s = 0.0;
+        float c = 0.0;
+        for (uint i = lane; i < V; i += WG) kadd(s, c, exp(work[base + i] - raw_max));
+        raw_lse = log(block_sum(s));
+    }
+
+    // penalties: repetition first, then presence / frequency, then the bias
+    const bool rep_on = abs(rep_pen - 1.0) >= 1e-5;
+    for (int j = int(lane); j < pen_len; j += WG) {
+        const uint at = p.pen_base + 2u * uint(pen_off + j);
+        const int id = int(meta[at]);
+        if (id < 0 || id >= int(V)) continue;
+        const int count = int(meta[at + 1u]);
+        float v = work[base + uint(id)];
+        if (rep_on) v = v > 0.0 ? v / rep_pen : v * rep_pen;
+        v -= pres_pen + freq_pen * float(count);
+        work[base + uint(id)] = v;
+    }
+    barrier();
+    for (int j = int(lane); j < bias_len; j += WG) {
+        const uint at = p.bias_base + 2u * uint(bias_off + j);
+        const int id = int(meta[at]);
+        if (id >= 0 && id < int(V)) work[base + uint(id)] += uintBitsToFloat(meta[at + 1u]);
+    }
+    barrier();
+    if (mask_row >= 0) {
+        const uint mb = p.mask_base + uint(mask_row) * p.mask_words;
+        for (uint i = lane; i < V; i += WG) {
+            if (((meta[mb + (i >> 5)] >> (i & 31u)) & 1u) == 0u) work[base + i] = ninf();
+        }
+    }
+    barrier();
+
+    float mloc = ninf();
+    for (uint i = lane; i < V; i += WG) {
+        const float v = work[base + i];
+        mloc = max(mloc, finite(v) ? v : ninf());
+    }
+    const float m = block_max(mloc);
+    int chosen = -1;
+    float lnz = 0.0;
+    const bool greedy = temperature <= 1e-5;
+    const float inv_t = greedy ? 1.0 : 1.0 / temperature;
+
+    if (!(m > ninf())) {
+        chosen = -1;
+    } else if (greedy) {
+        float best = ninf();
+        uint besti = 0x7FFFFFFFu;
+        for (uint i = lane; i < V; i += WG) {
+            if (work[base + i] > best) {
+                best = work[base + i];
+                besti = i;
+            }
+        }
+        float b;
+        uint bi;
+        block_argmax(best, besti, b, bi);
+        chosen = int(bi);
+    } else {
+        if (top_k > 0 && uint(top_k) < V) {
+            const uint t = kth_largest_key(base, top_k);
+            for (uint i = lane; i < V; i += WG)
+                if (f2key(work[base + i]) < t) work[base + i] = ninf();
+            barrier();
+        }
+        // normalizer of the survivors: e = exp((w - m) / T), 0 for removed tokens
+        float z;
+        {
+            float s = 0.0, c = 0.0;
+            for (uint i = lane; i < V; i += WG) {
+                const float v = work[base + i];
+                if (finite(v)) kadd(s, c, exp((v - m) * inv_t));
+            }
+            z = block_sum(s);
+        }
+        if (min_p > 0.0) {
+            for (uint i = lane; i < V; i += WG) {
+                const float v = work[base + i];
+                const float e = finite(v) ? exp((v - m) * inv_t) : 0.0;
+                if (e < min_p) work[base + i] = ninf();
+            }
+            barrier();
+            float s = 0.0, c = 0.0;
+            for (uint i = lane; i < V; i += WG) {
+                const float v = work[base + i];
+                if (finite(v)) kadd(s, c, exp((v - m) * inv_t));
+            }
+            z = block_sum(s);
+        }
+        if (typical_p < 1.0) {
+            float s = 0.0, c = 0.0;
+            for (uint i = lane; i < V; i += WG) {
+                const float v = work[base + i];
+                const float e = finite(v) ? exp((v - m) * inv_t) : 0.0;
+                if (e > 0.0) {
+                    const float pr = e / z;
+                    kadd(s, c, -pr * log(max(pr, 1e-30)));
+                }
+            }
+            const float entropy = block_sum(s);
+            // smallest key t such that the mass of {key >= t} is still at least typical_p * z (bisection over the 32-bit key space)
+            const float target = typical_p * z;
+            uint lo = 0u, hi = 0xFFFFFFFFu;
+            while (lo < hi) {
+                const uint mid = lo + ((hi - lo) >> 1) + 1u;
+                float part = 0.0, pc = 0.0;
+                for (uint i = lane; i < V; i += WG) {
+                    const float v = work[base + i];
+                    const float e = finite(v) ? exp((v - m) * inv_t) : 0.0;
+                    uint key = 0u;
+                    if (e > 0.0) {
+                        const float pr = e / z;
+                        key = f2key(-abs(-log(max(pr, 1e-30)) - entropy));
+                    }
+                    if (key >= mid) kadd(part, pc, e);
+                }
+                const float total = block_sum(part);
+                if (total >= target) lo = mid;
+                else hi = mid - 1u;
+            }
+            for (uint i = lane; i < V; i += WG) {
+                const float v = work[base + i];
+                const float e = finite(v) ? exp((v - m) * inv_t) : 0.0;
+                if (e > 0.0) {
+                    const float pr = e / z;
+                    const uint key = f2key(-abs(-log(max(pr, 1e-30)) - entropy));
+                    if (key < lo) work[base + i] = ninf();
+                }
+            }
+            barrier();
+            float s2 = 0.0, c2 = 0.0;
+            for (uint i = lane; i < V; i += WG) {
+                const float v = work[base + i];
+                if (finite(v)) kadd(s2, c2, exp((v - m) * inv_t));
+            }
+            z = block_sum(s2);
+        }
+        if (top_p > 0.0 && top_p < 1.0) {
+            const float target = top_p * z;
+            uint lo = 0u, hi = 0xFFFFFFFFu;
+            while (lo < hi) {
+                const uint mid = lo + ((hi - lo) >> 1) + 1u;
+                float part = 0.0, pc = 0.0;
+                for (uint i = lane; i < V; i += WG) {
+                    const float v = work[base + i];
+                    const float e = finite(v) ? exp((v - m) * inv_t) : 0.0;
+                    const uint key = e > 0.0 ? f2key(v) : 0u;
+                    if (key >= mid) kadd(part, pc, e);
+                }
+                const float total = block_sum(part);
+                if (total >= target) lo = mid;
+                else hi = mid - 1u;
+            }
+            for (uint i = lane; i < V; i += WG) {
+                const float v = work[base + i];
+                const float e = finite(v) ? exp((v - m) * inv_t) : 0.0;
+                if (e > 0.0 && f2key(v) < lo) work[base + i] = ninf();
+            }
+            barrier();
+            float s3 = 0.0, c3 = 0.0;
+            for (uint i = lane; i < V; i += WG) {
+                const float v = work[base + i];
+                if (finite(v)) kadd(s3, c3, exp((v - m) * inv_t));
+            }
+            z = block_sum(s3);
+        }
+        lnz = log(z);
+        // Gumbel-max draw over the survivors
+        float best = ninf();
+        uint besti = 0x7FFFFFFFu;
+        for (uint i = lane; i < V; i += WG) {
+            const float v = work[base + i];
+            if (!finite(v)) continue;
+            const float u = philox_uniform(seed_lo, seed_hi, draw_lo, draw_hi, i);
+            const float g = -log(-log(u));
+            const float score = (v - m) * inv_t + g;
+            if (score > best) {
+                best = score;
+                besti = i;
+            }
+        }
+        float b;
+        uint bi;
+        block_argmax(best, besti, b, bi);
+        chosen = int(bi);
+    }
+
+    // log-probabilities
+    const uint ob = row * p.out_stride;
+    if (lane == 0u) {
+        outbuf[ob] = uint(chosen);
+        float lp = 0.0;
+        if (chosen >= 0 && logprobs_mode == 1) lp = sanitize(logits[base + uint(chosen)]) - raw_max - raw_lse;
+        else if (chosen >= 0 && logprobs_mode == 2) lp = greedy ? 0.0 : (work[base + uint(chosen)] - m) * inv_t - lnz;
+        outbuf[ob + 1u] = floatBitsToUint(lp);
+    }
+    // top alternatives: n passes, each takes the largest element ordered after the previous pick (value descending, id ascending)
+    const int top_n = logprobs_mode != 0 ? min(top_n_req, min(20, int(p.top_stride))) : 0;
+    if (top_n > 0) {
+        float prev_v = pinf();
+        int prev_i = -1;
+        for (int n = 0; n < top_n; n++) {
+            float best = ninf();
+            uint besti = 0x7FFFFFFFu;
+            for (uint i = lane; i < V; i += WG) {
+                const float v = logprobs_mode == 1 ? sanitize(logits[base + i]) : work[base + i];
+                if (!finite(v)) continue;
+                const bool after = v < prev_v || (v == prev_v && int(i) > prev_i);
+                if (after && (v > best || (v == best && i < besti))) {
+                    best = v;
+                    besti = i;
+                }
+            }
+            float b;
+            uint bi;
+            block_argmax(best, besti, b, bi);
+            if (lane == 0u) {
+                if (bi == 0x7FFFFFFFu) {
+                    outbuf[ob + 2u + uint(n)] = uint(-1);
+                    outbuf[ob + 2u + p.top_stride + uint(n)] = floatBitsToUint(ninf());
+                } else {
+                    outbuf[ob + 2u + uint(n)] = bi;
+                    const float lp = logprobs_mode == 1 ? b - raw_max - raw_lse : (greedy ? (n == 0 ? 0.0 : ninf()) : (b - m) * inv_t - lnz);
+                    outbuf[ob + 2u + p.top_stride + uint(n)] = floatBitsToUint(lp);
+                }
+            }
+            prev_v = b;
+            prev_i = int(bi);
+            if (bi == 0x7FFFFFFFu) {
+                if (lane == 0u) {
+                    for (int r = n + 1; r < top_n; r++) {
+                        outbuf[ob + 2u + uint(r)] = uint(-1);
+                        outbuf[ob + 2u + p.top_stride + uint(r)] = floatBitsToUint(ninf());
+                    }
+                }
+                break;
+            }
+        }
+    }
+}

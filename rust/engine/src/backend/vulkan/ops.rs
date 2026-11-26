@@ -725,6 +725,45 @@ pub fn plan_argmax(rows: usize, vocab: usize) -> Result<OpPlan, BackendError> {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------
+// sample_rows
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+
+/// `Stream::sample_rows` (`sample_rows`): one workgroup per row. `meta` holds the 20-word parameter records, then the penalty pairs, the bias pairs and the
+/// grammar mask rows at the given word offsets; `work` is `rows x vocab` f32 scratch; the results go to `outbuf` (`out_stride` words per row).
+#[allow(clippy::too_many_arguments)]
+pub fn plan_sample_rows(
+    rows: usize,
+    vocab: usize,
+    mask_base: usize,
+    mask_words: usize,
+    pen_base: usize,
+    bias_base: usize,
+    top_stride: usize,
+    meta: Arc<Vec<u8>>,
+) -> Result<OpPlan, BackendError> {
+    if rows == 0 || vocab == 0 {
+        return Err(invalid("sample_rows of an empty tensor"));
+    }
+    if rows > MAX_GROUPS_PER_DIM as usize || top_stride > 20 {
+        return Err(BackendError::UnsupportedOperation(format!("sample_rows with {rows} rows and {top_stride} alternatives")));
+    }
+    let work_bytes = rows * vocab * 4;
+    plan(
+        "sample_rows",
+        Push::new()
+            .u("vocab", vocab)
+            .u("mask_base", mask_base)
+            .u("mask_words", mask_words)
+            .u("pen_base", pen_base)
+            .u("bias_base", bias_base)
+            .u("top_stride", top_stride)
+            .u("out_stride", 2 + 2 * top_stride),
+        [rows as u32, 1, 1],
+        Slots::new().read("logits").scratch("work", 0, work_bytes, Access::ReadWrite).host("meta", meta).write("outbuf"),
+    )
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
 // Embedding
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 

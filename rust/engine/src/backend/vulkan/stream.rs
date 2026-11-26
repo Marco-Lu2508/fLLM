@@ -1912,6 +1912,80 @@ impl Stream for VulkanStream {
         )
     }
 
+    fn sample_rows(&mut self, logits: &DeviceBuffer, vocab: usize, batch: &crate::backend::SampleBatch) -> Result<crate::backend::SampleOutput, BackendError> {
+        batch.validate(vocab)?;
+        let rows = batch.rows.len();
+        if rows == 0 || vocab == 0 {
+            return Ok(crate::backend::SampleOutput::default());
+        }
+        if logits.size < rows * vocab * 4 {
+            return Err(invalid("sample_rows: the logits buffer is smaller than rows x vocab"));
+        }
+        let stride = batch.top_stride;
+        // meta words: 20 per row, the penalty pairs, the bias pairs, the grammar masks
+        let mut meta: Vec<u32> = Vec::with_capacity(rows * 20 + 2 * (batch.pen.len() + batch.bias.len()) + batch.mask.len());
+        for p in batch.rows {
+            meta.extend([
+                p.temperature.to_bits(),
+                p.top_p.to_bits(),
+                p.min_p.to_bits(),
+                p.typical_p.to_bits(),
+                p.top_k as u32,
+                p.repetition_penalty.to_bits(),
+                p.presence_penalty.to_bits(),
+                p.frequency_penalty.to_bits(),
+                p.seed as u32,
+                (p.seed >> 32) as u32,
+                p.draw as u32,
+                (p.draw >> 32) as u32,
+                p.pen_off as u32,
+                p.pen_len as u32,
+                p.bias_off as u32,
+                p.bias_len as u32,
+                p.mask_row as u32,
+                p.logprobs_mode as u32,
+                p.top_n.max(0) as u32,
+                0,
+            ]);
+        }
+        let pen_base = meta.len();
+        for &(id, count) in batch.pen {
+            meta.extend([id as u32, count as u32]);
+        }
+        let bias_base = meta.len();
+        for &(id, bias) in batch.bias {
+            meta.extend([id as u32, bias.to_bits()]);
+        }
+        let mask_base = meta.len();
+        meta.extend_from_slice(batch.mask);
+        let bytes: Vec<u8> = meta.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let plan = crate::backend::vulkan::ops::plan_sample_rows(rows, vocab, mask_base, batch.mask_words, pen_base, bias_base, stride, Arc::new(bytes))?;
+        let out_words = rows * (2 + 2 * stride);
+        let result = self.dev.alloc(&self.sh, (out_words * 4) as u64)?;
+        self.run_plans(&[plan], &[Arg::r("logits", logits), Arg::view("outbuf", result.clone())], &[], false)?;
+        let mut raw = vec![0u8; out_words * 4];
+        self.read_back(&result, (out_words * 4) as u64, &mut raw)?;
+        let words: Vec<u32> = raw.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
+        let mut out = crate::backend::SampleOutput {
+            ids: vec![0; rows],
+            logprobs: vec![0.0; rows],
+            top_ids: vec![-1; rows * stride],
+            top_logprobs: vec![f32::NEG_INFINITY; rows * stride],
+        };
+        for (r, p) in batch.rows.iter().enumerate() {
+            let at = r * (2 + 2 * stride);
+            out.ids[r] = words[at] as i32;
+            out.logprobs[r] = f32::from_bits(words[at + 1]);
+            // the shader writes the alternatives it found (and -1 behind them) for rows that asked for log-probabilities
+            let n = if p.logprobs_mode != 0 { (p.top_n.max(0) as usize).min(20).min(stride) } else { 0 };
+            for j in 0..n {
+                out.top_ids[r * stride + j] = words[at + 2 + j] as i32;
+                out.top_logprobs[r * stride + j] = f32::from_bits(words[at + 2 + stride + j]);
+            }
+        }
+        Ok(out)
+    }
+
     fn argmax_rows(&mut self, logits: &DeviceBuffer, rows: usize, vocab: usize) -> Result<Vec<i32>, BackendError> {
         if rows == 0 || vocab == 0 {
             return Ok(Vec::new());

@@ -78,7 +78,8 @@ impl VulkanBackend {
             supports_embedding_lookup: true,
             // greedy sampling runs on the device (argmax_rows); sampling_logits goes through the host
             supports_device_sampling: false,
-            sample_on_device: false,
+            // the sampler of the CUDA backend as a compute shader (sample_rows.comp); FLLM_VK_SAMPLE=host keeps the host sampler
+            sample_on_device: !std::env::var("FLLM_VK_SAMPLE").is_ok_and(|v| v.eq_ignore_ascii_case("host")),
             supports_residual_add: true,
             // moe_topk / moe_linear / moe_combine run on the device; moe_route / moe_expert_gemm use the host path
             supports_moe: false,
