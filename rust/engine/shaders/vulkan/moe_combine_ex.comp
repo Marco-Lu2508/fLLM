@@ -1,0 +1,37 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: moe_combine_ex | bindings: y,w,shared_in,gate,out | push: count,k,hidden,has_w,has_shared,has_gate | grid: [min(ceil(count/256), 65535), 1, 1]
+// Stream::moe_combine_ex: out[t * hidden + d] = sum_j w[t * k + j] * y[(t * k + j) * hidden + d] (weight 1 without `w`) + gate[t] * shared[t * hidden + d]
+// (gate 1 without `gate`, nothing without `shared`), count = tokens * hidden. The pairs are added in order j = 0 .. k - 1.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer YBuf { float y[]; };
+layout(std430, binding = 1) readonly buffer WBuf { float wv[]; };
+layout(std430, binding = 2) readonly buffer SharedBuf { float shared_in[]; };
+layout(std430, binding = 3) readonly buffer GateBuf { float gate[]; };
+layout(std430, binding = 4) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint count;
+    uint k;
+    uint hidden;
+    uint has_w;
+    uint has_shared;
+    uint has_gate;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < p.count; i += grid_items) {
+        const uint t = i / p.hidden;
+        const uint d = i - t * p.hidden;
+        float acc = 0.0;
+        for (uint j = 0u; j < p.k; j++) {
+            const float wj = p.has_w != 0u ? wv[t * p.k + j] : 1.0;
+            acc += wj * y[(t * p.k + j) * p.hidden + d];
+        }
+        if (p.has_shared != 0u) acc += (p.has_gate != 0u ? gate[t] : 1.0) * shared_in[i];
+        outv[i] = acc;
+    }
+}

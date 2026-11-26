@@ -2075,6 +2075,12 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("moe_zero_fold".into()))
     }
 
+    /// The per-pair decode kernels (`moe_linear`, one expert per slot) are the device path of a mixture-of-experts layer for batches of any size, because the
+    /// backend has no grouped products (Vulkan); the default is the decode path for the first few rows only.
+    fn moe_decode_any_rows(&self) -> bool {
+        false
+    }
+
     /// Does this stream implement [`Stream::moe_zero_fold`]?
     fn supports_moe_zero(&self) -> bool {
         false

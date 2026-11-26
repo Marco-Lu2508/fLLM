@@ -1,0 +1,155 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: moe_route_ex | bindings: logits,bias,ids,weights | push: rows,experts,k,sigmoid,normalize_w,scale,eps,groups,groups_used,group_top2,has_bias | grid: [rows, 1, 1]
+// Stream::moe_route_ex: general mixture-of-experts routing, one workgroup (64 lanes) per row, experts <= 1024, k <= 32. Scores = softmax or sigmoid of the logits;
+// selection values = score + bias (DeepSeek-V3 correction bias); with groups > 1 the experts of the groups outside the best `groups_used` groups (ranked by
+// their best, or with `group_top2` the sum of their two best selection values; ties to the lower group) are masked; the k experts of the largest selection
+// value (ties to the lower index) are taken in order; their weights are the scores, divided by their sum + eps when `normalize`, times `scale`. The rules
+// of `route_reference` (backend/moe.rs); the scores are f32 here.
+#define WG 64
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer LogitBuf { float logits[]; };
+layout(std430, binding = 1) readonly buffer BiasBuf { float bias_v[]; };
+layout(std430, binding = 2) buffer IdBuf { int ids[]; };
+layout(std430, binding = 3) buffer WBuf { float weights[]; };
+layout(push_constant) uniform P {
+    uint rows;
+    uint experts;
+    uint k;
+    uint sigmoid;
+    uint normalize_w;
+    float scale;
+    float eps;
+    uint groups;
+    uint groups_used;
+    uint group_top2;
+    uint has_bias;
+} p;
+
+shared float score[1024];
+shared float sel[1024];
+shared uint taken[1024];
+shared float red_f[WG];
+shared uint red_i[WG];
+shared float gval[64];
+shared float chosen_w[32];
+shared int chosen_e[32];
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x;
+    const uint E = p.experts;
+    // scores
+    if (p.sigmoid != 0u) {
+        for (uint e = lane; e < E; e += WG) score[e] = 1.0 / (1.0 + exp(-logits[row * E + e]));
+    } else {
+        float m = NEG;
+        for (uint e = lane; e < E; e += WG) m = max(m, logits[row * E + e]);
+        red_f[lane] = m;
+        barrier();
+        for (uint s = WG / 2u; s > 0u; s >>= 1) {
+            if (lane < s) red_f[lane] = max(red_f[lane], red_f[lane + s]);
+            barrier();
+        }
+        const float mx = red_f[0];
+        barrier();
+        float sum = 0.0;
+        for (uint e = lane; e < E; e += WG) {
+            const float x = exp(logits[row * E + e] - mx);
+            score[e] = x;
+            sum += x;
+        }
+        red_f[lane] = sum;
+        barrier();
+        for (uint s = WG / 2u; s > 0u; s >>= 1) {
+            if (lane < s) red_f[lane] += red_f[lane + s];
+            barrier();
+        }
+        const float inv = 1.0 / red_f[0];
+        barrier();
+        for (uint e = lane; e < E; e += WG) score[e] *= inv;
+    }
+    barrier();
+    for (uint e = lane; e < E; e += WG) {
+        sel[e] = score[e] + (p.has_bias != 0u ? bias_v[e] : 0.0);
+        taken[e] = 0u;
+    }
+    barrier();
+    // group-limited selection
+    if (p.groups > 1u) {
+        const uint per = E / p.groups;
+        if (lane < p.groups) {
+            float b1 = NEG;
+            float b2 = NEG;
+            for (uint j = 0u; j < per; j++) {
+                const float v = sel[lane * per + j];
+                if (v > b1) {
+                    b2 = b1;
+                    b1 = v;
+                } else if (v > b2) {
+                    b2 = v;
+                }
+            }
+            gval[lane] = (p.group_top2 != 0u && per >= 2u) ? b1 + b2 : b1;
+        }
+        barrier();
+        bool drop = false;
+        if (lane < p.groups) {
+            uint rank = 0u;
+            for (uint g = 0u; g < p.groups; g++) {
+                if (gval[g] > gval[lane] || (gval[g] == gval[lane] && g < lane)) rank++;
+            }
+            drop = rank >= min(p.groups_used, p.groups);
+        }
+        barrier();
+        if (lane < p.groups && drop) {
+            for (uint j = 0u; j < per; j++) sel[lane * per + j] = NEG;
+        }
+        barrier();
+    }
+    // the k best
+    for (uint j = 0u; j < p.k; j++) {
+        float best = -3.4e38;
+        uint bi = 0xFFFFFFFFu;
+        for (uint e = lane; e < E; e += WG) {
+            if (taken[e] == 0u && (bi == 0xFFFFFFFFu || sel[e] > best)) {
+                best = sel[e];
+                bi = e;
+            }
+        }
+        red_f[lane] = best;
+        red_i[lane] = bi;
+        barrier();
+        for (uint s = WG / 2u; s > 0u; s >>= 1) {
+            if (lane < s) {
+                const float vo = red_f[lane + s];
+                const uint io = red_i[lane + s];
+                const float vm = red_f[lane];
+                const uint im = red_i[lane];
+                if (io != 0xFFFFFFFFu && (im == 0xFFFFFFFFu || vo > vm || (vo == vm && io < im))) {
+                    red_f[lane] = vo;
+                    red_i[lane] = io;
+                }
+            }
+            barrier();
+        }
+        if (lane == 0u) {
+            const uint e = red_i[0];
+            taken[e] = 1u;
+            chosen_e[j] = int(e);
+            chosen_w[j] = score[e];
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        float total = p.eps;
+        for (uint j = 0u; j < p.k; j++) total += chosen_w[j];
+        for (uint j = 0u; j < p.k; j++) {
+            const float w = (p.normalize_w != 0u ? chosen_w[j] / total : chosen_w[j]) * p.scale;
+            ids[row * p.k + j] = chosen_e[j];
+            weights[row * p.k + j] = w;
+        }
+    }
+}

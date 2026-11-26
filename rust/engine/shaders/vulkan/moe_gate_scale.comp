@@ -1,0 +1,31 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: moe_gate_scale | bindings: x,g,gate | push: tokens,hidden | grid: [tokens, 1, 1]
+// Stream::moe_gate_scale: gate[t] = sigmoid(g . x[t]) (the gate of the shared expert), one workgroup of 64 lanes per token.
+#define WG 64
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, binding = 1) readonly buffer GBuf { float g[]; };
+layout(std430, binding = 2) buffer GateBuf { float gate[]; };
+layout(push_constant) uniform P {
+    uint tokens;
+    uint hidden;
+} p;
+
+shared float red[WG];
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint t = gl_WorkGroupID.x;
+    float s = 0.0;
+    for (uint d = lane; d < p.hidden; d += WG) s += g[d] * x[t * p.hidden + d];
+    red[lane] = s;
+    barrier();
+    for (uint r = WG / 2u; r > 0u; r >>= 1) {
+        if (lane < r) red[lane] += red[lane + r];
+        barrier();
+    }
+    if (lane == 0u) gate[t] = 1.0 / (1.0 + exp(-red[0]));
+}

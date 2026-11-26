@@ -595,6 +595,87 @@ impl Stream for VulkanStream {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn moe_route_ex(
+        &mut self,
+        logits: &DeviceBuffer,
+        bias: Option<&DeviceBuffer>,
+        ids: &mut DeviceBuffer,
+        weights: &mut DeviceBuffer,
+        rows: usize,
+        experts: usize,
+        k: usize,
+        route: &crate::backend::MoeRoute,
+    ) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if logits.size < rows * experts * 4 || ids.size < rows * k * 4 || weights.size < rows * k * 4 || bias.is_some_and(|b| b.size < experts * 4) {
+            return Err(invalid("moe_route_ex buffers are smaller than rows x experts / rows x k"));
+        }
+        let plan = crate::backend::vulkan::ops::moe::plan_moe_route_ex(rows, experts, k, bias.is_some(), route)?;
+        let mut args = vec![Arg::r("logits", logits)];
+        if let Some(b) = bias {
+            args.push(Arg::r("bias", b));
+        }
+        args.extend([Arg::w("ids", ids), Arg::w("weights", weights)]);
+        self.run_plans(&[plan], &args, &[], false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn moe_combine_ex(
+        &mut self,
+        out: &mut DeviceBuffer,
+        y: &DeviceBuffer,
+        weights: Option<&DeviceBuffer>,
+        shared: Option<&DeviceBuffer>,
+        gate: Option<&DeviceBuffer>,
+        tokens: usize,
+        k: usize,
+        hidden: usize,
+    ) -> Result<(), BackendError> {
+        if tokens == 0 {
+            return Ok(());
+        }
+        if out.size < tokens * hidden * 4
+            || y.size < tokens * k * hidden * 4
+            || weights.is_some_and(|w| w.size < tokens * k * 4)
+            || shared.is_some_and(|s| s.size < tokens * hidden * 4)
+            || gate.is_some_and(|g| g.size < tokens * 4)
+        {
+            return Err(invalid("moe_combine_ex buffers are smaller than the tokens, pairs and width"));
+        }
+        let plan = crate::backend::vulkan::ops::moe::plan_moe_combine_ex(tokens, k, hidden, weights.is_some(), shared.is_some(), gate.is_some() && shared.is_some())?;
+        let mut args = vec![Arg::r("y", y)];
+        if let Some(w) = weights {
+            args.push(Arg::r("w", w));
+        }
+        if let Some(sh) = shared {
+            args.push(Arg::r("shared_in", sh));
+            if let Some(g) = gate {
+                args.push(Arg::r("gate", g));
+            }
+        }
+        args.push(Arg::w("out", out));
+        self.run_plans(&[plan], &args, &[], false)
+    }
+
+    fn moe_gate_scale(&mut self, gate: &mut DeviceBuffer, x: &DeviceBuffer, g: &DeviceBuffer, tokens: usize, hidden: usize) -> Result<(), BackendError> {
+        if tokens == 0 {
+            return Ok(());
+        }
+        if gate.size < tokens * 4 || x.size < tokens * hidden * 4 || g.size < hidden * 4 {
+            return Err(invalid("moe_gate_scale buffers are smaller than tokens x hidden"));
+        }
+        let plan = crate::backend::vulkan::ops::moe::plan_moe_gate_scale(tokens, hidden)?;
+        self.run_plans(&[plan], &[Arg::r("x", x), Arg::r("g", g), Arg::w("gate", gate)], &[], false)
+    }
+
+    /// The per-pair decode kernels (`moe_linear`) serve every batch size: there are no grouped GEMMs on this backend.
+    fn moe_decode_any_rows(&self) -> bool {
+        true
+    }
+
     fn moe_zero_fold(
         &mut self,
         zero_scale: &mut DeviceBuffer,

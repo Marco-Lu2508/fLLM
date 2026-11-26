@@ -768,7 +768,7 @@ const EXPERTS_USED: usize = 2;
 
 /// The tiny Mixtral-style model: the attention linears and the experts (`w1` gate, `w3` up, `w2` down) in `kind`, the router in BF16.
 /// The reference has the same values dequantized to F32.
-fn build_moe_pair(kind: Kind, seed: u64, quant_dir: &Path, ref_dir: &Path) {
+pub(crate) fn build_moe_pair(kind: Kind, seed: u64, quant_dir: &Path, ref_dir: &Path) {
     let mut rng = Rng(seed);
     let mut q_entries = Vec::new();
     let mut r_entries = Vec::new();

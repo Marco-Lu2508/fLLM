@@ -58,7 +58,8 @@ impl RustDecoder {
         }
         // small batches through the per-slot decode kernels when the formats allow it; larger batches through the grouped GEMM
         let decode_cap = moe_decode_max_rows();
-        let decode = rows <= decode_cap && fast.dp4a && !cfg.input_scaled;
+        // a backend without grouped products (Vulkan) takes the per-pair decode kernels for every batch size
+        let decode = (rows <= decode_cap || stream.moe_decode_any_rows()) && fast.dp4a && !cfg.input_scaled;
         if rows == 0 || (!decode && !dev.grouped) {
             return Ok(None);
         }
@@ -475,7 +476,7 @@ impl RustDecoder {
         if stream.act_dtype().is_narrow() {
             return Err("latent-space experts need F32 activations".into());
         }
-        let decode = rows <= moe_decode_max_rows() && fast.dp4a && !cfg.input_scaled;
+        let decode = (rows <= moe_decode_max_rows() || stream.moe_decode_any_rows()) && fast.dp4a && !cfg.input_scaled;
         if rows == 0 || (!decode && !dev.grouped) {
             return Err("latent-space experts need the device MoE kernels for the formats of this layer".into());
         }

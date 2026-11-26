@@ -1293,6 +1293,9 @@ fn sample_plans() -> Vec<OpPlan> {
         v.push(super::recurrent::plan_take_cols(3, 64, 192, 64).unwrap());
         v.push(super::recurrent::plan_xielu(100, [0.8, 0.8, 0.5, -1e-6]).unwrap());
         v.push(super::moe::plan_moe_zero_fold(5, 4, 64, true).unwrap());
+        v.push(super::moe::plan_moe_route_ex(5, 64, 6, true, &crate::backend::MoeRoute { sigmoid: true, normalize: true, scale: 2.5, eps: 0.0, groups: 8, groups_used: 4, group_top2: true }).unwrap());
+        v.push(super::moe::plan_moe_combine_ex(5, 6, 128, true, true, true).unwrap());
+        v.push(super::moe::plan_moe_gate_scale(5, 128).unwrap());
         v.push(super::attention::plan_attn_encoder(&[0, 5, 9], 2, 9, 4, 2, 64, 0.125, Some(4), Some(&[0, 7])).unwrap());
         v.push(super::recurrent::plan_logit_cap(100, 0.5, Some(30.0)).unwrap());
         for has_bias in [false, true] {

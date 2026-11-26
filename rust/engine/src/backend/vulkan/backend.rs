@@ -167,6 +167,11 @@ impl Backend for VulkanBackend {
         experts::alias_weights(&self.shared, table, weights)
     }
 
+    /// Routing, the per-pair expert kernels and the combination on the device (`FLLM_VK_MOE=host` keeps the routing of larger batches on the host).
+    fn moe_device_available(&self) -> bool {
+        !std::env::var("FLLM_VK_MOE").is_ok_and(|v| v.eq_ignore_ascii_case("host"))
+    }
+
     fn upload_pointer_table(&self, weights: &[&DeviceWeight]) -> Result<DeviceBuffer, BackendError> {
         experts::pointer_table(&self.shared, weights).inspect_err(|e| {
             log_once(

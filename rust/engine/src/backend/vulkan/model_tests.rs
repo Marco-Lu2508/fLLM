@@ -5,7 +5,7 @@
 //! them with `--test-threads=1`. Names contain `vulkan_whole_model` (the filter of the script).
 
 use crate::backend::vulkan::backend::set_exact_math;
-use crate::import_tests::{build_pair, convert, scratch, Kind};
+use crate::import_tests::{build_moe_pair, build_pair, convert, scratch, Kind};
 use crate::rust_decoder::RustDecoder;
 use crate::GgufModel;
 use fllm_checkpoint::OutputDType;
@@ -86,4 +86,29 @@ fn vulkan_whole_model_float_greedy_tokens_match_the_cpu() {
 #[test]
 fn vulkan_whole_model_q8_0_logits_match_the_cpu() {
     compare(Some(Kind::CtInt8), false, 3e-2);
+}
+
+/// A tiny Mixtral-style model with Q8_0 experts (the F32 conversion re-quantized like `fllm-rs quantize`): the prompt of five rows takes the device
+/// mixture-of-experts path (routing, per-pair expert kernels and combination on the device) and the steps after it the one-row path; the logits of the
+/// first step are compared with the CPU's.
+#[test]
+fn vulkan_whole_model_moe_q8_0_logits_match_the_cpu() {
+    if !device_available() {
+        return;
+    }
+    let (quant_dir, ref_dir) = (scratch("vk-moe-quant"), scratch("vk-moe-ref"));
+    build_moe_pair(Kind::CtInt8, 11, &quant_dir, &ref_dir);
+    let f32_gguf = convert(&ref_dir, OutputDType::F32);
+    let gguf = ref_dir.join("moe-q8_0.gguf");
+    fllm_checkpoint::quantize_gguf(&f32_gguf, &gguf, fllm_checkpoint::Preset::Q8_0).expect("quantize to Q8_0");
+    set_exact_math(true);
+    let (want, want_first) = generate(&gguf, "cpu").expect("CPU run");
+    let (have, have_first) = generate(&gguf, "vulkan").expect("Vulkan run");
+    set_exact_math(false);
+    let scale = want_first.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
+    let worst = want_first.iter().zip(&have_first).fold(0.0f32, |m, (a, b)| m.max((a - b).abs())) / scale;
+    eprintln!("[vulkan_whole_model] MoE first-step logits: worst difference {worst:.3e} of {scale:.3}; CPU {want:?} Vulkan {have:?}");
+    assert!(worst <= 3e-2, "first-step logits differ by {worst:e}");
+    let _ = std::fs::remove_dir_all(&quant_dir);
+    let _ = std::fs::remove_dir_all(&ref_dir);
 }

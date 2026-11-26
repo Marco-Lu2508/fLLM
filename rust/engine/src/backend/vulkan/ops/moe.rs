@@ -23,6 +23,53 @@ pub fn plan_moe_zero_fold(rows: usize, k: usize, routed: usize, rewrite: bool) -
     )
 }
 
+/// `Stream::moe_route_ex` (`moe_route_ex`): routing with softmax or sigmoid scores, selection bias and group-limited selection (`MoeRoute`).
+pub fn plan_moe_route_ex(rows: usize, experts: usize, k: usize, has_bias: bool, route: &crate::backend::MoeRoute) -> Result<OpPlan, BackendError> {
+    if rows == 0 || k == 0 || k > experts {
+        return Err(invalid(format!("moe_route_ex of {rows} rows, {experts} experts, k = {k}")));
+    }
+    if experts > 1024 || k > 32 || route.groups > 64 || (route.groups > 1 && !experts.is_multiple_of(route.groups)) {
+        return Err(BackendError::UnsupportedOperation(format!("moe_route_ex supports at most 1024 experts, k = 32 and 64 even groups (got {experts}, {k}, {})", route.groups)));
+    }
+    let push = Push::new()
+        .u("rows", rows)
+        .u("experts", experts)
+        .u("k", k)
+        .b("sigmoid", route.sigmoid)
+        .b("normalize_w", route.normalize)
+        .f("scale", route.scale)
+        .f("eps", route.eps)
+        .u("groups", route.groups)
+        .u("groups_used", route.groups_used)
+        .b("group_top2", route.group_top2)
+        .b("has_bias", has_bias);
+    let slots = Slots::new().read("logits");
+    let slots = if has_bias { slots.read("bias") } else { slots.dummy("bias", Access::Read) };
+    plan("moe_route_ex", push, [rows as u32, 1, 1], slots.write("ids").write("weights"))
+}
+
+/// `Stream::moe_combine_ex` (`moe_combine_ex`): weighted sum of the `k` rows of every token plus the optionally gated shared-expert row.
+pub fn plan_moe_combine_ex(tokens: usize, k: usize, hidden: usize, has_w: bool, has_shared: bool, has_gate: bool) -> Result<OpPlan, BackendError> {
+    if tokens == 0 || k == 0 || hidden == 0 {
+        return Err(invalid("moe_combine_ex without tokens, pairs or width"));
+    }
+    let push = Push::new().u("count", tokens * hidden).u("k", k).u("hidden", hidden).b("has_w", has_w).b("has_shared", has_shared).b("has_gate", has_gate);
+    let opt = |s: Slots, name: &'static str, on: bool| if on { s.read(name) } else { s.dummy(name, Access::Read) };
+    let slots = Slots::new().read("y");
+    let slots = opt(slots, "w", has_w);
+    let slots = opt(slots, "shared_in", has_shared);
+    let slots = opt(slots, "gate", has_gate);
+    plan("moe_combine_ex", push, groups_1d(tokens * hidden, 256), slots.write("out"))
+}
+
+/// `Stream::moe_gate_scale` (`moe_gate_scale`): `gate[t] = sigmoid(g . x[t])`.
+pub fn plan_moe_gate_scale(tokens: usize, hidden: usize) -> Result<OpPlan, BackendError> {
+    if tokens == 0 || hidden == 0 {
+        return Err(invalid("moe_gate_scale without tokens or width"));
+    }
+    plan("moe_gate_scale", Push::new().u("tokens", tokens).u("hidden", hidden), [tokens as u32, 1, 1], Slots::new().read("x").read("g").write("gate"))
+}
+
 /// `Stream::moe_topk` (`moe_topk`): softmax over `experts` logits per row, the `k` best with ties to the lower index; `ids` (int32) and `weights` hold
 /// `rows x k` entries. `normalize` renormalises over the selected experts, `scale` multiplies the weights.
 pub fn plan_moe_topk(
