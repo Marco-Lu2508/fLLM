@@ -1,0 +1,36 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_logit_cap | bindings: x | push: count,scale,cap | grid: [min(ceil(count/256), 65535), 1, 1]
+// Stream::logit_cap_inplace, in place over count floats: x = x * scale, then x = cap * tanh(x / cap) when cap > 0 (Gemma's final_logit_softcapping; the
+// order of the host path). The argument of tanh is clamped to +-15, where tanh is 1 to float precision, so no driver evaluates exp of a huge number.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer XBuf { float x[]; };
+layout(push_constant) uniform P {
+    uint count;
+    float scale;
+    float cap;
+} p;
+
+// tanh from exp: the built-in tanh of some drivers (Mesa lavapipe) is only accurate to a few 1e-6, the logits of a 256k vocabulary need more
+float tanh_acc(float y) {
+    const float a = abs(y);
+    if (a < 0.25) {  // the exponential form loses bits to the cancellation in 1 - exp(-2a): odd series to y^9 (error below 2e-9 here)
+        const float y2 = y * y;
+        return y * (1.0 + y2 * (-1.0 / 3.0 + y2 * (2.0 / 15.0 + y2 * (-17.0 / 315.0 + y2 * (62.0 / 2835.0)))));
+    }
+    const float t = exp(-2.0 * a);
+    const float r = (1.0 - t) / (1.0 + t);
+    return y < 0.0 ? -r : r;
+}
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < p.count; i += grid_items) {
+        float v = x[i] * p.scale;
+        if (p.cap > 0.0) v = p.cap * tanh_acc(clamp(v / p.cap, -15.0, 15.0));
+        x[i] = v;
+    }
+}

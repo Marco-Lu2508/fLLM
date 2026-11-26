@@ -1290,6 +1290,8 @@ fn sample_plans() -> Vec<OpPlan> {
             }
         }
         v.push(super::recurrent::plan_copy_cols(3, 64, 192, 64).unwrap());
+        v.push(super::recurrent::plan_take_cols(3, 64, 192, 64).unwrap());
+        v.push(super::recurrent::plan_logit_cap(100, 0.5, Some(30.0)).unwrap());
         for has_bias in [false, true] {
             v.push(super::recurrent::plan_shortconv(1, &run, 256, 3, 128, has_bias).unwrap());
         }

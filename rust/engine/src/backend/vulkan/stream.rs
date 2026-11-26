@@ -535,6 +535,44 @@ impl Stream for VulkanStream {
         self.run_plans(&[plan], &[Arg::r("src", src), Arg::w("dst", dst)], &[], false)
     }
 
+    fn supports_take_columns(&self) -> bool {
+        true
+    }
+
+    fn take_columns(
+        &mut self,
+        dst: &mut DeviceBuffer,
+        src: &DeviceBuffer,
+        src_stride: usize,
+        src_col: usize,
+        rows: usize,
+        width: usize,
+    ) -> Result<(), BackendError> {
+        if rows == 0 || width == 0 {
+            return Ok(());
+        }
+        if src_col + width > src_stride || src.size < rows * src_stride * 4 || dst.size < rows * width * 4 {
+            return Err(invalid("take_columns operands do not fit"));
+        }
+        let plan = crate::backend::vulkan::ops::recurrent::plan_take_cols(rows, width, src_stride, src_col)?;
+        self.run_plans(&[plan], &[Arg::r("src", src), Arg::w("dst", dst)], &[], false)
+    }
+
+    fn supports_logit_cap(&self) -> bool {
+        true
+    }
+
+    fn logit_cap_inplace(&mut self, x: &mut DeviceBuffer, scale: f32, cap: Option<f32>) -> Result<(), BackendError> {
+        if !x.size.is_multiple_of(4) {
+            return Err(invalid("logit target is not a whole number of floats"));
+        }
+        if x.size == 0 {
+            return Ok(());
+        }
+        let plan = crate::backend::vulkan::ops::recurrent::plan_logit_cap(x.size / 4, scale, cap)?;
+        self.run_plans(&[plan], &[Arg::w("x", x)], &[], false)
+    }
+
     fn kda_layer(
         &mut self,
         shape: &crate::backend::KdaShape,

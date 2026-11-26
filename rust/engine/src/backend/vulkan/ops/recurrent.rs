@@ -327,6 +327,35 @@ pub fn plan_copy_cols(rows: usize, width: usize, dst_stride: usize, dst_col: usi
     )
 }
 
+/// `Stream::take_columns` (`misc_take_cols`): `dst[r * width + c] = src[r * src_stride + src_col + c]` for `rows` rows.
+pub fn plan_take_cols(rows: usize, width: usize, src_stride: usize, src_col: usize) -> Result<OpPlan, BackendError> {
+    if rows == 0 || width == 0 || src_col + width > src_stride {
+        return Err(invalid("take_columns: empty block or block wider than the source row"));
+    }
+    plan(
+        "misc_take_cols",
+        Push::new().u("count", rows * width).u("width", width).u("src_stride", src_stride).u("src_col", src_col),
+        groups_1d(rows * width, 256),
+        Slots::new().read("src").rw("dst"),
+    )
+}
+
+/// `Stream::logit_cap_inplace` (`misc_logit_cap`): `x = x * scale`, then `cap * tanh(x / cap)` for a cap (0 = none) over `count` floats.
+pub fn plan_logit_cap(count: usize, scale: f32, cap: Option<f32>) -> Result<OpPlan, BackendError> {
+    if count == 0 {
+        return Err(invalid("logit cap of an empty tensor"));
+    }
+    if cap.is_some_and(|c| c <= 0.0 || !c.is_finite()) || !scale.is_finite() {
+        return Err(invalid("logit cap must be positive and finite"));
+    }
+    plan(
+        "misc_logit_cap",
+        Push::new().u("count", count).f("scale", scale).f("cap", cap.unwrap_or(0.0)),
+        groups_1d(count, 256),
+        Slots::new().rw("x"),
+    )
+}
+
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // RWKV-6 / RWKV-7
 // ---------------------------------------------------------------------------------------------------------------------------------------------
