@@ -702,6 +702,13 @@ def config_for(arch: str, vocab: int):
             ffn_proj_factor=2.0, ffn_round_up_to_multiple_of=16, chunk_size=64, max_inference_chunksize=256, bos_token_id=1, eos_token_id=2,
             pad_token_id=3, tie_word_embeddings=False, autocast_kernel_dtype="float32",
         ),
+        # DeepSeek-V3.2 style MLA with the sparse-attention indexer (top 4 of 12 tokens), gated query projection and gated norms; the first layer is dense
+        "axk2": lambda: T.AXK2Config(
+            vocab_size=vocab, hidden_size=64, intermediate_size=96, moe_intermediate_size=32, num_hidden_layers=3, num_attention_heads=4, num_key_value_heads=4,
+            n_routed_experts=4, n_shared_experts=1, num_experts_per_tok=2, kv_lora_rank=16, q_lora_rank=24, qk_rope_head_dim=8, qk_nope_head_dim=16,
+            v_head_dim=16, index_n_heads=8, index_head_dim=16, index_topk=int(__import__("os").environ.get("AXK2_TOPK", "4")), gated_norm_rank=8, rms_norm_eps=1e-6, max_position_embeddings=256,
+            bos_token_id=1, eos_token_id=2, pad_token_id=3, tie_word_embeddings=False,
+        ),
         "doge_moe": lambda: T.DogeConfig(
             vocab_size=vocab, hidden_size=64, intermediate_size=128, num_hidden_layers=3, num_attention_heads=4, num_key_value_heads=2,
             keep_window_size=8, max_position_embeddings=256, rms_norm_eps=1e-6, bos_token_id=1, eos_token_id=2, pad_token_id=3,
@@ -1430,6 +1437,11 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
                 block.mlstm_layer.igate_preact.bias.copy_(torch.randn_like(block.mlstm_layer.igate_preact.bias))
                 block.mlstm_layer.fgate_preact.bias.copy_(2.0 + torch.randn_like(block.mlstm_layer.fgate_preact.bias))
                 block.mlstm_layer.multihead_norm.weight.copy_(0.8 + 0.4 * torch.rand_like(block.mlstm_layer.multihead_norm.weight))
+    if arch == "axk2":
+        with torch.no_grad():
+            for layer in model.model.layers:
+                if hasattr(layer.mlp, "gate"):
+                    layer.mlp.gate.e_score_correction_bias.copy_(0.2 * torch.randn_like(layer.mlp.gate.e_score_correction_bias))
     if arch == "zaya":
         # the released initialisation zeroes the key scale and the balancing biases and gives the experts tiny weights
         with torch.no_grad():

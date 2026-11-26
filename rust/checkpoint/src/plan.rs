@@ -902,6 +902,9 @@ impl Plan {
         if raw == "zaya" {
             return crate::zaya::plan(cfg);
         }
+        if raw == "axk2" {
+            return crate::axk2::plan(cfg);
+        }
         if raw == "xlstm" {
             return crate::xlstm::plan(cfg);
         }
@@ -2901,6 +2904,9 @@ impl Plan {
             }
             if self.arch == "jetmoe" {
                 return crate::jetmoe::map(idx, suf).ok_or_else(|| format!("unexpected JetMoE tensor {n:?}"));
+            }
+            if let Some(m) = crate::axk2::map(idx, suf) {
+                return Ok(m);
             }
             if self.arch == "zaya" {
                 return crate::zaya::map(idx, suf).ok_or_else(|| format!("unexpected ZAYA tensor {n:?}"));

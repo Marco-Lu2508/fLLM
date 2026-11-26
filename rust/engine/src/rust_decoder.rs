@@ -518,6 +518,8 @@ struct Mla {
     kv_a: Linear,
     kv_a_norm: Vec<f32>,
     kv_b: Linear,
+    /// A.X-K2: `q` reads `[normalised, raw]` low-rank query.
+    q_gate: bool,
 }
 
 /// Score weights of the two attention-residual mixtures of a layer.
@@ -600,6 +602,9 @@ struct Layer {
     diff: Option<(f32, f32)>,
     /// Doge: dynamic mask attention, residual vectors and product-key experts.
     doge: Option<Box<DogeLayer>>,
+    /// A.X-K2: low-rank sigmoid gates behind the input norm and the post-attention norm.
+    attn_norm_gate: Option<Box<(Linear, Linear)>>,
+    ffn_norm_gate: Option<Box<(Linear, Linear)>>,
     zaya: Option<Box<ZayaLayer>>,
     /// JetMoE mixture of attention heads (the `q`, `k`, `v` of the layer are placeholders).
     moa: Option<Box<Moa>>,
@@ -2296,7 +2301,14 @@ impl RustDecoder {
                     )),
                     None => None,
                 };
+                let rows_of = |name: &str, first: usize, rows: usize, cols: usize| -> Result<Linear, String> {
+                    let mut l = Linear::load_rows(mapping, name, None, first, rows, cols)?;
+                    l.replace_weights(model.adapted_projection(&format!("{name}.weight")))?;
+                    l.enable_fast_cpu();
+                    Ok(l)
+                };
                 let q = match m.q_lora {
+                    Some(rank) if cfg.mla_q_gate => rows_of(&format!("{p}.attn_q_b.weight"), 0, qr, 2 * rank)?,
                     Some(rank) => linear(&format!("{p}.attn_q_b"), qr, rank)?,
                     None => linear(&format!("{p}.attn_q"), qr, hidden)?,
                 };
@@ -2341,6 +2353,7 @@ impl RustDecoder {
                     kv_a: linear(&format!("{p}.attn_kv_a_mqa"), m.kv_lora + m.rope, hidden)?,
                     kv_a_norm: scaled(vector(mapping, &format!("{p}.attn_kv_a_norm.weight"), m.kv_lora)?, cfg.mla_scales.map(|s| s.1)),
                     kv_b,
+                    q_gate: cfg.mla_q_gate,
                 }))
             } else if let Some(rw) = rwkv::Rwkv::load(&cfg, mapping, &p, i, &linear)? {
                 Attn::Rwkv(Box::new(rw))
@@ -2672,7 +2685,13 @@ impl RustDecoder {
             };
             let gate_rows = tensor_rows(mapping, &format!("{p}.attn_gate.weight"));
             let gate_per_head = !cfg.gate_per_element && gate_rows == Some(heads) && heads != heads * dv;
-            let attn_gate = if gate_rows.is_some() && matches!(attn, Attn::Std { .. } | Attn::Mla(_)) {
+            let attn_gate = if let (true, Attn::Mla(_), Some(rank)) = (cfg.mla_q_gate, &attn, cfg.mla.as_ref().and_then(|m| m.q_lora)) {
+                let mc = cfg.mla.as_ref().ok_or("MLA configuration")?;
+                let mut l = Linear::load_rows(mapping, &format!("{p}.attn_q_b.weight"), None, heads * (mc.nope + mc.rope), heads * mc.value, 2 * rank)?;
+                l.replace_weights(model.adapted_projection(&format!("{p}.attn_q_b.weight")))?;
+                l.enable_fast_cpu();
+                Some(l)
+            } else if gate_rows.is_some() && matches!(attn, Attn::Std { .. } | Attn::Mla(_)) {
                 Some(linear(&format!("{p}.attn_gate"), if gate_per_head { heads } else { heads * dv }, hidden)?)
             } else {
                 None
@@ -2801,6 +2820,16 @@ impl RustDecoder {
                 dsa_shared,
                 diff,
                 doge,
+                attn_norm_gate: if cfg.gated_norm_rank > 0 && has_tensor(mapping, &format!("{p}.attn_norm_gate_fc1.weight")) {
+                    Some(Box::new((linear(&format!("{p}.attn_norm_gate_fc1"), cfg.gated_norm_rank, hidden)?, linear(&format!("{p}.attn_norm_gate_fc2"), hidden, cfg.gated_norm_rank)?)))
+                } else {
+                    None
+                },
+                ffn_norm_gate: if cfg.gated_norm_rank > 0 && has_tensor(mapping, &format!("{p}.ffn_norm_gate_fc1.weight")) {
+                    Some(Box::new((linear(&format!("{p}.ffn_norm_gate_fc1"), cfg.gated_norm_rank, hidden)?, linear(&format!("{p}.ffn_norm_gate_fc2"), hidden, cfg.gated_norm_rank)?)))
+                } else {
+                    None
+                },
                 zaya,
                 moa,
                 ffn_bias,
@@ -3523,6 +3552,9 @@ impl RustDecoder {
     #[allow(clippy::too_many_arguments)]
     fn layer_host_reason(&self, _i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool, rwkv_ok: bool, kda_ok: bool, mamba_ok: bool, zamba_ok: bool, q4_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
+        if layer.attn_norm_gate.is_some() || layer.ffn_norm_gate.is_some() || cfg.mla_q_gate {
+            return Some("A.X-K2 gated norms and query gate (no device kernels)");
+        }
         if layer.zaya.is_some() {
             return Some("ZAYA convolutional attention, residual vectors and router (no device kernels)");
         }
@@ -6890,6 +6922,34 @@ impl RustDecoder {
     /// Queries, keys and values of one MLA layer for a batch of tokens, with rotary embeddings
     /// applied. Each head is laid out `[rotary | content]` for queries and keys; the dot product
     /// does not depend on the order as long as both sides agree.
+    /// A.X-K2: `y * sigmoid(fc2(silu(fc1(y))))` on every normalised row.
+    fn norm_gate(gate: &(Linear, Linear), y: &mut [f32]) -> Result<(), String> {
+        let mut t = gate.0.forward(y)?;
+        t.iter_mut().for_each(|v| *v = *v / (1.0 + (-*v).exp()));
+        let t = gate.1.forward(&t)?;
+        y.iter_mut().zip(&t).for_each(|(v, g)| *v *= 1.0 / (1.0 + (-g).exp()));
+        Ok(())
+    }
+
+    /// Per row `[normalised, raw]` low-rank query (A.X-K2).
+    fn q_gate_input(low: &[f32], raw: &[f32], rank: usize) -> Vec<f32> {
+        let mut out = Vec::with_capacity(2 * low.len());
+        for (a, b) in low.chunks_exact(rank).zip(raw.chunks_exact(rank)) {
+            out.extend_from_slice(a);
+            out.extend_from_slice(b);
+        }
+        out
+    }
+
+    /// Input of A.X-K2's output gate: the same `[normalised, raw]` low-rank query the query projection reads.
+    fn mla_gate_input(m: &Mla, cfg: &ModelConfig, x: &[f32]) -> Result<Vec<f32>, String> {
+        let (down, norm) = m.q_a.as_ref().ok_or("A.X-K2 gate without a low-rank query")?;
+        let raw = down.forward(x)?;
+        let mut low = raw.clone();
+        rms(&mut low, norm, cfg.eps);
+        Ok(Self::q_gate_input(&low, &raw, norm.len()))
+    }
+
     fn mla_qkv_low(
         &self,
         m: &Mla,
@@ -6911,8 +6971,12 @@ impl RustDecoder {
         let q_full = match &m.q_a {
             Some((down, norm)) => {
                 let mut low = down.forward(x)?;
+                let raw = if m.q_gate { Some(low.clone()) } else { None };
                 rms(&mut low, norm, cfg.eps);
-                let q = m.q.forward(&low)?;
+                let q = match &raw {
+                    Some(raw) => m.q.forward(&Self::q_gate_input(&low, raw, norm.len()))?,
+                    None => m.q.forward(&low)?,
+                };
                 if keep_low {
                     low_kept = Some(low);
                 }
@@ -10293,6 +10357,9 @@ impl RustDecoder {
                 if let Some(norm) = &layer.attn_norm {
                     self.norm(&mut normed, norm);
                 }
+                if let Some(gate) = &layer.attn_norm_gate {
+                    Self::norm_gate(gate, &mut normed)?;
+                }
                 trace.mark(1);
                 let laurel_out = match layer.gemma.as_ref().and_then(|g| g.laurel()) {
                     Some(laurel) => Some(self.laurel_forward(laurel, &normed)?),
@@ -10515,7 +10582,7 @@ impl RustDecoder {
                             let (qkv, q_low) = self.mla_qkv_low(m, &normed, positions, table, sparse && layer.indexer.is_some())?;
                             latent_qkv = qkv;
                             if let Some(gate) = &layer.attn_gate {
-                                gate_values = Some(gate.forward(&normed)?);
+                                gate_values = Some(if m.q_gate { gate.forward(&Self::mla_gate_input(m, cfg, &normed)?)? } else { gate.forward(&normed)? });
                             }
                             if sparse {
                                 dsa_rows = Some(self.dsa_select(i, layer, &normed, q_low.as_deref(), positions, table, tables, lengths)?);
@@ -10704,6 +10771,9 @@ impl RustDecoder {
                     };
                     if let Some(norm) = &layer.ffn_norm {
                         self.norm(&mut next, norm);
+                    }
+                    if let Some(gate) = &layer.ffn_norm_gate {
+                        Self::norm_gate(gate, &mut next)?;
                     }
                     next
                 };

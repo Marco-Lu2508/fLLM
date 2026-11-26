@@ -39,6 +39,7 @@ mod diffllama;
 mod doge;
 mod jetmoe;
 mod zaya;
+mod axk2;
 mod xlstm;
 mod recurrent_gemma;
 mod rwkv_vocab;

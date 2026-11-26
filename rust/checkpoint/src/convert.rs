@@ -252,6 +252,8 @@ pub fn prepare_checkpoint(
         crate::zaya::config(&cfg)?
     } else if arch == "xlstm" {
         crate::xlstm::config(&cfg)?
+    } else if cfg.get("model_type").and_then(Value::as_str) == Some("axk2") {
+        crate::axk2::config(&cfg)?
     } else if arch == "recurrent_gemma" {
         crate::recurrent_gemma::config(&cfg)?
     } else if arch == "dbrx" {
@@ -340,6 +342,9 @@ pub fn prepare_checkpoint(
     }
     let native_layout = crate::mistral_native::is_native(root);
     let rowperm = |name: &str| -> Result<Option<Vec<usize>>, String> {
+        if name.ends_with("attn_q_b.weight") && !name.contains(".indexer.") && cfg.get("gated_norm_rank").is_some() {
+            return Ok(crate::axk2::q_gate_order(&cfg));
+        }
         if native_layout {
             crate::mistral_native::native_row_permutation(arch, name, heads, kv_heads, head_dim)
         } else {

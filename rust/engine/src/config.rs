@@ -561,6 +561,10 @@ pub struct ModelConfig {
     pub indexer: Option<IndexerConfig>,
     /// LongCat-Flash: scalings of the normalised low-rank query and key/value latents `(sqrt(hidden / q_lora), sqrt(hidden / kv_lora))`.
     pub mla_scales: Option<(f32, f32)>,
+    /// A.X-K2: the query projection reads `[normalised, raw]` low-rank query and the gate of the attention output rides along (`attn_q_b.weight`: queries, then gates).
+    pub mla_q_gate: bool,
+    /// A.X-K2: rank of the gates behind the input and post-attention norms (0: plain norms).
+    pub gated_norm_rank: usize,
     pub v4: Option<V4Config>,
     pub inkling: Option<InklingConfig>,
     pub minimax3: Option<Minimax3Config>,
@@ -1201,6 +1205,8 @@ impl ModelConfig {
                 .unwrap_or(a == "muse-glimmer"),
             mla,
             indexer,
+            mla_q_gate: key(meta, a, "attention.q_gate").and_then(Value::as_bool).unwrap_or(false),
+            gated_norm_rank: uint(meta, a, "gated_norm_rank").unwrap_or(0),
             mla_scales: match (float(meta, a, "attention.q_lora_scale"), float(meta, a, "attention.kv_lora_scale")) {
                 (Some(q), Some(kv)) => Some((q, kv)),
                 _ => None,
@@ -1818,6 +1824,8 @@ pub(crate) mod tests_support {
             mla: None,
             indexer: None,
             mla_scales: None,
+            mla_q_gate: false,
+            gated_norm_rank: 0,
             v4: None,
             inkling: None,
             minimax3: None,
