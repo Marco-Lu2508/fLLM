@@ -591,6 +591,45 @@ impl Stream for VulkanStream {
         self.run_plans(&[plan], &[Arg::r("src", src), Arg::w("dst", dst)], &[], false)
     }
 
+    fn supports_moe_zero(&self) -> bool {
+        true
+    }
+
+    fn moe_zero_fold(
+        &mut self,
+        zero_scale: &mut DeviceBuffer,
+        ids: &mut DeviceBuffer,
+        weights: &mut DeviceBuffer,
+        rows: usize,
+        k: usize,
+        routed: usize,
+        rewrite: bool,
+    ) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if zero_scale.size < rows * 4 || ids.size < rows * k * 4 || weights.size < rows * k * 4 {
+            return Err(invalid("moe_zero_fold: buffers too small"));
+        }
+        let plan = crate::backend::vulkan::ops::moe::plan_moe_zero_fold(rows, k, routed, rewrite)?;
+        self.run_plans(&[plan], &[Arg::w("ids", ids), Arg::w("w", weights), Arg::w("zs", zero_scale)], &[], false)
+    }
+
+    fn supports_xielu(&self) -> bool {
+        true
+    }
+
+    fn xielu(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, params: [f32; 4]) -> Result<(), BackendError> {
+        if !x.size.is_multiple_of(4) || out.size < x.size {
+            return Err(invalid("xielu output smaller than its input"));
+        }
+        if x.size == 0 {
+            return Ok(());
+        }
+        let plan = crate::backend::vulkan::ops::recurrent::plan_xielu(x.size / 4, params)?;
+        self.run_plans(&[plan], &[Arg::r("x", x), Arg::w("out", out)], &[], false)
+    }
+
     fn supports_logit_cap(&self) -> bool {
         true
     }

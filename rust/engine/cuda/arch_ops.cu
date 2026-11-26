@@ -86,11 +86,24 @@ __global__ void arch_glu_ext_kernel(const float *__restrict__ gate, const float 
     }
 }
 
+// xIELU of Apertus' plain feed-forward (like the host path of rust_decoder.rs): x > 0: ap * x^2 + beta * x, else an * (expm1(min(x, eps)) - x) + beta * x
+__global__ void arch_xielu_kernel(const float *__restrict__ x, float *__restrict__ out, size_t n, float ap, float an, float beta, float eps) {
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x) {
+        const float v = x[i];
+        out[i] = v > 0.f ? ap * v * v + beta * v : (expm1f(fminf(v, eps)) - v) * an + beta * v;
+    }
+}
+
 static unsigned arch_grid(size_t n) {
     size_t g = (n + 255) / 256;
     return (unsigned)(g > 65535 ? 65535 : (g == 0 ? 1 : g));
 }
 
+int fllm_xielu_launch(cudaStream_t s, const float *x, float *out, size_t n, float ap, float an, float beta, float eps) {
+    if (n == 0) return 0;
+    arch_xielu_kernel<<<arch_grid(n), 256, 0, s>>>(x, out, n, ap, an, beta, eps);
+    return fllm_check_launch("xielu");
+}
 int fllm_act_launch(cudaStream_t s, const float *x, float *out, size_t n, int mode) {
     if (n == 0) return 0;
     arch_act_kernel<<<arch_grid(n), 256, 0, s>>>(x, out, n, mode);

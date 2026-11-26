@@ -1,0 +1,31 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_xielu | bindings: x,out | push: count,ap,an,beta,eps | grid: [min(ceil(count/256), 65535), 1, 1]
+// Stream::xielu (Apertus): out = ap * x^2 + beta * x for x > 0, else an * (expm1(min(x, eps)) - x) + beta * x, over count floats. expm1 from exp except
+// near zero, where exp(v) - 1 loses its digits: the series to v^5 is exact to float precision below |v| = 0.05.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, binding = 1) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint count;
+    float ap;
+    float an;
+    float beta;
+    float eps;
+} p;
+
+float expm1_acc(float v) {
+    if (abs(v) < 0.05) return v * (1.0 + v * (0.5 + v * (1.0 / 6.0 + v * (1.0 / 24.0 + v * (1.0 / 120.0)))));
+    return exp(v) - 1.0;
+}
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < p.count; i += grid_items) {
+        const float v = x[i];
+        outv[i] = v > 0.0 ? p.ap * v * v + p.beta * v : (expm1_acc(min(v, p.eps)) - v) * p.an + p.beta * v;
+    }
+}

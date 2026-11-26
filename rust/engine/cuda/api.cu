@@ -2277,6 +2277,10 @@ int fllm_cuda_act(FllmStream *st, const float *x, float *out, size_t n, int mode
     PREP(st);
     return fllm_act_launch(st->s, x, out, n, mode);
 }
+int fllm_cuda_xielu(FllmStream *st, const float *x, float *out, size_t n, float ap, float an, float beta, float eps) {
+    PREP(st);
+    return fllm_xielu_launch(st->s, x, out, n, ap, an, beta, eps);
+}
 int fllm_cuda_act_glu(FllmStream *st, const float *gate, const float *up, float *out, size_t n, int mode) {
     PREP(st);
     return fllm_act_glu_launch(st->s, gate, up, out, n, mode);

@@ -1291,6 +1291,8 @@ fn sample_plans() -> Vec<OpPlan> {
         }
         v.push(super::recurrent::plan_copy_cols(3, 64, 192, 64).unwrap());
         v.push(super::recurrent::plan_take_cols(3, 64, 192, 64).unwrap());
+        v.push(super::recurrent::plan_xielu(100, [0.8, 0.8, 0.5, -1e-6]).unwrap());
+        v.push(super::moe::plan_moe_zero_fold(5, 4, 64, true).unwrap());
         v.push(super::attention::plan_attn_encoder(&[0, 5, 9], 2, 9, 4, 2, 64, 0.125, Some(4), Some(&[0, 7])).unwrap());
         v.push(super::recurrent::plan_logit_cap(100, 0.5, Some(30.0)).unwrap());
         for has_bias in [false, true] {

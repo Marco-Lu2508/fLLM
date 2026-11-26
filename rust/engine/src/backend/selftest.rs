@@ -4397,6 +4397,14 @@ impl Tester<'_> {
         } else {
             self.record_skip("logit_cap", "final-logit scale and soft cap", "supports_logit_cap is false");
         }
+        if self.device.create_stream().map(|s| s.supports_xielu()).unwrap_or(false) {
+            for params in [[0.8f32, 0.8, 0.5, -1e-6], [1.3, 0.4, -0.2, 0.01]] {
+                let r = self.xielu_check(params);
+                self.record("xielu", &format!("4097 values {params:?}"), r);
+            }
+        } else {
+            self.record_skip("xielu", "xIELU activation", "supports_xielu is false");
+        }
         if self.device.create_stream().map(|s| s.supports_take_columns()).unwrap_or(false) {
             let r = self.take_columns_check();
             self.record("take_columns", "5 rows, 8 of 336 columns from 104", r);
@@ -4583,6 +4591,27 @@ impl Tester<'_> {
 
     /// `logit_cap_inplace` against the host order of rust_decoder.rs: `v * scale`, then `cap * tanh(v / cap)`. The inputs reach +-80 so the cap
     /// bends them (Gemma 4: cap 30).
+    /// `xielu` against the f64 formula of the host path.
+    fn xielu_check(&mut self, params: [f32; 4]) -> Result<Outcome, BackendError> {
+        let x: Vec<f32> = self.rng.vector(4097, 2.0).iter().map(|v| v * 2.0).collect();
+        let [ap, an, beta, eps] = params.map(f64::from);
+        let want: Vec<f64> = x
+            .iter()
+            .map(|&v| {
+                let v = f64::from(v);
+                if v > 0.0 { ap * v * v + beta * v } else { (v.min(eps).exp_m1() - v) * an + beta * v }
+            })
+            .collect();
+        let mut stream = self.device.create_stream()?;
+        let xb = put(self.device, stream.as_mut(), &x)?;
+        let mut out = self.device.allocate_buffer(x.len() * 4)?;
+        let mut ms = 0.0;
+        timed(&mut ms, stream.as_mut(), |s| s.xielu(&mut out, &xb, params))?;
+        let have = get(stream.as_mut(), &out, x.len())?;
+        let rel: Vec<f64> = want.iter().map(|v| v.abs().max(1.0)).collect();
+        Ok(Outcome { device: worst(&have, &want, &rel), cpu: 0.0, tol: 4e-6, cpu_tol: 1.0, ms })
+    }
+
     fn logit_cap_check(&mut self, scale: f32, cap: Option<f32>) -> Result<Outcome, BackendError> {
         let x: Vec<f32> = self.rng.vector(4097, 2.0).iter().map(|v| v * 40.0).collect();
         let want: Vec<f64> = x

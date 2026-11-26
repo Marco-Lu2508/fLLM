@@ -340,6 +340,19 @@ pub fn plan_take_cols(rows: usize, width: usize, src_stride: usize, src_col: usi
     )
 }
 
+/// `Stream::xielu` (`misc_xielu`): `out[i] = xielu(x[i])` over `count` floats, `params = [alpha_p, alpha_n, beta, eps]`.
+pub fn plan_xielu(count: usize, params: [f32; 4]) -> Result<OpPlan, BackendError> {
+    if count == 0 || params.iter().any(|v| !v.is_finite()) {
+        return Err(invalid("xielu: empty tensor or a parameter that is not a finite number"));
+    }
+    plan(
+        "misc_xielu",
+        Push::new().u("count", count).f("ap", params[0]).f("an", params[1]).f("beta", params[2]).f("eps", params[3]),
+        groups_1d(count, 256),
+        Slots::new().read("x").rw("out"),
+    )
+}
+
 /// `Stream::logit_cap_inplace` (`misc_logit_cap`): `x = x * scale`, then `cap * tanh(x / cap)` for a cap (0 = none) over `count` floats.
 pub fn plan_logit_cap(count: usize, scale: f32, cap: Option<f32>) -> Result<OpPlan, BackendError> {
     if count == 0 {

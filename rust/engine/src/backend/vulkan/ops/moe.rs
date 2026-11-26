@@ -9,6 +9,20 @@ pub const MAX_EXPERTS: usize = 1024;
 /// Most selected experts per row.
 pub const MAX_TOP_K: usize = 32;
 
+/// `Stream::moe_zero_fold` (`moe_zero_fold`): the weights of the pairs with an expert id of at least `routed` (the zero experts of LongCat-Flash) are summed
+/// per row into `zs`; with `rewrite` those pairs go to expert 0 with weight 0.
+pub fn plan_moe_zero_fold(rows: usize, k: usize, routed: usize, rewrite: bool) -> Result<OpPlan, BackendError> {
+    if rows == 0 || k == 0 {
+        return Err(invalid("moe_zero_fold without rows or pairs"));
+    }
+    plan(
+        "moe_zero_fold",
+        Push::new().u("rows", rows).u("k", k).u("routed", routed).b("rewrite", rewrite),
+        groups_1d(rows, 128),
+        Slots::new().rw("ids").rw("w").rw("zs"),
+    )
+}
+
 /// `Stream::moe_topk` (`moe_topk`): softmax over `experts` logits per row, the `k` best with ties to the lower index; `ids` (int32) and `weights` hold
 /// `rows x k` entries. `normalize` renormalises over the selected experts, `scale` multiplies the weights.
 pub fn plan_moe_topk(

@@ -405,6 +405,7 @@ int fllm_kvq_attention(cudaStream_t s, void *stream_key, const float *q, const u
                        float softcap, int window, int chunk, float *ws, size_t ws_bytes, bool capturing, int capture_max_len);
 // Activations of older architectures (arch_ops.cu): 0 SiLU, 1 GELU tanh, 2 GELU erf, 3 ReLU, 4 ReLU^2
 int fllm_act_launch(cudaStream_t s, const float *x, float *out, size_t n, int mode);
+int fllm_xielu_launch(cudaStream_t s, const float *x, float *out, size_t n, float ap, float an, float beta, float eps);
 int fllm_act_glu_launch(cudaStream_t s, const float *gate, const float *up, float *out, size_t n, int mode);
 int fllm_clamp_launch(cudaStream_t s, float *x, size_t n, float limit);
 // Multi-head latent attention data movement (mla.cu)

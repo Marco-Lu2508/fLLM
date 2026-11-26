@@ -1474,6 +1474,8 @@ pub struct RustDecoder {
     /// Latent-space experts run through the device MoE operations (`moe_device_latent`); false: those layers use the host (`FLLM_LATENT=device` not set, or a backend
     /// without `Backend::moe_device_available`).
     latent_device: bool,
+    /// The device has `Stream::xielu` (Apertus' plain feed-forward runs on it).
+    xielu_device: bool,
     /// The accelerator runs DeepSeek-V4 completely (`hc_device` is set with it); set when the model is attached.
     v4_device: bool,
     /// Qwen3.8-Flash-Next runs on the device (streams, n-gram embeddings and token indexer included).
@@ -2707,6 +2709,7 @@ impl RustDecoder {
             m3_run: false,
             ink_device: false,
             latent_device: false,
+            xielu_device: false,
             hc_device: false,
             v4_device: false,
             q4_device: false,
@@ -3356,7 +3359,7 @@ impl RustDecoder {
             }
             Ffn::Plain { .. } => {
                 if layer.xielu.is_some() {
-                    Some("the xIELU activation")
+                    if self.xielu_device { None } else { Some("the xIELU activation") }
                 } else if !arch_ok || !native(cfg.activation) {
                     Some("an activation without a device kernel")
                 } else {
@@ -3527,6 +3530,7 @@ impl RustDecoder {
         self.m3_run = m3_run;
         self.m3_device = m3_device;
         self.ink_device = self.cfg.inkling.is_some() && self.ink_device_possible(&*backend);
+        self.xielu_device = backend.create_stream().is_ok_and(|s| s.supports_xielu()) && !std::env::var_os("FLLM_XIELU_HOST").is_some();
         // opt-in until a GPU run has checked it against the host (`scripts/hf_golden.py nemotron_h_latent`): FLLM_LATENT=device
         self.latent_device = backend.moe_device_available()
             && !std::env::var_os("FLLM_MOE_DEVICE").is_some_and(|v| v == "0")
@@ -5988,7 +5992,10 @@ impl RustDecoder {
                     stream
                         .quantized_linear(&mut up_buf, &ffn_normed, up_w, up_w.bias.as_ref())
                         .map_err(err)?;
-                    stream.activation(&mut act_buf, &up_buf, act).map_err(err)?;
+                    match layer.xielu {
+                        Some(params) => stream.xielu(&mut act_buf, &up_buf, params).map_err(err)?,
+                        None => stream.activation(&mut act_buf, &up_buf, act).map_err(err)?,
+                    }
                 }
 
                 // BitNet: an RMS norm over the activated product in front of the down projection

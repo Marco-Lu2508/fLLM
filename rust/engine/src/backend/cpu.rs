@@ -890,6 +890,19 @@ impl Stream for CpuStream {
         write_f32(out, &values, "activation")
     }
 
+    fn supports_xielu(&self) -> bool {
+        true
+    }
+
+    fn xielu(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, params: [f32; 4]) -> Result<(), BackendError> {
+        let [alpha_p, alpha_n, beta, eps] = params;
+        let values: Vec<f32> = read_f32(x)?
+            .iter()
+            .map(|&v| if v > 0.0 { alpha_p * v * v + beta * v } else { (v.min(eps).exp_m1() - v) * alpha_n + beta * v })
+            .collect();
+        write_f32(out, &values, "xielu")
+    }
+
     fn activation_glu(
         &mut self,
         out: &mut DeviceBuffer,

@@ -2213,6 +2213,17 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("logit_cap_inplace".into()))
     }
 
+    /// xIELU (Apertus) of a plain feed-forward: `out = alpha_p * x * x + beta * x` for `x > 0`, else `alpha_n * (expm1(min(x, eps)) - x) + beta * x`;
+    /// `params = [alpha_p, alpha_n, beta, eps]` (the values of the layer, already through their softplus).
+    fn xielu(&mut self, _out: &mut DeviceBuffer, _x: &DeviceBuffer, _params: [f32; 4]) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("xielu".into()))
+    }
+
+    /// Does this stream implement [`Stream::xielu`]?
+    fn supports_xielu(&self) -> bool {
+        false
+    }
+
     /// Does this stream implement [`Stream::logit_cap_inplace`]?
     fn supports_logit_cap(&self) -> bool {
         false

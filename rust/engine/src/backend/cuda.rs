@@ -547,6 +547,7 @@ extern "C" {
         out: *mut f32,
     ) -> c_int;
     fn fllm_cuda_act(st: *mut RawStream, x: *const f32, out: *mut f32, n: usize, mode: c_int) -> c_int;
+    fn fllm_cuda_xielu(st: *mut RawStream, x: *const f32, out: *mut f32, n: usize, ap: f32, an: f32, beta: f32, eps: f32) -> c_int;
     fn fllm_cuda_act_glu(st: *mut RawStream, gate: *const f32, up: *const f32, out: *mut f32, n: usize, mode: c_int) -> c_int;
     fn fllm_cuda_softplus_mul(st: *mut RawStream, x: *mut f32, g: *const f32, n: usize, beta: f32) -> c_int;
     fn fllm_cuda_head_gate_mul(st: *mut RawStream, x: *mut f32, g: *const f32, n: usize, dv: usize, beta: f32) -> c_int;
@@ -5220,6 +5221,26 @@ impl Stream for CudaStream {
         }
         // SAFETY: sizes checked above.
         check(unsafe { fllm_cuda_act(self.raw, dev_ptr(x)?.cast(), dev_ptr(out)?.cast(), x.size / 4, mode) })
+    }
+
+    fn supports_xielu(&self) -> bool {
+        true
+    }
+
+    fn xielu(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, params: [f32; 4]) -> Result<(), BackendError> {
+        if self.act.is_narrow() {
+            let n = x.size.min(out.size) / 4;
+            let xf = self.wide_slot(0, n * 4)?;
+            let mut of = self.wide_slot(1, n * 4)?;
+            self.widen_into(&xf, x, n)?;
+            self.bridge(|s| s.xielu(&mut of, &xf, params))?;
+            return self.narrow_into(out, &of, n);
+        }
+        if !x.size.is_multiple_of(4) || out.size < x.size {
+            return Err(invalid("xielu output smaller than its input"));
+        }
+        // SAFETY: sizes checked above.
+        check(unsafe { fllm_cuda_xielu(self.raw, dev_ptr(x)?.cast(), dev_ptr(out)?.cast(), x.size / 4, params[0], params[1], params[2], params[3]) })
     }
 
     fn activation_glu(&mut self, out: &mut DeviceBuffer, gate: &DeviceBuffer, up: &DeviceBuffer, mode: i32) -> Result<(), BackendError> {
