@@ -1,0 +1,98 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: attn_encoder | bindings: q,k,v,meta,out | push: heads,kv_heads,hd,window,scale | grid: [heads, total_tokens, 1]
+// Stream::attn_encoder: bidirectional attention of an encoder over packed sequences (BERT, ModernBERT, ...). One workgroup of 64 lanes per (token, query head):
+// the lanes score 64 keys of the token's sequence at a time (online softmax: running maximum m, denominator l), lane `l` owns the output dimensions l,
+// l + 64, ... (hd <= 256). q is `total x heads x hd`, k and v `total x kv_heads x hd` (f32), out `total x heads x hd`. `meta` = int32: seq_start[total],
+// seq_end[total] (the packed rows of the token's sequence), global[total] (1 for a global token). Key j (0-based inside the sequence) is visible to the
+// token at position i unless a window w applies (0 = none; it applies when 0 < w < the sequence length) and |i - j| > w / 2 and neither token is global,
+// as in the CPU reference of `Stream::attn_encoder`.
+#define WG 64
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, binding = 1) readonly buffer KBuf { float kbuf[]; };
+layout(std430, binding = 2) readonly buffer VBuf { float vbuf[]; };
+layout(std430, binding = 3) readonly buffer MetaBuf { int meta[]; };
+layout(std430, binding = 4) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint heads;
+    uint kv_heads;
+    uint hd;
+    uint window;
+    float scale;
+} p;
+
+shared float qs[256];
+shared float sc_s[WG];
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint h = gl_WorkGroupID.x;
+    const uint t = gl_WorkGroupID.y;
+    const uint total = gl_NumWorkGroups.y;
+    const uint kh = h / (p.heads / p.kv_heads);
+    const uint s0 = uint(meta[t]);
+    const uint s1 = uint(meta[total + t]);
+    const uint n = s1 - s0;
+    const uint i = t - s0;
+    const bool i_global = meta[2u * total + t] != 0;
+    const bool windowed = p.window > 0u && p.window < n;
+    for (uint d = lane; d < p.hd; d += WG) qs[d] = q[(t * p.heads + h) * p.hd + d];
+    barrier();
+
+    float m = NEG;
+    float l = 0.0;
+    float acc[4];
+    [[unroll]] for (uint a = 0u; a < 4u; a++) acc[a] = 0.0;
+
+    for (uint j0 = 0u; j0 < n; j0 += WG) {
+        const uint j = j0 + lane;
+        float sc = NEG;
+        if (j < n) {
+            bool visible = true;
+            if (windowed && !i_global && meta[2u * total + s0 + j] == 0) {
+                const uint dist = i > j ? i - j : j - i;
+                visible = dist <= p.window / 2u;
+            }
+            if (visible) {
+                const uint kbase = ((s0 + j) * p.kv_heads + kh) * p.hd;
+                float dot = 0.0;
+                for (uint d = 0u; d < p.hd; d++) dot += qs[d] * kbuf[kbase + d];
+                sc = dot * p.scale;
+            }
+        }
+        sc_s[lane] = sc;
+        barrier();
+        const uint count = min(uint(WG), n - j0);
+        float tmax = NEG;
+        for (uint x = 0u; x < count; x++) tmax = max(tmax, sc_s[x]);
+        const float m_new = max(m, tmax);
+        const float corr = exp(m - m_new);
+        const float e = sc != NEG ? exp(sc - m_new) : 0.0;
+        barrier();  // every lane has read the scores
+        sc_s[lane] = e;
+        barrier();
+        float tsum = 0.0;
+        for (uint x = 0u; x < count; x++) tsum += sc_s[x];
+        l = l * corr + tsum;
+        [[unroll]] for (uint a = 0u; a < 4u; a++) {
+            const uint d = lane + a * WG;
+            if (d < p.hd) {
+                float v = acc[a] * corr;
+                for (uint x = 0u; x < count; x++) {
+                    if (sc_s[x] != 0.0) v += sc_s[x] * vbuf[((s0 + j0 + x) * p.kv_heads + kh) * p.hd + d];
+                }
+                acc[a] = v;
+            }
+        }
+        m = m_new;
+        barrier();  // sc_s is overwritten by the next tile
+    }
+    const float inv = l > 0.0 ? 1.0 / l : 0.0;
+    [[unroll]] for (uint a = 0u; a < 4u; a++) {
+        const uint d = lane + a * WG;
+        if (d < p.hd) outv[(t * p.heads + h) * p.hd + d] = acc[a] * inv;
+    }
+}

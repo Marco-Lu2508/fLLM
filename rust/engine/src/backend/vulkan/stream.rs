@@ -535,6 +535,39 @@ impl Stream for VulkanStream {
         self.run_plans(&[plan], &[Arg::r("src", src), Arg::w("dst", dst)], &[], false)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn attn_encoder(
+        &mut self,
+        out: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        k: &DeviceBuffer,
+        v: &DeviceBuffer,
+        cu_seqlens: &[i32],
+        batch_size: usize,
+        total_tokens: usize,
+        heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        scale: f32,
+        window: Option<usize>,
+        global_tokens: Option<&[i32]>,
+    ) -> Result<(), BackendError> {
+        if total_tokens == 0 {
+            return Ok(());
+        }
+        if q.size < total_tokens * heads * head_dim * 4
+            || out.size < total_tokens * heads * head_dim * 4
+            || k.size < total_tokens * kv_heads * head_dim * 4
+            || v.size < total_tokens * kv_heads * head_dim * 4
+        {
+            return Err(invalid("encoder attention operands do not fit"));
+        }
+        let plan = crate::backend::vulkan::ops::attention::plan_attn_encoder(
+            cu_seqlens, batch_size, total_tokens, heads, kv_heads, head_dim, scale, window, global_tokens,
+        )?;
+        self.run_plans(&[plan], &[Arg::r("q", q), Arg::r("k", k), Arg::r("v", v), Arg::w("out", out)], &[], false)
+    }
+
     fn supports_take_columns(&self) -> bool {
         true
     }

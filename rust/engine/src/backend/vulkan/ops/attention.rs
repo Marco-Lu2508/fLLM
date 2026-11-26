@@ -621,3 +621,63 @@ impl Common<'_> {
         )
     }
 }
+
+/// Widest head of `attn_encoder` (four accumulators per lane).
+pub const MAX_ENCODER_HEAD: usize = 256;
+
+/// `Stream::attn_encoder` (`attn_encoder`): bidirectional attention over the packed sequences of `cu_seqlens`, an optional window (visible when
+/// `|i - j| <= window / 2` unless one of the two tokens is global) and global tokens. Slots: `q`, `k`, `v`, `out`; `meta` is a host array
+/// (sequence start and end of every token, then its global flag).
+#[allow(clippy::too_many_arguments)]
+pub fn plan_attn_encoder(
+    cu_seqlens: &[i32],
+    batch_size: usize,
+    total_tokens: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    scale: f32,
+    window: Option<usize>,
+    global_tokens: Option<&[i32]>,
+) -> Result<OpPlan, BackendError> {
+    if total_tokens == 0 || heads == 0 || kv_heads == 0 || head_dim == 0 || !heads.is_multiple_of(kv_heads) {
+        return Err(invalid("encoder attention: empty batch or heads that do not group"));
+    }
+    if head_dim > MAX_ENCODER_HEAD {
+        return Err(BackendError::UnsupportedOperation(format!("encoder attention head width {head_dim} exceeds {MAX_ENCODER_HEAD}")));
+    }
+    if heads > MAX_GROUPS_PER_DIM as usize || total_tokens > MAX_GROUPS_PER_DIM as usize {
+        return Err(BackendError::UnsupportedOperation("encoder attention batch too large for one dispatch".into()));
+    }
+    if cu_seqlens.len() < batch_size + 1 || !scale.is_finite() {
+        return Err(invalid("encoder attention: cu_seqlens shorter than batch_size + 1"));
+    }
+    // tokens outside every sequence keep an empty one (their output stays zero, like the host reference)
+    let mut start: Vec<i64> = (0..total_tokens as i64).collect();
+    let mut end = start.clone();
+    for b in 0..batch_size {
+        let (s, e) = (cu_seqlens[b], cu_seqlens[b + 1]);
+        if s < 0 || e < s || e as usize > total_tokens {
+            return Err(invalid(format!("encoder attention: sequence {b} ({s}..{e}) outside {total_tokens} tokens")));
+        }
+        for t in s..e {
+            start[t as usize] = i64::from(s);
+            end[t as usize] = i64::from(e);
+        }
+    }
+    let mut global = vec![0i64; total_tokens];
+    for &g in global_tokens.unwrap_or(&[]) {
+        if g >= 0 && (g as usize) < total_tokens {
+            global[g as usize] = 1;
+        }
+    }
+    let mut meta = pack_i32(&start)?;
+    meta.extend_from_slice(&pack_i32(&end)?);
+    meta.extend_from_slice(&pack_i32(&global)?);
+    plan(
+        "attn_encoder",
+        Push::new().u("heads", heads).u("kv_heads", kv_heads).u("hd", head_dim).u("window", window.unwrap_or(0)).f("scale", scale),
+        [heads as u32, total_tokens as u32, 1],
+        Slots::new().read("q").read("k").read("v").host("meta", Arc::new(meta)).write("out"),
+    )
+}
