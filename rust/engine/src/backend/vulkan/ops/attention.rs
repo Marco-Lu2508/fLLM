@@ -5,8 +5,10 @@ use super::*;
 use crate::backend::{AttentionParams, DeviceKvCache};
 use crate::kv_format::{unpack_kind, KvFormat, KvLayout as RegionLayout};
 
-/// Widest key or value head the attention shaders take (shared memory of the query / accumulators).
-pub const MAX_HEAD_WIDTH: usize = 512;
+/// Widest key or value head the attention shaders take (shared memory of the query / accumulators; the decode kernel only, see [`NARROW_HEAD_WIDTH`]).
+pub const MAX_HEAD_WIDTH: usize = 1024;
+/// Widest head the prompt kernel and the plain decode variants take; wider heads (latent attention: a 576 wide key) use the `_w` decode variants.
+pub const NARROW_HEAD_WIDTH: usize = 512;
 /// Most splits of the key range (`attn_merge` keeps the weights of the splits in shared memory).
 pub const MAX_SPLITS: usize = 256;
 /// Query rows of one workgroup of `attn_prefill`.
@@ -369,7 +371,7 @@ pub fn plan_attention(
     let mut i = 0;
     while i < rows {
         let mut take = 1;
-        if tuning.use_prefill_kernel && tuning.prefill_min_rows > 1 {
+        if tuning.use_prefill_kernel && tuning.prefill_min_rows > 1 && dk <= NARROW_HEAD_WIDTH && dv <= NARROW_HEAD_WIDTH {
             // longest run of <= prefill_rows rows whose block tables are prefixes of one table (checked pairwise through the longest row seen so far)
             let mut longest = i;
             while take < tuning.prefill_rows && i + take < rows {
@@ -384,7 +386,7 @@ pub fn plan_attention(
                 take += 1;
             }
         }
-        if take >= tuning.prefill_min_rows.max(2) && tuning.use_prefill_kernel {
+        if take >= tuning.prefill_min_rows.max(2) && tuning.use_prefill_kernel && dk <= NARROW_HEAD_WIDTH && dv <= NARROW_HEAD_WIDTH {
             let br = tuning.prefill_rows;
             let extend = matches!(segments.last(), Some(&(f, e, true)) if e == i && (e - f).is_multiple_of(br) && (e - f + take) <= MAX_GROUPS_PER_DIM as usize * br);
             if extend {
@@ -524,12 +526,14 @@ impl Common<'_> {
         } else {
             self.slots(Some(part_bytes))
         };
-        let name = if self.is_generic() {
-            "attn_decode_gen"
-        } else if self.is_q8() {
-            "attn_decode_q8"
-        } else {
-            "attn_decode_f16"
+        let wide = p.head_dim > NARROW_HEAD_WIDTH || p.value_dim > NARROW_HEAD_WIDTH;
+        let name = match (self.is_generic(), self.is_q8(), wide) {
+            (true, _, false) => "attn_decode_gen",
+            (true, _, true) => "attn_decode_gen_w",
+            (false, true, false) => "attn_decode_q8",
+            (false, true, true) => "attn_decode_q8_w",
+            (false, false, false) => "attn_decode_f16",
+            (false, false, true) => "attn_decode_f16_w",
         };
         out.push(plan(
             name,

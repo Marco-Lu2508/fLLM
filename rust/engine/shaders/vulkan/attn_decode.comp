@@ -11,13 +11,18 @@
 // table row; q is `rows x heads x dk`, out `rows x heads x dv` (row index = global row). `meta` = int32: lengths[rows_total] then the block tables
 // (rows_total x stride). `bias` = float: sinks[heads] then ALiBi slopes[heads] (always bound; flags bit 0 = sinks used, bit 1 = ALiBi used).
 // `part`: ml pairs (m, l) for every (row, head, split) record, then the accumulators (dv floats per record); record = (z * heads + head) * nsplit + split.
-// Needs dk, dv <= 512, nsplit <= 256. Empty splits (rows shorter than the split grid) write l = 0 and are skipped by the merge.
+// Needs dk, dv <= DMAX (512; 1024 in the `_w` variants), nsplit <= 256. Empty splits (rows shorter than the split grid) write l = 0 and are skipped by the merge.
 #define WG 64
 #include "_ops_common.glsl"
 #include "_ops_kv.glsl"
 #ifndef KV_Q8
 #define KV_Q8 0
 #endif
+// DMAX = widest key / value head (512, or 1024 in the `_w` variants for latent attention with a 576 wide key); ACC = accumulators per lane
+#ifndef DMAX
+#define DMAX 512
+#endif
+#define ACC (DMAX / 64)
 layout(local_size_x = WG) in;
 
 layout(std430, binding = 0) readonly buffer QBuf { float q[]; };
@@ -65,7 +70,7 @@ layout(push_constant) uniform P {
 #include "_ops_kvgen.glsl"
 #endif
 
-shared float qs[512];
+shared float qs[DMAX];
 shared float sc_s[WG];
 shared uint slot_s[WG];
 
@@ -172,8 +177,8 @@ void main() {
     const uint tab = p.rows_total + r * p.stride;
     float m = NEG;
     float l = 0.0;
-    float acc[8];
-    [[unroll]] for (uint i = 0u; i < 8u; i++) acc[i] = 0.0;
+    float acc[ACC];
+    [[unroll]] for (uint i = 0u; i < ACC; i++) acc[i] = 0.0;
 
     for (uint t0 = lo; t0 < hi; t0 += WG) {
         const uint pos = t0 + lane;
@@ -199,7 +204,7 @@ void main() {
         float tsum = 0.0;
         for (uint j = 0u; j < count; j++) tsum += sc_s[j];
         l = l * corr + tsum;
-        [[unroll]] for (uint i = 0u; i < 8u; i++) {
+        [[unroll]] for (uint i = 0u; i < ACC; i++) {
             const uint d = lane + i * WG;
             if (d < p.dv) {
                 float a = acc[i] * corr;
@@ -223,10 +228,10 @@ void main() {
             const float m2 = max(m, sink);
             const float corr = exp(m - m2);
             l = l * corr + exp(sink - m2);
-            [[unroll]] for (uint i = 0u; i < 8u; i++) acc[i] *= corr;
+            [[unroll]] for (uint i = 0u; i < ACC; i++) acc[i] *= corr;
         }
         const float inv = 1.0 / l;
-        [[unroll]] for (uint i = 0u; i < 8u; i++) {
+        [[unroll]] for (uint i = 0u; i < ACC; i++) {
             const uint d = lane + i * WG;
             if (d < p.dv) outv[(r * p.heads + h) * p.dv + d] = acc[i] * inv;
         }
@@ -236,7 +241,7 @@ void main() {
             part[rec * 2u + 1u] = l;
         }
         const uint abase = nrec * 2u + rec * p.dv;
-        [[unroll]] for (uint i = 0u; i < 8u; i++) {
+        [[unroll]] for (uint i = 0u; i < ACC; i++) {
             const uint d = lane + i * WG;
             if (d < p.dv) part[abase + d] = acc[i];
         }

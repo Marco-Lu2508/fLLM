@@ -526,11 +526,11 @@ fn attention_rejects_bad_input() {
     let mut short = attn_params(heads, kvh, d, d, bs, 4);
     short.alibi_slopes = Some(Arc::new(vec![0.1; 3]));
     assert!(plan_attention(&kv, &short, &ok, &[20], &t).is_err());
-    let wide = kv_layout(1, kvh, 640, 640, bs, 8);
+    let wide = kv_layout(1, kvh, 1100, 1100, bs, 8);
     assert!(matches!(
         plan_attention(
             &wide,
-            &attn_params(heads, kvh, 640, 640, bs, 4),
+            &attn_params(heads, kvh, 1100, 1100, bs, 4),
             &ok,
             &[20],
             &t
@@ -1125,7 +1125,7 @@ fn sample_plans() -> Vec<OpPlan> {
     for kind in [1, 2, 9, 2 | (4 << 8)] {
         let kv = kv_layout(kind, 2, 64, 64, 16, 32);
         v.extend(plan_kv_write(&kv, &[0, 5]).unwrap());
-        for dv in [64usize, 160, 300] {
+        for dv in [64usize, 160, 300, 700] {
             let kv = kv_layout(kind, 2, 64, dv, 16, 256);
             let mut params = attn_params(8, 2, 64, dv, 16, 128);
             params.alibi_slopes = Some(Arc::new(vec![0.1; 8]));

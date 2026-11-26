@@ -100,6 +100,9 @@ moe_linear_iq1_m_bda moe_linear.comp -DMOE_BDA -DFMT_IQ1_M
 attn_decode_f16 attn_decode.comp -DKV_Q8=0
 attn_decode_q8 attn_decode.comp -DKV_Q8=1
 attn_decode_gen attn_decode.comp -DKV_Q8=2
+attn_decode_f16_w attn_decode.comp -DKV_Q8=0 -DDMAX=1024
+attn_decode_q8_w attn_decode.comp -DKV_Q8=1 -DDMAX=1024
+attn_decode_gen_w attn_decode.comp -DKV_Q8=2 -DDMAX=1024
 attn_prefill_f16_d128 attn_prefill.comp -DKV_Q8=0 -DDVMAX=128
 attn_prefill_f16_d256 attn_prefill.comp -DKV_Q8=0 -DDVMAX=256
 attn_prefill_f16_d512 attn_prefill.comp -DKV_Q8=0 -DDVMAX=512

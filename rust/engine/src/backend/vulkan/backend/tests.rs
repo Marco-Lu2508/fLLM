@@ -319,6 +319,7 @@ fn all_op_plans() -> Vec<OpPlan> {
             (4, 1, 192, 128),
             (8, 2, 256, 256),
             (2, 1, 512, 512),
+            (4, 1, 576, 512),
         ] {
             for fancy in [false, true] {
                 let layout = kv_layout(kind, kv_heads, dk, dv);
