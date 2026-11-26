@@ -694,6 +694,16 @@ pub struct DeviceMoeDevice {
     pub shared_gate: Option<crate::backend::DeviceBuffer>,
     /// The grouped GEMM runs the formats and widths of this layer (both pair tiles).
     pub grouped: bool,
+    /// Latent-space experts (Nemotron-H, Kimi K3): the projections around the routed experts.
+    pub latent: Option<DeviceLatent>,
+}
+
+/// `down` / `up` projections (hidden <-> latent width) and the optional RMS norm weights of the routed output in the latent space.
+pub struct DeviceLatent {
+    pub down: crate::backend::DeviceWeight,
+    pub up: crate::backend::DeviceWeight,
+    pub norm: Option<crate::backend::DeviceBuffer>,
+    pub width: usize,
 }
 
 /// MoVA routed value experts kept on the device (`K2 Horizon`).
@@ -1461,6 +1471,9 @@ pub struct RustDecoder {
     m3_run: bool,
     /// Inkling runs on the accelerator (convolutions, relative-position attention, experts); set when the model is attached.
     ink_device: bool,
+    /// Latent-space experts run through the device MoE operations (`moe_device_latent`); false: those layers use the host (`FLLM_LATENT=device` not set, or a backend
+    /// without `Backend::moe_device_available`).
+    latent_device: bool,
     /// The accelerator runs DeepSeek-V4 completely (`hc_device` is set with it); set when the model is attached.
     v4_device: bool,
     /// Qwen3.8-Flash-Next runs on the device (streams, n-gram embeddings and token indexer included).
@@ -2693,6 +2706,7 @@ impl RustDecoder {
             m3_device: false,
             m3_run: false,
             ink_device: false,
+            latent_device: false,
             hc_device: false,
             v4_device: false,
             q4_device: false,
@@ -3334,7 +3348,7 @@ impl RustDecoder {
                 Some("all-to-all expert dispatch of a tensor-parallel group")
             }
             Ffn::Moe(moe) => {
-                if moe.latent.is_some() || cfg.moe.as_ref().is_some_and(|m| m.latent.is_some()) {
+                if (moe.latent.is_some() || cfg.moe.as_ref().is_some_and(|m| m.latent.is_some())) && !self.latent_device {
                     Some("latent-space expert projections")
                 } else {
                     None
@@ -3435,7 +3449,9 @@ impl RustDecoder {
             mtp: self.mtp.is_some(),
             recurrent: false,
         };
-        eligibility(&shape).or_else(|| self.layers.iter().any(|l| l.xielu.is_some()).then_some("xIELU activation"))
+        eligibility(&shape)
+            .or_else(|| self.layers.iter().any(|l| l.xielu.is_some()).then_some("xIELU activation"))
+            .or_else(|| self.layers.iter().any(|l| matches!(&l.ffn, Ffn::Moe(m) if m.latent.is_some())).then_some("latent-space experts"))
     }
 
     /// `FLLM_ACT_DTYPE`: decide the activation type of the device pipeline and tell the backend before any weight is uploaded (BF16 needs BF16 scales
@@ -3511,6 +3527,10 @@ impl RustDecoder {
         self.m3_run = m3_run;
         self.m3_device = m3_device;
         self.ink_device = self.cfg.inkling.is_some() && self.ink_device_possible(&*backend);
+        // opt-in until a GPU run has checked it against the host (`scripts/hf_golden.py nemotron_h_latent`): FLLM_LATENT=device
+        self.latent_device = backend.moe_device_available()
+            && !std::env::var_os("FLLM_MOE_DEVICE").is_some_and(|v| v == "0")
+            && std::env::var("FLLM_LATENT").is_ok_and(|v| v.eq_ignore_ascii_case("device"));
         // hyper-connections on the device: the streams get their own buffer and the mixing runs in two small kernels per block; the layers' own
         // mixers and feed-forwards are the ordinary device ones (a branch output is the difference of the residual buffer before and after)
         let clamp_ok = backend.create_stream().is_ok_and(|s| s.supports_glu_clamped());
@@ -4351,6 +4371,15 @@ impl RustDecoder {
                                                     bias: moe.bias.as_ref().map(upload_vec).transpose()?,
                                                     shared_gate: moe.shared.as_ref().and_then(|(_, g)| g.as_ref()).map(upload_vec).transpose()?,
                                                     grouped,
+                                                    latent: match moe.latent.as_ref() {
+                                                        Some((down, up)) => Some(DeviceLatent {
+                                                            down: upload_linear(&format!("blk.{i}.ffn_latent_down"), down)?,
+                                                            up: upload_linear(&format!("blk.{i}.ffn_latent_up"), up)?,
+                                                            norm: moe.latent_norm.as_ref().map(upload_vec).transpose()?,
+                                                            width: down.rows,
+                                                        }),
+                                                        None => None,
+                                                    },
                                                 })
                                             } else {
                                                 None
@@ -4379,6 +4408,11 @@ impl RustDecoder {
                         let _ = backend.alias_weights_into_table(&f.up, &mut ups);
                         let mut downs: Vec<&mut crate::backend::DeviceWeight> = live.iter_mut().map(|e| &mut e.down).collect();
                         let _ = backend.alias_weights_into_table(&f.down, &mut downs);
+                    }
+                    if moe.latent.is_some() && !fast.as_ref().is_some_and(|f| f.device.as_ref().is_some_and(|d| d.latent.is_some())) {
+                        return Err(format!(
+                            "layer {i}: latent-space experts need the device MoE path (grouped expert tables) on this backend; leave FLLM_LATENT unset to run them on the host"
+                        ));
                     }
                     Some(DeviceMoe { experts, shared, fast })
                 }
@@ -7930,7 +7964,7 @@ impl RustDecoder {
             return false;
         }
         if device {
-            return moe.latent.is_none()
+            return (moe.latent.is_none() || cfg.zero_experts == 0)
                 // zero experts (LongCat-Flash) fold into the combination's shared slot: a router with both, or with scaled inputs, keeps the other paths
                 && (cfg.zero_experts == 0 || (moe.shared.is_none() && !cfg.input_scaled && cfg.experts > cfg.zero_experts))
                 && moe.tid2eid.is_none()
