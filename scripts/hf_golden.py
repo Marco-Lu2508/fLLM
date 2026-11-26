@@ -675,6 +675,7 @@ def config_for(arch: str, vocab: int):
         ),
         "g9v3": lambda: _g9_config(vocab),
         "internlm2": lambda: _il2_config(vocab),
+        "diffllama": lambda: T.DiffLlamaConfig(**common, **dense, rms_norm_eps=1e-5, lambda_std_dev=0.1),
         # Griffin: two RG-LRU recurrent blocks, then one local-attention block (window 8, one KV head, half the head width rotated), twice
         "recurrent_gemma": lambda: T.RecurrentGemmaConfig(
             vocab_size=vocab, hidden_size=64, intermediate_size=192, num_hidden_layers=6, num_attention_heads=4,

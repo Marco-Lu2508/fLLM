@@ -893,6 +893,9 @@ impl Plan {
         if raw == "recurrent_gemma" {
             return crate::recurrent_gemma::plan(cfg);
         }
+        if raw == "diffllama" {
+            return crate::diffllama::plan(cfg);
+        }
         if raw == "dbrx" {
             let mut normalized = dbrx_config(cfg)?;
             normalized["model_type"] = "qwen3_moe".into();
@@ -2875,6 +2878,11 @@ impl Plan {
             if idx >= self.layers {
                 let mtp_idx = idx - self.layers;
                 return self.map_mtp(&format!("{mtp_idx}.{suf}"));
+            }
+            if self.arch == "diffllama" {
+                if let Some(m) = crate::diffllama::map(idx, suf) {
+                    return Ok(m);
+                }
             }
             if self.arch == "recurrent_gemma" {
                 return crate::recurrent_gemma::map(idx, suf, self.norm_add).ok_or_else(|| format!("unexpected RecurrentGemma tensor {n:?}"));

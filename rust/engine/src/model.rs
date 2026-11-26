@@ -129,6 +129,7 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "telechat",
     "zaya1",
     "recurrent_gemma",
+    "diffllama",
     "dspine",
     "dflash",
 ];

@@ -29,6 +29,7 @@ pub(super) fn placeholder_layer() -> Layer {
         takes_shortcut: false,
         res: None,
         dsa_shared: false,
+        diff: None,
         output_gate: false,
         chunk: None,
         attn_gate: None,

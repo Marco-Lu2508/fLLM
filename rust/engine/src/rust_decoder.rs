@@ -460,6 +460,8 @@ struct Layer {
     res: Option<Box<LayerRes>>,
     /// The layer attends to the tokens the last layer with an indexer selected (GLM-5 layers marked `shared`).
     dsa_shared: bool,
+    /// DiffLlama differential attention: `(lambda, 1 - lambda_init)` of this layer; the layer attends with two value halves per key head and combines head `h` with head `h + heads / 2`.
+    diff: Option<(f32, f32)>,
     /// A second mixer that runs next to the attention of this layer (Falcon-H1: Mamba-2 and attention in parallel).
     parallel: Option<Box<hybrid::ParallelMixer>>,
     /// Zamba2: this layer starts with a call of a shared transformer block whose output joins the input of its Mamba mixer.
@@ -2014,7 +2016,9 @@ impl RustDecoder {
             let ff_i = cfg.layer_ff(i);
             let kv_shared = mtp_prefix.is_none() && cfg.layer_kv_source(i).is_some();
             let k_eq_v = !kv_shared && has_tensor(mapping, &format!("{p}.attn_k.weight")) && !has_tensor(mapping, &format!("{p}.attn_v.weight")) && cfg.arch == "gemma4";
-            let (qr, kr, vr) = (heads * dk, kv_heads * dk, kv_heads * dv);
+            // differential attention: v_proj has one value head per key head; the doubled value of the cache is built from it
+            let diff_layer = has_tensor(mapping, &format!("{p}.attn_lambda_q1.weight"));
+            let (qr, kr, vr) = (heads * dk, kv_heads * dk, if diff_layer { kv_heads * dv / 2 } else { kv_heads * dv });
             let q_rows = tensor_rows(mapping, &format!("{p}.attn_q.weight"));
             let output_gate = q_rows == Some(2 * qr) && cfg.mla.is_none();
             let attn = if let (Some(rg), true) = (cfg.rglru.as_ref(), cfg.rglru.as_ref().is_some_and(|r| r.layers.get(i).copied().unwrap_or(false))) {
@@ -2387,6 +2391,17 @@ impl RustDecoder {
             } else {
                 None
             };
+            let diff = if has_tensor(mapping, &format!("{p}.attn_lambda_q1.weight")) {
+                let dot = |a: &str, b: &str| -> Result<f32, String> {
+                    let (a, b) = (vector(mapping, &format!("{p}.{a}.weight"), dk)?, vector(mapping, &format!("{p}.{b}.weight"), dk)?);
+                    Ok(a.iter().zip(&b).map(|(x, y)| x * y).sum::<f32>())
+                };
+                let lambda_init = 0.8 - 0.6 * (-0.3 * i as f32).exp();
+                let lambda = dot("attn_lambda_q1", "attn_lambda_k1")?.exp() - dot("attn_lambda_q2", "attn_lambda_k2")?.exp() + lambda_init;
+                Some((lambda, 1.0 - lambda_init))
+            } else {
+                None
+            };
             let out = match (&attn, &cfg.delta, &cfg.mamba) {
                 (Attn::Rglru(_), _, _) => linear(&format!("{p}.rglru_out"), hidden, cfg.rglru.as_ref().map_or(hidden, |r| r.width))?,
                 (Attn::ShortConv(_), _, _) => {
@@ -2414,7 +2429,7 @@ impl RustDecoder {
                     let inner = cfg.mamba1.as_ref().map_or(0, |m| m.inner);
                     linear(&format!("{p}.ssm_out"), hidden, inner)?
                 }
-                _ => linear(&format!("{p}.attn_output"), hidden, heads * dv)?,
+                _ => linear(&format!("{p}.attn_output"), hidden, if diff.is_some() { heads * dv / 2 } else { heads * dv })?,
             };
             let gate_rows = tensor_rows(mapping, &format!("{p}.attn_gate.weight"));
             let gate_per_head = !cfg.gate_per_element && gate_rows == Some(heads) && heads != heads * dv;
@@ -2545,6 +2560,7 @@ impl RustDecoder {
                     None
                 },
                 dsa_shared,
+                diff,
                 parallel: hybrid::ParallelMixer::load(&cfg, mapping, &p, i, &linear)?,
                 zamba: zamba::ZambaCall::load(&cfg, mapping, i, &linear)?,
                 attn,
@@ -3292,6 +3308,7 @@ impl RustDecoder {
             return Some("a shared transformer block in front of the Mamba-2 mixer");
         }
         match &layer.attn {
+            Attn::Std { .. } if layer.diff.is_some() => Some("differential attention (no device kernel)"),
             Attn::Std { .. } => {
                 // the element-wise gate kernels would read a gate with one value per head (Laguna, Step-3.5) as garbage: that gate and
                 // the value scale of MiMo-V2 have their own device operations (`head_gate_mul`, `scale_inplace`)
@@ -9894,6 +9911,22 @@ impl RustDecoder {
                             (q, k, v)
                         }
                     };
+                    // differential attention: every key head attends over two value heads; the value of key head `g` is [v[g % m], v[m + g % m]]
+                    let mut diff_v: Vec<f32>;
+                    let v: &mut Vec<f32> = if layer.diff.is_some() {
+                        let d = dk;
+                        let m = kv_heads / 2;
+                        diff_v = Vec::with_capacity(rows * kv_heads * 2 * d);
+                        for row in v.chunks_exact(kv_heads * d) {
+                            for g in 0..kv_heads {
+                                diff_v.extend_from_slice(&row[(g % m) * d..(g % m + 1) * d]);
+                                diff_v.extend_from_slice(&row[(m + g % m) * d..(m + g % m + 1) * d]);
+                            }
+                        }
+                        &mut diff_v
+                    } else {
+                        v
+                    };
                     let (key_region, value_region) = (self.key_region(i), self.value_region(i));
                     if !layer.kv_shared {
                         for (r, &position) in positions.iter().enumerate() {
@@ -9945,6 +9978,21 @@ impl RustDecoder {
                         Some(out) => out,
                         None => self.attention_selected(i, q, key, value, tables, lengths, dsa_rows.as_deref()),
                     };
+                    if let Some((lambda, scale)) = layer.diff {
+                        // head p minus lambda times head p + heads / 2, an RMS norm over the 2 * head width, times (1 - lambda_init)
+                        let half = heads / 2;
+                        let width = dv;
+                        let mut mixed = Vec::with_capacity(attn.len() / 2);
+                        for row in attn.chunks_exact(heads * width) {
+                            for p in 0..half {
+                                let (a, b) = (&row[p * width..(p + 1) * width], &row[(p + half) * width..(p + half + 1) * width]);
+                                let z: Vec<f32> = a.iter().zip(b).map(|(x, y)| x - lambda * y).collect();
+                                let inv = (z.iter().map(|v| v * v).sum::<f32>() / width as f32 + cfg.eps).sqrt().recip();
+                                mixed.extend(z.iter().map(|v| v * inv * scale));
+                            }
+                        }
+                        attn = mixed;
+                    }
                     if let Some(gate) = &gate_values {
                         if layer.gate_per_head {
                             for (r, row) in attn.chunks_mut(heads * dv).enumerate() {

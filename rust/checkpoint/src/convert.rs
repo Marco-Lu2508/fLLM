@@ -242,6 +242,8 @@ pub fn prepare_checkpoint(
             patched["intermediate_size"] = first;
         }
         patched
+    } else if arch == "diffllama" {
+        crate::diffllama::config(&cfg)?
     } else if arch == "recurrent_gemma" {
         crate::recurrent_gemma::config(&cfg)?
     } else if arch == "dbrx" {
