@@ -4441,6 +4441,12 @@ impl Tester<'_> {
         } else {
             self.record_skip("diff_attn", "differential attention value expansion and head mix", "supports_diff_attn is false");
         }
+        if self.device.create_stream().map(|st| st.supports_arch_ops()).unwrap_or(false) {
+            for (rows, kv_heads, top_k, d) in [(3usize, 2usize, 2usize, 16usize), (5, 4, 3, 24)] {
+                let r = self.moa_permute_check(rows, kv_heads, top_k, d);
+                self.record("moa_permute", &format!("{rows} rows, {kv_heads} key heads of {d}, {top_k} experts"), r);
+            }
+        }
         for (width, kernel, blocks) in [(64usize, 4usize, 2usize), (192, 4, 3), (300, 3, 2), (512, 2, 1)] {
             let shape = RgLruShape { width, kernel, blocks };
             match self.device.create_stream() {
@@ -5060,6 +5066,39 @@ impl Tester<'_> {
                 .max(cmp(get(stream.as_mut(), &vo, want_v.len())?, &want_v));
         }
         Ok(Outcome { device: worst_err, cpu: 0.0, tol: 2e-3, cpu_tol: 1.0, ms: total_ms })
+    }
+
+    /// JetMoE's query permutation (and its inverse) against the index arithmetic of the host loop.
+    fn moa_permute_check(&mut self, rows: usize, kv_heads: usize, top_k: usize, d: usize) -> Result<Outcome, BackendError> {
+        let mut stream = self.device.create_stream()?;
+        let n = rows * kv_heads * top_k * d;
+        let src = self.rng.vector(n, 1.0);
+        let mut want = vec![0.0f32; n];
+        for r in 0..rows {
+            for j in 0..top_k {
+                for g in 0..kv_heads {
+                    let from = ((r * top_k + j) * kv_heads + g) * d;
+                    let to = ((r * kv_heads + g) * top_k + j) * d;
+                    want[to..to + d].copy_from_slice(&src[from..from + d]);
+                }
+            }
+        }
+        let sb = put(self.device, stream.as_mut(), &src)?;
+        let wb = put(self.device, stream.as_mut(), &want)?;
+        let mut fwd = put(self.device, stream.as_mut(), &vec![f32::NAN; n])?;
+        let mut back = put(self.device, stream.as_mut(), &vec![f32::NAN; n])?;
+        let mut ms = 0.0;
+        timed(&mut ms, stream.as_mut(), |s| {
+            s.moa_permute(&mut fwd, &sb, rows, kv_heads, top_k, d, false)?;
+            s.moa_permute(&mut back, &wb, rows, kv_heads, top_k, d, true)
+        })?;
+        let cmp = |have: Vec<f32>, want: &[f32]| {
+            let want64: Vec<f64> = want.iter().map(|&v| f64::from(v)).collect();
+            let scale: Vec<f64> = want64.iter().map(|v| v.abs().max(1.0)).collect();
+            worst(&have, &want64, &scale)
+        };
+        let err = cmp(get(stream.as_mut(), &fwd, n)?, &want).max(cmp(get(stream.as_mut(), &back, n)?, &src));
+        Ok(Outcome { device: err, cpu: 0.0, tol: 1e-6, cpu_tol: 1.0, ms })
     }
 
     /// DiffLlama's value expansion and head mix against their transcription in `rust_decoder.rs`.

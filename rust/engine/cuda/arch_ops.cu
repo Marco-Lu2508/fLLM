@@ -167,6 +167,33 @@ int fllm_diff_expand_v_launch(cudaStream_t s, float *out, const float *v, size_t
     return fllm_check_launch("diff_expand_v");
 }
 
+// JetMoE's mixture of attention heads: the per-expert queries [r][j][g][c] become the heads [r][g][j][c] (inverse: back to [r][j][g][c])
+__global__ void moa_permute_kernel(const float *__restrict__ src, float *__restrict__ out, size_t total, int kv_heads, int top_k, int d, int inverse) {
+    const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    const size_t c = i % d;
+    const size_t rest = i / d;
+    if (!inverse) {
+        const size_t j = rest % top_k;
+        const size_t rg = rest / top_k;
+        const size_t g = rg % kv_heads;
+        const size_t r = rg / kv_heads;
+        out[i] = src[((r * top_k + j) * kv_heads + g) * d + c];
+    } else {
+        const size_t g = rest % kv_heads;
+        const size_t rj = rest / kv_heads;
+        const size_t j = rj % top_k;
+        const size_t r = rj / top_k;
+        out[i] = src[((r * kv_heads + g) * top_k + j) * d + c];
+    }
+}
+int fllm_moa_permute_launch(cudaStream_t s, float *out, const float *src, size_t rows, int kv_heads, int top_k, int d, int inverse) {
+    const size_t total = rows * (size_t)kv_heads * top_k * d;
+    if (total == 0) return 0;
+    moa_permute_kernel<<<arch_grid(total), 256, 0, s>>>(src, out, total, kv_heads, top_k, d, inverse);
+    return fllm_check_launch("moa_permute");
+}
+
 // block (row, pair p): z = a[p] - lambda a[p + half]; out = z * rsqrt(mean(z^2) + eps) * scale
 __global__ void diff_attn_mix_kernel(const float *__restrict__ a, float *__restrict__ out, int heads, int width, float lambda, float scale, float eps) {
     const int half = heads / 2;

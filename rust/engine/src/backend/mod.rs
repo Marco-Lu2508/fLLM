@@ -2951,6 +2951,13 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("doge_cdmoe".into()))
     }
 
+    /// JetMoE: the queries of the `top_k` experts of each row (`[r][j][g][c]`, `kv_heads x d` per expert) become the attention heads `g * top_k + j`
+    /// (`[r][g][j][c]`); with `inverse` the attention output is split back per expert.
+    #[allow(clippy::too_many_arguments)]
+    fn moa_permute(&mut self, _out: &mut DeviceBuffer, _src: &DeviceBuffer, _rows: usize, _kv_heads: usize, _top_k: usize, _d: usize, _inverse: bool) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("moa_permute".into()))
+    }
+
     /// Does this stream implement [`Stream::diff_expand_v`] and [`Stream::diff_attn_mix`] (DiffLlama's differential attention)?
     fn supports_diff_attn(&self) -> bool {
         false

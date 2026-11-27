@@ -2316,6 +2316,10 @@ int fllm_cuda_doge_attention(FllmStream *st, const float *q, const uint16_t *kpo
     return fllm_doge_attention_launch(st->s, q, kpool_layer, vpool_layer, out, static_cast<const int64_t *>(dt), static_cast<const int64_t *>(dl), max_len, rows, heads,
                                       kv_heads, dk, dv, stride, block_size, kind, kgroup, vgroup, kscale_base, vscale_base, scale, dtw, keep);
 }
+int fllm_cuda_moa_permute(FllmStream *st, float *out, const float *src, size_t rows, int kv_heads, int top_k, int d, int inverse) {
+    PREP(st);
+    return fllm_moa_permute_launch(st->s, out, src, rows, kv_heads, top_k, d, inverse);
+}
 int fllm_cuda_diff_expand_v(FllmStream *st, float *out, const float *v, size_t rows, int kv_heads, int d) {
     PREP(st);
     return fllm_diff_expand_v_launch(st->s, out, v, rows, kv_heads, d);

@@ -744,7 +744,7 @@ fn no_shader_is_orphaned() {
     // the three passes of an EXL3 product are recorded by the stream, not planned by `plan_quantized_linear`
     seen.extend(["exl3_pre", "exl3_mm", "exl3_post"].map(str::to_owned));
     // recurrent-model ops recorded directly by the stream (RWKV, KDA recurrence, column copy, ShortConv)
-    seen.extend(["attn_encoder", "misc_copy_cols", "misc_take_cols", "misc_logit_cap", "misc_xielu", "moe_zero_fold", "sample_rows", "moe_route_ex", "moe_combine_ex", "moe_gate_scale", "rwkv_act", "rwkv_lerp", "rwkv_shift", "shortconv", "misc_q4_ple_conv", "xlstm_cell", "rglru_cell", "diff_expand_v", "diff_attn_mix", "channel_scale", "doge_cdmoe", "attn_decode_doge", "channel_affine", "zaya_cca"].map(str::to_owned));
+    seen.extend(["attn_encoder", "misc_copy_cols", "misc_take_cols", "misc_logit_cap", "misc_xielu", "moe_zero_fold", "sample_rows", "moe_route_ex", "moe_combine_ex", "moe_gate_scale", "rwkv_act", "rwkv_lerp", "rwkv_shift", "shortconv", "misc_q4_ple_conv", "xlstm_cell", "rglru_cell", "diff_expand_v", "diff_attn_mix", "channel_scale", "doge_cdmoe", "attn_decode_doge", "channel_affine", "zaya_cca", "moa_permute"].map(str::to_owned));
     for width in [16, 32, 64, 128] {
         seen.extend([format!("kda_rec_hk{width}"), format!("rwkv6_wkv_n{width}"), format!("rwkv7_wkv_n{width}")]);
     }

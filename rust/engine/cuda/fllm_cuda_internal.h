@@ -406,6 +406,7 @@ int fllm_kvq_attention(cudaStream_t s, void *stream_key, const float *q, const u
 // Activations of older architectures (arch_ops.cu): 0 SiLU, 1 GELU tanh, 2 GELU erf, 3 ReLU, 4 ReLU^2
 int fllm_act_launch(cudaStream_t s, const float *x, float *out, size_t n, int mode);
 int fllm_xielu_launch(cudaStream_t s, const float *x, float *out, size_t n, float ap, float an, float beta, float eps);
+int fllm_moa_permute_launch(cudaStream_t s, float *out, const float *src, size_t rows, int kv_heads, int top_k, int d, int inverse);
 int fllm_diff_expand_v_launch(cudaStream_t s, float *out, const float *v, size_t rows, int kv_heads, int d);
 int fllm_channel_scale_launch(cudaStream_t s, float *x, const float *scale, size_t rows, int width);
 int fllm_channel_affine_launch(cudaStream_t s, float *x, const float *scale, const float *bias, size_t rows, int width);

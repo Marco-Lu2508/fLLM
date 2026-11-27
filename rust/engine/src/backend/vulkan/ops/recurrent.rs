@@ -938,6 +938,20 @@ pub fn plan_rglru_cell(run_index: usize, run: &RunSpec, shape: &RgLruShape, stat
     plan("rglru_cell", push, [shape.blocks as u32, 1, 1], slots)
 }
 
+/// `moa_permute` (JetMoE): per-expert queries to attention heads and back.
+pub fn plan_moa_permute(rows: usize, kv_heads: usize, top_k: usize, d: usize, inverse: bool) -> Result<OpPlan, BackendError> {
+    if rows == 0 || kv_heads == 0 || top_k == 0 || d == 0 {
+        return Err(invalid("a mixture of attention heads needs heads, experts and a head width"));
+    }
+    let count = rows * kv_heads * top_k * d;
+    plan(
+        "moa_permute",
+        Push::new().u("count", count).u("kv_heads", kv_heads).u("top_k", top_k).u("d", d).u("inverse", usize::from(inverse)),
+        groups_1d(count, 256),
+        Slots::new().read("src").rw("out"),
+    )
+}
+
 /// `diff_expand_v` (DiffLlama): `rows x kv_heads x d` values expanded to `rows x kv_heads x 2d`.
 pub fn plan_diff_expand_v(rows: usize, kv_heads: usize, d: usize) -> Result<OpPlan, BackendError> {
     if rows == 0 || kv_heads < 2 || !kv_heads.is_multiple_of(2) || d == 0 {

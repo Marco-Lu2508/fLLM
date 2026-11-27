@@ -1,0 +1,41 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: moa_permute | bindings: src,out | push: count,kv_heads,top_k,d,inverse | grid: [min(ceil(count/256), 65535), 1, 1]
+// JetMoE's mixture of attention heads: the queries of the `top_k` selected experts (one per slot, `kv_heads x d` each) become the heads `g * top_k + j` of the row
+// (inverse = 0: [r][j][g][c] -> [r][g][j][c]); with inverse = 1 the attention output is split back per expert ([r][g][j][c] -> [r][j][g][c]).
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer SrcBuf { float src[]; };
+layout(std430, binding = 1) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint count;
+    uint kv_heads;
+    uint top_k;
+    uint d;
+    uint inverse;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < p.count; i += grid_items) {
+        const uint c = i % p.d;
+        const uint rest = i / p.d;
+        if (p.inverse == 0u) {
+            // out index [r][g][j][c]
+            const uint j = rest % p.top_k;
+            const uint rg = rest / p.top_k;
+            const uint g = rg % p.kv_heads;
+            const uint r = rg / p.kv_heads;
+            outv[i] = src[(((r * p.top_k + j) * p.kv_heads + g) * p.d) + c];
+        } else {
+            // out index [r][j][g][c]
+            const uint g = rest % p.kv_heads;
+            const uint rj = rest / p.kv_heads;
+            const uint j = rj % p.top_k;
+            const uint r = rj / p.top_k;
+            outv[i] = src[(((r * p.kv_heads + g) * p.top_k + j) * p.d) + c];
+        }
+    }
+}

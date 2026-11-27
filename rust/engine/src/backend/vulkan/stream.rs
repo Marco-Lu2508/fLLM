@@ -1920,6 +1920,18 @@ impl Stream for VulkanStream {
         true
     }
 
+    fn moa_permute(&mut self, out: &mut DeviceBuffer, src: &DeviceBuffer, rows: usize, kv_heads: usize, top_k: usize, d: usize, inverse: bool) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        let bytes = rows * kv_heads * top_k * d * 4;
+        if src.size < bytes || out.size < bytes {
+            return Err(invalid("mixture-of-attention-heads buffers are smaller than the layer needs"));
+        }
+        let plan = crate::backend::vulkan::ops::recurrent::plan_moa_permute(rows, kv_heads, top_k, d, inverse)?;
+        self.run_plans(&[plan], &[Arg::r("src", src), Arg::w("out", out)], &[], false)
+    }
+
     fn diff_expand_v(&mut self, out: &mut DeviceBuffer, v: &DeviceBuffer, rows: usize, kv_heads: usize, d: usize) -> Result<(), BackendError> {
         if rows == 0 {
             return Ok(());

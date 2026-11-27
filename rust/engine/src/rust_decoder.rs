@@ -311,6 +311,23 @@ struct DeviceZaya {
     ordinal: usize,
 }
 
+/// JetMoE's mixture of attention heads on the device: the router, the experts' query and output projections as pointer tables and the output bias.
+struct DeviceMoa {
+    router: crate::backend::DeviceWeight,
+    /// `(table, quant type, int8 decode kernels usable, grouped products usable)` over the experts' `hidden -> kv_heads * dk` query projections.
+    q_table: (crate::backend::DeviceBuffer, crate::backend::QuantType, bool, bool),
+    /// The same over the `kv_heads * dk -> hidden` output projections.
+    out_table: (crate::backend::DeviceBuffer, crate::backend::QuantType, bool, bool),
+    /// Keeps the expert weights the tables point into alive.
+    _experts: Vec<crate::backend::DeviceWeight>,
+    bias: crate::backend::DeviceBuffer,
+    ones: crate::backend::DeviceBuffer,
+    route: crate::backend::MoeRoute,
+    experts: usize,
+    top_k: usize,
+    attn_hidden: usize,
+}
+
 /// Recurrent state of one live sequence on the device: one buffer for all DeltaNet layers.
 struct DeviceSeq {
     used: u64,
@@ -961,6 +978,10 @@ pub struct DeviceLayerWeights {
     doge: Option<DeviceDoge>,
     /// ZAYA: convolutional attention, residual vectors and router on the device.
     zaya: Option<DeviceZaya>,
+    /// JetMoE: the mixture of attention heads on the device.
+    moa: Option<DeviceMoa>,
+    /// JetMoE: `(ones, bias)` of the bias added behind the sum of the feed-forward experts.
+    ffn_bias: Option<(crate::backend::DeviceBuffer, crate::backend::DeviceBuffer)>,
     pub ffn_norm_gate: Option<(crate::backend::DeviceWeight, crate::backend::DeviceWeight)>,
     /// BitNet sub-norms: over the attention output in front of the output projection / over the activated feed-forward product.
     pub attn_sub_norm: Option<crate::backend::DeviceBuffer>,
@@ -1059,6 +1080,8 @@ impl DeviceLayerWeights {
             ffn_norm_gate: None,
             doge: None,
             zaya: None,
+            moa: None,
+            ffn_bias: None,
             attn_sub_norm: None,
             ffn_sub_norm: None,
             q_norm: None,
@@ -1719,6 +1742,8 @@ pub struct RustDecoder {
     doge_device: bool,
     /// ZAYA's convolutional attention, residual vectors and router run on the device (the experts need the device MoE path).
     zaya_device: bool,
+    /// JetMoE's mixture of attention heads and the bias behind its experts run on the device.
+    moa_device: bool,
     /// The accelerator runs DeepSeek-V4 completely (`hc_device` is set with it); set when the model is attached.
     v4_device: bool,
     /// Qwen3.8-Flash-Next runs on the device (streams, n-gram embeddings and token indexer included).
@@ -3114,6 +3139,7 @@ impl RustDecoder {
             axk2_device: false,
             doge_device: false,
             zaya_device: false,
+            moa_device: false,
             hc_device: false,
             v4_device: false,
             q4_device: false,
@@ -3672,7 +3698,9 @@ impl RustDecoder {
         }
         match &layer.attn {
             Attn::Std { .. } if layer.diff.is_some() && !self.diff_device => Some("differential attention (no device kernel for this backend, or FLLM_DIFF_HOST=1)"),
-            Attn::Std { .. } if layer.moa.is_some() => Some("a mixture of attention heads (no device kernel)"),
+            Attn::Std { .. } if layer.moa.as_ref().is_some_and(|m| !self.moa_device || !Self::moa_experts_ok(m, self.cfg.hidden)) => {
+                Some("a mixture of attention heads (needs quantized experts, the device MoE path, or FLLM_MOA_HOST is set)")
+            }
             Attn::Std { .. } => {
                 // the element-wise gate kernels would read a gate with one value per head (Laguna, Step-3.5) as garbage: that gate and
                 // the value scale of MiMo-V2 have their own device operations (`head_gate_mul`, `scale_inplace`)
@@ -3753,7 +3781,7 @@ impl RustDecoder {
     /// Why the feed-forward of `layer` has to use the host reference code although the mixer runs on the device.
     fn ffn_host_reason(&self, layer_idx: usize, layer: &Layer, arch_ok: bool, clamp_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
-        if layer.ffn_bias.is_some() {
+        if layer.ffn_bias.is_some() && !(self.moa_device && self.cfg.moe.is_some()) {
             return Some("a bias behind the sum of the experts");
         }
         let native = |a: Activation| matches!(a, Activation::Silu | Activation::GeluTanh) || arch_ok;
@@ -3951,6 +3979,9 @@ impl RustDecoder {
         self.m3_device = m3_device;
         self.ink_device = self.cfg.inkling.is_some() && self.ink_device_possible(&*backend);
         self.xielu_device = backend.create_stream().is_ok_and(|s| s.supports_xielu()) && !std::env::var_os("FLLM_XIELU_HOST").is_some();
+        self.moa_device = backend.create_stream().is_ok_and(|s| s.supports_arch_ops())
+            && backend.moe_device_available()
+            && !std::env::var_os("FLLM_MOA_HOST").is_some();
         self.zaya_device = self.zaya_shape().is_some_and(|shape| backend.create_stream().is_ok_and(|s| s.supports_zaya(&shape) && s.supports_arch_ops()))
             && backend.moe_device_available()
             && self.zaya_experts_ok()
@@ -4329,13 +4360,22 @@ impl RustDecoder {
                 .transpose()?;
             // FLLM_MERGE_PROJ: q/k/v and gate/up as one Marlin matrix each (instead of seven GEMMs per layer, four)
             let merged_qkv = match &layer.attn {
-                Attn::Std { q, k, v } if merge_on && layer.diff.is_none() && layer.zaya.is_none() && layer.value_moe.is_none() && !layer.output_gate && self.cfg.qkv_clip.is_none() && !layer.kv_shared && !layer.k_eq_v => {
+                Attn::Std { q, k, v } if merge_on && layer.moa.is_none() && layer.diff.is_none() && layer.zaya.is_none() && layer.value_moe.is_none() && !layer.output_gate && self.cfg.qkv_clip.is_none() && !layer.kv_shared && !layer.k_eq_v => {
                     upload_merged(&format!("blk.{i}.attn_qkv"), &[q, k, v])?
                 }
                 _ => None,
             };
             let (q, k, v) = match &layer.attn {
                 Attn::Std { .. } if merged_qkv.is_some() => (None, None, None),
+                // the query comes from the experts: a placeholder takes its place, the shared key and value are ordinary projections
+                Attn::Std { q, .. } if layer.moa.is_some() => {
+                    let moa = layer.moa.as_ref().ok_or("missing mixture of attention heads")?;
+                    (
+                        Some(upload_linear(&format!("blk.{i}.attn_q"), q)?),
+                        Some(upload_linear(&format!("blk.{i}.attn_k"), &moa.k)?),
+                        Some(upload_linear(&format!("blk.{i}.attn_v"), &moa.v)?),
+                    )
+                }
                 Attn::Std { q, k, v } => (
                     Some(upload_linear(&format!("blk.{i}.attn_q"), q)?),
                     if layer.kv_shared { None } else { Some(upload_linear(&format!("blk.{i}.attn_k"), k)?) },
@@ -4974,6 +5014,55 @@ impl RustDecoder {
                 }
                 None => None,
             };
+            let moa_dev = match layer.moa.as_ref() {
+                Some(moa) if self.moa_device && Self::moa_experts_ok(moa, self.cfg.hidden) => {
+                    let attn_hidden = moa.q[0].rows;
+                    let experts = moa.q.len();
+                    let upload_set = |tag: &str, ls: &[Linear], rows: usize, cols: usize| -> Result<Option<((crate::backend::DeviceBuffer, crate::backend::QuantType, bool, bool), Vec<crate::backend::DeviceWeight>)>, String> {
+                        let mut ws = Vec::with_capacity(ls.len());
+                        for (e, l) in ls.iter().enumerate() {
+                            ws.push(upload_expert_linear(&format!("blk.{i}.attn_moa_{tag}{e}"), l)?);
+                        }
+                        let kind = ws[0].quant_type;
+                        let id = kind.to_gguf_type_id();
+                        let ok_kind = matches!(id, 1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 0x8000_0010..=0x8000_0012) && backend.moe_linear_supported(kind, cols);
+                        let grouped = backend.moe_device_available() && [16usize, 64].iter().all(|&b| backend.moe_grouped_supported(kind, cols, b));
+                        if !ws.iter().all(|w| w.quant_type == kind && w.rows == rows && w.cols == cols && w.bias.is_none()) || !(ok_kind || grouped) {
+                            return Ok(None);
+                        }
+                        let refs: Vec<&crate::backend::DeviceWeight> = ws.iter().collect();
+                        let table = backend.upload_pointer_table(&refs).map_err(|e| e.to_string())?;
+                        let mut muts: Vec<&mut crate::backend::DeviceWeight> = ws.iter_mut().collect();
+                        let _ = backend.alias_weights_into_table(&table, &mut muts);
+                        Ok(Some(((table, kind, ok_kind, grouped), ws)))
+                    };
+                    let q_set = upload_set("q", &moa.q, attn_hidden, self.cfg.hidden)?;
+                    let o_set = upload_set("o", &moa.out, self.cfg.hidden, attn_hidden)?;
+                    match (q_set, o_set) {
+                        (Some((q_table, mut qw)), Some((out_table, ow))) => {
+                            qw.extend(ow);
+                            Some(DeviceMoa {
+                                router: upload_linear(&format!("blk.{i}.attn_moa_router"), &moa.router)?,
+                                q_table,
+                                out_table,
+                                _experts: qw,
+                                bias: upload_vec(&moa.bias)?,
+                                ones: upload_vec(&vec![1.0f32; self.cfg.hidden])?,
+                                route: crate::backend::MoeRoute { sigmoid: false, normalize: true, scale: 1.0, eps: 0.0, groups: 0, groups_used: 0, group_top2: false },
+                                experts,
+                                top_k: moa.top_k,
+                                attn_hidden,
+                            })
+                        }
+                        _ => return Err(format!("layer {i}: the attention experts' formats are not usable by the device kernels on this backend (set FLLM_MOA_HOST=1 to run the layer on the host)")),
+                    }
+                }
+                _ => None,
+            };
+            let ffn_bias_dev = match (&layer.ffn_bias, self.moa_device && self.cfg.moe.is_some()) {
+                (Some(b), true) => Some((upload_vec(&vec![1.0f32; self.cfg.hidden])?, upload_vec(b)?)),
+                _ => None,
+            };
             dev_layers.push(DeviceLayerWeights {
                 attn_norm,
                 q,
@@ -4988,6 +5077,8 @@ impl RustDecoder {
                 host_layer: false,
                 host_ffn: ffn_host_exact,
                 host_values: layer.value_moe.is_some() && value_moe_dev.is_none(),
+                moa: moa_dev,
+                ffn_bias: ffn_bias_dev,
                 attn_gate: layer.attn_gate.as_ref().map(|g| upload_linear(&format!("blk.{i}.attn_gate"), g)).transpose()?,
                 zaya: match (&layer.zaya, self.zaya_shape()) {
                     (Some(z), Some(shape)) if self.zaya_device => {
@@ -5752,10 +5843,12 @@ impl RustDecoder {
                 let mut q_low_dev: Option<crate::backend::DeviceBuffer> = None;
 
                 let mut gate_buf = None;
+                // JetMoE: the experts chosen for each row (ids, gate weights), kept for the output projection
+                let mut moa_route: Option<(crate::backend::DeviceBuffer, crate::backend::DeviceBuffer)> = None;
                 if let Some((q_w, k_w, v_w)) = std_qkv {
                 // 4-bit q/k/v: the three GEMMs leave FP16 and one kernel adds the bias, rotates q and k and writes k and v into the cache
                 let mut fused_qkv = false;
-                let plain_kv = !layer.kv_shared && !layer.k_eq_v && layer.diff.is_none() && layer.zaya.is_none() && dev_layer.v_norm.is_none() && cfg.value_scale == 1.0;
+                let plain_kv = !layer.kv_shared && !layer.k_eq_v && layer.moa.is_none() && layer.diff.is_none() && layer.zaya.is_none() && dev_layer.v_norm.is_none() && cfg.value_scale == 1.0;
                 if plain_kv
                     && cfg.rope.dims > 0
                     && cfg.layer_rotates(i)
@@ -5863,7 +5956,7 @@ impl RustDecoder {
                 }
                 // q, k and v from one launch of the tensor-core GEMV where the three are dense 16-bit projections of a decode-sized batch
                 let mut grouped_done = false;
-                if !fused_qkv && !merged_done && !layer.output_gate && !layer.kv_shared && !layer.k_eq_v && layer.value_moe.is_none() && rows <= 16 {
+                if !fused_qkv && !merged_done && !layer.output_gate && !layer.kv_shared && !layer.k_eq_v && layer.value_moe.is_none() && layer.moa.is_none() && rows <= 16 {
                     if let (Some(v_w), false) = (v_w, group_off()) {
                         grouped_done = stream
                             .linear_group(
@@ -5890,6 +5983,8 @@ impl RustDecoder {
                         .map_err(err)?;
                     scratch.recycle(projected);
                     gate_buf = Some(gate);
+                } else if let Some(mo) = &dev_layer.moa {
+                    moa_route = Some(self.moa_query_device(&mut **stream, &mut scratch, mo, &normed_buf, &mut q_buf, rows)?);
                 } else {
                 stream
                     .quantized_linear(&mut q_buf, &normed_buf, q_w, q_w.bias.as_ref())
@@ -6284,7 +6379,7 @@ impl RustDecoder {
                 let mut out_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                 let out_w = dev_layer.out.as_ref().ok_or("attention layer without a device output projection")?;
                 // the feed-forward norm (and the activation format of its first GEMM) can join the residual add of the output projection
-                let ffn_target = if cfg.gated_norm_rank == 0 && dev_layer.zaya.is_none() && !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.par_mamba.is_none() && dev_layer.post_attn_norm.is_none() && dev_layer.laurel.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
+                let ffn_target = if cfg.gated_norm_rank == 0 && dev_layer.zaya.is_none() && dev_layer.moa.is_none() && !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.par_mamba.is_none() && dev_layer.post_attn_norm.is_none() && dev_layer.laurel.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
                     dev_layer
                         .ffn_norm
                         .as_ref()
@@ -6309,6 +6404,7 @@ impl RustDecoder {
                 if !fused {
                     fused = !tp
                         && dev_layer.zaya.is_none()
+                        && dev_layer.moa.is_none()
                         && dev_layer.post_attn_norm.is_none()
                         && dev_layer.laurel.is_none()
                         && !parallel
@@ -6317,6 +6413,11 @@ impl RustDecoder {
                             .map_err(err)?;
                 }
                 if !fused {
+                    if let (Some(mo), Some((ids, weights))) = (&dev_layer.moa, moa_route.take()) {
+                        self.moa_out_device(&mut **stream, &mut scratch, mo, &attn_buf, &ids, &weights, &mut out_buf, rows)?;
+                        scratch.recycle(ids);
+                        scratch.recycle(weights);
+                    } else {
                     stream
                         .quantized_linear(
                             &mut out_buf,
@@ -6325,6 +6426,7 @@ impl RustDecoder {
                             out_w.bias.as_ref(),
                         )
                         .map_err(err)?;
+                    }
                     if tp {
                         self.device_tp_reduce(&mut **stream, &mut out_buf, rows * hidden)?;
                     }
@@ -6874,6 +6976,9 @@ impl RustDecoder {
                     cfg.post_eps,
                     self.groups,
                 )?;
+                if let Some((ones, bias)) = &dev_layer.ffn_bias {
+                    stream.channel_affine(&mut ffn_out_buf, ones, bias, rows, hidden).map_err(err)?;
+                }
                 dump_device(&mut **stream, "moeout", i, &ffn_out_buf, rows * hidden);
                 if let Some(dz) = &dev_layer.zaya {
                     stream.channel_affine(&mut ffn_out_buf, &dz.res_mlp[0], &dz.res_mlp[1], rows, hidden).map_err(err)?;
@@ -7688,6 +7793,24 @@ impl RustDecoder {
     }
 
     /// Whether the experts of every ZAYA layer can take the device MoE path (a packed or half-precision format with widths the kernels accept).
+    /// Do all the experts of a mixture of attention heads have one packed format the device expert kernels read (widths a multiple of 32, k-quants 256)?
+    fn moa_experts_ok(moa: &Moa, hidden: usize) -> bool {
+        let Some(first) = moa.q.first() else {
+            return false;
+        };
+        let attn_hidden = first.rows;
+        let align = |kind: u32| if matches!(kind, 10..=14 | 16..=19 | 21 | 22 | 29) { 256 } else { 32 };
+        let same = |ls: &[Linear], rows: usize, cols: usize| {
+            let Some((kind0, _)) = ls.first().and_then(|l| l.packed_weights()) else {
+                return false;
+            };
+            hidden.is_multiple_of(align(kind0))
+                && attn_hidden.is_multiple_of(align(kind0))
+                && ls.iter().all(|l| l.packed_weights().is_some_and(|(k, _)| k == kind0) && l.rows == rows && l.cols == cols && l.bias.is_none())
+        };
+        same(&moa.q, attn_hidden, hidden) && same(&moa.out, hidden, attn_hidden)
+    }
+
     fn zaya_experts_ok(&self) -> bool {
         self.layers.iter().all(|l| match &l.ffn {
             Ffn::Moe(moe) => moe.experts.first().is_some_and(|e| {
@@ -9489,6 +9612,119 @@ impl RustDecoder {
             self.device_tp_reduce(stream, &mut acc, rows * hidden)?;
         }
         Ok(Some(acc))
+    }
+
+    /// One product per (row, expert) pair of a mixture of attention heads: `out[pair] = W[ids[pair]] x[pair / x_div]`.
+    #[allow(clippy::too_many_arguments)]
+    fn moa_pairs_linear(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        table: &(crate::backend::DeviceBuffer, crate::backend::QuantType, bool, bool),
+        x: &crate::backend::DeviceBuffer,
+        ids: &crate::backend::DeviceBuffer,
+        out: &mut crate::backend::DeviceBuffer,
+        rows: usize,
+        pairs: usize,
+        experts: usize,
+        out_width: usize,
+        in_width: usize,
+        x_div: usize,
+    ) -> Result<(), String> {
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let (tbl, kind, dp4a, grouped) = (&table.0, table.1, table.2, table.3);
+        if dp4a && (rows <= 4 || stream.moe_decode_any_rows() || !grouped) {
+            return stream.moe_linear(out, x, tbl, None, ids, kind, out_width, in_width, pairs, x_div).map_err(err);
+        }
+        if !grouped {
+            return Err("the attention experts' format has neither decode nor grouped device kernels here".into());
+        }
+        let block = crate::backend::moe::moe_block_for(pairs, experts);
+        let (sorted, blocks, post) = crate::backend::moe::moe_sort_bytes(pairs, experts, block);
+        let mut sort = crate::backend::MoeSort {
+            sorted: scratch.acquire(sorted).map_err(err)?,
+            block_expert: scratch.acquire(blocks).map_err(err)?,
+            post: scratch.acquire(post).map_err(err)?,
+            pairs,
+            block,
+            max_blocks: blocks / 4,
+        };
+        stream.moe_align(ids, &mut sort, 0, experts).map_err(err)?;
+        stream
+            .moe_grouped_linear(crate::backend::MoeGrouped {
+                out,
+                x,
+                table: tbl,
+                table_up: None,
+                bias: None,
+                bias_up: None,
+                input_weights: None,
+                sort: &sort,
+                quant_type: kind,
+                rows: out_width,
+                cols: in_width,
+                x_div,
+                glu: None,
+            })
+            .map_err(err)?;
+        scratch.recycle(sort.sorted);
+        scratch.recycle(sort.block_expert);
+        scratch.recycle(sort.post);
+        Ok(())
+    }
+
+    /// JetMoE: route every row, project it through its experts' query matrices and lay the results out as the attention heads `g * top_k + j`.
+    /// Returns the expert ids and gate weights for the output projection.
+    fn moa_query_device(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        mo: &DeviceMoa,
+        x: &crate::backend::DeviceBuffer,
+        q_buf: &mut crate::backend::DeviceBuffer,
+        rows: usize,
+    ) -> Result<(crate::backend::DeviceBuffer, crate::backend::DeviceBuffer), String> {
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let (hidden, kv_heads) = (self.cfg.hidden, self.cfg.kv_heads);
+        let pairs = rows * mo.top_k;
+        let mut logits = scratch.acquire(rows * mo.experts * 4).map_err(err)?;
+        stream.quantized_linear(&mut logits, x, &mo.router, mo.router.bias.as_ref()).map_err(err)?;
+        let mut ids = scratch.acquire(pairs * 4).map_err(err)?;
+        let mut weights = scratch.acquire(pairs * 4).map_err(err)?;
+        stream.moe_route_ex(&logits, None, &mut ids, &mut weights, rows, mo.experts, mo.top_k, &mo.route).map_err(err)?;
+        let mut slots = scratch.acquire(pairs * mo.attn_hidden * 4).map_err(err)?;
+        self.moa_pairs_linear(stream, scratch, &mo.q_table, x, &ids, &mut slots, rows, pairs, mo.experts, mo.attn_hidden, hidden, mo.top_k)?;
+        stream.moa_permute(q_buf, &slots, rows, kv_heads, mo.top_k, mo.attn_hidden / kv_heads, false).map_err(err)?;
+        scratch.recycle(logits);
+        scratch.recycle(slots);
+        Ok((ids, weights))
+    }
+
+    /// JetMoE: split the attention output per expert, apply the experts' output projections, mix them with the gates and add the bias.
+    #[allow(clippy::too_many_arguments)]
+    fn moa_out_device(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        mo: &DeviceMoa,
+        attn: &crate::backend::DeviceBuffer,
+        ids: &crate::backend::DeviceBuffer,
+        weights: &crate::backend::DeviceBuffer,
+        out: &mut crate::backend::DeviceBuffer,
+        rows: usize,
+    ) -> Result<(), String> {
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let (hidden, kv_heads) = (self.cfg.hidden, self.cfg.kv_heads);
+        let pairs = rows * mo.top_k;
+        let mut parts = scratch.acquire(pairs * mo.attn_hidden * 4).map_err(err)?;
+        stream.moa_permute(&mut parts, attn, rows, kv_heads, mo.top_k, mo.attn_hidden / kv_heads, true).map_err(err)?;
+        let mut y = scratch.acquire(pairs * hidden * 4).map_err(err)?;
+        self.moa_pairs_linear(stream, scratch, &mo.out_table, &parts, ids, &mut y, rows, pairs, mo.experts, hidden, mo.attn_hidden, 1)?;
+        stream.moe_combine(out, &y, weights, rows, mo.top_k, hidden).map_err(err)?;
+        stream.channel_affine(out, &mo.ones, &mo.bias, rows, hidden).map_err(err)?;
+        scratch.recycle(parts);
+        scratch.recycle(y);
+        Ok(())
     }
 
     /// K2 Horizon MoVA value experts on the device: routes tokens and evaluates `sum_k w_k * silu(W_k x)` directly into `v_buf`.
