@@ -11760,6 +11760,9 @@ impl RustDecoder {
             && self.layers.len() == weights.layers.len()
             && self.layers.iter().zip(&weights.layers).all(|(layer, dev)| {
                 matches!(layer.attn, Attn::Std { .. })
+                    // ZAYA stages the recurrent state of the convolutions from host tables each step, a mixture of attention heads keeps its routing in pool buffers
+                    && layer.zaya.is_none()
+                    && layer.moa.is_none()
                     && ((dev.q.is_some() && dev.k.is_some() && dev.v.is_some())
                         || dev.qkv.is_some()
                         // Gemma 4: the values are the keys (global layers), or the layer reads the cache of an earlier one (only q)
