@@ -655,8 +655,8 @@ fn ungated_and_newly_registered_architectures_run_on_backend() {
         assert!(logits.iter().all(|v| v.is_finite()));
     }
 
-    // 3. Newly enabled Llama/Qwen architectures converted by plan.rs (e.g. `telechat`, `step3`)
-    for (model_type, is_moe) in [("telechat", false), ("step3", true)] {
+    // 3. Newly enabled Llama/Qwen architectures converted by plan.rs (e.g. `telechat`; Step-3 has its own converter and fixture)
+    for (model_type, is_moe) in [("telechat", false)] {
         let ckpt = dir.join(model_type);
         fs::create_dir_all(&ckpt).unwrap();
         let (h, heads, kvh, hd, ff, layers, vocab, experts, topk) = (64, 4, 2, 16, 128, 1, 64, 4, 2);

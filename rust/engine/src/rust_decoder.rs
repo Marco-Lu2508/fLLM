@@ -11358,7 +11358,7 @@ impl RustDecoder {
                                 for row in q_all.chunks_exact_mut(ql.norm.len()) {
                                     rms(row, &ql.norm, cfg.eps);
                                 }
-                                step_q = ql.wq.forward(&q_all)?;
+                                step_q = ql.wq.forward(q_all)?;
                                 step_k = k_all.clone();
                                 step_v = v_all.clone();
                                 (&mut step_q, &mut step_k, &mut step_v)
