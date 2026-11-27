@@ -938,6 +938,15 @@ pub fn plan_rglru_cell(run_index: usize, run: &RunSpec, shape: &RgLruShape, stat
     plan("rglru_cell", push, [shape.blocks as u32, 1, 1], slots)
 }
 
+/// `nvfp4_act_quant`: NVFP4 activation quantization (one invocation per block of 16 values).
+pub fn plan_nvfp4_act_quant(count: usize, gs: f32) -> Result<OpPlan, BackendError> {
+    if count == 0 || !count.is_multiple_of(16) || !gs.is_finite() || gs <= 0.0 {
+        return Err(invalid("NVFP4 activations need a multiple of 16 values and a positive finite factor"));
+    }
+    let blocks = count / 16;
+    plan("nvfp4_act_quant", Push::new().u("blocks", blocks).f("gs", gs), groups_1d(blocks, 64), Slots::new().read("x").rw("out"))
+}
+
 /// `attn_res_mix` (Kimi K3 attention residuals): one workgroup per row.
 pub fn plan_attn_res_mix(rows: usize, hidden: usize, nb: usize, eps: f32) -> Result<OpPlan, BackendError> {
     if rows == 0 || hidden == 0 || nb > 63 || !eps.is_finite() {

@@ -91,6 +91,12 @@ pub struct VulkanStream {
     cpu: Option<fallback::Cpu>,
 }
 
+/// `FLLM_NVFP4_ACT=w4a4`: emulate the activation quantization of the FP4 tensor cores for NVFP4 weights on this backend.
+fn nvfp4_w4a4_emulation() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLLM_NVFP4_ACT").is_ok_and(|v| v.eq_ignore_ascii_case("w4a4")))
+}
+
 fn invalid(msg: impl Into<String>) -> BackendError {
     BackendError::InvalidShape(msg.into())
 }
@@ -420,6 +426,12 @@ impl Stream for VulkanStream {
         weight: &DeviceWeight,
         bias: Option<&DeviceBuffer>,
     ) -> Result<(), BackendError> {
+        // NVFP4 W4A4 emulation (opt-in, `FLLM_NVFP4_ACT=w4a4`): the activations take the FP4 grid of the tensor cores before the GEMM (no per-tensor factor: gs = 1)
+        if weight.quant_type == QuantType::NvFp4 && weight.cols.is_multiple_of(16) && x.size.is_multiple_of(weight.cols * 4) && nvfp4_w4a4_emulation() {
+            let mut quantized = self.sh.new_device_buffer(x.size)?;
+            self.nvfp4_act_quant(&mut quantized, x, x.size / 4, 1.0)?;
+            return self.quantized_linear_impl(out, &quantized, weight, bias);
+        }
         self.quantized_linear_impl(out, x, weight, bias)
     }
 
@@ -1918,6 +1930,21 @@ impl Stream for VulkanStream {
 
     fn supports_diff_attn(&self) -> bool {
         true
+    }
+
+    fn supports_nvfp4_act_quant(&self) -> bool {
+        true
+    }
+
+    fn nvfp4_act_quant(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, count: usize, gs: f32) -> Result<(), BackendError> {
+        if count == 0 {
+            return Ok(());
+        }
+        if x.size < count * 4 || out.size < count * 4 {
+            return Err(invalid("NVFP4 activation buffers are smaller than the value count"));
+        }
+        let plan = crate::backend::vulkan::ops::recurrent::plan_nvfp4_act_quant(count, gs)?;
+        self.run_plans(&[plan], &[Arg::r("x", x), Arg::w("out", out)], &[], false)
     }
 
     #[allow(clippy::too_many_arguments)]

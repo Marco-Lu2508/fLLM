@@ -4442,6 +4442,10 @@ impl Tester<'_> {
             self.record_skip("diff_attn", "differential attention value expansion and head mix", "supports_diff_attn is false");
         }
         if self.device.create_stream().map(|st| st.supports_arch_ops()).unwrap_or(false) {
+            for (rows, cols, gs) in [(3usize, 64usize, 1.0f32), (2, 160, 1.0), (4, 96, 37.0)].into_iter().filter(|_| self.device.create_stream().is_ok_and(|s| s.supports_nvfp4_act_quant())) {
+                let r = self.nvfp4_act_quant_check(rows, cols, gs);
+                self.record("nvfp4_act_quant", &format!("{rows} rows of {cols}, factor {gs}"), r);
+            }
             for (rows, hidden, nb) in [(3usize, 64usize, 0usize), (4, 300, 2), (2, 96, 5)] {
                 let r = self.attn_res_check(rows, hidden, nb);
                 self.record("attn_res", &format!("{rows} rows, hidden {hidden}, {nb} blocks"), r);
@@ -5070,6 +5074,22 @@ impl Tester<'_> {
                 .max(cmp(get(stream.as_mut(), &vo, want_v.len())?, &want_v));
         }
         Ok(Outcome { device: worst_err, cpu: 0.0, tol: 2e-3, cpu_tol: 1.0, ms: total_ms })
+    }
+
+    /// The NVFP4 activation quantizer (the W4A4 emulation of backends without FP4 tensor cores) against the CPU simulation of the recipe.
+    fn nvfp4_act_quant_check(&mut self, rows: usize, cols: usize, gs: f32) -> Result<Outcome, BackendError> {
+        let mut stream = self.device.create_stream()?;
+        let x = self.rng.vector(rows * cols, 3.0);
+        let want: Vec<f64> = x.chunks(cols).flat_map(|row| nvfp4_activation_reference(row, gs)).collect();
+        let xb = put(self.device, stream.as_mut(), &x)?;
+        let mut ob = put(self.device, stream.as_mut(), &vec![f32::NAN; x.len()])?;
+        let mut ms = 0.0;
+        timed(&mut ms, stream.as_mut(), |s| s.nvfp4_act_quant(&mut ob, &xb, rows * cols, gs))?;
+        let have = get(stream.as_mut(), &ob, x.len())?;
+        // a value at a rounding boundary may take the neighbouring grid point on a device with a different division: count those instead of failing the case
+        let off = have.iter().zip(&want).filter(|(h, w)| (f64::from(**h) - **w).abs() > 1e-4 * w.abs().max(1.0)).count();
+        let err = off as f64 / x.len() as f64;
+        Ok(Outcome { device: err, cpu: 0.0, tol: 0.01, cpu_tol: 1.0, ms })
     }
 
     /// Kimi K3's attention-residual mixture against `apply_attn_res` of the host decoder.

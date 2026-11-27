@@ -1257,6 +1257,7 @@ fn sample_plans() -> Vec<OpPlan> {
     }
     v.push(crate::backend::vulkan::ops::recurrent::plan_diff_expand_v(3, 4, 16).unwrap());
     v.push(crate::backend::vulkan::ops::recurrent::plan_moa_permute(3, 4, 2, 16, false).unwrap());
+    v.push(crate::backend::vulkan::ops::recurrent::plan_nvfp4_act_quant(64, 1.0).unwrap());
     v.push(crate::backend::vulkan::ops::recurrent::plan_attn_res_mix(3, 64, 2, 1e-6).unwrap());
     v.push(crate::backend::vulkan::ops::recurrent::plan_diff_attn_mix(3, 4, 32, 0.3, 0.7, 1e-5).unwrap());
     v.push(

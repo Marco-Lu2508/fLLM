@@ -1,0 +1,64 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: nvfp4_act_quant | bindings: x,out | push: blocks,gs | grid: [min(ceil(blocks/64), 65535), 1, 1]
+// NVFP4 W4A4 emulation: the activations as the FP4 tensor cores of Blackwell see them (vLLM's scaled_fp4_quant): per block of 16 values a UE4M3 scale
+// round(gs * amax / 6) (ties to the even code, saturating at 448) and E2M1 values round(x * gs / scale) (ties to the even code). out = q * scale, so a
+// plain GEMM with the NVFP4 weights gives the W4A4 result up to the factor weight_scale_2 / gs (gs = 1 here).
+#define WG 64
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, binding = 1) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint blocks;
+    float gs;
+} p;
+
+float ue4m3_value(uint code) {
+    const uint e = (code >> 3u) & 15u;
+    const float m = float(code & 7u);
+    return e == 0u ? m * 0.125 * exp2(-6.0) : (1.0 + m * 0.125) * exp2(float(e) - 7.0);
+}
+
+uint ue4m3_code(float v) {
+    if (!(v > 0.0)) return 0u;
+    if (v >= 448.0) return 126u;
+    uint best = 0u;
+    float best_d = abs(ue4m3_value(0u) - v);
+    for (uint code = 1u; code <= 126u; code++) {
+        const float d = abs(ue4m3_value(code) - v);
+        if (d < best_d || (d == best_d && (code & 1u) == 0u)) {
+            best = code;
+            best_d = d;
+        }
+    }
+    return best;
+}
+
+const float GRID[8] = float[8](0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0);
+
+uint e2m1_index(float a) {
+    uint best = 0u;
+    for (uint i = 1u; i < 8u; i++) {
+        const float d = abs(GRID[i] - a);
+        const float db = abs(GRID[best] - a);
+        if (d < db || (d == db && (i & 1u) == 0u)) best = i;
+    }
+    return best;
+}
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint b = gl_GlobalInvocationID.x; b < p.blocks; b += grid_items) {
+        float amax = 0.0;
+        for (uint i = 0u; i < 16u; i++) amax = max(amax, abs(x[b * 16u + i]));
+        const float sd = ue4m3_value(ue4m3_code(amax * p.gs * (1.0 / 6.0)));
+        const float inv = sd > 0.0 ? p.gs / sd : 0.0;
+        for (uint i = 0u; i < 16u; i++) {
+            const float t = x[b * 16u + i] * inv;
+            const float q = GRID[e2m1_index(abs(t))] * (t < 0.0 ? -1.0 : 1.0);
+            outv[b * 16u + i] = q * sd;
+        }
+    }
+}

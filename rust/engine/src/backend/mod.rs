@@ -2951,6 +2951,17 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("doge_cdmoe".into()))
     }
 
+    /// NVFP4 W4A4 emulation: `out` holds `x` (`count` floats, a multiple of 16) as the FP4 tensor cores see it after the per-tensor factor `gs`:
+    /// per block of 16 a UE4M3 scale `round(gs * amax / 6)` and E2M1 values (see the CUDA fast path), returned as `q * scale`.
+    fn supports_nvfp4_act_quant(&self) -> bool {
+        false
+    }
+
+    /// See [`Stream::supports_nvfp4_act_quant`].
+    fn nvfp4_act_quant(&mut self, _out: &mut DeviceBuffer, _x: &DeviceBuffer, _count: usize, _gs: f32) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("nvfp4_act_quant".into()))
+    }
+
     /// Kimi K3 attention residuals: `out[r]` is the softmax-weighted sum of the `nb` block sums (`blocks`, `nb x rows x hidden`) and the running sum `prefix`
     /// (`rows x hidden`), every candidate scored with `dot(candidate * rsqrt(mean(candidate^2) + eps), score)`. At most 63 blocks.
     #[allow(clippy::too_many_arguments)]
