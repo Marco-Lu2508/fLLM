@@ -1272,7 +1272,9 @@ static int fused_quant_target(FllmStream *st, int quant, int kind, int rows, int
         return 2;
     }
     if (quant == 3) {
-        if (!fllm_mmvq_prep_ok(kind, cols, rows)) return 0;
+        // K-quants: the int8 kernels of fllm_mmvq_try; legacy formats: those of fllm_mmvq_leg_try (decode batches of up to 4 rows, width a multiple of 32)
+        const bool legacy = kind == KIND_Q4_0 || kind == KIND_Q4_1 || kind == KIND_Q5_0 || kind == KIND_Q5_1 || kind == KIND_Q8_0 || kind == KIND_IQ4_NL || kind == KIND_MXFP4;
+        if (legacy ? (rows < 1 || rows > 4 || (cols & 31) != 0 || fllm_exact_math() || getenv("FLLM_CUDA_NO_MMVQ") != nullptr) : !fllm_mmvq_prep_ok(kind, cols, rows)) return 0;
         const size_t xq = ((size_t)rows * cols + 255) & ~size_t(255);
         if (xq + (size_t)rows * (cols / 32) * sizeof(float2) > st->x16_bytes) return 0;
         *q0 = st->x16;

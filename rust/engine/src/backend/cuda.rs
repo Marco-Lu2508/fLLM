@@ -1331,6 +1331,10 @@ fn next_activation_format(weight: Option<&DeviceWeight>) -> (c_int, c_int) {
         }
     } else if matches!(kind, 12..=14) {
         (3, kind as c_int)
+    } else if matches!(kind, 2 | 3 | 6 | 7 | 8 | 20 | 39) {
+        // the legacy formats (a Q4_K_M model keeps Q5_0 / Q8_0 for the tensors whose rows are not a multiple of 256): the int8 kernels of `fllm_mmvq_leg_try`
+        // read the same layout, so the norm quantizes for them as well
+        (3, kind as c_int)
     } else if matches!(kind, 1 | 30) {
         // dense 16-bit weights: the norm writes the 16-bit copy that cuBLASLt multiplies (BF16 4, FP16 5; the kernel decides by the rows whether it does),
         // and the kind tells it that dense weights take the fused add + norm at any number of rows
