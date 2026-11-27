@@ -5252,7 +5252,7 @@ impl Stream for CudaStream {
     }
 
     fn diff_expand_v(&mut self, out: &mut DeviceBuffer, v: &DeviceBuffer, rows: usize, kv_heads: usize, d: usize) -> Result<(), BackendError> {
-        if kv_heads < 2 || kv_heads % 2 != 0 || v.size < rows * kv_heads * d * 4 || out.size < rows * kv_heads * 2 * d * 4 {
+        if kv_heads < 2 || !kv_heads.is_multiple_of(2) || v.size < rows * kv_heads * d * 4 || out.size < rows * kv_heads * 2 * d * 4 {
             return Err(invalid("differential attention values smaller than the layer needs"));
         }
         // SAFETY: sizes checked above.
@@ -5261,7 +5261,7 @@ impl Stream for CudaStream {
 
     #[allow(clippy::too_many_arguments)]
     fn diff_attn_mix(&mut self, out: &mut DeviceBuffer, attn: &DeviceBuffer, rows: usize, heads: usize, width: usize, lambda: f32, scale: f32, eps: f32) -> Result<(), BackendError> {
-        if heads < 2 || heads % 2 != 0 || attn.size < rows * heads * width * 4 || out.size < rows * (heads / 2) * width * 4 {
+        if heads < 2 || !heads.is_multiple_of(2) || attn.size < rows * heads * width * 4 || out.size < rows * (heads / 2) * width * 4 {
             return Err(invalid("differential attention output smaller than the layer needs"));
         }
         // SAFETY: sizes checked above.

@@ -6,6 +6,9 @@
 //! (`Backend::moe_device_available`) keep the earlier paths: the softmax-only decode kernels of `moe_fast`, and routing on the host with one gated FFN per expert.
 
 use super::*;
+
+/// The latent-space inputs of `moe_device_rows`: the normalised input of the experts, the latent width and the slots for the up-projected buffers.
+pub(super) type LatentArgs<'a> = (&'a crate::backend::DeviceBuffer, usize, &'a mut Option<(Option<crate::backend::DeviceBuffer>, Option<crate::backend::DeviceBuffer>)>);
 use crate::backend::{moe::moe_block_for, moe::moe_sort_bytes, BufferPool, MoeGlu, MoeGrouped, MoeRoute, MoeSort, Stream};
 
 fn moe_decode_max_rows() -> usize {
@@ -152,7 +155,7 @@ impl RustDecoder {
         out: &mut crate::backend::DeviceBuffer,
         rows: usize,
         decode: bool,
-        latent: Option<(&crate::backend::DeviceBuffer, usize, &mut Option<(Option<crate::backend::DeviceBuffer>, Option<crate::backend::DeviceBuffer>)>)>,
+        latent: Option<LatentArgs<'_>>,
     ) -> Result<(), String> {
         let (Some(cfg), Some(mode)) = (self.cfg.moe.as_ref(), self.device_glu_mode(layer_idx)) else {
             return Err("MoE layer without MoE configuration".into());

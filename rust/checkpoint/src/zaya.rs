@@ -4,6 +4,7 @@
 //!   previous token's `v_proj_delayed`. Queries and keys are L2-normalised to `sqrt(head_dim)` (keys times a learned scale per key head), then rotated.
 //! * Residual stream: `(branch + hb) * hs + (x + rb) * rs` with four learned vectors per block, and a learned scale and bias on the embeddings.
 //! * Feed-forward: the router (down projection, state of the layer before, MLP) ranks `experts + 1` classes (the last one skips); the experts are plain gated.
+//!
 //! The plan is the Mixtral plan of a normalised configuration renamed to the GGUF architecture `zaya`.
 use crate::gguf::Meta;
 use crate::plan::{Mapped, Plan};

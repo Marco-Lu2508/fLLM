@@ -920,7 +920,7 @@ pub fn plan_xlstm_cell(run_index: usize, run: &RunSpec, shape: &XlstmShape, stat
 /// `rglru_cell` for one run: the recurrent core of a RecurrentGemma block, one workgroup per gate block (see the shader for the operands). Slots: `xin`,
 /// `gate_y`, `wts` (the packed weights), `state`, `out` (`rows x width`, final: `gelu(gate_y) * h`).
 pub fn plan_rglru_cell(run_index: usize, run: &RunSpec, shape: &RgLruShape, state_off: usize) -> Result<OpPlan, BackendError> {
-    if shape.width == 0 || shape.blocks == 0 || shape.width % shape.blocks != 0 || shape.block_width() > 1024 || shape.kernel == 0 || shape.kernel > 8 {
+    if shape.width == 0 || shape.blocks == 0 || !shape.width.is_multiple_of(shape.blocks) || shape.block_width() > 1024 || shape.kernel == 0 || shape.kernel > 8 {
         return Err(invalid("RG-LRU shape outside the supported range (blocks of at most 1024 channels, kernel 1..=8)"));
     }
     if run.rows == 0 {
@@ -940,7 +940,7 @@ pub fn plan_rglru_cell(run_index: usize, run: &RunSpec, shape: &RgLruShape, stat
 
 /// `diff_expand_v` (DiffLlama): `rows x kv_heads x d` values expanded to `rows x kv_heads x 2d`.
 pub fn plan_diff_expand_v(rows: usize, kv_heads: usize, d: usize) -> Result<OpPlan, BackendError> {
-    if rows == 0 || kv_heads < 2 || kv_heads % 2 != 0 || d == 0 {
+    if rows == 0 || kv_heads < 2 || !kv_heads.is_multiple_of(2) || d == 0 {
         return Err(invalid("differential attention values need an even number of key heads"));
     }
     let count = rows * kv_heads * 2 * d;
@@ -949,7 +949,7 @@ pub fn plan_diff_expand_v(rows: usize, kv_heads: usize, d: usize) -> Result<OpPl
 
 /// `diff_attn_mix` (DiffLlama): head `p` minus `lambda` times head `p + heads / 2`, an RMS norm over `width`, times `scale`.
 pub fn plan_diff_attn_mix(rows: usize, heads: usize, width: usize, lambda: f32, scale: f32, eps: f32) -> Result<OpPlan, BackendError> {
-    if rows == 0 || heads < 2 || heads % 2 != 0 || width == 0 || ![lambda, scale, eps].iter().all(|v| v.is_finite()) {
+    if rows == 0 || heads < 2 || !heads.is_multiple_of(2) || width == 0 || ![lambda, scale, eps].iter().all(|v| v.is_finite()) {
         return Err(invalid("differential attention needs an even number of heads and finite constants"));
     }
     plan(

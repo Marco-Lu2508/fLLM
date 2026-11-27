@@ -931,6 +931,9 @@ pub struct DeviceLayerWeights {
     pub host_values: bool,
     /// Projection of the separate attention output gate (AFMoE, K2 Horizon).
     pub attn_gate: Option<crate::backend::DeviceWeight>,
+    /// A.X-K2: low-rank gates behind the input norm and the post-attention norm (`fc1` then `fc2`).
+    pub attn_norm_gate: Option<(crate::backend::DeviceWeight, crate::backend::DeviceWeight)>,
+    pub ffn_norm_gate: Option<(crate::backend::DeviceWeight, crate::backend::DeviceWeight)>,
     /// BitNet sub-norms: over the attention output in front of the output projection / over the activated feed-forward product.
     pub attn_sub_norm: Option<crate::backend::DeviceBuffer>,
     pub ffn_sub_norm: Option<crate::backend::DeviceBuffer>,
@@ -1024,6 +1027,8 @@ impl DeviceLayerWeights {
             host_ffn: host,
             host_values: false,
             attn_gate: None,
+            attn_norm_gate: None,
+            ffn_norm_gate: None,
             attn_sub_norm: None,
             ffn_sub_norm: None,
             q_norm: None,
@@ -1678,6 +1683,8 @@ pub struct RustDecoder {
     xielu_device: bool,
     /// DiffLlama's differential attention runs on the device (value expansion and head mix kernels).
     diff_device: bool,
+    /// A.X-K2's gated norms and query gate run on the device (built from existing operations).
+    axk2_device: bool,
     /// The accelerator runs DeepSeek-V4 completely (`hc_device` is set with it); set when the model is attached.
     v4_device: bool,
     /// Qwen3.8-Flash-Next runs on the device (streams, n-gram embeddings and token indexer included).
@@ -3068,6 +3075,7 @@ impl RustDecoder {
             latent_device: false,
             xielu_device: false,
             diff_device: false,
+            axk2_device: false,
             hc_device: false,
             v4_device: false,
             q4_device: false,
@@ -3583,7 +3591,7 @@ impl RustDecoder {
     #[allow(clippy::too_many_arguments)]
     fn layer_host_reason(&self, _i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool, rwkv_ok: bool, kda_ok: bool, mamba_ok: bool, zamba_ok: bool, q4_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
-        if layer.attn_norm_gate.is_some() || layer.ffn_norm_gate.is_some() || cfg.mla_q_gate {
+        if (layer.attn_norm_gate.is_some() || layer.ffn_norm_gate.is_some() || cfg.mla_q_gate) && (!self.axk2_device || self.mla_latent) {
             return Some("A.X-K2 gated norms and query gate (no device kernels)");
         }
         if layer.zaya.is_some() {
@@ -3905,6 +3913,7 @@ impl RustDecoder {
         self.m3_device = m3_device;
         self.ink_device = self.cfg.inkling.is_some() && self.ink_device_possible(&*backend);
         self.xielu_device = backend.create_stream().is_ok_and(|s| s.supports_xielu()) && !std::env::var_os("FLLM_XIELU_HOST").is_some();
+        self.axk2_device = backend.create_stream().is_ok_and(|s| s.supports_attention_gate() && s.supports_arch_ops() && s.supports_take_columns()) && !std::env::var_os("FLLM_AXK2_HOST").is_some();
         self.diff_device = backend.create_stream().is_ok_and(|s| s.supports_diff_attn()) && !std::env::var_os("FLLM_DIFF_HOST").is_some();
         // checked on a Tesla T4 against the host (`nemotron_h_latent_wide`, Q8_0 and Q4_0: the same distance from the CPU as the host path). Still opt-in: a layer whose experts
         // cannot take the device path (unquantised, widths not a multiple of 32) is a load error here instead of a host layer. FLLM_LATENT=device
@@ -4932,6 +4941,14 @@ impl RustDecoder {
                 host_ffn: ffn_host_exact,
                 host_values: layer.value_moe.is_some() && value_moe_dev.is_none(),
                 attn_gate: layer.attn_gate.as_ref().map(|g| upload_linear(&format!("blk.{i}.attn_gate"), g)).transpose()?,
+                attn_norm_gate: match &layer.attn_norm_gate {
+                    Some(g) => Some((upload_linear(&format!("blk.{i}.attn_norm_gate_fc1"), &g.0)?, upload_linear(&format!("blk.{i}.attn_norm_gate_fc2"), &g.1)?)),
+                    None => None,
+                },
+                ffn_norm_gate: match &layer.ffn_norm_gate {
+                    Some(g) => Some((upload_linear(&format!("blk.{i}.ffn_norm_gate_fc1"), &g.0)?, upload_linear(&format!("blk.{i}.ffn_norm_gate_fc2"), &g.1)?)),
+                    None => None,
+                },
                 attn_sub_norm: layer.attn_sub_norm.as_ref().map(upload_vec).transpose()?,
                 ffn_sub_norm: layer.ffn_sub_norm.as_ref().map(upload_vec).transpose()?,
                 q_norm,
@@ -5591,6 +5608,9 @@ impl RustDecoder {
                 stream.copy_buffer(&mut normed_buf, &x_buf).map_err(err)?;
             }
 
+            if let Some(g) = &dev_layer.attn_norm_gate {
+                Self::device_norm_gate(&mut **stream, &mut scratch, g, &mut normed_buf, rows)?;
+            }
             if i == 0 {
                 debug_sum(&mut **stream, "attn_norm-0", &normed_buf);
             }
@@ -5636,6 +5656,8 @@ impl RustDecoder {
                 let mut k_buf = scratch.acquire(k_bytes).map_err(err)?;
                 let mut v_buf = scratch.acquire(v_bytes).map_err(err)?;
                 let mut latent_attn: Option<crate::backend::DeviceBuffer> = None;
+                // A.X-K2: `[normalised, raw]` low-rank query, the input of the query projection and of the output gate
+                let mut axk2_cat: Option<crate::backend::DeviceBuffer> = None;
                 // normalized low-rank query of a layer with a lightning indexer (the indexer queries are projected from it)
                 let mut q_low_dev: Option<crate::backend::DeviceBuffer> = None;
 
@@ -5965,8 +5987,25 @@ impl RustDecoder {
                     if let Some((down, norm)) = &dm.q_a {
                         let mut low = scratch.acquire(rows * down.rows * 4).map_err(err)?;
                         stream.quantized_linear(&mut low, &normed_buf, down, down.bias.as_ref()).map_err(err)?;
+                        let raw = if cfg.mla_q_gate {
+                            let mut raw = scratch.acquire(rows * down.rows * 4).map_err(err)?;
+                            stream.copy_buffer(&mut raw, &low).map_err(err)?;
+                            Some(raw)
+                        } else {
+                            None
+                        };
                         device_rms_inplace(&mut **stream, &mut scratch, &mut low, Some(norm), cfg.eps, 1)?;
-                        stream.quantized_linear(&mut q_full, &low, &dm.q, dm.q.bias.as_ref()).map_err(err)?;
+                        if let Some(raw) = raw {
+                            let rank = down.rows;
+                            let mut cat = scratch.acquire(rows * 2 * rank * 4).map_err(err)?;
+                            stream.copy_columns(&mut cat, 2 * rank, 0, &low, rows, rank).map_err(err)?;
+                            stream.copy_columns(&mut cat, 2 * rank, rank, &raw, rows, rank).map_err(err)?;
+                            scratch.recycle(raw);
+                            stream.quantized_linear(&mut q_full, &cat, &dm.q, dm.q.bias.as_ref()).map_err(err)?;
+                            axk2_cat = Some(cat);
+                        } else {
+                            stream.quantized_linear(&mut q_full, &low, &dm.q, dm.q.bias.as_ref()).map_err(err)?;
+                        }
                         if dev_layer.dsa.is_some() {
                             q_low_dev = Some(low);
                         } else {
@@ -6007,7 +6046,10 @@ impl RustDecoder {
 
                 if let Some(g_w) = &dev_layer.attn_gate {
                     let mut gate = scratch.acquire(rows * layer_heads * dv * 4).map_err(err)?;
-                    stream.quantized_linear(&mut gate, &normed_buf, g_w, g_w.bias.as_ref()).map_err(err)?;
+                    stream.quantized_linear(&mut gate, axk2_cat.as_ref().unwrap_or(&normed_buf), g_w, g_w.bias.as_ref()).map_err(err)?;
+                    if let Some(cat) = axk2_cat.take() {
+                        scratch.recycle(cat);
+                    }
                     gate_buf = Some(gate);
                 }
                 let mut attn_buf = match latent_attn.take() {
@@ -6125,7 +6167,7 @@ impl RustDecoder {
                 let mut out_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                 let out_w = dev_layer.out.as_ref().ok_or("attention layer without a device output projection")?;
                 // the feed-forward norm (and the activation format of its first GEMM) can join the residual add of the output projection
-                let ffn_target = if !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.par_mamba.is_none() && dev_layer.post_attn_norm.is_none() && dev_layer.laurel.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
+                let ffn_target = if cfg.gated_norm_rank == 0 && !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.par_mamba.is_none() && dev_layer.post_attn_norm.is_none() && dev_layer.laurel.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
                     dev_layer
                         .ffn_norm
                         .as_ref()
@@ -6370,6 +6412,9 @@ impl RustDecoder {
             } else {
                 stream.copy_buffer(&mut ffn_normed, &x_buf).map_err(err)?;
             }
+            if let Some(g) = &dev_layer.ffn_norm_gate {
+                Self::device_norm_gate(&mut **stream, &mut scratch, g, &mut ffn_normed, rows)?;
+            }
             if let Some(branch) = deferred_branch.take() {
                 stream.residual_add(&mut x_buf, &branch, cfg.residual_scale).map_err(err)?;
                 scratch.recycle(branch);
@@ -6471,7 +6516,7 @@ impl RustDecoder {
                 // (a layer that receives DeepStack features adds them after its residual, so the norm cannot join the add)
                 let ds_here = deepstack.as_ref().is_some_and(|d| d.get(i).is_some_and(|level| !level.is_empty()));
                 // (the shortcut experts of LongCat-Flash are added to the stream after this block: the norm computed in the add would miss them)
-                let next_target = if !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && !layer.takes_shortcut && matches!(cfg.norm, NormKind::Rms) && self.groups == 1 {
+                let next_target = if cfg.gated_norm_rank == 0 && !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && !layer.takes_shortcut && matches!(cfg.norm, NormKind::Rms) && self.groups == 1 {
                     match dev_weights.layers.get(i + 1) {
                         Some(next) if !next.host_layer && next.attn_norm_b.is_none() => next.attn_norm.as_ref().map(|w| {
                             let first = if self.layers.get(i + 1).is_some_and(|l| matches!(l.attn, Attn::Std { .. })) { next.q.as_ref() } else { None };
@@ -7043,6 +7088,28 @@ impl RustDecoder {
     /// Queries, keys and values of one MLA layer for a batch of tokens, with rotary embeddings
     /// applied. Each head is laid out `[rotary | content]` for queries and keys; the dot product
     /// does not depend on the order as long as both sides agree.
+    /// A.X-K2 on the device: `y * sigmoid(fc2(silu(fc1(y))))` in place on a normalised buffer (`rows x hidden`).
+    fn device_norm_gate(
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        gate: &(crate::backend::DeviceWeight, crate::backend::DeviceWeight),
+        y: &mut crate::backend::DeviceBuffer,
+        rows: usize,
+    ) -> Result<(), String> {
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let mut low = scratch.acquire(rows * gate.0.rows * 4).map_err(err)?;
+        stream.quantized_linear(&mut low, y, &gate.0, gate.0.bias.as_ref()).map_err(err)?;
+        let mut act = scratch.acquire(rows * gate.0.rows * 4).map_err(err)?;
+        stream.activation(&mut act, &low, 0).map_err(err)?;
+        let mut g = scratch.acquire(rows * gate.1.rows * 4).map_err(err)?;
+        stream.quantized_linear(&mut g, &act, &gate.1, gate.1.bias.as_ref()).map_err(err)?;
+        stream.sigmoid_gate_mul(y, &g).map_err(err)?;
+        for buf in [low, act, g] {
+            scratch.recycle(buf);
+        }
+        Ok(())
+    }
+
     /// A.X-K2: `y * sigmoid(fc2(silu(fc1(y))))` on every normalised row.
     fn norm_gate(gate: &(Linear, Linear), y: &mut [f32]) -> Result<(), String> {
         let mut t = gate.0.forward(y)?;

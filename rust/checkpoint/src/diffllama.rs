@@ -12,7 +12,7 @@ pub(crate) fn config(cfg: &Value) -> Result<Value, String> {
     out["architectures"] = serde_json::json!(["LlamaForCausalLM"]);
     let kv = out.get("num_key_value_heads").and_then(Value::as_u64).or_else(|| out.get("num_attention_heads").and_then(Value::as_u64)).unwrap_or(0);
     let heads = out.get("num_attention_heads").and_then(Value::as_u64).unwrap_or(0);
-    if kv < 2 || kv % 2 != 0 || heads % 2 != 0 {
+    if kv < 2 || !kv.is_multiple_of(2) || !heads.is_multiple_of(2) {
         return Err("DiffLlama needs an even number of key-value heads (at least 2) and of attention heads".into());
     }
     out["num_key_value_heads"] = kv.into();

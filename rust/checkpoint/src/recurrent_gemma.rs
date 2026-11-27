@@ -82,7 +82,7 @@ pub(crate) fn plan(cfg: &Value) -> Result<Plan, String> {
     let rope = cfg.get("rope_parameters").cloned().unwrap_or(Value::Null);
     let partial = flt(&rope, "partial_rotary_factor").or_else(|| flt(cfg, "partial_rotary_factor")).unwrap_or(0.5);
     let rot = ((head_dim as f64 * partial) as u64) & !1;
-    if rot == 0 || kernel == 0 || lru_width % heads != 0 {
+    if rot == 0 || kernel == 0 || !lru_width.is_multiple_of(heads) {
         return Err("invalid RecurrentGemma rotary, convolution or LRU width".into());
     }
     let normalized = config(cfg)?;
