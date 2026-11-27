@@ -3690,7 +3690,7 @@ impl RustDecoder {
             return Some("hyper-connections (the backend has no kernels for them, or FLLM_HC=host)");
         }
         if cfg.attn_res.is_some() && !self.attn_res_device {
-            return Some("attention residual blocks (the device pass is opt-in: FLLM_ATTN_RES_DEVICE=1)");
+            return Some("attention residual blocks (no kernels for this backend, or FLLM_ATTN_RES_HOST=1)");
         }
         if cfg.qwen4.is_some() && !q4_ok {
             return Some("Qwen3.8-Flash-Next streams, n-gram embeddings and token indexer (the backend has no kernels for them, or FLLM_QWEN4=host)");
@@ -3994,8 +3994,7 @@ impl RustDecoder {
             self.layers.len() / block.max(1) < 62
                 && self.cfg.hidden > 0
                 && backend.create_stream().is_ok_and(|s| s.supports_arch_ops() && s.supports_copy_columns())
-                // opt-in until a Kimi K3 checkpoint has compared the device pass with the host pass
-                && std::env::var_os("FLLM_ATTN_RES_DEVICE").is_some()
+                && std::env::var_os("FLLM_ATTN_RES_HOST").is_none()
         });
         self.moa_device = backend.create_stream().is_ok_and(|s| s.supports_arch_ops())
             && backend.moe_device_available()
