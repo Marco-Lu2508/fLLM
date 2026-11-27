@@ -957,7 +957,7 @@ impl Plan {
         if raw == "hy_v4" {
             return crate::hy4::plan(cfg);
         }
-        if raw == "longcat_flash" {
+        if raw == "longcat_flash" || raw == "longcat_flash_ngram" {
             return crate::longcat::plan(cfg);
         }
         if raw.starts_with("qwen4_exp") {

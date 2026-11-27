@@ -556,6 +556,7 @@ impl GgufModel {
             || self.config.rglru.is_some()
             || self.config.zaya.is_some()
             || self.config.xlstm.is_some()
+            || self.config.longcat_ngram.is_some()
             || self.config.hybrid.stateful()
             || self
                 .config

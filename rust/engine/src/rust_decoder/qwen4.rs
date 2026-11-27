@@ -379,7 +379,7 @@ impl Qwen4Model {
 
 impl RustDecoder {
     /// The runs of consecutive tokens of each sequence: `(first row, end row, first KV block, position of the first row)`.
-    fn q4_runs(&self, tables: &[i64], lengths: &[i64]) -> Vec<(usize, usize, i64, usize)> {
+    pub(super) fn q4_runs(&self, tables: &[i64], lengths: &[i64]) -> Vec<(usize, usize, i64, usize)> {
         let rows = lengths.len();
         let mut out = Vec::new();
         let mut start = 0;

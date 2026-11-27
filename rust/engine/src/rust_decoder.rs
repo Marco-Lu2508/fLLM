@@ -311,6 +311,23 @@ struct DeviceZaya {
     ordinal: usize,
 }
 
+/// LongCat-Flash-Lite n-gram embeddings: `split` hash tables per extra order, each row projected up to the hidden size.
+struct NgramEmb {
+    tables: Vec<Embedding>,
+    projs: Vec<Linear>,
+    /// Rows of each table.
+    rows: Vec<i64>,
+    /// Per table, `vocab^t mod rows` for `t = 1 .. order - 1`.
+    mods: Vec<Vec<i64>>,
+}
+
+/// The last `neighbor - 1` token ids of every live sequence (keyed by its first KV block) and the tokens seen so far.
+#[derive(Default)]
+struct NgramStore {
+    clock: u64,
+    map: std::collections::HashMap<i64, (u64, usize, Vec<i64>)>,
+}
+
 /// `(pointer table, quant type, int8 decode kernels usable, grouped products usable)` over the experts of one projection.
 type ExpertTable = (crate::backend::DeviceBuffer, crate::backend::QuantType, bool, bool);
 
@@ -1714,6 +1731,9 @@ pub struct RustDecoder {
     qwen4: Option<Box<qwen4::Qwen4Model>>,
     /// Score weights of the attention residual over the blocks at the end of the model.
     output_res: Option<Vec<f32>>,
+    /// LongCat-Flash-Lite n-gram embeddings and the token history they read.
+    ngram: Option<Box<NgramEmb>>,
+    ngram_store: std::sync::Mutex<NgramStore>,
     /// Inkling weights.
     inkling: Option<Box<inkling::InklingModel>>,
     /// Hyper-connection weights of Hy4 and GLM-5-Next.
@@ -3045,7 +3065,28 @@ impl RustDecoder {
         } else {
             None
         };
+        let ngram = match cfg.longcat_ngram.as_ref() {
+            Some(nc) => {
+                let tables_n = nc.split * (nc.neighbor - 1);
+                let dim = hidden / tables_n.max(1);
+                let base = nc.ratio * model.vocab_size();
+                let (mut tables, mut projs, mut rows, mut mods) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                for index in 0..tables_n {
+                    let m = (base + index * 2 + 1) as i64;
+                    tables.push(Embedding::load_with_cols(model, &format!("ngram_embd.{index}.weight"), dim)?);
+                    projs.push(Linear::load(mapping, &format!("ngram_proj.{index}"), hidden, dim)?);
+                    let order = index / nc.split + 2;
+                    let mut power = 1i64;
+                    mods.push((1..order).map(|_| { power = (power * model.vocab_size() as i64) % m; power }).collect());
+                    rows.push(m);
+                }
+                Some(Box::new(NgramEmb { tables, projs, rows, mods }))
+            }
+            None => None,
+        };
         let mut decoder = Self {
+            ngram,
+            ngram_store: std::sync::Mutex::new(NgramStore::default()),
             mtp,
             expert_cache,
             profile: std::env::var_os("FLLM_RUST_PROFILE").is_some(),
@@ -5509,6 +5550,7 @@ impl RustDecoder {
             && dev_weights.q4.is_none()
             && self.cfg.hybrid.zamba.is_none()
             && self.cfg.zaya.is_none()
+            && self.ngram.is_none()
             && stream.async_launches()
             && !std::env::var("FLLM_PREFILL_DEVICE_EMBED").is_ok_and(|v| v == "0")
         {
@@ -5518,6 +5560,8 @@ impl RustDecoder {
         };
         let mut host_x = if embed_dev.is_some() {
             Vec::new()
+        } else if first_stage && self.ngram.is_some() {
+            self.ngram_embed(ids, tables, lengths)?
         } else if first_stage {
             self.embed_rows(ids)?
         } else {
@@ -11042,8 +11086,12 @@ impl RustDecoder {
                 x = self.par_recv_activations(rows)?;
             }
             let embed_span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::EMBED);
-            for &id in ids.iter().filter(|_| first_stage) {
-                x.extend_from_slice(&self.embedding.row(id as usize)?);
+            if first_stage && self.ngram.is_some() {
+                x.extend_from_slice(&self.ngram_embed(ids, tables, lengths)?);
+            } else {
+                for &id in ids.iter().filter(|_| first_stage) {
+                    x.extend_from_slice(&self.embedding.row(id as usize)?);
+                }
             }
             drop(embed_span);
             if first_stage {
@@ -11834,6 +11882,7 @@ impl RustDecoder {
         !self.cfg.parallel_residual
             && self.cfg.qkv_clip.is_none()
             && self.cfg.attn_res.is_none()
+            && self.ngram.is_none()
             // the block selection stages host arrays (slots, tables, lengths) that a recorded step cannot take
             && !self.m3_device
             && self.layers.len() == weights.layers.len()
@@ -11894,6 +11943,66 @@ impl RustDecoder {
 
     /// The embedding rows of `ids` (rows x hidden values). A prompt chunk dequantizes its rows on all cores: this runs before the first kernel is
     /// queued, so the device waits for it (`FLLM_PREFILL_PAR_EMBED=0` keeps the single-threaded loop).
+    /// Token embeddings of LongCat-Flash-Lite: the table row plus the projected hashed n-gram rows, divided by `1 + split * (neighbor - 1)`. The hash reads the
+    /// previous tokens of the sequence (the store keeps the last `neighbor - 1`); an end-of-sequence token cuts the context.
+    fn ngram_embed(&self, ids: &[i64], tables: &[i64], lengths: &[i64]) -> Result<Vec<f32>, String> {
+        let (Some(ng), Some(nc)) = (self.ngram.as_deref(), self.cfg.longcat_ngram.as_ref()) else {
+            return Err("n-gram embeddings are not loaded".into());
+        };
+        let hidden = self.cfg.hidden;
+        let (n, k, eos) = (nc.neighbor, nc.split, nc.eos);
+        let mut out = vec![0.0f32; ids.len() * hidden];
+        for (r, &id) in ids.iter().enumerate() {
+            if id < 0 || id as usize >= self.embedding.rows {
+                return Err(format!("token id {id} out of embedding vocabulary range"));
+            }
+            out[r * hidden..(r + 1) * hidden].copy_from_slice(&self.embedding.row(id as usize)?);
+        }
+        let mut store = self.ngram_store.lock().map_err(|_| "state lock poisoned")?;
+        for (start, end, first, position) in self.q4_runs(tables, lengths) {
+            store.clock += 1;
+            let clock = store.clock;
+            if !store.map.contains_key(&first) && store.map.len() >= self.state_capacity {
+                if let Some(oldest) = store.map.iter().min_by_key(|(_, v)| v.0).map(|(key, _)| *key) {
+                    store.map.remove(&oldest);
+                }
+            }
+            let entry = store.map.entry(first).or_insert((clock, 0, Vec::new()));
+            if position == 0 {
+                *entry = (clock, 0, Vec::new());
+            }
+            if entry.1 != position {
+                return Err(format!("n-gram state out of sync (holds {} tokens, got position {position})", entry.1));
+            }
+            entry.0 = clock;
+            let mut tokens = entry.2.clone();
+            let base = tokens.len();
+            tokens.extend_from_slice(&ids[start..end]);
+            for t in 0..end - start {
+                let at = base + t;
+                let shifted = |s: usize| if at >= s && !tokens[at - s..at].contains(&eos) { tokens[at - s] } else { 0 };
+                let row = &mut out[(start + t) * hidden..(start + t + 1) * hidden];
+                for order in 2..=n {
+                    for j in 0..k {
+                        let index = (order - 2) * k + j;
+                        let mut v = tokens[at];
+                        for kk in 2..=order {
+                            v += shifted(kk - 1) * ng.mods[index][kk - 2];
+                        }
+                        let id = v.rem_euclid(ng.rows[index]) as usize;
+                        let projected = ng.projs[index].forward(&ng.tables[index].row(id)?)?;
+                        row.iter_mut().zip(&projected).for_each(|(a, b)| *a += b);
+                    }
+                }
+            }
+            entry.1 += end - start;
+            entry.2 = tokens[tokens.len().saturating_sub(n - 1)..].to_vec();
+        }
+        let scale = 1.0 / (1 + k * (n - 1)) as f32;
+        out.iter_mut().for_each(|v| *v *= scale);
+        Ok(out)
+    }
+
     fn embed_rows(&self, ids: &[i64]) -> Result<Vec<f32>, String> {
         let hidden = self.cfg.hidden;
         static PARALLEL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

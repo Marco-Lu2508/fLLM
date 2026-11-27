@@ -253,6 +253,15 @@ pub struct DogeConfig {
     pub norm_topk: bool,
 }
 
+/// n-gram embeddings of LongCat-Flash-Lite: `neighbor - 1` extra orders with `split` hash tables each, `ratio` times the vocabulary in rows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LongcatNgram {
+    pub neighbor: usize,
+    pub split: usize,
+    pub ratio: usize,
+    pub eos: i64,
+}
+
 /// ZAYA: kernel sizes of the two convolutions over time of the compressed convolutional attention, and the width of the router.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ZayaConfig {
@@ -575,6 +584,8 @@ pub struct ModelConfig {
     /// Block attention residuals (Kimi K3): the input of every block is a learned softmax mixture of the sums of earlier blocks of this many
     /// layers and the running sum.
     pub attn_res: Option<usize>,
+    /// LongCat-Flash-Lite: hashed n-gram embeddings added to the token embedding.
+    pub longcat_ngram: Option<LongcatNgram>,
     pub hc: Option<HcConfig>,
     pub delta: Option<DeltaConfig>,
     pub mamba: Option<MambaConfig>,
@@ -1217,6 +1228,12 @@ impl ModelConfig {
             qwen4,
             situ: float(meta, a, "situ_beta").map(|b| (b, float(meta, a, "situ_linear_beta").unwrap_or(0.0))),
             attn_res: uint(meta, a, "attention_residual_block_size").filter(|&n| n > 0),
+            longcat_ngram: match (uint(meta, a, "ngram.neighbor"), uint(meta, a, "ngram.split"), uint(meta, a, "ngram.vocab_ratio")) {
+                (Some(neighbor), Some(split), Some(ratio)) if neighbor >= 2 && split > 0 => {
+                    Some(LongcatNgram { neighbor, split, ratio, eos: uint(meta, a, "ngram.eos").unwrap_or(2) as i64 })
+                }
+                _ => None,
+            },
             hc: uint(meta, a, "hc_mult").filter(|&n| n > 0).map(|hc_mult| HcConfig {
                 hc_mult,
                 magnitude: float(meta, a, "hc_magnitude"),
@@ -1832,6 +1849,7 @@ pub(crate) mod tests_support {
             qwen4: None,
             situ: None,
             attn_res: None,
+            longcat_ngram: None,
             hc: None,
             delta: None,
             mamba: None,

@@ -96,6 +96,15 @@ pub(crate) fn plan(cfg: &Value) -> Result<Plan, String> {
         f("attention.kv_lora_scale", (hidden / num(cfg, "kv_lora_rank").unwrap_or(1) as f64).sqrt()),
     ]);
     plan.moe_layers = vec![false; plan.layers as usize];
+    // LongCat-Flash-Lite: n-gram embeddings (`emb_neighbor_num` tokens hashed into `emb_split_num` tables each, `ngram_vocab_size_ratio` x the vocabulary)
+    if cfg.get("model_type").and_then(Value::as_str) == Some("longcat_flash_ngram") {
+        plan.meta.extend([
+            u("ngram.neighbor", num(cfg, "emb_neighbor_num").ok_or("config.json requires emb_neighbor_num")?),
+            u("ngram.split", num(cfg, "emb_split_num").ok_or("config.json requires emb_split_num")?),
+            u("ngram.vocab_ratio", num(cfg, "ngram_vocab_size_ratio").ok_or("config.json requires ngram_vocab_size_ratio")?),
+            u("ngram.eos", num(cfg, "eos_token_id").unwrap_or(2)),
+        ]);
+    }
     Ok(plan)
 }
 
@@ -117,6 +126,19 @@ pub(crate) fn map(plan: &Plan, n: &str) -> Result<Mapped, String> {
         "model.norm.weight" => return tensor("output_norm.weight".into()),
         "lm_head.weight" => return tensor("output.weight".into()),
         _ => {}
+    }
+    // LongCat-Flash-Lite n-gram embeddings: `model.ngram_embeddings.{embedders,post_projs}.<i>.weight`; the base table is the shared `embed_tokens`
+    if let Some(tail) = n.strip_prefix("model.ngram_embeddings.") {
+        if tail == "word_embeddings.weight" {
+            return Ok(Mapped::Skip);
+        }
+        let (kind, index) = tail.strip_suffix(".weight").and_then(|t| t.split_once('.')).ok_or_else(|| format!("unrecognized tensor {n:?}"))?;
+        let index: usize = index.parse().map_err(|_| format!("invalid n-gram table index in {n:?}"))?;
+        return match kind {
+            "embedders" => tensor(format!("ngram_embd.{index}.weight")),
+            "post_projs" => tensor(format!("ngram_proj.{index}.weight")),
+            _ => Err(format!("unrecognized tensor {n:?}")),
+        };
     }
     let rest = n.strip_prefix("model.layers.").ok_or_else(|| format!("unrecognized checkpoint tensor {n:?}"))?;
     let (layer, suf) = rest.split_once('.').ok_or_else(|| format!("malformed layer tensor name {n:?}"))?;

@@ -48,6 +48,7 @@ SPECIALS = ["<unk>", "<s>", "</s>", "<pad>", "<|im_start|>", "<|im_end|>"]
 # Fixtures for aliased architectures are built with the closest native config; the
 # saved config.json is then rewritten to the real model_type / config keys.
 CONFIG_PATCH = {
+    "longcat_flash_lite": {"model_type": "longcat_flash_ngram"},
     "internlm3": {"model_type": "internlm3"},
     "mimo": {"model_type": "mimo", "set": {"num_nextn_predict_layers": 1}},
     "solar": {"model_type": "solar", "set": {"sliding_window": 2047}},
@@ -1075,6 +1076,15 @@ def config_for(arch: str, vocab: int):
             q_lora_rank=24, kv_lora_rank=16, qk_nope_head_dim=16, qk_rope_head_dim=8, v_head_dim=16, routed_scaling_factor=1.5,
             rms_norm_eps=1e-5, rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
         ),
+        # LongCat-Flash-Lite: LongCat-Flash with hashed n-gram embeddings (3 tokens, 2 tables per extra token); the model code is not part of transformers:
+        # set LONGCAT_LITE_CODE to a directory with the repository's configuration_longcat_ngram.py and modeling_longcat_ngram.py
+        "longcat_flash_lite": lambda: _longcat_ngram_config()(
+            **{k: v for k, v in common.items() if k != "num_hidden_layers"}, num_layers=2, num_attention_heads=4, num_key_value_heads=4,
+            ffn_hidden_size=128, expert_ffn_hidden_size=32, n_routed_experts=6, head_dim=8, zero_expert_num=2, moe_topk=3,
+            q_lora_rank=24, kv_lora_rank=16, qk_nope_head_dim=16, qk_rope_head_dim=8, v_head_dim=16, routed_scaling_factor=1.5,
+            rms_norm_eps=1e-5, rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+            emb_neighbor_num=3, emb_split_num=2, ngram_vocab_size_ratio=4,
+        ),
         # GLM-5-Next text model: delta layers, NoPE latent attention with the k-pool indexer (pools of 4 keys, 2 pools + tail), 3 residual streams
         "glm5_next": lambda: T.Glm5NextConfig(
             text_config=dict(
@@ -1391,6 +1401,25 @@ def stable_topk(margins=None, index_topk=None):
         torch.Tensor.topk = original
 
 
+
+_LAST_MODEL = [None]  # the model of the last `build` (for references that must generate with it)
+
+
+def _longcat_ngram_config():
+    """The configuration class of LongCat-Flash-Lite, loaded from the model repository's own files (`LONGCAT_LITE_CODE`)."""
+    import importlib
+    import types
+
+    path = os.environ.get("LONGCAT_LITE_CODE")
+    if not path:
+        raise SystemExit("set LONGCAT_LITE_CODE to the directory with configuration_longcat_ngram.py and modeling_longcat_ngram.py")
+    if "lc_ngram" not in sys.modules:
+        package = types.ModuleType("lc_ngram")
+        package.__path__ = [path]
+        sys.modules["lc_ngram"] = package
+    return importlib.import_module("lc_ngram.configuration_longcat_ngram").LongcatFlashNgramConfig
+
+
 def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
     import transformers as T
 
@@ -1435,6 +1464,10 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
                 or getattr(mod, "BaichuanForCausalLM", None)
             )
         model = cls._from_config(cfg, dtype=torch.float32, attn_implementation="eager")
+    if arch == "longcat_flash_lite":
+        # the remote code shares the token embedding with the n-gram module, which transformers 5 refuses to save: keep two equal copies
+        word = model.model.ngram_embeddings.word_embeddings
+        model.model.ngram_embeddings.word_embeddings = torch.nn.Embedding.from_pretrained(word.weight.detach().clone(), freeze=False)
     if arch in ("doge", "doge_moe"):
         # the released initialisation (A = 0) makes the dynamic mask a constant: give every layer real decays and residual scales
         with torch.no_grad():
@@ -1662,7 +1695,31 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
             if name.endswith("e_score_correction_bias"):
                 b.copy_(0.2 * torch.randn_like(b))
     model.eval()
+    _LAST_MODEL[0] = model
+    if arch == "longcat_flash_lite":
+        # saved as LongCat-Flash so that the expert weights are written one tensor per expert; the configuration gets its own type back below
+        model.config.model_type = "longcat_flash"
     model.save_pretrained(out, safe_serialization=True)
+    if arch == "longcat_flash_lite":
+        # the fused expert tensors of transformers 5 become one gate / up / down tensor per expert, the layout of the released checkpoints
+        from safetensors.torch import load_file, save_file
+
+        tensors = load_file(str(out / "model.safetensors"))
+        split = {}
+        for key, value in tensors.items():
+            if key.endswith("mlp.experts.gate_up_proj"):
+                base = key[: -len("gate_up_proj")]
+                for e in range(value.shape[0]):
+                    gate, up = value[e].chunk(2, dim=0)
+                    split[f"{base}{e}.gate_proj.weight"] = gate.contiguous()
+                    split[f"{base}{e}.up_proj.weight"] = up.contiguous()
+            elif key.endswith("mlp.experts.down_proj"):
+                base = key[: -len("down_proj")]
+                for e in range(value.shape[0]):
+                    split[f"{base}{e}.down_proj.weight"] = value[e].contiguous()
+            else:
+                split[key] = value
+        save_file(split, str(out / "model.safetensors"))
     patch = CONFIG_PATCH.get(arch)
     if patch:
         cfg_path = out / "config.json"

@@ -425,6 +425,10 @@ pub fn prepare_checkpoint(
         if matches!(arch, "gemma4" | "gemma3n") && (name.contains(".attn_") || name.contains(".ffn_") || !matches!(name, "token_embd.weight" | "output_norm.weight" | "output.weight")) {
             return Ok(None);
         }
+        // LongCat-Flash-Lite: the n-gram embedding tables and their projections
+        if arch == "longcat-flash" && name.starts_with("ngram_") {
+            return Ok(None);
+        }
         // Kimi K3 output attention residual
         if arch == "kimi-linear" && name.starts_with("output_res_") {
             return Ok(None);

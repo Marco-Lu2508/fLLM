@@ -429,7 +429,7 @@ GGUFs (Nemotron 3 Nano), and Qwen3.8 27B GGUF checks.
 | Nemotron 3 Super 120B A12B | | `NemotronHForCausalLM` | V (tiny, new) | Needs the latent expert projections added here (`moe_latent_size: 1024`). Real weights not run (120B). |
 | HyperNova 60B, gpt-oss-120b | | `GptOssForCausalLM` | V | MXFP4 import. |
 | K2 Think V2 70B | dense | `LlamaForCausalLM` | V | |
-| LongCat Flash Lite | 68.5B / 3B | `LongcatFlashNgramForCausalLM` | **N** | n-gram embeddings plus LongCat dual-sublayer topology. |
+| LongCat Flash Lite | 68.5B / 3B | `LongcatFlashNgramForCausalLM` | **T (tiny checkpoint)** | n-gram embeddings (hashed over the previous tokens of the sequence, kept per sequence outside the KV cache) plus the LongCat dual-sublayer topology; logits 1.5e-4 relative to the model's own code on a tiny random checkpoint, greedy generation identical to it on the CPU and, with every layer on the device, on Vulkan (lavapipe). The embeddings are computed on the host. |
 | Mistral Small 4 119B | | `mistral4` (MLA MoE) | V | |
 | Qwen3 Next 80B A3B | | `Qwen3NextForCausalLM` | V | |
 | Nemotron 3 Nano 30B A3B (not in the top 12, checked as a real GGUF) | | `NemotronHForCausalLM` | V (tiny) +GGUF | The llama.cpp GGUF uses architecture `nemotron_h_moe` and per-layer arrays for `head_count_kv` / `feed_forward_length`; both were unsupported before. Unsloth Q4_0 loads, text equals llama.cpp on peaked prompts. |
