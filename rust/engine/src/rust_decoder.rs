@@ -311,13 +311,16 @@ struct DeviceZaya {
     ordinal: usize,
 }
 
+/// `(pointer table, quant type, int8 decode kernels usable, grouped products usable)` over the experts of one projection.
+type ExpertTable = (crate::backend::DeviceBuffer, crate::backend::QuantType, bool, bool);
+
 /// JetMoE's mixture of attention heads on the device: the router, the experts' query and output projections as pointer tables and the output bias.
 struct DeviceMoa {
     router: crate::backend::DeviceWeight,
     /// `(table, quant type, int8 decode kernels usable, grouped products usable)` over the experts' `hidden -> kv_heads * dk` query projections.
-    q_table: (crate::backend::DeviceBuffer, crate::backend::QuantType, bool, bool),
+    q_table: ExpertTable,
     /// The same over the `kv_heads * dk -> hidden` output projections.
-    out_table: (crate::backend::DeviceBuffer, crate::backend::QuantType, bool, bool),
+    out_table: ExpertTable,
     /// Keeps the expert weights the tables point into alive.
     _experts: Vec<crate::backend::DeviceWeight>,
     bias: crate::backend::DeviceBuffer,
@@ -5033,7 +5036,7 @@ impl RustDecoder {
                 Some(moa) if self.moa_device && Self::moa_experts_ok(moa, self.cfg.hidden) => {
                     let attn_hidden = moa.q[0].rows;
                     let experts = moa.q.len();
-                    let upload_set = |tag: &str, ls: &[Linear], rows: usize, cols: usize| -> Result<Option<((crate::backend::DeviceBuffer, crate::backend::QuantType, bool, bool), Vec<crate::backend::DeviceWeight>)>, String> {
+                    let upload_set = |tag: &str, ls: &[Linear], rows: usize, cols: usize| -> Result<Option<(ExpertTable, Vec<crate::backend::DeviceWeight>)>, String> {
                         let mut ws = Vec::with_capacity(ls.len());
                         for (e, l) in ls.iter().enumerate() {
                             ws.push(upload_expert_linear(&format!("blk.{i}.attn_moa_{tag}{e}"), l)?);
@@ -9696,7 +9699,7 @@ impl RustDecoder {
         &self,
         stream: &mut dyn crate::backend::Stream,
         scratch: &mut crate::backend::BufferPool,
-        table: &(crate::backend::DeviceBuffer, crate::backend::QuantType, bool, bool),
+        table: &ExpertTable,
         x: &crate::backend::DeviceBuffer,
         ids: &crate::backend::DeviceBuffer,
         out: &mut crate::backend::DeviceBuffer,
