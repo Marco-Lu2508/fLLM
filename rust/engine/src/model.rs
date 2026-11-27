@@ -121,6 +121,7 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "grok",
     "hrm",
     "jetmoe",
+    "step3",
     "pangu",
     "param2_moe",
     "plamo",

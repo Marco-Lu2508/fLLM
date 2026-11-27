@@ -902,6 +902,9 @@ impl Plan {
         if raw == "zaya" {
             return crate::zaya::plan(cfg);
         }
+        if raw == "step3_text" || raw == "step3" {
+            return crate::step3::plan(cfg);
+        }
         if raw == "axk2" {
             return crate::axk2::plan(cfg);
         }
@@ -2701,6 +2704,11 @@ impl Plan {
             || n.starts_with("model.vision_")
             || n.starts_with("vision_model.")
             || n.starts_with("vit_large_projector.")
+            || n.starts_with("model.vit_large_projector.")
+            || n.starts_with("model.vit_downsampler.")
+            || n.starts_with("vit_downsampler.")
+            || n.starts_with("model.vit_downsampler2.")
+            || n.starts_with("vit_downsampler2.")
             || n.starts_with("audio_tower.")
             || n.starts_with("model.audio_tower.")
             || n.starts_with("talker.")
@@ -2907,6 +2915,9 @@ impl Plan {
             }
             if let Some(m) = crate::axk2::map(idx, suf) {
                 return Ok(m);
+            }
+            if self.arch == "step3" {
+                return crate::step3::map(idx, suf).ok_or_else(|| format!("unexpected Step-3 tensor {n:?}"));
             }
             if self.arch == "zaya" {
                 return crate::zaya::map(idx, suf).ok_or_else(|| format!("unexpected ZAYA tensor {n:?}"));

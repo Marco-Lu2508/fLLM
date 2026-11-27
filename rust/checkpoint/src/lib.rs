@@ -38,6 +38,7 @@ mod requant;
 mod diffllama;
 mod doge;
 mod jetmoe;
+mod step3;
 mod zaya;
 mod axk2;
 mod xlstm;

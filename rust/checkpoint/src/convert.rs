@@ -248,6 +248,8 @@ pub fn prepare_checkpoint(
         crate::diffllama::config(&cfg)?
     } else if arch == "doge" {
         crate::doge::config(&cfg)?
+    } else if arch == "step3" {
+        crate::step3::config(&cfg)?
     } else if arch == "zaya" {
         crate::zaya::config(&cfg)?
     } else if arch == "xlstm" {
@@ -419,6 +421,10 @@ pub fn prepare_checkpoint(
             return Ok(None);
         }
         // layers of Gemma 4 differ in head width and KV heads; the engine checks the shapes against the per-layer metadata
+        // Step-3: the first query projection is `share_q_dim` wide, the second one (`attn_q_low`) gives the heads
+        if arch == "step3" && name.contains(".attn_q") {
+            return Ok(None);
+        }
         if matches!(arch, "laguna" | "mimo_v2") && name.contains(".attn_") {
             return Ok(None);
         }
@@ -1043,6 +1049,16 @@ pub fn prepare_checkpoint(
         }
         if arch == "xlstm" {
             for n in crate::xlstm::layer_requirements() {
+                let key = format!("blk.{i}.{n}");
+                if !byname.contains_key(key.as_str()) {
+                    return Err(format!("missing required tensor {key}").into());
+                }
+            }
+            continue;
+        }
+        if arch == "step3" {
+            let moe = byname.contains_key(format!("blk.{i}.ffn_gate_inp.weight").as_str());
+            for n in crate::step3::layer_requirements(moe) {
                 let key = format!("blk.{i}.{n}");
                 if !byname.contains_key(key.as_str()) {
                     return Err(format!("missing required tensor {key}").into());

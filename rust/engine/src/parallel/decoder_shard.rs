@@ -35,6 +35,7 @@ pub(super) fn placeholder_layer() -> Layer {
         ffn_norm_gate: None,
         zaya: None,
         moa: None,
+        q_low: None,
         ffn_bias: None,
         output_gate: false,
         chunk: None,

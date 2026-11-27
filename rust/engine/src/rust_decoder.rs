@@ -420,6 +420,12 @@ struct ShortConv {
 
 /// JetMoE's mixture of attention heads: `top_k` of `experts` experts per token each project the token to a query of `kv_heads` heads, all attend over the shared
 /// key / value of the token, and the per-expert outputs are mixed by the experts' output projections and the gates (`attn_moa_*`).
+/// Step-3 low-rank query: `q` projects to `norm.len()` values, an RMS norm and `wq` give the `heads * head_dim` query.
+struct QLow {
+    norm: Vec<f32>,
+    wq: Linear,
+}
+
 struct Moa {
     router: Linear,
     k: Linear,
@@ -691,6 +697,8 @@ struct Layer {
     zaya: Option<Box<ZayaLayer>>,
     /// JetMoE mixture of attention heads (the `q`, `k`, `v` of the layer are placeholders).
     moa: Option<Box<Moa>>,
+    /// Step-3 low-rank query projection (behind the plain `q`).
+    q_low: Option<Box<QLow>>,
     /// Bias added behind the sum of the feed-forward experts (JetMoE).
     ffn_bias: Option<Vec<f32>>,
     /// A second mixer that runs next to the attention of this layer (Falcon-H1: Mamba-2 and attention in parallel).
@@ -1000,6 +1008,8 @@ pub struct DeviceLayerWeights {
     zaya: Option<DeviceZaya>,
     /// JetMoE: the mixture of attention heads on the device.
     moa: Option<DeviceMoa>,
+    /// Step-3: `(norm, second query projection)`.
+    q_low: Option<(crate::backend::DeviceBuffer, crate::backend::DeviceWeight)>,
     /// Kimi K3: score weights of the attention-residual mixtures in front of the attention and the feed-forward branch.
     res: Option<(crate::backend::DeviceBuffer, crate::backend::DeviceBuffer)>,
     /// JetMoE: `(ones, bias)` of the bias added behind the sum of the feed-forward experts.
@@ -1103,6 +1113,7 @@ impl DeviceLayerWeights {
             doge: None,
             zaya: None,
             moa: None,
+            q_low: None,
             ffn_bias: None,
             res: None,
             attn_sub_norm: None,
@@ -2298,6 +2309,8 @@ impl RustDecoder {
             let (qr, kr, vr) = (heads * dk, kv_heads * dk, if diff_layer { kv_heads * dv / 2 } else { kv_heads * dv });
             let q_rows = tensor_rows(mapping, &format!("{p}.attn_q.weight"));
             let output_gate = q_rows == Some(2 * qr) && cfg.mla.is_none();
+            // Step-3: the width of the first query projection (the columns of the second one)
+            let q_low_cols = mapping.index().tensors.iter().find(|t| t.name == format!("{p}.attn_q_low.weight")).and_then(|t| t.dimensions.first().map(|&c| c as usize));
             let attn = if has_tensor(mapping, &format!("{p}.xlstm_q.weight")) {
                 let heads = cfg.layer_heads(i);
                 let dqk = tensor_rows(mapping, &format!("{p}.xlstm_q.weight")).ok_or("xLSTM layer without query projection")? / heads;
@@ -2510,7 +2523,7 @@ impl RustDecoder {
                 Attn::Std {
                     q: linear(
                         &format!("{p}.attn_q"),
-                        if output_gate { 2 * qr } else { qr },
+                        q_low_cols.unwrap_or(if output_gate { 2 * qr } else { qr }),
                         hidden,
                     )?,
                     k: if kv_shared { unused()? } else { linear(&format!("{p}.attn_k"), kr, hidden)? },
@@ -2710,6 +2723,11 @@ impl RustDecoder {
                 let lambda_init = 0.8 - 0.6 * (-0.3 * i as f32).exp();
                 let lambda = dot("attn_lambda_q1", "attn_lambda_k1")?.exp() - dot("attn_lambda_q2", "attn_lambda_k2")?.exp() + lambda_init;
                 Some((lambda, 1.0 - lambda_init))
+            } else {
+                None
+            };
+            let q_low = if let Some(q_size) = q_low_cols {
+                Some(Box::new(QLow { norm: vector(mapping, &format!("{p}.attn_q_inter_norm.weight"), q_size)?, wq: linear(&format!("{p}.attn_q_low"), heads * dk, q_size)? }))
             } else {
                 None
             };
@@ -2960,6 +2978,7 @@ impl RustDecoder {
                 },
                 zaya,
                 moa,
+                q_low,
                 ffn_bias,
                 parallel: hybrid::ParallelMixer::load(&cfg, mapping, &p, i, &linear)?,
                 zamba: zamba::ZambaCall::load(&cfg, mapping, i, &linear)?,
@@ -4418,7 +4437,7 @@ impl RustDecoder {
                 .transpose()?;
             // FLLM_MERGE_PROJ: q/k/v and gate/up as one Marlin matrix each (instead of seven GEMMs per layer, four)
             let merged_qkv = match &layer.attn {
-                Attn::Std { q, k, v } if merge_on && layer.moa.is_none() && layer.diff.is_none() && layer.zaya.is_none() && layer.value_moe.is_none() && !layer.output_gate && self.cfg.qkv_clip.is_none() && !layer.kv_shared && !layer.k_eq_v => {
+                Attn::Std { q, k, v } if merge_on && layer.moa.is_none() && layer.q_low.is_none() && layer.diff.is_none() && layer.zaya.is_none() && layer.value_moe.is_none() && !layer.output_gate && self.cfg.qkv_clip.is_none() && !layer.kv_shared && !layer.k_eq_v => {
                     upload_merged(&format!("blk.{i}.attn_qkv"), &[q, k, v])?
                 }
                 _ => None,
@@ -5117,6 +5136,10 @@ impl RustDecoder {
                 }
                 _ => None,
             };
+            let q_low_dev = match layer.q_low.as_ref() {
+                Some(ql) => Some((upload_vec(&ql.norm)?, upload_linear(&format!("blk.{i}.attn_q_low"), &ql.wq)?)),
+                None => None,
+            };
             let ffn_bias_dev = match (&layer.ffn_bias, self.moa_device && self.cfg.moe.is_some()) {
                 (Some(b), true) => Some((upload_vec(&vec![1.0f32; self.cfg.hidden])?, upload_vec(b)?)),
                 _ => None,
@@ -5136,6 +5159,7 @@ impl RustDecoder {
                 host_ffn: ffn_host_exact,
                 host_values: layer.value_moe.is_some() && value_moe_dev.is_none(),
                 moa: moa_dev,
+                q_low: q_low_dev,
                 ffn_bias: ffn_bias_dev,
                 res: match (&layer.res, self.attn_res_device) {
                     (Some(r), true) => Some((upload_vec(&r.attn)?, upload_vec(&r.ffn)?)),
@@ -5943,7 +5967,7 @@ impl RustDecoder {
                 if let Some((q_w, k_w, v_w)) = std_qkv {
                 // 4-bit q/k/v: the three GEMMs leave FP16 and one kernel adds the bias, rotates q and k and writes k and v into the cache
                 let mut fused_qkv = false;
-                let plain_kv = !layer.kv_shared && !layer.k_eq_v && layer.moa.is_none() && layer.diff.is_none() && layer.zaya.is_none() && dev_layer.v_norm.is_none() && cfg.value_scale == 1.0;
+                let plain_kv = !layer.kv_shared && !layer.k_eq_v && layer.moa.is_none() && layer.q_low.is_none() && layer.diff.is_none() && layer.zaya.is_none() && dev_layer.v_norm.is_none() && cfg.value_scale == 1.0;
                 if plain_kv
                     && cfg.rope.dims > 0
                     && cfg.layer_rotates(i)
@@ -6051,7 +6075,7 @@ impl RustDecoder {
                 }
                 // q, k and v from one launch of the tensor-core GEMV where the three are dense 16-bit projections of a decode-sized batch
                 let mut grouped_done = false;
-                if !fused_qkv && !merged_done && !layer.output_gate && !layer.kv_shared && !layer.k_eq_v && layer.value_moe.is_none() && layer.moa.is_none() && rows <= 16 {
+                if !fused_qkv && !merged_done && !layer.output_gate && !layer.kv_shared && !layer.k_eq_v && layer.value_moe.is_none() && layer.moa.is_none() && layer.q_low.is_none() && rows <= 16 {
                     if let (Some(v_w), false) = (v_w, group_off()) {
                         grouped_done = stream
                             .linear_group(
@@ -6078,6 +6102,13 @@ impl RustDecoder {
                         .map_err(err)?;
                     scratch.recycle(projected);
                     gate_buf = Some(gate);
+                } else if let Some((norm, wq)) = &dev_layer.q_low {
+                    let width = norm.size / 4;
+                    let mut low = scratch.acquire(rows * width * 4).map_err(err)?;
+                    stream.quantized_linear(&mut low, &normed_buf, q_w, q_w.bias.as_ref()).map_err(err)?;
+                    device_rms_inplace(&mut **stream, &mut scratch, &mut low, Some(norm), cfg.eps, 1)?;
+                    stream.quantized_linear(&mut q_buf, &low, wq, wq.bias.as_ref()).map_err(err)?;
+                    scratch.recycle(low);
                 } else if let Some(mo) = &dev_layer.moa {
                     moa_route = Some(self.moa_query_device(&mut **stream, &mut scratch, mo, &normed_buf, &mut q_buf, rows)?);
                 } else {
@@ -11298,6 +11329,7 @@ impl RustDecoder {
                     let mut latent_qkv: [Vec<f32>; 3];
                     let mut moe_values: Vec<f32>;
                     let (mut zaya_q, mut zaya_k, mut zaya_v): (Vec<f32>, Vec<f32>, Vec<f32>);
+                    let (mut step_q, mut step_k, mut step_v): (Vec<f32>, Vec<f32>, Vec<f32>);
                     let mut moa_q: Vec<f32>;
                     let mut moa_k: Vec<f32>;
                     let mut moa_v: Vec<f32>;
@@ -11317,6 +11349,19 @@ impl RustDecoder {
                                 zaya_k = ck;
                                 zaya_v = cv;
                                 (&mut zaya_q, &mut zaya_k, &mut zaya_v)
+                            } else if let Some(ql) = &layer.q_low {
+                                // Step-3: the query goes through a norm between its two projections
+                                let qkv = Linear::forward_group_with_workspace(&[q, k, v], &normed, &mut qkv_workspace)?;
+                                let [q_all, k_all, v_all] = qkv else {
+                                    return Err("invalid QKV projection group".into());
+                                };
+                                for row in q_all.chunks_exact_mut(ql.norm.len()) {
+                                    rms(row, &ql.norm, cfg.eps);
+                                }
+                                step_q = ql.wq.forward(&q_all)?;
+                                step_k = k_all.clone();
+                                step_v = v_all.clone();
+                                (&mut step_q, &mut step_k, &mut step_v)
                             } else if let Some(moa) = &layer.moa {
                                 // every selected expert gives a query of kv_heads heads; the heads of one key head are made adjacent (key head g, expert j: head g * top_k + j)
                                 moa_k = moa.k.forward(&normed)?;
@@ -11891,6 +11936,7 @@ impl RustDecoder {
                     // ZAYA stages the recurrent state of the convolutions from host tables each step, a mixture of attention heads keeps its routing in pool buffers
                     && layer.zaya.is_none()
                     && layer.moa.is_none()
+                    && layer.q_low.is_none()
                     && ((dev.q.is_some() && dev.k.is_some() && dev.v.is_some())
                         || dev.qkv.is_some()
                         // Gemma 4: the values are the keys (global layers), or the layer reads the cache of an earlier one (only q)

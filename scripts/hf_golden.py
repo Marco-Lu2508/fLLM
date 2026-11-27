@@ -1085,6 +1085,17 @@ def config_for(arch: str, vocab: int):
             rms_norm_eps=1e-5, rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
             emb_neighbor_num=3, emb_split_num=2, ngram_vocab_size_ratio=4,
         ),
+        # Step-3: multi-query attention with a normed low-rank query, dense first layer, softmax experts plus a shared expert; the model code is not part of
+        # transformers: set STEP3_CODE to a directory with the repository's configuration_step3.py, modeling_step3.py and vision_encoder.py
+        "step3": lambda: _step3_modules()[0].Step3VLConfig(
+            vision_config=dict(hidden_size=32, intermediate_size=64, output_hidden_size=32, num_hidden_layers=1, num_attention_heads=2, image_size=28, patch_size=14),
+            text_config=dict(
+                vocab_size=vocab, hidden_size=64, intermediate_size=128, num_attention_heads=4, num_attention_groups=1, num_hidden_layers=3, max_position_embedding=256,
+                moe_intermediate_size=32, moe_num_experts=8, moe_top_k=3, share_expert_dim=32, share_q_dim=48, head_dim=16, moe_layers_enum="1,2", rope_theta=10000.0,
+                rms_norm_eps=1e-5, bos_token_id=1, eos_token_id=2, pad_token_id=3,
+            ),
+            understand_projector_stride=2, projector_bias=False,
+        ),
         # GLM-5-Next text model: delta layers, NoPE latent attention with the k-pool indexer (pools of 4 keys, 2 pools + tail), 3 residual streams
         "glm5_next": lambda: T.Glm5NextConfig(
             text_config=dict(
@@ -1402,6 +1413,35 @@ def stable_topk(margins=None, index_topk=None):
 
 
 
+def _step3_modules():
+    """(configuration module, modeling module) of the Step-3 repository (`STEP3_CODE`); torchvision is replaced by stubs, the text model never calls it."""
+    import importlib
+    import importlib.machinery
+    from unittest import mock
+
+    path = os.environ.get("STEP3_CODE")
+    if not path:
+        raise SystemExit("set STEP3_CODE to the directory with configuration_step3.py, modeling_step3.py and vision_encoder.py")
+
+    class Stub(types.ModuleType):
+        def __getattr__(self, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return mock.MagicMock()
+
+    if "torchvision" not in sys.modules:
+        for name in ("torchvision", "torchvision.transforms", "torchvision.transforms.functional"):
+            module = Stub(name)
+            module.__spec__ = importlib.machinery.ModuleSpec(name, None)
+            module.__path__ = []
+            sys.modules[name] = module
+    if "s3pkg" not in sys.modules:
+        package = types.ModuleType("s3pkg")
+        package.__path__ = [path]
+        sys.modules["s3pkg"] = package
+    return importlib.import_module("s3pkg.configuration_step3"), importlib.import_module("s3pkg.modeling_step3")
+
+
 _LAST_MODEL = [None]  # the model of the last `build` (for references that must generate with it)
 
 
@@ -1443,8 +1483,18 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
     vocab = tok.get_vocab_size()
     cfg = config_for(arch, vocab)
     torch.manual_seed(seed)
+    if arch == "step3":
+        modeling = _step3_modules()[1]
+        for cls in (modeling.Step3vForConditionalGeneration, modeling.Step3Model):
+            cls._tied_weights_keys = {}  # the list of the repository is not the mapping transformers 5 expects; the head is not tied
+        model = modeling.Step3vForConditionalGeneration._from_config(cfg, dtype=torch.float32, attn_implementation="eager")
+        model.eval()
     try:
+        if arch == "step3":
+            raise KeyError(arch)
         model = T.AutoModelForCausalLM.from_config(cfg, dtype=torch.float32, attn_implementation="eager", trust_remote_code=True)
+    except KeyError:
+        pass
     except (ValueError, TypeError):
         # newer architectures that the Auto mapping does not know yet
         base = type(cfg).__name__.replace("Config", "")
