@@ -3,7 +3,7 @@
 //! `mamba_gate_norm`, plus `norm_rms` for the Mamba-1 B / C normalisation.
 
 use super::*;
-use crate::backend::{DeltaShape, RgLruShape, XlstmShape};
+use crate::backend::{DeltaShape, RgLruShape, XlstmShape, ZayaShape};
 
 /// Tokens per workgroup column of the convolution shaders (must be >= conv_kernel - 1).
 pub const CONV_CHUNK: usize = 16;
@@ -980,4 +980,45 @@ pub fn plan_doge_cdmoe(rows: usize, hidden: usize, keys: usize, top_k: usize, no
         [rows as u32, 1, 1],
         Slots::new().read("x").read("router").read("down").read("up").write("out"),
     )
+}
+
+/// `channel_affine`: `x = (x + bias) * scale` per channel over `rows x width` floats.
+pub fn plan_channel_affine(rows: usize, width: usize) -> Result<OpPlan, BackendError> {
+    if rows == 0 || width == 0 {
+        return Err(invalid("channel affine of an empty tensor"));
+    }
+    plan("channel_affine", Push::new().u("count", rows * width).u("width", width), groups_1d(rows * width, 256), Slots::new().read("scale").read("bias").rw("x"))
+}
+
+/// `zaya_cca` for one run: ZAYA's compressed convolutional attention, one workgroup per head group (see the shader). Slots: `q_in`, `k_in`, `v_cur`, `v_del`, `wts`,
+/// `state`, `q_out`, `k_out`, `v_out`.
+pub fn plan_zaya_cca(run_index: usize, run: &RunSpec, shape: &ZayaShape, state_off: usize) -> Result<OpPlan, BackendError> {
+    if shape.heads == 0
+        || shape.kv_heads == 0
+        || !shape.heads.is_multiple_of(shape.kv_heads)
+        || shape.head_dim == 0
+        || shape.head_dim > 256
+        || !shape.value_width().is_multiple_of(2)
+        || shape.k0 == 0
+        || shape.k0 > 8
+        || shape.k1 == 0
+        || shape.k1 > 8
+    {
+        return Err(invalid("ZAYA attention shape outside the supported range (head width <= 256, kernels 1..=8)"));
+    }
+    if run.rows == 0 {
+        return Err(invalid("ZAYA attention of an empty run"));
+    }
+    let push = Push::new()
+        .u("heads", shape.heads)
+        .u("kv_heads", shape.kv_heads)
+        .u("hd", shape.head_dim)
+        .u("k0", shape.k0)
+        .u("k1", shape.k1)
+        .u("row0", run.first_row)
+        .u("n", run.rows)
+        .b("reset", run.reset)
+        .u("state_off", state_off);
+    let slots = Slots::new().read("q_in").read("k_in").read("v_cur").read("v_del").read("wts").run_state("state", run_index).write("q_out").write("k_out").write("v_out");
+    plan("zaya_cca", push, [(shape.heads + shape.kv_heads) as u32, 1, 1], slots)
 }

@@ -408,6 +408,10 @@ int fllm_act_launch(cudaStream_t s, const float *x, float *out, size_t n, int mo
 int fllm_xielu_launch(cudaStream_t s, const float *x, float *out, size_t n, float ap, float an, float beta, float eps);
 int fllm_diff_expand_v_launch(cudaStream_t s, float *out, const float *v, size_t rows, int kv_heads, int d);
 int fllm_channel_scale_launch(cudaStream_t s, float *x, const float *scale, size_t rows, int width);
+int fllm_channel_affine_launch(cudaStream_t s, float *x, const float *scale, const float *bias, size_t rows, int width);
+int fllm_zaya_supported(int heads, int kv_heads, int hd, int k0, int k1);
+int fllm_zaya_cca_launch(cudaStream_t s, const void *runs, int nruns, int heads, int kv_heads, int hd, int k0, int k1, size_t state_off, const float *q_in,
+                         const float *k_in, const float *v_cur, const float *v_del, const float *wts, float *q_out, float *k_out, float *v_out);
 int fllm_doge_cdmoe_launch(cudaStream_t s, float *out, const float *x, const float *router, const float *down, const float *up, size_t rows, int hidden, int keys,
                            int top_k, int norm, int act);
 int fllm_doge_attention_launch(cudaStream_t s, const float *q, const uint16_t *kpool, const uint16_t *vpool, float *out, const int64_t *tables,

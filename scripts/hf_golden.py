@@ -690,7 +690,7 @@ def config_for(arch: str, vocab: int):
         # compressed convolutional attention (a sliding-window layer in the middle) and a router MLP with the one-layer-back router state
         "zaya": lambda: T.ZayaConfig(
             vocab_size=vocab, hidden_size=64, num_hidden_layers=3, num_attention_heads=4, num_key_value_heads=2, head_dim=16,
-            max_position_embeddings=256, rms_norm_eps=1e-5, moe_intermediate_size=48, num_experts=4, num_experts_per_tok=1,
+            max_position_embeddings=256, rms_norm_eps=1e-5, moe_intermediate_size=64, num_experts=4, num_experts_per_tok=1,
             router_hidden_size=32, layer_types=["hybrid", "hybrid_sliding", "hybrid"], sliding_window=6,
             rope_parameters={"hybrid": {"rope_type": "default", "rope_theta": 50000.0, "partial_rotary_factor": 0.5},
                              "hybrid_sliding": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5}},

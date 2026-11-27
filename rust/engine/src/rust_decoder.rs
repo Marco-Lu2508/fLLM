@@ -296,6 +296,21 @@ struct DeviceDoge {
     cdmoe: Option<(crate::backend::DeviceBuffer, crate::backend::DeviceBuffer, crate::backend::DeviceBuffer)>,
 }
 
+/// Device copy of a ZAYA layer: the delayed value projection, the packed convolution weights, the four residual vectors of each block and the router MLP.
+struct DeviceZaya {
+    v_delayed: crate::backend::DeviceWeight,
+    /// Depthwise taps and bias, grouped taps and bias, key scales (see `ZayaShape::weight_floats`).
+    weights: crate::backend::DeviceBuffer,
+    res_attn: [crate::backend::DeviceBuffer; 4],
+    res_mlp: [crate::backend::DeviceBuffer; 4],
+    router_down: crate::backend::DeviceWeight,
+    router_scale: Option<crate::backend::DeviceBuffer>,
+    router_norm: crate::backend::DeviceBuffer,
+    fc1: crate::backend::DeviceWeight,
+    fc2: crate::backend::DeviceWeight,
+    ordinal: usize,
+}
+
 /// Recurrent state of one live sequence on the device: one buffer for all DeltaNet layers.
 struct DeviceSeq {
     used: u64,
@@ -944,6 +959,8 @@ pub struct DeviceLayerWeights {
     pub attn_norm_gate: Option<(crate::backend::DeviceWeight, crate::backend::DeviceWeight)>,
     /// Doge: residual vectors, dynamic mask weights and routed experts on the device.
     doge: Option<DeviceDoge>,
+    /// ZAYA: convolutional attention, residual vectors and router on the device.
+    zaya: Option<DeviceZaya>,
     pub ffn_norm_gate: Option<(crate::backend::DeviceWeight, crate::backend::DeviceWeight)>,
     /// BitNet sub-norms: over the attention output in front of the output projection / over the activated feed-forward product.
     pub attn_sub_norm: Option<crate::backend::DeviceBuffer>,
@@ -1041,6 +1058,7 @@ impl DeviceLayerWeights {
             attn_norm_gate: None,
             ffn_norm_gate: None,
             doge: None,
+            zaya: None,
             attn_sub_norm: None,
             ffn_sub_norm: None,
             q_norm: None,
@@ -1699,6 +1717,8 @@ pub struct RustDecoder {
     axk2_device: bool,
     /// Doge's dynamic mask attention, residual vectors and routed experts run on the device.
     doge_device: bool,
+    /// ZAYA's convolutional attention, residual vectors and router run on the device (the experts need the device MoE path).
+    zaya_device: bool,
     /// The accelerator runs DeepSeek-V4 completely (`hc_device` is set with it); set when the model is attached.
     v4_device: bool,
     /// Qwen3.8-Flash-Next runs on the device (streams, n-gram embeddings and token indexer included).
@@ -2502,7 +2522,9 @@ impl RustDecoder {
                             down: load("down", width, eff)?,
                         })
                     };
-                let experts = (0..moe.experts)
+                // ZAYA: the last router class (skip) has no expert
+                let loaded = if cfg.zaya.is_some() { moe.experts - moe.zero_experts } else { moe.experts };
+                let experts = (0..loaded)
                     .map(|e| {
                         // expert parallelism loads only the experts of this rank
                         if let Some(ctx) = &par {
@@ -2559,7 +2581,7 @@ impl RustDecoder {
                         None
                     },
                     router: match cfg.zaya.as_ref() {
-                        Some(z) => linear(&format!("{p}.ffn_gate_inp"), moe.experts + 1, z.router)?,
+                        Some(z) => linear(&format!("{p}.ffn_gate_inp"), moe.experts, z.router)?,
                         None => linear(&format!("{p}.ffn_gate_inp"), moe.experts, hidden)?,
                     },
                     experts,
@@ -2683,7 +2705,7 @@ impl RustDecoder {
                     router_norm: vector(mapping, &format!("{p}.zaya_router_norm.weight"), zc.router)?,
                     fc1: linear(&format!("{p}.zaya_router_fc1"), zc.router, zc.router)?,
                     fc2: linear(&format!("{p}.zaya_router_fc2"), zc.router, zc.router)?,
-                    balancing: vector(mapping, &format!("{p}.zaya_router_bias.weight"), moe_experts + 1)?,
+                    balancing: vector(mapping, &format!("{p}.exp_probs_b.bias"), moe_experts)?,
                 }))
             } else {
                 None
@@ -3091,6 +3113,7 @@ impl RustDecoder {
             diff_device: false,
             axk2_device: false,
             doge_device: false,
+            zaya_device: false,
             hc_device: false,
             v4_device: false,
             q4_device: false,
@@ -3609,8 +3632,8 @@ impl RustDecoder {
         if (layer.attn_norm_gate.is_some() || layer.ffn_norm_gate.is_some() || cfg.mla_q_gate) && (!self.axk2_device || self.mla_latent) {
             return Some("A.X-K2 gated norms and query gate (no device kernels)");
         }
-        if layer.zaya.is_some() {
-            return Some("ZAYA convolutional attention, residual vectors and router (no device kernels)");
+        if layer.zaya.is_some() && !self.zaya_device {
+            return Some("ZAYA convolutional attention, residual vectors and router (no device kernels for this backend or expert format, or FLLM_ZAYA_HOST=1)");
         }
         if layer.doge.is_some() && !self.doge_device {
             return Some("Doge dynamic mask attention, residual vectors and product-key experts (no device kernels for this backend, cache format or context length, or FLLM_DOGE_HOST=1)");
@@ -3928,6 +3951,10 @@ impl RustDecoder {
         self.m3_device = m3_device;
         self.ink_device = self.cfg.inkling.is_some() && self.ink_device_possible(&*backend);
         self.xielu_device = backend.create_stream().is_ok_and(|s| s.supports_xielu()) && !std::env::var_os("FLLM_XIELU_HOST").is_some();
+        self.zaya_device = self.zaya_shape().is_some_and(|shape| backend.create_stream().is_ok_and(|s| s.supports_zaya(&shape) && s.supports_arch_ops()))
+            && backend.moe_device_available()
+            && self.zaya_experts_ok()
+            && !std::env::var_os("FLLM_ZAYA_HOST").is_some();
         self.doge_device = self.kv_kind == 1
             && matches!(self.cfg.activation, Activation::Silu | Activation::GeluTanh)
             && self.cfg.doge.as_ref().is_some_and(|d| d.experts == 0 || ((d.experts as f64).sqrt().floor() as usize <= 128 && d.top_k <= 16))
@@ -4262,6 +4289,7 @@ impl RustDecoder {
                 && std::env::var_os("FLLM_RGLRU_HOST").is_none()
         });
         let mut rglru_layers = 0usize;
+        let mut zaya_layers = 0usize;
         let mut xlstm_layers = 0usize;
         let mut mamba_layers = 0usize;
         let mut conv_layers = 0usize;
@@ -4301,7 +4329,7 @@ impl RustDecoder {
                 .transpose()?;
             // FLLM_MERGE_PROJ: q/k/v and gate/up as one Marlin matrix each (instead of seven GEMMs per layer, four)
             let merged_qkv = match &layer.attn {
-                Attn::Std { q, k, v } if merge_on && layer.diff.is_none() && layer.value_moe.is_none() && !layer.output_gate && self.cfg.qkv_clip.is_none() && !layer.kv_shared && !layer.k_eq_v => {
+                Attn::Std { q, k, v } if merge_on && layer.diff.is_none() && layer.zaya.is_none() && layer.value_moe.is_none() && !layer.output_gate && self.cfg.qkv_clip.is_none() && !layer.kv_shared && !layer.k_eq_v => {
                     upload_merged(&format!("blk.{i}.attn_qkv"), &[q, k, v])?
                 }
                 _ => None,
@@ -4961,6 +4989,29 @@ impl RustDecoder {
                 host_ffn: ffn_host_exact,
                 host_values: layer.value_moe.is_some() && value_moe_dev.is_none(),
                 attn_gate: layer.attn_gate.as_ref().map(|g| upload_linear(&format!("blk.{i}.attn_gate"), g)).transpose()?,
+                zaya: match (&layer.zaya, self.zaya_shape()) {
+                    (Some(z), Some(shape)) if self.zaya_device => {
+                        zaya_layers += 1;
+                        let mut packed: Vec<f32> = Vec::with_capacity(shape.weight_floats());
+                        for part in [&z.conv_dw, &z.conv_dw_bias, &z.conv_g, &z.conv_g_bias, &z.temp] {
+                            packed.extend_from_slice(part);
+                        }
+                        let four = |r: &[Vec<f32>; 4]| -> Result<[crate::backend::DeviceBuffer; 4], String> { Ok([upload_vec(&r[0])?, upload_vec(&r[1])?, upload_vec(&r[2])?, upload_vec(&r[3])?]) };
+                        Some(DeviceZaya {
+                            v_delayed: upload_linear(&format!("blk.{i}.zaya_v_del"), &z.v_delayed)?,
+                            weights: upload_vec(&packed)?,
+                            res_attn: four(&z.res_attn)?,
+                            res_mlp: four(&z.res_mlp)?,
+                            router_down: upload_linear(&format!("blk.{i}.zaya_router_down"), &z.router_down)?,
+                            router_scale: z.router_scale.as_ref().map(upload_vec).transpose()?,
+                            router_norm: upload_vec(&z.router_norm)?,
+                            fc1: upload_linear(&format!("blk.{i}.zaya_router_fc1"), &z.fc1)?,
+                            fc2: upload_linear(&format!("blk.{i}.zaya_router_fc2"), &z.fc2)?,
+                            ordinal: zaya_layers - 1,
+                        })
+                    }
+                    _ => None,
+                },
                 doge: match (&layer.doge, self.cfg.doge.as_ref()) {
                     (Some(d), Some(_)) if self.doge_device => {
                         let mut dt = d.a.clone();
@@ -5527,6 +5578,8 @@ impl RustDecoder {
         let mut carried_norm: Option<crate::backend::DeviceBuffer> = None;
         // LongCat-Flash: the shortcut experts of the layer before, added after the feed-forward block of the layer that follows
         let mut pending_shortcut_dev: Option<crate::backend::DeviceBuffer> = None;
+        // ZAYA: the router state of the layer before
+        let mut zaya_prev: Option<crate::backend::DeviceBuffer> = None;
         // FLLM_LAYER_CHECK: the input of the layer that made the shortcut experts, for the host run of the pair
         let mut check_pair: Option<Vec<f32>> = None;
         // selection of the lightning indexer of the last layer that has one (the layers after it without an indexer reuse it)
@@ -5702,7 +5755,7 @@ impl RustDecoder {
                 if let Some((q_w, k_w, v_w)) = std_qkv {
                 // 4-bit q/k/v: the three GEMMs leave FP16 and one kernel adds the bias, rotates q and k and writes k and v into the cache
                 let mut fused_qkv = false;
-                let plain_kv = !layer.kv_shared && !layer.k_eq_v && layer.diff.is_none() && dev_layer.v_norm.is_none() && cfg.value_scale == 1.0;
+                let plain_kv = !layer.kv_shared && !layer.k_eq_v && layer.diff.is_none() && layer.zaya.is_none() && dev_layer.v_norm.is_none() && cfg.value_scale == 1.0;
                 if plain_kv
                     && cfg.rope.dims > 0
                     && cfg.layer_rotates(i)
@@ -5883,6 +5936,29 @@ impl RustDecoder {
                     stream.diff_expand_v(&mut expanded, &v_buf, rows, layer_kv_heads, dk).map_err(err)?;
                     scratch.recycle(std::mem::replace(&mut v_buf, expanded));
                 }
+                // ZAYA: convolutions over time, residual paths, L2 norm and the delayed value half replace the plain projections
+                if let (Some(dz), Some(shape)) = (&dev_layer.zaya, self.zaya_shape()) {
+                    if delta_plan.is_none() {
+                        let count = self.layers.iter().filter(|l| l.zaya.is_some()).count();
+                        delta_plan = Some(self.state_plan(count, shape.layer_state_bytes(), tables, lengths)?);
+                    }
+                    let plan = delta_plan.as_deref().unwrap_or(&[]);
+                    let resets = self.delta_claim(dz.ordinal, plan)?;
+                    let runs: Vec<crate::backend::DeltaRun<'_>> =
+                        plan.iter().zip(&resets).map(|(p, &reset)| crate::backend::DeltaRun { state: &p.buf, first_row: p.start, rows: p.n, reset }).collect();
+                    let half = shape.value_width() / 2;
+                    let mut v_delayed = scratch.acquire(rows * half * 4).map_err(err)?;
+                    stream.quantized_linear(&mut v_delayed, &normed_buf, &dz.v_delayed, dz.v_delayed.bias.as_ref()).map_err(err)?;
+                    let mut q_out = scratch.acquire(rows * shape.heads * shape.head_dim * 4).map_err(err)?;
+                    let mut k_out = scratch.acquire(rows * shape.kv_heads * shape.head_dim * 4).map_err(err)?;
+                    let mut v_out = scratch.acquire(rows * shape.value_width() * 4).map_err(err)?;
+                    let offset = dz.ordinal * shape.layer_state_bytes();
+                    stream.zaya_cca(&shape, &dz.weights, &runs, offset, &q_buf, &k_buf, &v_buf, &v_delayed, &mut q_out, &mut k_out, &mut v_out).map_err(err)?;
+                    scratch.recycle(v_delayed);
+                    scratch.recycle(std::mem::replace(&mut q_buf, q_out));
+                    scratch.recycle(std::mem::replace(&mut k_buf, k_out));
+                    scratch.recycle(std::mem::replace(&mut v_buf, v_out));
+                }
                 if i == 0 {
                     debug_sum(&mut **stream, "Qcur-0 (proj+bias)", &q_buf);
                     debug_sum(&mut **stream, "Kcur-0 (proj+bias)", &k_buf);
@@ -5953,7 +6029,7 @@ impl RustDecoder {
                             stream.rope(&mut q_buf, &mut k_buf, &axis_positions, &axis_params).map_err(err)?;
                         }
                     } else {
-                        if !cfg.qk_norm_after_rope && !layer.kv_shared && layer.diff.is_none() && std::env::var_os("FLLM_DEBUG_SUMS").is_none() {
+                        if !cfg.qk_norm_after_rope && !layer.kv_shared && layer.diff.is_none() && layer.zaya.is_none() && std::env::var_os("FLLM_DEBUG_SUMS").is_none() {
                             kv_written = stream
                                 .rope_kv_write(&mut q_buf, &k_buf, &v_buf, dev_kv, kvi, &positions, &slots, &rope_params)
                                 .map_err(err)?;
@@ -6089,6 +6165,7 @@ impl RustDecoder {
                     }
                     gate_buf = Some(gate);
                 }
+                dump_device(&mut **stream, "q", i, &q_buf, rows * layer_heads * dk);
                 let mut attn_buf = match latent_attn.take() {
                     Some(buf) => buf,
                     None => scratch.acquire(rows * layer_heads * dv * 4).map_err(err)?,
@@ -6182,6 +6259,7 @@ impl RustDecoder {
                             .map_err(err)?;
                     }
                 }
+                dump_device(&mut **stream, "attnout", i, &attn_buf, rows * layer_heads * dv);
                 if let Some((lambda, scale)) = layer.diff {
                     let mut mixed = scratch.acquire(rows * (layer_heads / 2) * dv * 4).map_err(err)?;
                     stream.diff_attn_mix(&mut mixed, &attn_buf, rows, layer_heads, dv, lambda, scale, cfg.eps).map_err(err)?;
@@ -6206,7 +6284,7 @@ impl RustDecoder {
                 let mut out_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                 let out_w = dev_layer.out.as_ref().ok_or("attention layer without a device output projection")?;
                 // the feed-forward norm (and the activation format of its first GEMM) can join the residual add of the output projection
-                let ffn_target = if cfg.gated_norm_rank == 0 && !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.par_mamba.is_none() && dev_layer.post_attn_norm.is_none() && dev_layer.laurel.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
+                let ffn_target = if cfg.gated_norm_rank == 0 && dev_layer.zaya.is_none() && !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.par_mamba.is_none() && dev_layer.post_attn_norm.is_none() && dev_layer.laurel.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
                     dev_layer
                         .ffn_norm
                         .as_ref()
@@ -6230,6 +6308,7 @@ impl RustDecoder {
                 // the output projection is added straight into the residual stream when nothing sits between them
                 if !fused {
                     fused = !tp
+                        && dev_layer.zaya.is_none()
                         && dev_layer.post_attn_norm.is_none()
                         && dev_layer.laurel.is_none()
                         && !parallel
@@ -6262,6 +6341,12 @@ impl RustDecoder {
                         cfg.post_eps,
                         self.groups,
                     )?;
+                    dump_device(&mut **stream, "branch", i, &out_buf, rows * hidden);
+                    // ZAYA: (branch + bias) * scale + (x + bias) * scale
+                    if let Some(dz) = &dev_layer.zaya {
+                        stream.channel_affine(&mut out_buf, &dz.res_attn[0], &dz.res_attn[1], rows, hidden).map_err(err)?;
+                        stream.channel_affine(&mut x_buf, &dz.res_attn[2], &dz.res_attn[3], rows, hidden).map_err(err)?;
+                    }
                     if parallel {
                         deferred_branch = Some(std::mem::replace(
                             &mut out_buf,
@@ -6454,6 +6539,8 @@ impl RustDecoder {
             if let Some(g) = &dev_layer.ffn_norm_gate {
                 Self::device_norm_gate(&mut **stream, &mut scratch, g, &mut ffn_normed, rows)?;
             }
+            dump_device(&mut **stream, "attn", i, &x_buf, rows * hidden);
+            dump_device(&mut **stream, "ffnin", i, &ffn_normed, rows * hidden);
             // Doge: the stream is scaled per channel, then the routed experts join it (the shared expert is added by the down projection below)
             if let (Some(dd), Some(dc)) = (&dev_layer.doge, cfg.doge.as_ref()) {
                 stream.channel_scale(&mut x_buf, &dd.post_res, rows, hidden).map_err(err)?;
@@ -6649,7 +6736,44 @@ impl RustDecoder {
                 let mut streamed = None;
                 let mut host_in = Vec::new();
                 if let (Ffn::Moe(_), Some(dm)) = (&layer.ffn, dev_layer.moe.as_ref()) {
-                    streamed = self.moe_fast(&mut **stream, &mut scratch, i, dm, &ffn_normed, rows)?;
+                    if let (Some(dz), Some(fast)) = (&dev_layer.zaya, dm.fast.as_ref()) {
+                        // ZAYA's router: down projection (plus the state of the layer before), norm, two GELU layers, then the class scores
+                        let zc = cfg.zaya.as_ref().ok_or("missing ZAYA configuration")?;
+                        let rh = zc.router;
+                        let mut state = scratch.acquire(rows * rh * 4).map_err(err)?;
+                        stream.quantized_linear(&mut state, &ffn_normed, &dz.router_down, dz.router_down.bias.as_ref()).map_err(err)?;
+                        if let (Some(scale), Some(prev)) = (&dz.router_scale, zaya_prev.as_ref()) {
+                            let mut carried = scratch.acquire(rows * rh * 4).map_err(err)?;
+                            stream.copy_buffer(&mut carried, prev).map_err(err)?;
+                            stream.channel_scale(&mut carried, scale, rows, rh).map_err(err)?;
+                            stream.residual_add(&mut state, &carried, 1.0).map_err(err)?;
+                            scratch.recycle(carried);
+                        }
+                        let mut next = scratch.acquire(rows * rh * 4).map_err(err)?;
+                        stream.copy_buffer(&mut next, &state).map_err(err)?;
+                        if let Some(old) = zaya_prev.replace(next) {
+                            scratch.recycle(old);
+                        }
+                        device_rms_inplace(&mut **stream, &mut scratch, &mut state, Some(&dz.router_norm), cfg.eps, 1)?;
+                        let mut h1 = scratch.acquire(rows * rh * 4).map_err(err)?;
+                        stream.quantized_linear(&mut h1, &state, &dz.fc1, dz.fc1.bias.as_ref()).map_err(err)?;
+                        let mut a1 = scratch.acquire(rows * rh * 4).map_err(err)?;
+                        stream.activation(&mut a1, &h1, 2).map_err(err)?;
+                        stream.quantized_linear(&mut h1, &a1, &dz.fc2, dz.fc2.bias.as_ref()).map_err(err)?;
+                        stream.activation(&mut a1, &h1, 2).map_err(err)?;
+                        let classes = cfg.moe.as_ref().map_or(0, |m| m.experts);
+                        let mut logits = scratch.acquire(rows * classes * 4).map_err(err)?;
+                        stream.quantized_linear(&mut logits, &a1, &fast.router, fast.router.bias.as_ref()).map_err(err)?;
+                        streamed = self.moe_fast_ext(&mut **stream, &mut scratch, i, dm, &ffn_normed, rows, Some(&logits))?;
+                        for buf in [state, h1, a1, logits] {
+                            scratch.recycle(buf);
+                        }
+                        if streamed.is_none() {
+                            return Err(format!("ZAYA layer {i}: the experts need the device MoE path (set FLLM_ZAYA_HOST=1 to run the layer on the host)"));
+                        }
+                    } else {
+                        streamed = self.moe_fast(&mut **stream, &mut scratch, i, dm, &ffn_normed, rows)?;
+                    }
                 }
                 if streamed.is_none() && (big || dev_layer.moe.is_some()) && !dev_layer.host_ffn {
                     match &layer.ffn {
@@ -6750,10 +6874,16 @@ impl RustDecoder {
                     cfg.post_eps,
                     self.groups,
                 )?;
+                dump_device(&mut **stream, "moeout", i, &ffn_out_buf, rows * hidden);
+                if let Some(dz) = &dev_layer.zaya {
+                    stream.channel_affine(&mut ffn_out_buf, &dz.res_mlp[0], &dz.res_mlp[1], rows, hidden).map_err(err)?;
+                    stream.channel_affine(&mut x_buf, &dz.res_mlp[2], &dz.res_mlp[3], rows, hidden).map_err(err)?;
+                }
                 stream
                     .residual_add(&mut x_buf, &ffn_out_buf, cfg.residual_scale)
                     .map_err(err)?;
                 scratch.recycle(ffn_out_buf);
+                dump_device(&mut **stream, "ffn", i, &x_buf, rows * hidden);
             }
             if layer.takes_shortcut {
                 if let Some(buf) = pending_shortcut_dev.take() {
@@ -7549,6 +7679,27 @@ impl RustDecoder {
             rank: mc.rank,
             conv_kernel: mc.conv_kernel,
             bc_rms_eps: mc.bc_rms_eps,
+        })
+    }
+
+    fn zaya_shape(&self) -> Option<crate::backend::ZayaShape> {
+        let z = self.cfg.zaya.as_ref()?;
+        self.layers.iter().any(|l| l.zaya.is_some()).then(|| crate::backend::ZayaShape { heads: self.cfg.heads, kv_heads: self.cfg.kv_heads, head_dim: self.cfg.layer_head_dim(0), k0: z.k0, k1: z.k1 })
+    }
+
+    /// Whether the experts of every ZAYA layer can take the device MoE path (a packed or half-precision format with widths the kernels accept).
+    fn zaya_experts_ok(&self) -> bool {
+        self.layers.iter().all(|l| match &l.ffn {
+            Ffn::Moe(moe) => moe.experts.first().is_some_and(|e| {
+                let kinds: Vec<i32> = [e.gate.as_ref(), Some(&e.up), Some(&e.down)]
+                    .into_iter()
+                    .flatten()
+                    .map(|lin| lin.packed_weights().map_or(0, |(k, _)| i32::try_from(k).unwrap_or(-1)))
+                    .collect();
+                let ok = |id: i32| matches!(id, 1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40);
+                kinds.iter().all(|&k| ok(k)) && e.up.cols.is_multiple_of(32) && e.up.rows.is_multiple_of(32)
+            }),
+            _ => true,
         })
     }
 
@@ -9135,11 +9286,26 @@ impl RustDecoder {
         x: &crate::backend::DeviceBuffer,
         rows: usize,
     ) -> Result<Option<crate::backend::DeviceBuffer>, String> {
+        self.moe_fast_ext(stream, scratch, layer_idx, dm, x, rows, None)
+    }
+
+    /// `moe_fast` with router scores computed by the caller (`external_logits`, `rows x experts`; ZAYA's router MLP).
+    #[allow(clippy::too_many_arguments)]
+    fn moe_fast_ext(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        layer_idx: usize,
+        dm: &DeviceMoe,
+        x: &crate::backend::DeviceBuffer,
+        rows: usize,
+        external_logits: Option<&crate::backend::DeviceBuffer>,
+    ) -> Result<Option<crate::backend::DeviceBuffer>, String> {
         let (Some(fast), Some(cfg), Some(mode)) = (dm.fast.as_ref(), self.cfg.moe.as_ref(), self.device_glu_mode(layer_idx)) else {
             return Ok(None);
         };
         if let Some(device) = fast.device.as_ref() {
-            return self.moe_device(stream, scratch, layer_idx, dm, fast, device, x, rows);
+            return self.moe_device(stream, scratch, layer_idx, dm, fast, device, x, rows, external_logits);
         }
         if rows == 0 || rows > 4 || cfg.zero_experts > 0 {
             return Ok(None);
@@ -10483,7 +10649,7 @@ impl RustDecoder {
             && !self.m3_device
             && self.layers.len() == weights.layers.len()
             && std::env::var_os("FLLM_LAYER_CHECK").is_none()
-            && self.layers.iter().zip(&weights.layers).all(|(layer, dev)| matches!(layer.attn, Attn::Std { .. }) && !dev.host_layer)
+            && self.layers.iter().zip(&weights.layers).all(|(layer, dev)| matches!(layer.attn, Attn::Std { .. }) && layer.zaya.is_none() && !dev.host_layer)
     }
 
     /// One batch through this decoder's stage (the whole model when it is not part of a parallel group).
@@ -11926,6 +12092,17 @@ impl RustDecoder {
 /// after the FFN branch of every host layer, and the projection results and attention output of
 /// each layer, to `dir/l<layer>_<tag>.f32` (raw little-endian f32). `scripts/cmpdump.py` compares
 /// two such directories (two tiers, thread counts or kernel variants).
+/// `FLLM_DUMP_LAYERS`: the device buffer `buf` (`floats` values) next to the host dumps of the same tag.
+fn dump_device(stream: &mut dyn crate::backend::Stream, tag: &str, layer: usize, buf: &crate::backend::DeviceBuffer, floats: usize) {
+    if std::env::var_os("FLLM_DUMP_LAYERS").is_none() || buf.size < floats * 4 {
+        return;
+    }
+    let mut host = vec![0.0f32; floats];
+    if stream.download(cast_f32_to_u8_mut(&mut host), buf).is_ok() {
+        dump_layer(tag, layer, &host);
+    }
+}
+
 fn dump_layer(tag: &str, layer: usize, x: &[f32]) {
     use std::io::Write;
     static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();

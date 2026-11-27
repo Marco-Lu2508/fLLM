@@ -75,6 +75,14 @@ pub(crate) fn plan(cfg: &Value) -> Result<Plan, String> {
     let (swa_theta, _) = rope(cfg, "hybrid_sliding");
     plan.meta.retain(|(k, _)| k != "zaya.rope.freq_base_swa");
     plan.meta.push(("zaya.rope.freq_base_swa".into(), Meta::F32(swa_theta as f32)));
+    // the router scores `experts + 1` classes: the last one (skip) has no weights, like a zero expert of LongCat-Flash
+    let experts = num(cfg, "num_experts").ok_or("config.json requires num_experts")? as u32;
+    plan.meta.retain(|(k, _)| k != "zaya.expert_count");
+    plan.meta.push(("zaya.expert_count".into(), Meta::U32(experts + 1)));
+    plan.meta.push(("zaya.expert_zero_count".into(), Meta::U32(1)));
+    // the weights are the router probabilities as they are (no renormalisation over the selected experts)
+    plan.meta.retain(|(k, _)| k != "zaya.expert_weights_norm");
+    plan.meta.push(("zaya.expert_weights_norm".into(), Meta::Bool(false)));
     plan.meta.push(("zaya.attention.cca_kernels".into(), Meta::U32s(vec![num(cfg, "cca_time0").unwrap_or(2) as u32, num(cfg, "cca_time1").unwrap_or(2) as u32])));
     plan.meta.push(("zaya.router.hidden_size".into(), Meta::U32(num(cfg, "router_hidden_size").ok_or("config.json requires router_hidden_size")? as u32)));
     Ok(plan)
@@ -123,7 +131,7 @@ pub(crate) fn map(i: u64, suf: &str) -> Option<Mapped> {
         "mlp.gate.router_mlp.fc2.weight" => "zaya_router_fc2.weight",
         "mlp.gate.router_mlp.fc2.bias" => "zaya_router_fc2.bias",
         "mlp.gate.router_mlp.out_proj.weight" => "ffn_gate_inp.weight",
-        "mlp.gate.balancing_biases" => "zaya_router_bias.weight",
+        "mlp.gate.balancing_biases" => "exp_probs_b.bias",
         "mlp.experts.gate_up_proj" => return fused("experts_input"),
         "mlp.experts.down_proj" => return fused("experts_output"),
         _ => return None,
@@ -138,7 +146,7 @@ pub(crate) fn layer_requirements(first: bool) -> Vec<&'static str> {
         "zaya_res_attn_hs.weight", "zaya_res_attn_hb.weight", "zaya_res_attn_rs.weight", "zaya_res_attn_rb.weight",
         "zaya_res_mlp_hs.weight", "zaya_res_mlp_hb.weight", "zaya_res_mlp_rs.weight", "zaya_res_mlp_rb.weight",
         "zaya_router_down.weight", "zaya_router_down.bias", "zaya_router_norm.weight", "zaya_router_fc1.weight", "zaya_router_fc1.bias",
-        "zaya_router_fc2.weight", "zaya_router_fc2.bias", "ffn_gate_inp.weight", "zaya_router_bias.weight",
+        "zaya_router_fc2.weight", "zaya_router_fc2.bias", "ffn_gate_inp.weight", "exp_probs_b.bias",
         "ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight",
     ];
     if !first {

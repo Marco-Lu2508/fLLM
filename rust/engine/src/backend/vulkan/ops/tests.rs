@@ -1236,6 +1236,16 @@ fn sample_plans() -> Vec<OpPlan> {
         .unwrap(),
     );
     v.push(crate::backend::vulkan::ops::recurrent::plan_channel_scale(3, 64).unwrap());
+    v.push(crate::backend::vulkan::ops::recurrent::plan_channel_affine(3, 64).unwrap());
+    v.push(
+        crate::backend::vulkan::ops::recurrent::plan_zaya_cca(
+            0,
+            &RunSpec { first_row: 0, rows: 2, reset: false },
+            &crate::backend::ZayaShape { heads: 4, kv_heads: 2, head_dim: 16, k0: 2, k1: 2 },
+            0,
+        )
+        .unwrap(),
+    );
     v.push(crate::backend::vulkan::ops::recurrent::plan_doge_cdmoe(2, 64, 4, 3, true, 0).unwrap());
     {
         let (heads, kvh, d, bs) = (4usize, 2usize, 16usize, 16usize);

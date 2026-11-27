@@ -52,6 +52,7 @@ impl RustDecoder {
         dev: &DeviceMoeDevice,
         x: &crate::backend::DeviceBuffer,
         rows: usize,
+        external_logits: Option<&crate::backend::DeviceBuffer>,
     ) -> Result<Option<crate::backend::DeviceBuffer>, String> {
         let (Some(cfg), Some(_)) = (self.cfg.moe.as_ref(), self.device_glu_mode(layer_idx)) else {
             return Ok(None);
@@ -91,10 +92,14 @@ impl RustDecoder {
         let mut start = 0;
         while start < rows {
             let n = (rows - start).min(max_rows);
+            let ext_chunk = match external_logits {
+                Some(e) => Some(e.slice(start * cfg.experts * 4, n * cfg.experts * 4).map_err(err)?),
+                None => None,
+            };
             if native_f16 {
                 let xs = x.slice(start * hidden * 2, n * hidden * 4).map_err(err)?;
                 let mut os = out.slice(start * hidden * 2, n * hidden * 4).map_err(err)?;
-                self.moe_device_rows(stream, scratch, layer_idx, dm, fast, dev, &xs, &xs, &mut os, n, decode, None)?;
+                self.moe_device_rows(stream, scratch, layer_idx, dm, fast, dev, &xs, &xs, &mut os, n, decode, None, ext_chunk.as_ref())?;
                 start += n;
                 continue;
             }
@@ -111,7 +116,7 @@ impl RustDecoder {
             };
             if narrow {
                 let mut os_wide = scratch.acquire(n * hidden * 4).map_err(err)?;
-                self.moe_device_rows(stream, scratch, layer_idx, dm, fast, dev, &xs, x_shared, &mut os_wide, n, decode, None)?;
+                self.moe_device_rows(stream, scratch, layer_idx, dm, fast, dev, &xs, x_shared, &mut os_wide, n, decode, None, ext_chunk.as_ref())?;
                 if n == rows {
                     let mut out_mut = out.slice(0, out.size).map_err(err)?;
                     stream.narrow_activations(&mut out_mut, &os_wide).map_err(err)?;
@@ -127,7 +132,7 @@ impl RustDecoder {
                 scratch.recycle(os_wide);
             } else {
                 let mut os = out.slice(start * hidden * 4, n * hidden * 4).map_err(err)?;
-                self.moe_device_rows(stream, scratch, layer_idx, dm, fast, dev, &xs, &xs, &mut os, n, decode, None)?;
+                self.moe_device_rows(stream, scratch, layer_idx, dm, fast, dev, &xs, &xs, &mut os, n, decode, None, ext_chunk.as_ref())?;
             }
             if let Some(wn) = tmp_shared_n {
                 scratch.recycle(wn);
@@ -156,6 +161,7 @@ impl RustDecoder {
         rows: usize,
         decode: bool,
         latent: Option<LatentArgs<'_>>,
+        external_logits: Option<&crate::backend::DeviceBuffer>,
     ) -> Result<(), String> {
         let (Some(cfg), Some(mode)) = (self.cfg.moe.as_ref(), self.device_glu_mode(layer_idx)) else {
             return Err("MoE layer without MoE configuration".into());
@@ -183,7 +189,10 @@ impl RustDecoder {
         let experts = scored - zero;
         let pairs = rows * k;
         let mut logits = scratch.acquire(rows * scored * 4).map_err(err)?;
-        if native_f16 {
+        if let Some(ext) = external_logits {
+            // ZAYA: the router scores come from its own MLP (computed by the caller)
+            stream.copy_buffer(&mut logits, ext).map_err(err)?;
+        } else if native_f16 {
             let mut logits_narrow = scratch.acquire(rows * scored * 4).map_err(err)?;
             stream
                 .quantized_linear(&mut logits_narrow, x, &fast.router, fast.router.bias.as_ref())
@@ -439,7 +448,11 @@ impl RustDecoder {
             }
             return Ok(());
         }
-        if let Some(zs) = zero_scale {
+        if let (Some(zs), true) = (zero_scale.as_ref(), external_logits.is_some()) {
+            // ZAYA: the skip class returns nothing (its pairs carry weight 0): no identity term
+            let _ = zs;
+            stream.moe_combine_ex(out, &y, Some(&weights), None, None, rows, k, hidden).map_err(err)?;
+        } else if let Some(zs) = zero_scale {
             // no shared expert in such a router (`device_routing_ok`): its slot carries the zero experts' identity term
             stream.moe_combine_ex(out, &y, Some(&weights), Some(x), Some(&zs), rows, k, hidden).map_err(err)?;
             temps.push(zs);
@@ -496,7 +509,7 @@ impl RustDecoder {
             stream.quantized_linear(&mut xe, &xs, &latent.down, latent.down.bias.as_ref()).map_err(err)?;
             let mut routed = scratch.acquire(n * width * 4).map_err(err)?;
             let mut extra = None;
-            self.moe_device_rows(stream, scratch, layer_idx, dm, fast, dev, &xs, &xs, &mut routed, n, decode, Some((&xe, width, &mut extra)))?;
+            self.moe_device_rows(stream, scratch, layer_idx, dm, fast, dev, &xs, &xs, &mut routed, n, decode, Some((&xe, width, &mut extra)), None)?;
             if let Some(norm) = latent.norm.as_ref() {
                 let mut normed = scratch.acquire(n * width * 4).map_err(err)?;
                 stream.rms_norm(&mut normed, &routed, norm, self.cfg.eps).map_err(err)?;

@@ -2281,6 +2281,19 @@ int fllm_cuda_xielu(FllmStream *st, const float *x, float *out, size_t n, float 
     PREP(st);
     return fllm_xielu_launch(st->s, x, out, n, ap, an, beta, eps);
 }
+int fllm_cuda_channel_affine(FllmStream *st, float *x, const float *scale, const float *bias, size_t rows, int width) {
+    PREP(st);
+    return fllm_channel_affine_launch(st->s, x, scale, bias, rows, width);
+}
+int fllm_cuda_zaya_supported(int heads, int kv_heads, int hd, int k0, int k1) { return !ssm_kernels_off() && fllm_zaya_supported(heads, kv_heads, hd, k0, k1); }
+// ZAYA compressed convolutional attention; `runs` is nruns SsmRun records (24 bytes each) in host memory.
+int fllm_cuda_zaya_cca(FllmStream *st, const void *runs, int nruns, int heads, int kv_heads, int hd, int k0, int k1, size_t state_off, const float *q_in,
+                       const float *k_in, const float *v_cur, const float *v_del, const float *wts, float *q_out, float *k_out, float *v_out) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
+    return fllm_zaya_cca_launch(st->s, d, nruns, heads, kv_heads, hd, k0, k1, state_off, q_in, k_in, v_cur, v_del, wts, q_out, k_out, v_out);
+}
 int fllm_cuda_channel_scale(FllmStream *st, float *x, const float *scale, size_t rows, int width) {
     PREP(st);
     return fllm_channel_scale_launch(st->s, x, scale, rows, width);

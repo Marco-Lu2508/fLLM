@@ -322,3 +322,119 @@ int fllm_rglru_cell_launch(cudaStream_t s, const void *runs, int nruns, int widt
     rglru_cell_kernel<<<grid, RG_BLOCK, (size_t)(width / blocks) * sizeof(float), s>>>(xin, gate_y, wts, r, out, width, kernel, blocks, state_off);
     return fllm_check_launch("rglru_cell");
 }
+
+// ---- ZAYA compressed convolutional attention (see Stream::zaya_cca) -------------------------------------------------------------------------
+// One block per (head group, run); the block walks the tokens of the run. Group gi < heads is a query head, gi >= heads a key head. State per sequence and layer:
+// the last `history` columns of every channel ([channels][history]), then the delayed value half.
+#define ZC_BLOCK 128
+
+__global__ void __launch_bounds__(ZC_BLOCK) zaya_cca_kernel(const float *__restrict__ q_in, const float *__restrict__ k_in, const float *__restrict__ v_cur,
+                                                           const float *__restrict__ v_del, const float *__restrict__ wts, const SsmRun1 *__restrict__ runs,
+                                                           float *__restrict__ q_out, float *__restrict__ k_out, float *__restrict__ v_out, int heads, int kv_heads,
+                                                           int hd, int k0, int k1, size_t state_off) {
+    const SsmRun1 run = runs[blockIdx.y];
+    const int gi = blockIdx.x;
+    const int tid = threadIdx.x;
+    extern __shared__ float zc_sh[];
+    float *mid = zc_sh;                  // hd x k1
+    float *vals = mid + (size_t)hd * k1;  // hd
+    float *red = vals + hd;               // ZC_BLOCK
+    const int C = (heads + kv_heads) * hd;
+    const int history = (k0 - 1) + (k1 - 1);
+    const int groups = heads / kv_heads;
+    const int half = kv_heads * hd / 2;
+    const float *dw = wts;
+    const float *dwb = dw + (size_t)C * k0;
+    const float *gw = dwb + C;
+    const float *gb = gw + (size_t)C * hd * k1;
+    const float *temp = gb + C;
+    float *hist = reinterpret_cast<float *>(reinterpret_cast<char *>(run.state) + state_off);
+    float *delayed = hist + (size_t)C * history;
+    if (run.reset) {
+        for (int d = tid; d < hd; d += ZC_BLOCK)
+            for (int t = 0; t < history; t++) hist[(size_t)(gi * hd + d) * history + t] = 0.f;
+        if (gi == 0)
+            for (int i = tid; i < half; i += ZC_BLOCK) delayed[i] = 0.f;
+    }
+    __syncthreads();
+    const float target = sqrtf((float)hd);
+    for (int t = 0; t < run.n; t++) {
+        const size_t row = (size_t)(run.row0 + t);
+        const float *qr = q_in + row * heads * hd;
+        const float *kr = k_in + row * kv_heads * hd;
+        for (int d = tid; d < hd; d += ZC_BLOCK) {
+            const int c = gi * hd + d;
+            const float cur = c < heads * hd ? qr[c] : kr[c - heads * hd];
+            for (int j = 0; j < k1; j++) {
+                float v = dwb[c];
+                for (int a = 0; a < k0; a++) {
+                    const int pos = j + a;
+                    const float col = pos < history ? hist[(size_t)c * history + pos] : cur;
+                    v += dw[(size_t)c * k0 + a] * col;
+                }
+                mid[d * k1 + j] = v;
+            }
+        }
+        __syncthreads();
+        float sq = 0.f;
+        for (int d = tid; d < hd; d += ZC_BLOCK) {
+            const int c = gi * hd + d;
+            float conv = gb[c];
+            for (int ci = 0; ci < hd; ci++)
+                for (int j = 0; j < k1; j++) conv += gw[((size_t)c * hd + ci) * k1 + j] * mid[ci * k1 + j];
+            float res;
+            if (gi < heads) {
+                res = (qr[gi * hd + d] + kr[(gi / groups) * hd + d]) * 0.5f;
+            } else {
+                const int g = gi - heads;
+                float sum = 0.f;
+                for (int j = 0; j < groups; j++) sum += (qr[(g * groups + j) * hd + d] + kr[g * hd + d]) * 0.5f;
+                res = sum / (float)groups;
+            }
+            const float val = conv + res;
+            vals[d] = val;
+            sq += val * val;
+        }
+        red[tid] = sq;
+        __syncthreads();
+        for (int s2 = ZC_BLOCK / 2; s2 > 0; s2 >>= 1) {
+            if (tid < s2) red[tid] += red[tid + s2];
+            __syncthreads();
+        }
+        const float inv = target / fmaxf(sqrtf(red[0]), 1.1920929e-7f);
+        for (int d = tid; d < hd; d += ZC_BLOCK) {
+            if (gi < heads) q_out[row * heads * hd + gi * hd + d] = vals[d] * inv;
+            else k_out[row * kv_heads * hd + (gi - heads) * hd + d] = vals[d] * inv * temp[gi - heads];
+        }
+        // the history keeps the last `history` columns including this token
+        for (int d = tid; d < hd; d += ZC_BLOCK) {
+            const int c = gi * hd + d;
+            const float cur = c < heads * hd ? qr[c] : kr[c - heads * hd];
+            float *h = hist + (size_t)c * history;
+            for (int i = 0; i + 1 < history; i++) h[i] = h[i + 1];
+            if (history > 0) h[history - 1] = cur;
+        }
+        if (gi == 0) {
+            for (int i = tid; i < half; i += ZC_BLOCK) {
+                v_out[row * 2 * half + i] = v_cur[row * half + i];
+                v_out[row * 2 * half + half + i] = delayed[i];
+                delayed[i] = v_del[row * half + i];
+            }
+        }
+        __syncthreads();
+    }
+}
+
+int fllm_zaya_supported(int heads, int kv_heads, int hd, int k0, int k1) {
+    return heads > 0 && kv_heads > 0 && heads % kv_heads == 0 && hd > 0 && hd <= 256 && (kv_heads * hd) % 2 == 0 && k0 >= 1 && k0 <= 8 && k1 >= 1 && k1 <= 8;
+}
+
+int fllm_zaya_cca_launch(cudaStream_t s, const void *runs, int nruns, int heads, int kv_heads, int hd, int k0, int k1, size_t state_off, const float *q_in,
+                         const float *k_in, const float *v_cur, const float *v_del, const float *wts, float *q_out, float *k_out, float *v_out) {
+    if (nruns <= 0) return 0;
+    const SsmRun1 *r = static_cast<const SsmRun1 *>(runs);
+    const dim3 grid(heads + kv_heads, nruns);
+    const size_t shared = ((size_t)hd * k1 + hd + ZC_BLOCK) * sizeof(float);
+    zaya_cca_kernel<<<grid, ZC_BLOCK, shared, s>>>(q_in, k_in, v_cur, v_del, wts, r, q_out, k_out, v_out, heads, kv_heads, hd, k0, k1, state_off);
+    return fllm_check_launch("zaya_cca");
+}

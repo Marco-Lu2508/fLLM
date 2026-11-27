@@ -275,6 +275,45 @@ impl RgLruShape {
     }
 }
 
+/// Shape of ZAYA's compressed convolutional attention (see [`Stream::zaya_cca`]): `heads` query and `kv_heads` key heads of width `head_dim`, a depthwise
+/// convolution of `k0` taps and a grouped convolution (one group per head) of `k1` taps over time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ZayaShape {
+    pub heads: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    pub k0: usize,
+    pub k1: usize,
+}
+
+impl ZayaShape {
+    /// Convolution channels: the query and key columns.
+    pub fn channels(&self) -> usize {
+        (self.heads + self.kv_heads) * self.head_dim
+    }
+
+    /// Columns of history of every channel: the convolutions look `(k0 - 1) + (k1 - 1)` tokens back.
+    pub fn history(&self) -> usize {
+        (self.k0 - 1) + (self.k1 - 1)
+    }
+
+    /// Floats of the packed weight buffer: the depthwise taps (`channels x k0`) and bias, the grouped taps (`channels x head_dim x k1`) and bias, the key scales.
+    pub fn weight_floats(&self) -> usize {
+        let c = self.channels();
+        c * self.k0 + c + c * self.head_dim * self.k1 + c + self.kv_heads
+    }
+
+    /// Width of one value row (half is the value of this token, half the delayed value of the token before).
+    pub fn value_width(&self) -> usize {
+        self.kv_heads * self.head_dim
+    }
+
+    /// Bytes one layer of one sequence occupies in a state buffer: the history of every channel, then the delayed value half (FP32, rounded up to 256 bytes).
+    pub fn layer_state_bytes(&self) -> usize {
+        ((self.channels() * self.history() + self.value_width() / 2) * 4).next_multiple_of(256)
+    }
+}
+
 /// Device-resident parameters of a Mamba-2 layer (all FP32).
 pub struct MambaWeights<'a> {
     /// `conv_dim x conv_kernel`
@@ -2828,6 +2867,39 @@ pub trait Stream: Send {
         _out: &mut DeviceBuffer,
     ) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("xlstm_cell".into()))
+    }
+
+    /// Does this stream implement [`Stream::zaya_cca`] for this shape?
+    fn supports_zaya(&self, _shape: &ZayaShape) -> bool {
+        false
+    }
+
+    /// ZAYA's compressed convolutional attention in front of the rotary embedding, for `runs`. `q_in` / `k_in` are the query and key projections
+    /// (`rows x heads x head_dim`, `rows x kv_heads x head_dim`), `v_current` / `v_delayed` the two value projections (`rows x value_width / 2`); `weights` is the packed
+    /// buffer of [`ZayaShape::weight_floats`] floats (depthwise taps and bias, grouped taps and bias, key scales). The convolved, residual-mixed and L2-normalised
+    /// (`sqrt(head_dim)`, keys times their scale) queries and keys go to `q_out` / `k_out`, the values (`[current | delayed of the token before]`) to `v_out`.
+    /// The state (history of every channel, then the delayed half) starts `state_offset` bytes into each run's state buffer; a run that `reset`s starts from zero.
+    #[allow(clippy::too_many_arguments)]
+    fn zaya_cca(
+        &mut self,
+        _shape: &ZayaShape,
+        _weights: &DeviceBuffer,
+        _runs: &[DeltaRun<'_>],
+        _state_offset: usize,
+        _q_in: &DeviceBuffer,
+        _k_in: &DeviceBuffer,
+        _v_current: &DeviceBuffer,
+        _v_delayed: &DeviceBuffer,
+        _q_out: &mut DeviceBuffer,
+        _k_out: &mut DeviceBuffer,
+        _v_out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("zaya_cca".into()))
+    }
+
+    /// `x[r][c] = (x[r][c] + bias[c]) * scale[c]` for `rows x width` floats (ZAYA's residual scaling).
+    fn channel_affine(&mut self, _x: &mut DeviceBuffer, _scale: &DeviceBuffer, _bias: &DeviceBuffer, _rows: usize, _width: usize) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("channel_affine".into()))
     }
 
     /// Does this stream implement [`Stream::doge_attention`], [`Stream::doge_cdmoe`] and [`Stream::channel_scale`] for contexts of up to `max_context` tokens?

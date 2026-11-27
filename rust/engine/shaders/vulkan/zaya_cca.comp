@@ -1,0 +1,127 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: zaya_cca | bindings: q_in,k_in,v_cur,v_del,wts,state,q_out,k_out,v_out | push: heads,kv_heads,hd,k0,k1,row0,n,reset,state_off | grid: [heads + kv_heads, 1, 1] per run
+// ZAYA compressed convolutional attention (reference: `cca_forward` in rust_decoder.rs) of one run, one workgroup per head group (group < heads: a query head, else a key head).
+// wts packs the depthwise taps [C][k0], their bias [C], the grouped taps [C][hd][k1], their bias [C] and the key scales [kv_heads] (C = (heads + kv_heads) * hd). The state is the last
+// `history = (k0 - 1) + (k1 - 1)` columns of every channel [C][history], then the delayed value half, starting at state[state_off]. Per token and channel c of the group:
+//   mid[j] = dw_bias + sum_a dw[a] * column(j + a), j < k1 (column: the history, the last one is the current projection);  conv = gbias + sum_{ci, j} gw[ci][j] * mid[ci][j]
+//   out = conv + residual (query head: (q + k of its key head) / 2; key head: the mean of that over its query heads); then L2-normalised to sqrt(hd), keys times their scale.
+// Values: [v_cur | delayed half] with the delayed half of the token before. hd <= 256, k0, k1 <= 8.
+#define WG 128
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer QIn { float q_in[]; };
+layout(std430, binding = 1) readonly buffer KIn { float k_in[]; };
+layout(std430, binding = 2) readonly buffer VCur { float v_cur[]; };
+layout(std430, binding = 3) readonly buffer VDel { float v_del[]; };
+layout(std430, binding = 4) readonly buffer WBuf { float wts[]; };
+layout(std430, binding = 5) buffer StateBuf { float state[]; };
+layout(std430, binding = 6) buffer QOut { float q_out[]; };
+layout(std430, binding = 7) buffer KOut { float k_out[]; };
+layout(std430, binding = 8) buffer VOut { float v_out[]; };
+layout(push_constant) uniform P {
+    uint heads;
+    uint kv_heads;
+    uint hd;
+    uint k0;
+    uint k1;
+    uint row0;
+    uint n;
+    uint reset;
+    uint state_off;
+} p;
+
+shared float mid[2048];
+shared float vals[256];
+shared float red[WG];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint gi = gl_WorkGroupID.x;
+    const uint hd = p.hd;
+    const uint C = (p.heads + p.kv_heads) * hd;
+    const uint history = (p.k0 - 1u) + (p.k1 - 1u);
+    const uint groups = p.heads / p.kv_heads;
+    const uint half_w = p.kv_heads * hd / 2u;
+    const uint o_dwb = C * p.k0;
+    const uint o_gw = o_dwb + C;
+    const uint o_gb = o_gw + C * hd * p.k1;
+    const uint o_temp = o_gb + C;
+    const uint hist = p.state_off;
+    const uint delayed = hist + C * history;
+    if (p.reset != 0u) {
+        for (uint d = tid; d < hd; d += WG)
+            for (uint t = 0u; t < history; t++) state[hist + (gi * hd + d) * history + t] = 0.0;
+        if (gi == 0u)
+            for (uint i = tid; i < half_w; i += WG) state[delayed + i] = 0.0;
+    }
+    barrier();
+    memoryBarrierBuffer();
+    const float target = sqrt(float(hd));
+    for (uint t = 0u; t < p.n; t++) {
+        const uint row = p.row0 + t;
+        const uint qr = row * p.heads * hd;
+        const uint kr = row * p.kv_heads * hd;
+        for (uint d = tid; d < hd; d += WG) {
+            const uint c = gi * hd + d;
+            const float cur = c < p.heads * hd ? q_in[qr + c] : k_in[kr + c - p.heads * hd];
+            for (uint j = 0u; j < p.k1; j++) {
+                float v = wts[o_dwb + c];
+                for (uint a = 0u; a < p.k0; a++) {
+                    const uint pos = j + a;
+                    const float col = pos < history ? state[hist + c * history + pos] : cur;
+                    v += wts[c * p.k0 + a] * col;
+                }
+                mid[d * p.k1 + j] = v;
+            }
+        }
+        barrier();
+        float sq = 0.0;
+        for (uint d = tid; d < hd; d += WG) {
+            const uint c = gi * hd + d;
+            float conv = wts[o_gb + c];
+            for (uint ci = 0u; ci < hd; ci++)
+                for (uint j = 0u; j < p.k1; j++) conv += wts[o_gw + (c * hd + ci) * p.k1 + j] * mid[ci * p.k1 + j];
+            float res;
+            if (gi < p.heads) {
+                res = (q_in[qr + gi * hd + d] + k_in[kr + (gi / groups) * hd + d]) * 0.5;
+            } else {
+                const uint g = gi - p.heads;
+                float sum = 0.0;
+                for (uint j = 0u; j < groups; j++) sum += (q_in[qr + (g * groups + j) * hd + d] + k_in[kr + g * hd + d]) * 0.5;
+                res = sum / float(groups);
+            }
+            const float val = conv + res;
+            vals[d] = val;
+            sq += val * val;
+        }
+        red[tid] = sq;
+        barrier();
+        for (uint s = WG / 2u; s > 0u; s >>= 1u) {
+            if (tid < s) red[tid] += red[tid + s];
+            barrier();
+        }
+        const float inv = target / max(sqrt(red[0]), 1.1920929e-7);
+        for (uint d = tid; d < hd; d += WG) {
+            if (gi < p.heads) q_out[qr + gi * hd + d] = vals[d] * inv;
+            else k_out[kr + (gi - p.heads) * hd + d] = vals[d] * inv * wts[o_temp + gi - p.heads];
+        }
+        for (uint d = tid; d < hd; d += WG) {
+            const uint c = gi * hd + d;
+            const float cur = c < p.heads * hd ? q_in[qr + c] : k_in[kr + c - p.heads * hd];
+            const uint h = hist + c * history;
+            for (uint i = 0u; i + 1u < history; i++) state[h + i] = state[h + i + 1u];
+            if (history > 0u) state[h + history - 1u] = cur;
+        }
+        if (gi == 0u) {
+            for (uint i = tid; i < half_w; i += WG) {
+                v_out[row * 2u * half_w + i] = v_cur[row * half_w + i];
+                v_out[row * 2u * half_w + half_w + i] = state[delayed + i];
+                state[delayed + i] = v_del[row * half_w + i];
+            }
+        }
+        barrier();
+        memoryBarrierBuffer();
+    }
+}

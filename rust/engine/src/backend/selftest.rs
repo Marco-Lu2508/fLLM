@@ -4424,6 +4424,15 @@ impl Tester<'_> {
             let r = self.mamba1_check(&shape);
             self.record("mamba1", &format!("inner {inner} state {state} rank {rank}{}", if eps.is_some() { " +bc norm" } else { "" }), r);
         }
+        for (heads, kv_heads, hd, k0, k1) in [(4usize, 2usize, 16usize, 2usize, 2usize), (8, 2, 32, 3, 2), (6, 3, 24, 2, 3)] {
+            let shape = ZayaShape { heads, kv_heads, head_dim: hd, k0, k1 };
+            match self.device.create_stream() {
+                Ok(st) if st.supports_zaya(&shape) => {}
+                _ => continue,
+            }
+            let r = self.zaya_check(&shape);
+            self.record("zaya_cca", &format!("{heads} heads, {kv_heads} key heads of {hd}, kernels {k0}/{k1}"), r);
+        }
         if self.device.create_stream().map(|st| st.supports_diff_attn()).unwrap_or(false) {
             for (rows, heads, kv_heads, d) in [(3usize, 4usize, 2usize, 16usize), (5, 8, 4, 40)] {
                 let r = self.diff_attn_check(rows, heads, kv_heads, d);
@@ -4925,6 +4934,132 @@ impl Tester<'_> {
             worst_err = worst_err.max(worst(&have, &want, &scale));
         }
         Ok(Outcome { device: worst_err, cpu: 0.0, tol: 1e-5, cpu_tol: 1.0, ms: total_ms })
+    }
+
+    /// ZAYA's convolutional attention against a transcription of `cca_forward`: several sequences over several calls.
+    fn zaya_check(&mut self, shape: &ZayaShape) -> Result<Outcome, BackendError> {
+        let (heads, kv_heads, hd, k0, k1) = (shape.heads, shape.kv_heads, shape.head_dim, shape.k0, shape.k1);
+        let c_total = shape.channels();
+        let history = shape.history();
+        let groups = heads / kv_heads;
+        let half = shape.value_width() / 2;
+        let dw = self.rng.vector(c_total * k0, 0.5);
+        let dwb = self.rng.vector(c_total, 0.3);
+        let gw = self.rng.vector(c_total * hd * k1, 0.5 / ((hd * k1) as f32).sqrt());
+        let gb = self.rng.vector(c_total, 0.3);
+        let temp: Vec<f32> = self.rng.vector(kv_heads, 0.5).iter().map(|v| 1.0 + v).collect();
+        let mut packed = Vec::new();
+        for part in [&dw, &dwb, &gw, &gb, &temp] {
+            packed.extend_from_slice(part);
+        }
+        let calls: [&[(usize, usize)]; 4] = [&[(0, 9), (1, 3), (2, 1)], &[(0, 1), (1, 1), (2, 1)], &[(2, 5), (0, 2), (1, 1)], &[(1, 1), (0, 1), (2, 1)]];
+        let mut stream = self.device.create_stream()?;
+        let weights = put(self.device, stream.as_mut(), &packed)?;
+        let offset = 256;
+        let states: Vec<DeviceBuffer> = (0..3).map(|_| self.device.allocate_buffer(offset + shape.layer_state_bytes())).collect::<Result<_, _>>()?;
+        let mut hist = vec![vec![0.0f32; c_total * history]; 3];
+        let mut delayed = vec![vec![0.0f32; half]; 3];
+        let mut started = [false; 3];
+        let (mut worst_err, mut total_ms) = (0.0f64, 0.0f64);
+        for call in calls {
+            let rows: usize = call.iter().map(|c| c.1).sum();
+            let q_in = self.rng.vector(rows * heads * hd, 1.0);
+            let k_in = self.rng.vector(rows * kv_heads * hd, 1.0);
+            let v_cur = self.rng.vector(rows * half, 1.0);
+            let v_del = self.rng.vector(rows * half, 1.0);
+            let (mut want_q, mut want_k, mut want_v) = (vec![0.0f32; rows * heads * hd], vec![0.0f32; rows * kv_heads * hd], vec![0.0f32; rows * 2 * half]);
+            let mut runs = Vec::new();
+            let mut first = 0;
+            for &(seq, cnt) in call {
+                if !started[seq] {
+                    hist[seq].iter_mut().for_each(|x| *x = 0.0);
+                    delayed[seq].iter_mut().for_each(|x| *x = 0.0);
+                }
+                for t in 0..cnt {
+                    let row = first + t;
+                    let (qr, kr) = (&q_in[row * heads * hd..(row + 1) * heads * hd], &k_in[row * kv_heads * hd..(row + 1) * kv_heads * hd]);
+                    let cur = |c: usize| if c < heads * hd { qr[c] } else { kr[c - heads * hd] };
+                    let column = |h: &Vec<f32>, c: usize, pos: usize| if pos < history { h[c * history + pos] } else { cur(c) };
+                    let mut mid = vec![0.0f32; c_total * k1];
+                    for c in 0..c_total {
+                        for j in 0..k1 {
+                            let mut v = dwb[c];
+                            for a in 0..k0 {
+                                v += dw[c * k0 + a] * column(&hist[seq], c, j + a);
+                            }
+                            mid[c * k1 + j] = v;
+                        }
+                    }
+                    let mut conv = vec![0.0f32; c_total];
+                    for (c, out) in conv.iter_mut().enumerate() {
+                        let group = c / hd;
+                        let mut v = gb[c];
+                        for ci in 0..hd {
+                            for j in 0..k1 {
+                                v += gw[(c * hd + ci) * k1 + j] * mid[(group * hd + ci) * k1 + j];
+                            }
+                        }
+                        *out = v;
+                    }
+                    let mut query_res = vec![0.0f32; heads * hd];
+                    for h in 0..heads {
+                        for d in 0..hd {
+                            query_res[h * hd + d] = (qr[h * hd + d] + kr[(h / groups) * hd + d]) * 0.5;
+                        }
+                    }
+                    let mut q: Vec<f32> = (0..heads * hd).map(|i| conv[i] + query_res[i]).collect();
+                    let mut k = vec![0.0f32; kv_heads * hd];
+                    for g in 0..kv_heads {
+                        for d in 0..hd {
+                            let mean = (0..groups).map(|j| query_res[(g * groups + j) * hd + d]).sum::<f32>() / groups as f32;
+                            k[g * hd + d] = conv[heads * hd + g * hd + d] + mean;
+                        }
+                    }
+                    let target = (hd as f32).sqrt();
+                    for head in q.chunks_exact_mut(hd) {
+                        let norm = head.iter().map(|v| v * v).sum::<f32>().sqrt().max(f32::EPSILON);
+                        head.iter_mut().for_each(|v| *v *= target / norm);
+                    }
+                    for (g, head) in k.chunks_exact_mut(hd).enumerate() {
+                        let norm = head.iter().map(|v| v * v).sum::<f32>().sqrt().max(f32::EPSILON);
+                        head.iter_mut().for_each(|v| *v *= target / norm * temp[g]);
+                    }
+                    want_q[row * heads * hd..(row + 1) * heads * hd].copy_from_slice(&q);
+                    want_k[row * kv_heads * hd..(row + 1) * kv_heads * hd].copy_from_slice(&k);
+                    want_v[row * 2 * half..row * 2 * half + half].copy_from_slice(&v_cur[row * half..(row + 1) * half]);
+                    want_v[row * 2 * half + half..(row + 1) * 2 * half].copy_from_slice(&delayed[seq]);
+                    delayed[seq].copy_from_slice(&v_del[row * half..(row + 1) * half]);
+                    // the history keeps the last `history` columns including this token
+                    let mut next = hist[seq].clone();
+                    for c in 0..c_total {
+                        for i in 0..history {
+                            next[c * history + i] = column(&hist[seq], c, i + 1);
+                        }
+                    }
+                    hist[seq] = next;
+                }
+                runs.push(DeltaRun { state: &states[seq], first_row: first, rows: cnt, reset: !started[seq] });
+                started[seq] = true;
+                first += cnt;
+            }
+            let (qb, kb, vc, vd) = (put(self.device, stream.as_mut(), &q_in)?, put(self.device, stream.as_mut(), &k_in)?, put(self.device, stream.as_mut(), &v_cur)?, put(self.device, stream.as_mut(), &v_del)?);
+            let mut qo = put(self.device, stream.as_mut(), &vec![f32::NAN; want_q.len()])?;
+            let mut ko = put(self.device, stream.as_mut(), &vec![f32::NAN; want_k.len()])?;
+            let mut vo = put(self.device, stream.as_mut(), &vec![f32::NAN; want_v.len()])?;
+            let mut ms = 0.0;
+            timed(&mut ms, stream.as_mut(), |s| s.zaya_cca(shape, &weights, &runs, offset, &qb, &kb, &vc, &vd, &mut qo, &mut ko, &mut vo))?;
+            total_ms += ms;
+            let cmp = |have: Vec<f32>, want: &[f32]| {
+                let want64: Vec<f64> = want.iter().map(|&v| f64::from(v)).collect();
+                let scale: Vec<f64> = want64.iter().map(|v| v.abs().max(1.0)).collect();
+                worst(&have, &want64, &scale)
+            };
+            worst_err = worst_err
+                .max(cmp(get(stream.as_mut(), &qo, want_q.len())?, &want_q))
+                .max(cmp(get(stream.as_mut(), &ko, want_k.len())?, &want_k))
+                .max(cmp(get(stream.as_mut(), &vo, want_v.len())?, &want_v));
+        }
+        Ok(Outcome { device: worst_err, cpu: 0.0, tol: 2e-3, cpu_tol: 1.0, ms: total_ms })
     }
 
     /// DiffLlama's value expansion and head mix against their transcription in `rust_decoder.rs`.

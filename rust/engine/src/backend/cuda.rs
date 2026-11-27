@@ -587,6 +587,28 @@ extern "C" {
     fn fllm_cuda_xielu(st: *mut RawStream, x: *const f32, out: *mut f32, n: usize, ap: f32, an: f32, beta: f32, eps: f32) -> c_int;
     fn fllm_cuda_diff_expand_v(st: *mut RawStream, out: *mut f32, v: *const f32, rows: usize, kv_heads: c_int, d: c_int) -> c_int;
     fn fllm_cuda_channel_scale(st: *mut RawStream, x: *mut f32, scale: *const f32, rows: usize, width: c_int) -> c_int;
+    fn fllm_cuda_channel_affine(st: *mut RawStream, x: *mut f32, scale: *const f32, bias: *const f32, rows: usize, width: c_int) -> c_int;
+    fn fllm_cuda_zaya_supported(heads: c_int, kv_heads: c_int, hd: c_int, k0: c_int, k1: c_int) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_zaya_cca(
+        st: *mut RawStream,
+        runs: *const c_void,
+        nruns: c_int,
+        heads: c_int,
+        kv_heads: c_int,
+        hd: c_int,
+        k0: c_int,
+        k1: c_int,
+        state_off: usize,
+        q_in: *const f32,
+        k_in: *const f32,
+        v_cur: *const f32,
+        v_del: *const f32,
+        wts: *const f32,
+        q_out: *mut f32,
+        k_out: *mut f32,
+        v_out: *mut f32,
+    ) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn fllm_cuda_doge_cdmoe(
         st: *mut RawStream,
@@ -5285,6 +5307,84 @@ impl Stream for CudaStream {
                 dev_ptr(decay)?.cast(),
                 dev_ptr(skip)?.cast(),
                 dev_ptr(out)?.cast(),
+            )
+        })
+    }
+
+    fn supports_zaya(&self, s: &ZayaShape) -> bool {
+        if !ssm_enabled_on_build() {
+            return false;
+        }
+        let d = [s.heads, s.kv_heads, s.head_dim, s.k0, s.k1].map(|n| c_int::try_from(n).unwrap_or(0));
+        // SAFETY: plain arithmetic on the arguments.
+        unsafe { fllm_cuda_zaya_supported(d[0], d[1], d[2], d[3], d[4]) != 0 }
+    }
+
+    fn channel_affine(&mut self, x: &mut DeviceBuffer, scale: &DeviceBuffer, bias: &DeviceBuffer, rows: usize, width: usize) -> Result<(), BackendError> {
+        if x.size < rows * width * 4 || scale.size < width * 4 || bias.size < width * 4 {
+            return Err(invalid("channel affine buffers are smaller than rows x width"));
+        }
+        // SAFETY: sizes checked above.
+        check(unsafe { fllm_cuda_channel_affine(self.raw, dev_ptr(x)?.cast(), dev_ptr(scale)?.cast(), dev_ptr(bias)?.cast(), rows, to_c(width, "width")?) })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn zaya_cca(
+        &mut self,
+        s: &ZayaShape,
+        weights: &DeviceBuffer,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        q_in: &DeviceBuffer,
+        k_in: &DeviceBuffer,
+        v_current: &DeviceBuffer,
+        v_delayed: &DeviceBuffer,
+        q_out: &mut DeviceBuffer,
+        k_out: &mut DeviceBuffer,
+        v_out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_zaya(s) {
+            return Err(BackendError::UnsupportedOperation("zaya_cca for this shape".into()));
+        }
+        let rows: usize = runs.iter().map(|r| r.rows).sum();
+        if rows == 0 {
+            return Ok(());
+        }
+        let state_end = state_offset + s.layer_state_bytes();
+        let (q_len, k_len, half) = (rows * s.heads * s.head_dim * 4, rows * s.kv_heads * s.head_dim * 4, rows * s.value_width() / 2 * 4);
+        if q_in.size < q_len
+            || q_out.size < q_len
+            || k_in.size < k_len
+            || k_out.size < k_len
+            || v_out.size < k_len
+            || v_current.size < half
+            || v_delayed.size < half
+            || weights.size < s.weight_floats() * 4
+            || runs.iter().any(|r| r.state.size < state_end || r.first_row + r.rows > rows)
+        {
+            return Err(invalid("ZAYA buffers smaller than the layer needs"));
+        }
+        let list = ssm_runs(runs)?;
+        // SAFETY: sizes checked above; `list` outlives the call (the C side copies it before returning).
+        check(unsafe {
+            fllm_cuda_zaya_cca(
+                self.raw,
+                list.as_ptr().cast(),
+                to_c(list.len(), "runs")?,
+                to_c(s.heads, "heads")?,
+                to_c(s.kv_heads, "key heads")?,
+                to_c(s.head_dim, "head width")?,
+                to_c(s.k0, "depthwise kernel")?,
+                to_c(s.k1, "grouped kernel")?,
+                state_offset,
+                dev_ptr(q_in)?.cast(),
+                dev_ptr(k_in)?.cast(),
+                dev_ptr(v_current)?.cast(),
+                dev_ptr(v_delayed)?.cast(),
+                dev_ptr(weights)?.cast(),
+                dev_ptr(q_out)?.cast(),
+                dev_ptr(k_out)?.cast(),
+                dev_ptr(v_out)?.cast(),
             )
         })
     }

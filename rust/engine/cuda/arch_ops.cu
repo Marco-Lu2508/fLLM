@@ -310,3 +310,18 @@ int fllm_doge_cdmoe_launch(cudaStream_t s, float *out, const float *x, const flo
     doge_cdmoe_kernel<<<(unsigned)rows, DC_BLOCK, 0, s>>>(x, router, down, up, out, hidden, keys, top_k, norm, act);
     return fllm_check_launch("doge_cdmoe");
 }
+
+// ZAYA: x[i] = (x[i] + bias[i % width]) * scale[i % width]
+__global__ void channel_affine_kernel(float *__restrict__ x, const float *__restrict__ scale, const float *__restrict__ bias, size_t n, int width) {
+    const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        const size_t c = i % width;
+        x[i] = (x[i] + bias[c]) * scale[c];
+    }
+}
+int fllm_channel_affine_launch(cudaStream_t s, float *x, const float *scale, const float *bias, size_t rows, int width) {
+    const size_t n = rows * width;
+    if (n == 0) return 0;
+    channel_affine_kernel<<<arch_grid(n), 256, 0, s>>>(x, scale, bias, n, width);
+    return fllm_check_launch("channel_affine");
+}

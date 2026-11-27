@@ -30,7 +30,7 @@ use crate::backend::vulkan::ops::moe::{
     plan_gather_rows, plan_moe_combine, plan_moe_linear, plan_moe_topk, plan_scatter_add_rows, ExpertAccess, MoeLinear,
 };
 use crate::backend::vulkan::ops::recurrent::{
-    delta_supported, plan_delta_layer_scan, plan_mamba1_bc_norms_with, plan_mamba1_scan, plan_mamba2_mixer, plan_channel_scale, plan_doge_cdmoe, plan_mamba_conv, plan_rglru_cell, plan_xlstm_cell, Mamba1Shape as VkMamba1,
+    delta_supported, plan_delta_layer_scan, plan_mamba1_bc_norms_with, plan_mamba1_scan, plan_mamba2_mixer, plan_channel_affine, plan_channel_scale, plan_doge_cdmoe, plan_zaya_cca, plan_mamba_conv, plan_rglru_cell, plan_xlstm_cell, Mamba1Shape as VkMamba1,
     Mamba2Shape, RunSpec,
 };
 use crate::backend::vulkan::ops::{
@@ -40,7 +40,7 @@ use crate::backend::vulkan::ops::{
 use crate::backend::vulkan::weights::{format_info, DeviceLayout};
 use crate::backend::{
     validate_kv_write, AttentionParams, BackendError, DeltaRun, DeltaShape, DeltaWeights, DeviceBuffer, DeviceKvCache, DeviceWeight,
-    DsaParams, HcMode, Mamba1Shape, MambaShape, MambaWeights, MlaShape, QuantType, RopeParams, SamplingParams, RgLruShape, Stream, XlstmShape,
+    DsaParams, HcMode, Mamba1Shape, MambaShape, MambaWeights, MlaShape, QuantType, RopeParams, SamplingParams, RgLruShape, Stream, XlstmShape, ZayaShape,
 };
 use exec::Arg;
 use linear::LinTrace;
@@ -1769,6 +1769,78 @@ impl Stream for VulkanStream {
             Arg::r("decay", decay),
             Arg::r("skip", skip),
             Arg::w("out", out),
+        ];
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        self.run_plans(&plans, &args, &states, false)
+    }
+
+    fn supports_zaya(&self, shape: &ZayaShape) -> bool {
+        plan_zaya_cca(0, &RunSpec { first_row: 0, rows: 1, reset: true }, shape, 0).is_ok() && self.sh.caps().max_per_stage_storage_buffers >= 9
+    }
+
+    fn channel_affine(&mut self, x: &mut DeviceBuffer, scale: &DeviceBuffer, bias: &DeviceBuffer, rows: usize, width: usize) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if x.size < rows * width * 4 || scale.size < width * 4 || bias.size < width * 4 {
+            return Err(invalid("channel affine buffers are smaller than rows x width"));
+        }
+        let plan = plan_channel_affine(rows, width)?;
+        self.run_plans(&[plan], &[Arg::r("scale", scale), Arg::r("bias", bias), Arg::w("x", x)], &[], false)
+    }
+
+    fn zaya_cca(
+        &mut self,
+        shape: &ZayaShape,
+        weights: &DeviceBuffer,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        q_in: &DeviceBuffer,
+        k_in: &DeviceBuffer,
+        v_current: &DeviceBuffer,
+        v_delayed: &DeviceBuffer,
+        q_out: &mut DeviceBuffer,
+        k_out: &mut DeviceBuffer,
+        v_out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        if !self.supports_zaya(shape) {
+            return Err(BackendError::UnsupportedOperation("zaya_cca for this shape".into()));
+        }
+        let state_end = state_offset + shape.layer_state_bytes();
+        let (q_len, k_len, half) = (rows * shape.heads * shape.head_dim * 4, rows * shape.kv_heads * shape.head_dim * 4, rows * shape.value_width() / 2 * 4);
+        if q_in.size < q_len
+            || q_out.size < q_len
+            || k_in.size < k_len
+            || k_out.size < k_len
+            || v_out.size < k_len
+            || v_current.size < half
+            || v_delayed.size < half
+            || weights.size < shape.weight_floats() * 4
+            || runs.iter().any(|r| r.state.size < state_end)
+        {
+            return Err(invalid("ZAYA buffers are smaller than the layer needs"));
+        }
+        let mut plans = Vec::new();
+        for (index, r) in runs.iter().enumerate() {
+            if r.rows == 0 {
+                continue;
+            }
+            let spec = RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset };
+            plans.push(plan_zaya_cca(index, &spec, shape, state_offset / 4)?);
+        }
+        let args = [
+            Arg::r("q_in", q_in),
+            Arg::r("k_in", k_in),
+            Arg::r("v_cur", v_current),
+            Arg::r("v_del", v_delayed),
+            Arg::r("wts", weights),
+            Arg::w("q_out", q_out),
+            Arg::w("k_out", k_out),
+            Arg::w("v_out", v_out),
         ];
         let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
         self.run_plans(&plans, &args, &states, false)
