@@ -1,0 +1,69 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: attn_res_mix | bindings: prefix,blocks,score,out | push: hidden,rows,nb,eps | grid: [rows, 1, 1]
+// Kimi K3 attention residuals: for one row the candidates are the `nb` earlier block sums (blocks is nb x rows x hidden) and the running sum `prefix`. Every candidate is scored
+// with dot(candidate * rsqrt(mean(candidate^2) + eps), score), a softmax over the candidates weights them and out is the weighted sum. At most 64 candidates.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer PBuf { float prefix[]; };
+layout(std430, binding = 1) readonly buffer BBuf { float blocks[]; };
+layout(std430, binding = 2) readonly buffer SBuf { float score[]; };
+layout(std430, binding = 3) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint hidden;
+    uint rows;
+    uint nb;
+    float eps;
+} p;
+
+shared float red_sq[WG];
+shared float red_dot[WG];
+shared float sc[65];
+
+float cand(uint c, uint r, uint j) {
+    return c < p.nb ? blocks[(c * p.rows + r) * p.hidden + j] : prefix[r * p.hidden + j];
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint r = gl_WorkGroupID.x;
+    for (uint c = 0u; c <= p.nb; c++) {
+        float sq = 0.0;
+        float dt = 0.0;
+        for (uint j = tid; j < p.hidden; j += WG) {
+            const float v = cand(c, r, j);
+            sq += v * v;
+            dt += v * score[j];
+        }
+        red_sq[tid] = sq;
+        red_dot[tid] = dt;
+        barrier();
+        for (uint s = WG / 2u; s > 0u; s >>= 1u) {
+            if (tid < s) {
+                red_sq[tid] += red_sq[tid + s];
+                red_dot[tid] += red_dot[tid + s];
+            }
+            barrier();
+        }
+        if (tid == 0u) sc[c] = red_dot[0] * inversesqrt(red_sq[0] / float(p.hidden) + p.eps);
+        barrier();
+    }
+    if (tid == 0u) {
+        float mx = sc[0];
+        for (uint c = 1u; c <= p.nb; c++) mx = max(mx, sc[c]);
+        float sum = 0.0;
+        for (uint c = 0u; c <= p.nb; c++) {
+            sc[c] = exp(sc[c] - mx);
+            sum += sc[c];
+        }
+        for (uint c = 0u; c <= p.nb; c++) sc[c] /= sum;
+    }
+    barrier();
+    for (uint j = tid; j < p.hidden; j += WG) {
+        float acc = 0.0;
+        for (uint c = 0u; c <= p.nb; c++) acc += sc[c] * cand(c, r, j);
+        outv[r * p.hidden + j] = acc;
+    }
+}

@@ -167,6 +167,59 @@ int fllm_diff_expand_v_launch(cudaStream_t s, float *out, const float *v, size_t
     return fllm_check_launch("diff_expand_v");
 }
 
+// Kimi K3 attention residuals: out[r] = softmax_c(dot(cand_c[r] * rsqrt(mean(cand_c[r]^2) + eps), score)) weighted sum of the candidates (nb block sums and the prefix)
+__global__ void attn_res_mix_kernel(const float *__restrict__ prefix, const float *__restrict__ blocks, const float *__restrict__ score, float *__restrict__ out, size_t rows, int hidden, int nb, float eps) {
+    const size_t r = blockIdx.x;
+    __shared__ float red_sq[256];
+    __shared__ float red_dot[256];
+    __shared__ float sc[65];
+    const int tid = threadIdx.x;
+    for (int c = 0; c <= nb; c++) {
+        const float *v = c < nb ? blocks + ((size_t)c * rows + r) * hidden : prefix + r * hidden;
+        float sq = 0.f, dt = 0.f;
+        for (int j = tid; j < hidden; j += 256) {
+            sq += v[j] * v[j];
+            dt += v[j] * score[j];
+        }
+        red_sq[tid] = sq;
+        red_dot[tid] = dt;
+        __syncthreads();
+        for (int s = 128; s > 0; s >>= 1) {
+            if (tid < s) {
+                red_sq[tid] += red_sq[tid + s];
+                red_dot[tid] += red_dot[tid + s];
+            }
+            __syncthreads();
+        }
+        if (tid == 0) sc[c] = red_dot[0] * rsqrtf(red_sq[0] / (float)hidden + eps);
+        __syncthreads();
+    }
+    if (tid == 0) {
+        float mx = sc[0];
+        for (int c = 1; c <= nb; c++) mx = fmaxf(mx, sc[c]);
+        float sum = 0.f;
+        for (int c = 0; c <= nb; c++) {
+            sc[c] = expf(sc[c] - mx);
+            sum += sc[c];
+        }
+        for (int c = 0; c <= nb; c++) sc[c] /= sum;
+    }
+    __syncthreads();
+    for (int j = tid; j < hidden; j += 256) {
+        float acc = 0.f;
+        for (int c = 0; c <= nb; c++) {
+            const float *v = c < nb ? blocks + ((size_t)c * rows + r) * hidden : prefix + r * hidden;
+            acc += sc[c] * v[j];
+        }
+        out[r * hidden + j] = acc;
+    }
+}
+int fllm_attn_res_mix_launch(cudaStream_t s, float *out, const float *prefix, const float *blocks, const float *score, size_t rows, int hidden, int nb, float eps) {
+    if (rows == 0) return 0;
+    attn_res_mix_kernel<<<(unsigned)rows, 256, 0, s>>>(prefix, blocks, score, out, rows, hidden, nb, eps);
+    return fllm_check_launch("attn_res_mix");
+}
+
 // JetMoE's mixture of attention heads: the per-expert queries [r][j][g][c] become the heads [r][g][j][c] (inverse: back to [r][j][g][c])
 __global__ void moa_permute_kernel(const float *__restrict__ src, float *__restrict__ out, size_t total, int kv_heads, int top_k, int d, int inverse) {
     const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;

@@ -2951,6 +2951,13 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("doge_cdmoe".into()))
     }
 
+    /// Kimi K3 attention residuals: `out[r]` is the softmax-weighted sum of the `nb` block sums (`blocks`, `nb x rows x hidden`) and the running sum `prefix`
+    /// (`rows x hidden`), every candidate scored with `dot(candidate * rsqrt(mean(candidate^2) + eps), score)`. At most 63 blocks.
+    #[allow(clippy::too_many_arguments)]
+    fn attn_res_mix(&mut self, _out: &mut DeviceBuffer, _prefix: &DeviceBuffer, _blocks: &DeviceBuffer, _score: &DeviceBuffer, _rows: usize, _hidden: usize, _nb: usize, _eps: f32) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("attn_res_mix".into()))
+    }
+
     /// JetMoE: the queries of the `top_k` experts of each row (`[r][j][g][c]`, `kv_heads x d` per expert) become the attention heads `g * top_k + j`
     /// (`[r][g][j][c]`); with `inverse` the attention output is split back per expert.
     #[allow(clippy::too_many_arguments)]

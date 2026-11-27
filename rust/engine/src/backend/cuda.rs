@@ -585,6 +585,7 @@ extern "C" {
     ) -> c_int;
     fn fllm_cuda_act(st: *mut RawStream, x: *const f32, out: *mut f32, n: usize, mode: c_int) -> c_int;
     fn fllm_cuda_xielu(st: *mut RawStream, x: *const f32, out: *mut f32, n: usize, ap: f32, an: f32, beta: f32, eps: f32) -> c_int;
+    fn fllm_cuda_attn_res_mix(st: *mut RawStream, out: *mut f32, prefix: *const f32, blocks: *const f32, score: *const f32, rows: usize, hidden: c_int, nb: c_int, eps: f32) -> c_int;
     fn fllm_cuda_moa_permute(st: *mut RawStream, out: *mut f32, src: *const f32, rows: usize, kv_heads: c_int, top_k: c_int, d: c_int, inverse: c_int) -> c_int;
     fn fllm_cuda_diff_expand_v(st: *mut RawStream, out: *mut f32, v: *const f32, rows: usize, kv_heads: c_int, d: c_int) -> c_int;
     fn fllm_cuda_channel_scale(st: *mut RawStream, x: *mut f32, scale: *const f32, rows: usize, width: c_int) -> c_int;
@@ -5504,6 +5505,15 @@ impl Stream for CudaStream {
 
     fn supports_diff_attn(&self) -> bool {
         !self.act.is_narrow()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn attn_res_mix(&mut self, out: &mut DeviceBuffer, prefix: &DeviceBuffer, blocks: &DeviceBuffer, score: &DeviceBuffer, rows: usize, hidden: usize, nb: usize, eps: f32) -> Result<(), BackendError> {
+        if nb > 63 || prefix.size < rows * hidden * 4 || out.size < rows * hidden * 4 || blocks.size < nb * rows * hidden * 4 || score.size < hidden * 4 {
+            return Err(invalid("attention residual buffers are smaller than the layer needs, or more than 64 candidates"));
+        }
+        // SAFETY: sizes checked above.
+        check(unsafe { fllm_cuda_attn_res_mix(self.raw, dev_ptr(out)?.cast(), dev_ptr(prefix)?.cast(), dev_ptr(blocks)?.cast(), dev_ptr(score)?.cast(), rows, to_c(hidden, "hidden")?, to_c(nb, "blocks")?, eps) })
     }
 
     fn moa_permute(&mut self, out: &mut DeviceBuffer, src: &DeviceBuffer, rows: usize, kv_heads: usize, top_k: usize, d: usize, inverse: bool) -> Result<(), BackendError> {

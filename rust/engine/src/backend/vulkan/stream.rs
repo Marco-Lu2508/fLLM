@@ -1920,6 +1920,18 @@ impl Stream for VulkanStream {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn attn_res_mix(&mut self, out: &mut DeviceBuffer, prefix: &DeviceBuffer, blocks: &DeviceBuffer, score: &DeviceBuffer, rows: usize, hidden: usize, nb: usize, eps: f32) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if prefix.size < rows * hidden * 4 || out.size < rows * hidden * 4 || blocks.size < nb * rows * hidden * 4 || score.size < hidden * 4 {
+            return Err(invalid("attention residual buffers are smaller than the layer needs"));
+        }
+        let plan = crate::backend::vulkan::ops::recurrent::plan_attn_res_mix(rows, hidden, nb, eps)?;
+        self.run_plans(&[plan], &[Arg::r("prefix", prefix), Arg::r("blocks", blocks), Arg::r("score", score), Arg::w("out", out)], &[], false)
+    }
+
     fn moa_permute(&mut self, out: &mut DeviceBuffer, src: &DeviceBuffer, rows: usize, kv_heads: usize, top_k: usize, d: usize, inverse: bool) -> Result<(), BackendError> {
         if rows == 0 {
             return Ok(());

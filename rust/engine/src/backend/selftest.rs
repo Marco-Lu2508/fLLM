@@ -4442,6 +4442,10 @@ impl Tester<'_> {
             self.record_skip("diff_attn", "differential attention value expansion and head mix", "supports_diff_attn is false");
         }
         if self.device.create_stream().map(|st| st.supports_arch_ops()).unwrap_or(false) {
+            for (rows, hidden, nb) in [(3usize, 64usize, 0usize), (4, 300, 2), (2, 96, 5)] {
+                let r = self.attn_res_check(rows, hidden, nb);
+                self.record("attn_res", &format!("{rows} rows, hidden {hidden}, {nb} blocks"), r);
+            }
             for (rows, kv_heads, top_k, d) in [(3usize, 2usize, 2usize, 16usize), (5, 4, 3, 24)] {
                 let r = self.moa_permute_check(rows, kv_heads, top_k, d);
                 self.record("moa_permute", &format!("{rows} rows, {kv_heads} key heads of {d}, {top_k} experts"), r);
@@ -5066,6 +5070,44 @@ impl Tester<'_> {
                 .max(cmp(get(stream.as_mut(), &vo, want_v.len())?, &want_v));
         }
         Ok(Outcome { device: worst_err, cpu: 0.0, tol: 2e-3, cpu_tol: 1.0, ms: total_ms })
+    }
+
+    /// Kimi K3's attention-residual mixture against `apply_attn_res` of the host decoder.
+    fn attn_res_check(&mut self, rows: usize, hidden: usize, nb: usize) -> Result<Outcome, BackendError> {
+        let mut stream = self.device.create_stream()?;
+        let prefix = self.rng.vector(rows * hidden, 1.0);
+        let blocks = self.rng.vector(nb * rows * hidden, 1.0);
+        let score = self.rng.vector(hidden, 0.3);
+        let eps = 1e-6f32;
+        let mut want = vec![0.0f32; rows * hidden];
+        for r in 0..rows {
+            let cands: Vec<&[f32]> = (0..nb).map(|c| &blocks[(c * rows + r) * hidden..(c * rows + r + 1) * hidden]).chain(std::iter::once(&prefix[r * hidden..(r + 1) * hidden])).collect();
+            let scores: Vec<f32> = cands
+                .iter()
+                .map(|v| {
+                    let inv = (v.iter().map(|x| x * x).sum::<f32>() / hidden as f32 + eps).sqrt().recip();
+                    v.iter().zip(&score).map(|(x, s)| x * inv * s).sum()
+                })
+                .collect();
+            let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = scores.iter().map(|s| (s - max).exp()).collect();
+            let sum: f32 = exps.iter().sum();
+            for (c, e) in cands.iter().zip(&exps) {
+                for (o, x) in want[r * hidden..(r + 1) * hidden].iter_mut().zip(*c) {
+                    *o += e / sum * x;
+                }
+            }
+        }
+        let pb = put(self.device, stream.as_mut(), &prefix)?;
+        let bb = put(self.device, stream.as_mut(), &if blocks.is_empty() { vec![0.0f32] } else { blocks.clone() })?;
+        let sb = put(self.device, stream.as_mut(), &score)?;
+        let mut ob = put(self.device, stream.as_mut(), &vec![f32::NAN; want.len()])?;
+        let mut ms = 0.0;
+        timed(&mut ms, stream.as_mut(), |s| s.attn_res_mix(&mut ob, &pb, &bb, &sb, rows, hidden, nb, eps))?;
+        let want64: Vec<f64> = want.iter().map(|&v| f64::from(v)).collect();
+        let scale: Vec<f64> = want64.iter().map(|v| v.abs().max(1.0)).collect();
+        let err = worst(&get(stream.as_mut(), &ob, want.len())?, &want64, &scale);
+        Ok(Outcome { device: err, cpu: 0.0, tol: 2e-3, cpu_tol: 1.0, ms })
     }
 
     /// JetMoE's query permutation (and its inverse) against the index arithmetic of the host loop.

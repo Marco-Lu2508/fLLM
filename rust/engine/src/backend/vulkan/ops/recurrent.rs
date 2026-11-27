@@ -938,6 +938,14 @@ pub fn plan_rglru_cell(run_index: usize, run: &RunSpec, shape: &RgLruShape, stat
     plan("rglru_cell", push, [shape.blocks as u32, 1, 1], slots)
 }
 
+/// `attn_res_mix` (Kimi K3 attention residuals): one workgroup per row.
+pub fn plan_attn_res_mix(rows: usize, hidden: usize, nb: usize, eps: f32) -> Result<OpPlan, BackendError> {
+    if rows == 0 || hidden == 0 || nb > 63 || !eps.is_finite() {
+        return Err(invalid("attention residuals need rows, a hidden size, at most 63 blocks and a finite epsilon"));
+    }
+    plan("attn_res_mix", Push::new().u("hidden", hidden).u("rows", rows).u("nb", nb).f("eps", eps), [rows as u32, 1, 1], Slots::new().read("prefix").read("blocks").read("score").rw("out"))
+}
+
 /// `moa_permute` (JetMoE): per-expert queries to attention heads and back.
 pub fn plan_moa_permute(rows: usize, kv_heads: usize, top_k: usize, d: usize, inverse: bool) -> Result<OpPlan, BackendError> {
     if rows == 0 || kv_heads == 0 || top_k == 0 || d == 0 {

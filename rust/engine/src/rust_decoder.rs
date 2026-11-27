@@ -980,6 +980,8 @@ pub struct DeviceLayerWeights {
     zaya: Option<DeviceZaya>,
     /// JetMoE: the mixture of attention heads on the device.
     moa: Option<DeviceMoa>,
+    /// Kimi K3: score weights of the attention-residual mixtures in front of the attention and the feed-forward branch.
+    res: Option<(crate::backend::DeviceBuffer, crate::backend::DeviceBuffer)>,
     /// JetMoE: `(ones, bias)` of the bias added behind the sum of the feed-forward experts.
     ffn_bias: Option<(crate::backend::DeviceBuffer, crate::backend::DeviceBuffer)>,
     pub ffn_norm_gate: Option<(crate::backend::DeviceWeight, crate::backend::DeviceWeight)>,
@@ -1082,6 +1084,7 @@ impl DeviceLayerWeights {
             zaya: None,
             moa: None,
             ffn_bias: None,
+            res: None,
             attn_sub_norm: None,
             ffn_sub_norm: None,
             q_norm: None,
@@ -1334,6 +1337,8 @@ pub struct DeviceModelWeights {
     pub layers: Vec<DeviceLayerWeights>,
     pub final_norm: crate::backend::DeviceBuffer,
     pub final_norm_b: Option<crate::backend::DeviceBuffer>,
+    /// Kimi K3: score weights of the attention-residual mixture in front of the output norm.
+    pub output_res: Option<crate::backend::DeviceBuffer>,
     pub head: crate::backend::DeviceWeight,
     /// (cos, sin) of the global and the sliding-window rotary table, shared with every
     /// `RopeParams` so a step does not copy them.
@@ -1744,6 +1749,8 @@ pub struct RustDecoder {
     zaya_device: bool,
     /// JetMoE's mixture of attention heads and the bias behind its experts run on the device.
     moa_device: bool,
+    /// Kimi K3's attention-residual blocks run on the device.
+    attn_res_device: bool,
     /// The accelerator runs DeepSeek-V4 completely (`hc_device` is set with it); set when the model is attached.
     v4_device: bool,
     /// Qwen3.8-Flash-Next runs on the device (streams, n-gram embeddings and token indexer included).
@@ -3140,6 +3147,7 @@ impl RustDecoder {
             doge_device: false,
             zaya_device: false,
             moa_device: false,
+            attn_res_device: false,
             hc_device: false,
             v4_device: false,
             q4_device: false,
@@ -3678,8 +3686,8 @@ impl RustDecoder {
         if cfg.hc.is_some() && !hc_ok {
             return Some("hyper-connections (the backend has no kernels for them, or FLLM_HC=host)");
         }
-        if cfg.attn_res.is_some() {
-            return Some("attention residual blocks");
+        if cfg.attn_res.is_some() && !self.attn_res_device {
+            return Some("attention residual blocks (the device pass is opt-in: FLLM_ATTN_RES_DEVICE=1)");
         }
         if cfg.qwen4.is_some() && !q4_ok {
             return Some("Qwen3.8-Flash-Next streams, n-gram embeddings and token indexer (the backend has no kernels for them, or FLLM_QWEN4=host)");
@@ -3979,6 +3987,13 @@ impl RustDecoder {
         self.m3_device = m3_device;
         self.ink_device = self.cfg.inkling.is_some() && self.ink_device_possible(&*backend);
         self.xielu_device = backend.create_stream().is_ok_and(|s| s.supports_xielu()) && !std::env::var_os("FLLM_XIELU_HOST").is_some();
+        self.attn_res_device = self.cfg.attn_res.is_some_and(|block| {
+            self.layers.len() / block.max(1) < 62
+                && self.cfg.hidden > 0
+                && backend.create_stream().is_ok_and(|s| s.supports_arch_ops() && s.supports_copy_columns())
+                // opt-in until a Kimi K3 checkpoint has compared the device pass with the host pass
+                && std::env::var_os("FLLM_ATTN_RES_DEVICE").is_some()
+        });
         self.moa_device = backend.create_stream().is_ok_and(|s| s.supports_arch_ops())
             && backend.moe_device_available()
             && !std::env::var_os("FLLM_MOA_HOST").is_some();
@@ -5079,6 +5094,10 @@ impl RustDecoder {
                 host_values: layer.value_moe.is_some() && value_moe_dev.is_none(),
                 moa: moa_dev,
                 ffn_bias: ffn_bias_dev,
+                res: match (&layer.res, self.attn_res_device) {
+                    (Some(r), true) => Some((upload_vec(&r.attn)?, upload_vec(&r.ffn)?)),
+                    _ => None,
+                },
                 attn_gate: layer.attn_gate.as_ref().map(|g| upload_linear(&format!("blk.{i}.attn_gate"), g)).transpose()?,
                 zaya: match (&layer.zaya, self.zaya_shape()) {
                     (Some(z), Some(shape)) if self.zaya_device => {
@@ -5256,6 +5275,10 @@ impl RustDecoder {
             layers: dev_layers,
             final_norm,
             final_norm_b,
+            output_res: match (&self.output_res, self.attn_res_device) {
+                (Some(score), true) => Some(upload_norm("output_res", &Norm { weight: score.clone(), bias: None })?),
+                _ => None,
+            },
             head,
             rope: self
                 .rope
@@ -5667,6 +5690,14 @@ impl RustDecoder {
         let mut delta_plan: Option<Vec<DeltaPlanRun>> = None;
         // the norm of the next layer (or the final norm), when the residual add of this layer's feed-forward block already computed it
         let mut carried_norm: Option<crate::backend::DeviceBuffer> = None;
+        // Kimi K3 attention residuals: the finished block sums (`res_nb` of up to `res_cap`, each `rows x hidden`) side by side in one buffer
+        let res_block = if self.attn_res_device { cfg.attn_res } else { None };
+        let res_cap = res_block.map_or(0, |b| self.layers.len() / b.max(1) + 1);
+        let mut res_blocks = match res_block {
+            Some(_) => Some(scratch.acquire(res_cap * rows * hidden * 4).map_err(err)?),
+            None => None,
+        };
+        let mut res_nb = 0usize;
         // LongCat-Flash: the shortcut experts of the layer before, added after the feed-forward block of the layer that follows
         let mut pending_shortcut_dev: Option<crate::backend::DeviceBuffer> = None;
         // ZAYA: the router state of the layer before
@@ -5759,6 +5790,24 @@ impl RustDecoder {
             // the feed-forward norm of this layer, when the output projection's residual add already computed it
             let mut ffn_pre: Option<crate::backend::DeviceBuffer> = None;
 
+            // Kimi K3: the attention branch reads a softmax mixture of the earlier block sums and the running sum; a new block starts every `block` layers
+            let res_in = match (res_block, &dev_layer.res, res_blocks.as_mut()) {
+                (Some(block), Some((attn_score, _)), Some(blocks)) => {
+                    let mut mixed = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                    if res_nb == 0 {
+                        stream.copy_buffer(&mut mixed, &x_buf).map_err(err)?;
+                    } else {
+                        stream.attn_res_mix(&mut mixed, &x_buf, blocks, attn_score, rows, hidden, res_nb, cfg.eps).map_err(err)?;
+                    }
+                    if i % block == 0 {
+                        stream.copy_columns(blocks, res_cap * rows * hidden, res_nb * rows * hidden, &x_buf, 1, rows * hidden).map_err(err)?;
+                        res_nb += 1;
+                        stream.zero_buffer(&mut x_buf).map_err(err)?;
+                    }
+                    Some(mixed)
+                }
+                _ => None,
+            };
             // Zamba2: the shared block's output joins the stream in front of the layer's norm (the residual stream itself stays as it is)
             let zamba_in = match &dev_layer.zamba {
                 Some(dz) => {
@@ -5772,7 +5821,7 @@ impl RustDecoder {
                     scratch.recycle(shared);
                     Some(sum)
                 }
-                None => None,
+                None => res_in,
             };
             if let Some(carried) = carried_norm.take() {
                 scratch.recycle(std::mem::replace(&mut normed_buf, carried));
@@ -6379,7 +6428,7 @@ impl RustDecoder {
                 let mut out_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                 let out_w = dev_layer.out.as_ref().ok_or("attention layer without a device output projection")?;
                 // the feed-forward norm (and the activation format of its first GEMM) can join the residual add of the output projection
-                let ffn_target = if cfg.gated_norm_rank == 0 && dev_layer.zaya.is_none() && dev_layer.moa.is_none() && !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.par_mamba.is_none() && dev_layer.post_attn_norm.is_none() && dev_layer.laurel.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
+                let ffn_target = if cfg.gated_norm_rank == 0 && cfg.attn_res.is_none() && dev_layer.zaya.is_none() && dev_layer.moa.is_none() && !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.par_mamba.is_none() && dev_layer.post_attn_norm.is_none() && dev_layer.laurel.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
                     dev_layer
                         .ffn_norm
                         .as_ref()
@@ -6627,6 +6676,19 @@ impl RustDecoder {
                 (None, None, Some(d)) if dev_layer.gate_up.is_some() => dev_layer.gate_up.as_ref().map(|m| (Some(&m.weight), &m.weight, d)),
                 _ => None,
             };
+            // Kimi K3: the feed-forward branch reads its own mixture of the block sums and the running sum
+            let ffn_res_in = match (res_block, &dev_layer.res, res_blocks.as_ref()) {
+                (Some(_), Some((_, ffn_score)), Some(blocks)) => {
+                    let mut mixed = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                    if res_nb == 0 {
+                        stream.copy_buffer(&mut mixed, &x_buf).map_err(err)?;
+                    } else {
+                        stream.attn_res_mix(&mut mixed, &x_buf, blocks, ffn_score, rows, hidden, res_nb, cfg.eps).map_err(err)?;
+                    }
+                    Some(mixed)
+                }
+                _ => None,
+            };
             let mut ffn_normed = scratch.acquire(rows * hidden * 4).map_err(err)?;
             if matches!(layer.attn, Attn::None) || (parallel && dev_layer.ffn_norm.is_none()) {
                 // feed-forward-only layers (Nemotron-H) and parallel-residual models with one shared norm (Cohere)
@@ -6634,9 +6696,12 @@ impl RustDecoder {
             } else if let Some(pre) = ffn_pre.take() {
                 scratch.recycle(std::mem::replace(&mut ffn_normed, pre));
             } else if let Some(ffn_norm_buf) = &dev_layer.ffn_norm {
-                device_norm(&mut **stream, cfg.norm, &mut ffn_normed, &x_buf, ffn_norm_buf, dev_layer.ffn_norm_b.as_ref(), cfg.eps, self.groups)?;
+                device_norm(&mut **stream, cfg.norm, &mut ffn_normed, ffn_res_in.as_ref().unwrap_or(&x_buf), ffn_norm_buf, dev_layer.ffn_norm_b.as_ref(), cfg.eps, self.groups)?;
             } else {
-                stream.copy_buffer(&mut ffn_normed, &x_buf).map_err(err)?;
+                stream.copy_buffer(&mut ffn_normed, ffn_res_in.as_ref().unwrap_or(&x_buf)).map_err(err)?;
+            }
+            if let Some(mixed) = ffn_res_in {
+                scratch.recycle(mixed);
             }
             if let Some(g) = &dev_layer.ffn_norm_gate {
                 Self::device_norm_gate(&mut **stream, &mut scratch, g, &mut ffn_normed, rows)?;
@@ -6756,7 +6821,7 @@ impl RustDecoder {
                 // (a layer that receives DeepStack features adds them after its residual, so the norm cannot join the add)
                 let ds_here = deepstack.as_ref().is_some_and(|d| d.get(i).is_some_and(|level| !level.is_empty()));
                 // (the shortcut experts of LongCat-Flash are added to the stream after this block: the norm computed in the add would miss them)
-                let next_target = if cfg.gated_norm_rank == 0 && !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && !layer.takes_shortcut && matches!(cfg.norm, NormKind::Rms) && self.groups == 1 {
+                let next_target = if cfg.gated_norm_rank == 0 && cfg.attn_res.is_none() && !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && !layer.takes_shortcut && matches!(cfg.norm, NormKind::Rms) && self.groups == 1 {
                     match dev_weights.layers.get(i + 1) {
                         Some(next) if !next.host_layer && next.attn_norm_b.is_none() => next.attn_norm.as_ref().map(|w| {
                             let first = if self.layers.get(i + 1).is_some_and(|l| matches!(l.attn, Attn::Std { .. })) { next.q.as_ref() } else { None };
@@ -7075,6 +7140,17 @@ impl RustDecoder {
             step.recycle(&mut scratch);
         }
 
+        // Kimi K3: one more mixture of the block sums in front of the output norm
+        if let (Some(_), Some(score), Some(blocks)) = (res_block, dev_weights.output_res.as_ref(), res_blocks.take()) {
+            let mut mixed = scratch.acquire(rows * hidden * 4).map_err(err)?;
+            if res_nb == 0 {
+                stream.copy_buffer(&mut mixed, &x_buf).map_err(err)?;
+            } else {
+                stream.attn_res_mix(&mut mixed, &x_buf, &blocks, score, rows, hidden, res_nb, cfg.eps).map_err(err)?;
+            }
+            scratch.recycle(std::mem::replace(&mut x_buf, mixed));
+            scratch.recycle(blocks);
+        }
         if !last_stage {
             // not the last pipeline stage: the residual stream goes down to the host (no peer path between devices of different
             // backends) and on to the next stage, which uploads it to its own device
@@ -11755,6 +11831,7 @@ impl RustDecoder {
         // parallel residual and QKV clipping take buffers from the pool in the middle of a step: not recordable
         !self.cfg.parallel_residual
             && self.cfg.qkv_clip.is_none()
+            && self.cfg.attn_res.is_none()
             // the block selection stages host arrays (slots, tables, lengths) that a recorded step cannot take
             && !self.m3_device
             && self.layers.len() == weights.layers.len()
