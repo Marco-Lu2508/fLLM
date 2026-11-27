@@ -30,7 +30,7 @@ use crate::backend::vulkan::ops::moe::{
     plan_gather_rows, plan_moe_combine, plan_moe_linear, plan_moe_topk, plan_scatter_add_rows, ExpertAccess, MoeLinear,
 };
 use crate::backend::vulkan::ops::recurrent::{
-    delta_supported, plan_delta_layer_scan, plan_mamba1_bc_norms_with, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, plan_rglru_cell, plan_xlstm_cell, Mamba1Shape as VkMamba1,
+    delta_supported, plan_delta_layer_scan, plan_mamba1_bc_norms_with, plan_mamba1_scan, plan_mamba2_mixer, plan_channel_scale, plan_doge_cdmoe, plan_mamba_conv, plan_rglru_cell, plan_xlstm_cell, Mamba1Shape as VkMamba1,
     Mamba2Shape, RunSpec,
 };
 use crate::backend::vulkan::ops::{
@@ -1772,6 +1772,76 @@ impl Stream for VulkanStream {
         ];
         let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
         self.run_plans(&plans, &args, &states, false)
+    }
+
+    fn supports_doge(&self, max_context: usize) -> bool {
+        max_context <= crate::backend::vulkan::ops::attention::DOGE_MAX_CONTEXT && self.sh.caps().max_per_stage_storage_buffers >= 7
+    }
+
+    fn channel_scale(&mut self, x: &mut DeviceBuffer, scale: &DeviceBuffer, rows: usize, width: usize) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if x.size < rows * width * 4 || scale.size < width * 4 {
+            return Err(invalid("channel scale buffers are smaller than rows x width"));
+        }
+        let plan = plan_channel_scale(rows, width)?;
+        self.run_plans(&[plan], &[Arg::r("scale", scale), Arg::w("x", x)], &[], false)
+    }
+
+    fn doge_attention(
+        &mut self,
+        out: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        kv: &DeviceKvCache,
+        block_tables: &[i64],
+        lengths: &[i64],
+        layer_idx: usize,
+        params: &AttentionParams,
+        dt: &std::sync::Arc<Vec<f32>>,
+        keep: usize,
+    ) -> Result<(), BackendError> {
+        params.validate(kv, block_tables, lengths, layer_idx)?;
+        let rows = lengths.len();
+        if rows == 0 {
+            return Ok(());
+        }
+        let (heads, dk, dv) = (params.num_heads, params.head_dim, params.value_dim);
+        if q.size < rows * heads * dk * 4 || out.size < rows * heads * dv * 4 {
+            return Err(invalid("attention q/out smaller than rows x heads x dim"));
+        }
+        let (layout, keys, values) = self.kv_windows(kv, layer_idx)?;
+        let plans = crate::backend::vulkan::ops::attention::plan_doge_attention(&layout, params, block_tables, lengths, dt, keep)?;
+        self.run_plans(&plans, &[Arg::r("q", q), Arg::view("kpool", keys), Arg::view("vpool", values), Arg::w("out", out)], &[], false)
+    }
+
+    fn doge_cdmoe(
+        &mut self,
+        out: &mut DeviceBuffer,
+        x: &DeviceBuffer,
+        router: &DeviceBuffer,
+        down: &DeviceBuffer,
+        up: &DeviceBuffer,
+        rows: usize,
+        hidden: usize,
+        keys: usize,
+        top_k: usize,
+        norm: bool,
+        act: u32,
+    ) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if x.size < rows * hidden * 4
+            || out.size < rows * hidden * 4
+            || router.size < 2 * keys * hidden * 4
+            || down.size < keys * keys * hidden * 4
+            || up.size < keys * keys * hidden * 4
+        {
+            return Err(invalid("Doge expert buffers are smaller than the layer needs"));
+        }
+        let plan = plan_doge_cdmoe(rows, hidden, keys, top_k, norm, act)?;
+        self.run_plans(&[plan], &[Arg::r("x", x), Arg::r("router", router), Arg::r("down", down), Arg::r("up", up), Arg::w("out", out)], &[], false)
     }
 
     fn supports_diff_attn(&self) -> bool {

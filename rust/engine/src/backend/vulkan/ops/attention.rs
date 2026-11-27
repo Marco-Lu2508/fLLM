@@ -681,3 +681,52 @@ pub fn plan_attn_encoder(
         Slots::new().read("q").read("k").read("v").host("meta", Arc::new(meta)).write("out"),
     )
 }
+
+/// Longest context of the Doge attention shader (`attn_decode_doge` keeps one decay per key in shared memory).
+pub const DOGE_MAX_CONTEXT: usize = 4096;
+
+/// Doge's dynamic mask attention (`attn_decode_doge`, f16 cache, one workgroup per row and head): see `Stream::doge_attention`. `dt` is `A` then the dt projection.
+pub fn plan_doge_attention(kv: &KvLayout, params: &AttentionParams, block_tables: &[i64], lengths: &[i64], dt: &[f32], keep: usize) -> Result<Vec<OpPlan>, BackendError> {
+    kv.check()?;
+    let rows = lengths.len();
+    let (heads, kv_heads, dk, dv) = (params.num_heads, params.num_kv_heads, params.head_dim, params.value_dim);
+    if rows == 0 || keep == 0 || kv_heads == 0 || heads == 0 || !heads.is_multiple_of(kv_heads) {
+        return Err(invalid("Doge attention needs rows, a keep window and heads that are a multiple of the key heads"));
+    }
+    if kv.kv_heads != kv_heads || kv.head_dim != dk || kv.value_dim != dv || kv.block_size != params.block_size || kv.is_q8() || kv.is_generic() {
+        return Err(BackendError::UnsupportedOperation("Doge attention reads an f16 cache that matches the layer".into()));
+    }
+    if dk > NARROW_HEAD_WIDTH || dv > NARROW_HEAD_WIDTH || dt.len() < kv_heads + kv_heads * kv_heads * dv {
+        return Err(invalid("Doge attention head widths or decay weights outside the supported range"));
+    }
+    if params.stride == 0 || block_tables.len() != rows * params.stride || !params.scale.is_finite() {
+        return Err(invalid("Doge attention block tables do not match the rows"));
+    }
+    let bs = params.block_size;
+    for (r, &n) in lengths.iter().enumerate() {
+        if n <= 0 || n as usize > DOGE_MAX_CONTEXT || (n as usize).div_ceil(bs) > params.stride {
+            return Err(BackendError::UnsupportedOperation(format!("Doge attention: row {r} has {n} keys (at most {DOGE_MAX_CONTEXT})")));
+        }
+        let need = (n as usize).div_ceil(bs);
+        if block_tables[r * params.stride..][..need].iter().any(|&b| b < 0 || b as usize >= kv.pool_blocks) {
+            return Err(invalid(format!("row {r}: KV block outside the pool")));
+        }
+    }
+    let mut meta = pack_i32(lengths)?;
+    meta.extend_from_slice(&pack_i32(block_tables)?);
+    let meta = Arc::new(meta);
+    let bias = Arc::new(pack_f32(&dt[..kv_heads + kv_heads * kv_heads * dv]));
+    // the shader reads `keep` from the window field and ignores sinks, ALiBi and chunks
+    let shaped = AttentionParams { window: Some(keep), chunk: None, sinks: None, alibi_slopes: None, ..params.clone() };
+    let tuning = AttentionTuning::for_device(64);
+    let common = Common { kv, params: &shaped, rows, flags: 0, meta, bias, tuning: &tuning };
+    let mut plans = Vec::new();
+    let mut first = 0;
+    while first < rows {
+        let end = (first + MAX_GROUPS_PER_DIM as usize).min(rows);
+        let push = common.cache_push(common.head_push().u("nsplit", 1).u("rows_total", rows).u("row0", first));
+        plans.push(plan("attn_decode_doge", push, [1, heads as u32, (end - first) as u32], common.slots(None).dummy("part", Access::ReadWrite))?);
+        first = end;
+    }
+    Ok(plans)
+}

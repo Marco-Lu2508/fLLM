@@ -959,3 +959,25 @@ pub fn plan_diff_attn_mix(rows: usize, heads: usize, width: usize, lambda: f32, 
         Slots::new().read("attn").rw("out"),
     )
 }
+
+/// `channel_scale`: `x[i] *= scale[i % width]` over `rows x width` floats.
+pub fn plan_channel_scale(rows: usize, width: usize) -> Result<OpPlan, BackendError> {
+    if rows == 0 || width == 0 {
+        return Err(invalid("channel scale of an empty tensor"));
+    }
+    plan("channel_scale", Push::new().u("count", rows * width).u("width", width), groups_1d(rows * width, 256), Slots::new().read("scale").rw("x"))
+}
+
+/// `doge_cdmoe`: Doge's routed experts, one workgroup per row (see the shader).
+#[allow(clippy::too_many_arguments)]
+pub fn plan_doge_cdmoe(rows: usize, hidden: usize, keys: usize, top_k: usize, norm: bool, act: u32) -> Result<OpPlan, BackendError> {
+    if rows == 0 || hidden == 0 || keys == 0 || keys > 128 || top_k == 0 || top_k > 16 || top_k > keys * keys || act > 1 {
+        return Err(invalid("Doge experts need 1..=128 keys, 1..=16 experts per token and a SiLU or GELU activation"));
+    }
+    plan(
+        "doge_cdmoe",
+        Push::new().u("hidden", hidden).u("keys", keys).u("top_k", top_k).b("norm", norm).u("act", act as usize).u("rows", rows),
+        [rows as u32, 1, 1],
+        Slots::new().read("x").read("router").read("down").read("up").write("out"),
+    )
+}

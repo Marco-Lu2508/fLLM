@@ -2281,6 +2281,28 @@ int fllm_cuda_xielu(FllmStream *st, const float *x, float *out, size_t n, float 
     PREP(st);
     return fllm_xielu_launch(st->s, x, out, n, ap, an, beta, eps);
 }
+int fllm_cuda_channel_scale(FllmStream *st, float *x, const float *scale, size_t rows, int width) {
+    PREP(st);
+    return fllm_channel_scale_launch(st->s, x, scale, rows, width);
+}
+int fllm_cuda_doge_cdmoe(FllmStream *st, float *out, const float *x, const float *router, const float *down, const float *up, size_t rows, int hidden, int keys,
+                         int top_k, int norm, int act) {
+    PREP(st);
+    return fllm_doge_cdmoe_launch(st->s, out, x, router, down, up, rows, hidden, keys, top_k, norm, act);
+}
+// Doge attention: the block tables and lengths are staged from host memory like those of fllm_cuda_attention.
+int fllm_cuda_doge_attention(FllmStream *st, const float *q, const uint16_t *kpool_layer, const uint16_t *vpool_layer, float *out, const int64_t *tables_host,
+                             size_t tables_len, const int64_t *lengths_host, int rows, int heads, int kv_heads, int dk, int dv, int stride, int block_size,
+                             int kind, int kgroup, int vgroup, int kscale_base, int vscale_base, float scale, const float *dtw, int keep) {
+    PREP(st);
+    void *dt = nullptr, *dl = nullptr;
+    if (int e = stage(st, 2, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
+    if (int e = stage(st, 3, lengths_host, (size_t)rows * sizeof(int64_t), &dl)) return e;
+    int max_len = 1;
+    for (int r = 0; r < rows; r++) max_len = lengths_host[r] > max_len ? (int)lengths_host[r] : max_len;
+    return fllm_doge_attention_launch(st->s, q, kpool_layer, vpool_layer, out, static_cast<const int64_t *>(dt), static_cast<const int64_t *>(dl), max_len, rows, heads,
+                                      kv_heads, dk, dv, stride, block_size, kind, kgroup, vgroup, kscale_base, vscale_base, scale, dtw, keep);
+}
 int fllm_cuda_diff_expand_v(FllmStream *st, float *out, const float *v, size_t rows, int kv_heads, int d) {
     PREP(st);
     return fllm_diff_expand_v_launch(st->s, out, v, rows, kv_heads, d);

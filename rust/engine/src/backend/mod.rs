@@ -2830,6 +2830,55 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("xlstm_cell".into()))
     }
 
+    /// Does this stream implement [`Stream::doge_attention`], [`Stream::doge_cdmoe`] and [`Stream::channel_scale`] for contexts of up to `max_context` tokens?
+    fn supports_doge(&self, _max_context: usize) -> bool {
+        false
+    }
+
+    /// `x[r][c] *= scale[c]` for `rows x width` floats: a learned scale per channel (Doge's residual vectors).
+    fn channel_scale(&mut self, _x: &mut DeviceBuffer, _scale: &DeviceBuffer, _rows: usize, _width: usize) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("channel_scale".into()))
+    }
+
+    /// Doge's dynamic mask attention over the paged cache (f16 or q8_0 keys and values, no sliding window). `dt` packs `A` (`kv_heads` floats) and the dt projection
+    /// (`kv_heads x kv_heads * value_dim`): the decay of a key for key head `g` is `exp(A[g] * softplus(w[g] . value row of all key heads))`, it is added to the
+    /// score, and a query keeps only the `keep` keys with the largest decay (ties: the lower position).
+    #[allow(clippy::too_many_arguments)]
+    fn doge_attention(
+        &mut self,
+        _out: &mut DeviceBuffer,
+        _q: &DeviceBuffer,
+        _kv: &DeviceKvCache,
+        _block_tables: &[i64],
+        _lengths: &[i64],
+        _layer_idx: usize,
+        _params: &AttentionParams,
+        _dt: &Arc<Vec<f32>>,
+        _keep: usize,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("doge_attention".into()))
+    }
+
+    /// Doge's routed experts (product-key lookup): `x` is `rows x hidden`, `router` `2 * keys x hidden`, `down` / `up` `keys * keys x hidden`; `out` receives
+    /// `sum_j act(down[e_j] . x) * w_j * up[e_j]` over the `top_k` best expert pairs (weights: softmax of their scores, renormalised when `norm`). `act`: 0 SiLU, 1 GELU (tanh).
+    #[allow(clippy::too_many_arguments)]
+    fn doge_cdmoe(
+        &mut self,
+        _out: &mut DeviceBuffer,
+        _x: &DeviceBuffer,
+        _router: &DeviceBuffer,
+        _down: &DeviceBuffer,
+        _up: &DeviceBuffer,
+        _rows: usize,
+        _hidden: usize,
+        _keys: usize,
+        _top_k: usize,
+        _norm: bool,
+        _act: u32,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("doge_cdmoe".into()))
+    }
+
     /// Does this stream implement [`Stream::diff_expand_v`] and [`Stream::diff_attn_mix`] (DiffLlama's differential attention)?
     fn supports_diff_attn(&self) -> bool {
         false

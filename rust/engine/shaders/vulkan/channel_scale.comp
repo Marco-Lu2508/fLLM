@@ -1,0 +1,19 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: channel_scale | bindings: scale,x | push: count,width | grid: [min(ceil(count/256), 65535), 1, 1]
+// x[i] *= scale[i % width] over count floats (rows x width): a learned scale per channel (Doge's residual vectors).
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer SBuf { float scale[]; };
+layout(std430, binding = 1) buffer XBuf { float x[]; };
+layout(push_constant) uniform P {
+    uint count;
+    uint width;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < p.count; i += grid_items) x[i] *= scale[i % p.width];
+}

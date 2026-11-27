@@ -586,6 +586,48 @@ extern "C" {
     fn fllm_cuda_act(st: *mut RawStream, x: *const f32, out: *mut f32, n: usize, mode: c_int) -> c_int;
     fn fllm_cuda_xielu(st: *mut RawStream, x: *const f32, out: *mut f32, n: usize, ap: f32, an: f32, beta: f32, eps: f32) -> c_int;
     fn fllm_cuda_diff_expand_v(st: *mut RawStream, out: *mut f32, v: *const f32, rows: usize, kv_heads: c_int, d: c_int) -> c_int;
+    fn fllm_cuda_channel_scale(st: *mut RawStream, x: *mut f32, scale: *const f32, rows: usize, width: c_int) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_doge_cdmoe(
+        st: *mut RawStream,
+        out: *mut f32,
+        x: *const f32,
+        router: *const f32,
+        down: *const f32,
+        up: *const f32,
+        rows: usize,
+        hidden: c_int,
+        keys: c_int,
+        top_k: c_int,
+        norm: c_int,
+        act: c_int,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_doge_attention(
+        st: *mut RawStream,
+        q: *const f32,
+        kpool_layer: *const u16,
+        vpool_layer: *const u16,
+        out: *mut f32,
+        tables_host: *const i64,
+        tables_len: usize,
+        lengths_host: *const i64,
+        rows: c_int,
+        heads: c_int,
+        kv_heads: c_int,
+        dk: c_int,
+        dv: c_int,
+        stride: c_int,
+        block_size: c_int,
+        kind: c_int,
+        kgroup: c_int,
+        vgroup: c_int,
+        kscale_base: c_int,
+        vscale_base: c_int,
+        scale: f32,
+        dtw: *const f32,
+        keep: c_int,
+    ) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn fllm_cuda_diff_attn_mix(st: *mut RawStream, out: *mut f32, attn: *const f32, rows: usize, heads: c_int, width: c_int, lambda: f32, scale: f32, eps: f32) -> c_int;
     fn fllm_cuda_act_glu(st: *mut RawStream, gate: *const f32, up: *const f32, out: *mut f32, n: usize, mode: c_int) -> c_int;
@@ -5243,6 +5285,118 @@ impl Stream for CudaStream {
                 dev_ptr(decay)?.cast(),
                 dev_ptr(skip)?.cast(),
                 dev_ptr(out)?.cast(),
+            )
+        })
+    }
+
+    fn supports_doge(&self, max_context: usize) -> bool {
+        !self.act.is_narrow() && max_context <= 8192
+    }
+
+    fn channel_scale(&mut self, x: &mut DeviceBuffer, scale: &DeviceBuffer, rows: usize, width: usize) -> Result<(), BackendError> {
+        if x.size < rows * width * 4 || scale.size < width * 4 {
+            return Err(invalid("channel scale buffers are smaller than rows x width"));
+        }
+        // SAFETY: sizes checked above.
+        check(unsafe { fllm_cuda_channel_scale(self.raw, dev_ptr(x)?.cast(), dev_ptr(scale)?.cast(), rows, to_c(width, "width")?) })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn doge_attention(
+        &mut self,
+        out: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        kv: &DeviceKvCache,
+        block_tables: &[i64],
+        lengths: &[i64],
+        layer_idx: usize,
+        params: &AttentionParams,
+        dt: &Arc<Vec<f32>>,
+        keep: usize,
+    ) -> Result<(), BackendError> {
+        params.validate(kv, block_tables, lengths, layer_idx)?;
+        let rows = lengths.len();
+        if rows == 0 {
+            return Ok(());
+        }
+        let (dk, dv, heads) = (params.head_dim, params.value_dim, params.num_heads);
+        if q.size < rows * heads * dk * 4 || out.size < rows * heads * dv * 4 || !matches!(kv.kv_kind, 1 | 2) || dk > MAX_ATTENTION_DIM || dv > MAX_ATTENTION_DIM {
+            return Err(invalid("Doge attention buffers or cache format outside what the kernel reads"));
+        }
+        if dt.len() < params.num_kv_heads + params.num_kv_heads * params.num_kv_heads * dv {
+            return Err(invalid("Doge decay weights shorter than the layer needs"));
+        }
+        let slots = kv.slots();
+        let (kk, kvv) = (kv.kv_heads * dk, kv.kv_heads * dv);
+        let dtw = self.table(dt)?;
+        // SAFETY: `validate` checked the block tables, lengths and parameters against the cache; the pool pointers address the requested layer.
+        check(unsafe {
+            fllm_cuda_doge_attention(
+                self.raw,
+                dev_ptr(q)?.cast(),
+                dev_ptr(&kv.key_pool)?.add(kv.layer_key_offset(layer_idx) * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(kv.layer_value_offset(layer_idx) * 2).cast(),
+                dev_ptr(out)?.cast(),
+                block_tables.as_ptr(),
+                block_tables.len(),
+                lengths.as_ptr(),
+                to_c(rows, "rows")?,
+                to_c(heads, "heads")?,
+                to_c(params.num_kv_heads, "kv heads")?,
+                to_c(dk, "key width")?,
+                to_c(dv, "value width")?,
+                to_c(params.stride, "block table stride")?,
+                to_c(params.block_size, "block size")?,
+                kv.kv_kind,
+                to_c(kv_quant_group(dk), "key group")?,
+                to_c(kv_quant_group(dv), "value group")?,
+                to_c((slots * kk).div_ceil(2), "key scale base")?,
+                to_c((slots * kvv).div_ceil(2), "value scale base")?,
+                params.scale,
+                dtw,
+                to_c(keep, "keep window")?,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn doge_cdmoe(
+        &mut self,
+        out: &mut DeviceBuffer,
+        x: &DeviceBuffer,
+        router: &DeviceBuffer,
+        down: &DeviceBuffer,
+        up: &DeviceBuffer,
+        rows: usize,
+        hidden: usize,
+        keys: usize,
+        top_k: usize,
+        norm: bool,
+        act: u32,
+    ) -> Result<(), BackendError> {
+        if x.size < rows * hidden * 4
+            || out.size < rows * hidden * 4
+            || router.size < 2 * keys * hidden * 4
+            || down.size < keys * keys * hidden * 4
+            || up.size < keys * keys * hidden * 4
+        {
+            return Err(invalid("Doge expert buffers are smaller than the layer needs"));
+        }
+        // SAFETY: sizes checked above.
+        check(unsafe {
+            fllm_cuda_doge_cdmoe(
+                self.raw,
+                dev_ptr(out)?.cast(),
+                dev_ptr(x)?.cast(),
+                dev_ptr(router)?.cast(),
+                dev_ptr(down)?.cast(),
+                dev_ptr(up)?.cast(),
+                rows,
+                to_c(hidden, "hidden")?,
+                to_c(keys, "keys")?,
+                to_c(top_k, "experts per token")?,
+                i32::from(norm),
+                act as c_int,
             )
         })
     }

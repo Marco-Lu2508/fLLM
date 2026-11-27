@@ -407,6 +407,12 @@ int fllm_kvq_attention(cudaStream_t s, void *stream_key, const float *q, const u
 int fllm_act_launch(cudaStream_t s, const float *x, float *out, size_t n, int mode);
 int fllm_xielu_launch(cudaStream_t s, const float *x, float *out, size_t n, float ap, float an, float beta, float eps);
 int fllm_diff_expand_v_launch(cudaStream_t s, float *out, const float *v, size_t rows, int kv_heads, int d);
+int fllm_channel_scale_launch(cudaStream_t s, float *x, const float *scale, size_t rows, int width);
+int fllm_doge_cdmoe_launch(cudaStream_t s, float *out, const float *x, const float *router, const float *down, const float *up, size_t rows, int hidden, int keys,
+                           int top_k, int norm, int act);
+int fllm_doge_attention_launch(cudaStream_t s, const float *q, const uint16_t *kpool, const uint16_t *vpool, float *out, const int64_t *tables,
+                               const int64_t *lengths, int max_len, int rows, int heads, int kv_heads, int dk, int dv, int stride, int block_size, int kind,
+                               int kgroup, int vgroup, int kscale_base, int vscale_base, float scale, const float *dtw, int keep);
 int fllm_diff_attn_mix_launch(cudaStream_t s, float *out, const float *attn, size_t rows, int heads, int width, float lambda, float scale, float eps);
 int fllm_act_glu_launch(cudaStream_t s, const float *gate, const float *up, float *out, size_t n, int mode);
 int fllm_clamp_launch(cudaStream_t s, float *x, size_t n, float limit);

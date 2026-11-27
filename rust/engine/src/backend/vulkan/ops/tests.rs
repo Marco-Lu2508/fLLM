@@ -1235,6 +1235,16 @@ fn sample_plans() -> Vec<OpPlan> {
         )
         .unwrap(),
     );
+    v.push(crate::backend::vulkan::ops::recurrent::plan_channel_scale(3, 64).unwrap());
+    v.push(crate::backend::vulkan::ops::recurrent::plan_doge_cdmoe(2, 64, 4, 3, true, 0).unwrap());
+    {
+        let (heads, kvh, d, bs) = (4usize, 2usize, 16usize, 16usize);
+        let kv = kv_layout(1, kvh, d, d, bs, 64);
+        let params = attn_params(heads, kvh, d, d, bs, 8);
+        let lengths = [20i64, 9];
+        let dt = vec![0.1f32; kvh + kvh * kvh * d];
+        v.extend(crate::backend::vulkan::ops::attention::plan_doge_attention(&kv, &params, &tables(&lengths, bs, 8), &lengths, &dt, 8).unwrap());
+    }
     v.push(crate::backend::vulkan::ops::recurrent::plan_diff_expand_v(3, 4, 16).unwrap());
     v.push(crate::backend::vulkan::ops::recurrent::plan_diff_attn_mix(3, 4, 32, 0.3, 0.7, 1e-5).unwrap());
     v.push(

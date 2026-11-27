@@ -1,0 +1,147 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: doge_cdmoe | bindings: x,router,down,up,out | push: hidden,keys,top_k,norm,act,rows | grid: [rows, 1, 1]
+// Doge's cross-domain mixture of experts, routed part (reference: `DogeLayer::experts` in rust_decoder.rs), one workgroup per row. router [2 * keys][hidden] scores the
+// two key halves; each half keeps its `keys` entries sorted by logit (ties: lower index first); all keys * keys sums are ranked (ties: lower grid position) and the best top_k
+// are weighted by their softmax (norm: renormalised). Expert e = x_index * keys + y_index owns down[e] and up[e] (hidden floats each):
+//   out = sum_j act(down[e_j] . x) * w_j * up[e_j].        act: 0 = SiLU, 1 = GELU (tanh).   keys <= 128, top_k <= 16.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer XBuf { float xv[]; };
+layout(std430, binding = 1) readonly buffer RBuf { float router[]; };
+layout(std430, binding = 2) readonly buffer DBuf { float down_e[]; };
+layout(std430, binding = 3) readonly buffer UBuf { float up_e[]; };
+layout(std430, binding = 4) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint hidden;
+    uint keys;
+    uint top_k;
+    uint norm;
+    uint act;
+    uint rows;
+} p;
+
+shared float logit[256];
+shared uint order_x[128];
+shared uint order_y[128];
+shared float sorted_x[128];
+shared float sorted_y[128];
+shared float red_v[WG];
+shared uint red_g[WG];
+shared uint chosen_g[16];
+shared float chosen_s[16];
+shared float coef[16];
+shared uint chosen_e[16];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x;
+    const uint keys = p.keys;
+    // router logits
+    if (tid < 2u * keys) {
+        float acc = 0.0;
+        for (uint i = 0u; i < p.hidden; i++) acc += router[tid * p.hidden + i] * xv[row * p.hidden + i];
+        logit[tid] = acc;
+    }
+    barrier();
+    // rank inside each half (descending, ties to the lower index)
+    if (tid < 2u * keys) {
+        const uint half_index = tid / keys;
+        const uint e = tid % keys;
+        const float v = logit[tid];
+        uint rank = 0u;
+        for (uint f = 0u; f < keys; f++) {
+            const float w = logit[half_index * keys + f];
+            if (w > v || (w == v && f < e)) rank++;
+        }
+        if (half_index == 0u) {
+            order_x[rank] = e;
+            sorted_x[rank] = v;
+        } else {
+            order_y[rank] = e;
+            sorted_y[rank] = v;
+        }
+    }
+    barrier();
+    // the best top_k pair sums, one round per pair
+    for (uint round = 0u; round < p.top_k; round++) {
+        float best = -3.0e38;
+        uint best_g = 0xFFFFFFFFu;
+        for (uint g = tid; g < keys * keys; g += WG) {
+            bool taken = false;
+            for (uint c = 0u; c < round; c++) taken = taken || chosen_g[c] == g;
+            if (taken) continue;
+            const float s = sorted_x[g / keys] + sorted_y[g % keys];
+            if (s > best || (s == best && g < best_g)) {
+                best = s;
+                best_g = g;
+            }
+        }
+        red_v[tid] = best;
+        red_g[tid] = best_g;
+        barrier();
+        for (uint st = WG / 2u; st > 0u; st >>= 1u) {
+            if (tid < st) {
+                const float ov = red_v[tid + st];
+                const uint og = red_g[tid + st];
+                if (ov > red_v[tid] || (ov == red_v[tid] && og < red_g[tid])) {
+                    red_v[tid] = ov;
+                    red_g[tid] = og;
+                }
+            }
+            barrier();
+        }
+        if (tid == 0u) {
+            chosen_g[round] = red_g[0];
+            chosen_s[round] = red_v[0];
+        }
+        barrier();
+    }
+    if (tid == 0u) {
+        float mx = chosen_s[0];
+        for (uint j = 1u; j < p.top_k; j++) mx = max(mx, chosen_s[j]);
+        float sum = 0.0;
+        for (uint j = 0u; j < p.top_k; j++) {
+            coef[j] = exp(chosen_s[j] - mx);
+            sum += coef[j];
+        }
+        float total = 0.0;
+        for (uint j = 0u; j < p.top_k; j++) {
+            coef[j] = coef[j] / sum;
+            total += coef[j];
+        }
+        if (p.norm != 0u) {
+            for (uint j = 0u; j < p.top_k; j++) coef[j] = coef[j] / total;
+        }
+        for (uint j = 0u; j < p.top_k; j++) {
+            const uint g = chosen_g[j];
+            chosen_e[j] = order_x[g / keys] * keys + order_y[g % keys];
+        }
+    }
+    barrier();
+    // act(down . x) * weight per expert
+    for (uint j = 0u; j < p.top_k; j++) {
+        const uint e = chosen_e[j];
+        float part = 0.0;
+        for (uint i = tid; i < p.hidden; i += WG) part += down_e[e * p.hidden + i] * xv[row * p.hidden + i];
+        red_v[tid] = part;
+        barrier();
+        for (uint st = WG / 2u; st > 0u; st >>= 1u) {
+            if (tid < st) red_v[tid] += red_v[tid + st];
+            barrier();
+        }
+        if (tid == 0u) {
+            const float d = red_v[0];
+            const float a = p.act == 0u ? d / (1.0 + exp(-d)) : 0.5 * d * (1.0 + tanh(0.7978846 * (d + 0.044715 * d * d * d)));
+            coef[j] = a * coef[j];
+        }
+        barrier();
+    }
+    for (uint i = tid; i < p.hidden; i += WG) {
+        float acc = 0.0;
+        for (uint j = 0u; j < p.top_k; j++) acc += coef[j] * up_e[chosen_e[j] * p.hidden + i];
+        outv[row * p.hidden + i] = acc;
+    }
+}

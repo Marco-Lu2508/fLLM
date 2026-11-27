@@ -287,6 +287,15 @@ struct DeviceRgLru {
     ordinal: usize,
 }
 
+/// Device copy of a Doge layer: the two residual vectors, the decay weights of the dynamic mask (`A` then the dt projection) and the product-key experts.
+struct DeviceDoge {
+    input_res: crate::backend::DeviceBuffer,
+    post_res: crate::backend::DeviceBuffer,
+    dt: Arc<Vec<f32>>,
+    /// Router, down and up vectors of the routed experts (`None` for a dense layer).
+    cdmoe: Option<(crate::backend::DeviceBuffer, crate::backend::DeviceBuffer, crate::backend::DeviceBuffer)>,
+}
+
 /// Recurrent state of one live sequence on the device: one buffer for all DeltaNet layers.
 struct DeviceSeq {
     used: u64,
@@ -933,6 +942,8 @@ pub struct DeviceLayerWeights {
     pub attn_gate: Option<crate::backend::DeviceWeight>,
     /// A.X-K2: low-rank gates behind the input norm and the post-attention norm (`fc1` then `fc2`).
     pub attn_norm_gate: Option<(crate::backend::DeviceWeight, crate::backend::DeviceWeight)>,
+    /// Doge: residual vectors, dynamic mask weights and routed experts on the device.
+    doge: Option<DeviceDoge>,
     pub ffn_norm_gate: Option<(crate::backend::DeviceWeight, crate::backend::DeviceWeight)>,
     /// BitNet sub-norms: over the attention output in front of the output projection / over the activated feed-forward product.
     pub attn_sub_norm: Option<crate::backend::DeviceBuffer>,
@@ -1029,6 +1040,7 @@ impl DeviceLayerWeights {
             attn_gate: None,
             attn_norm_gate: None,
             ffn_norm_gate: None,
+            doge: None,
             attn_sub_norm: None,
             ffn_sub_norm: None,
             q_norm: None,
@@ -1685,6 +1697,8 @@ pub struct RustDecoder {
     diff_device: bool,
     /// A.X-K2's gated norms and query gate run on the device (built from existing operations).
     axk2_device: bool,
+    /// Doge's dynamic mask attention, residual vectors and routed experts run on the device.
+    doge_device: bool,
     /// The accelerator runs DeepSeek-V4 completely (`hc_device` is set with it); set when the model is attached.
     v4_device: bool,
     /// Qwen3.8-Flash-Next runs on the device (streams, n-gram embeddings and token indexer included).
@@ -3076,6 +3090,7 @@ impl RustDecoder {
             xielu_device: false,
             diff_device: false,
             axk2_device: false,
+            doge_device: false,
             hc_device: false,
             v4_device: false,
             q4_device: false,
@@ -3597,8 +3612,8 @@ impl RustDecoder {
         if layer.zaya.is_some() {
             return Some("ZAYA convolutional attention, residual vectors and router (no device kernels)");
         }
-        if layer.doge.is_some() {
-            return Some("Doge dynamic mask attention, residual vectors and product-key experts (no device kernels)");
+        if layer.doge.is_some() && !self.doge_device {
+            return Some("Doge dynamic mask attention, residual vectors and product-key experts (no device kernels for this backend, cache format or context length, or FLLM_DOGE_HOST=1)");
         }
         if cfg.v4.is_some() {
             return if self.v4_device { None } else { Some("DeepSeek-V4 hyper-connections and compressed attention (the backend has no kernels for them, or FLLM_V4=host)") };
@@ -3913,6 +3928,11 @@ impl RustDecoder {
         self.m3_device = m3_device;
         self.ink_device = self.cfg.inkling.is_some() && self.ink_device_possible(&*backend);
         self.xielu_device = backend.create_stream().is_ok_and(|s| s.supports_xielu()) && !std::env::var_os("FLLM_XIELU_HOST").is_some();
+        self.doge_device = self.kv_kind == 1
+            && matches!(self.cfg.activation, Activation::Silu | Activation::GeluTanh)
+            && self.cfg.doge.as_ref().is_some_and(|d| d.experts == 0 || ((d.experts as f64).sqrt().floor() as usize <= 128 && d.top_k <= 16))
+            && backend.create_stream().is_ok_and(|s| s.supports_doge(self.stride * self.block_size))
+            && !std::env::var_os("FLLM_DOGE_HOST").is_some();
         self.axk2_device = backend.create_stream().is_ok_and(|s| s.supports_attention_gate() && s.supports_arch_ops() && s.supports_take_columns()) && !std::env::var_os("FLLM_AXK2_HOST").is_some();
         self.diff_device = backend.create_stream().is_ok_and(|s| s.supports_diff_attn()) && !std::env::var_os("FLLM_DIFF_HOST").is_some();
         // checked on a Tesla T4 against the host (`nemotron_h_latent_wide`, Q8_0 and Q4_0: the same distance from the CPU as the host path). Still opt-in: a layer whose experts
@@ -4941,6 +4961,19 @@ impl RustDecoder {
                 host_ffn: ffn_host_exact,
                 host_values: layer.value_moe.is_some() && value_moe_dev.is_none(),
                 attn_gate: layer.attn_gate.as_ref().map(|g| upload_linear(&format!("blk.{i}.attn_gate"), g)).transpose()?,
+                doge: match (&layer.doge, self.cfg.doge.as_ref()) {
+                    (Some(d), Some(_)) if self.doge_device => {
+                        let mut dt = d.a.clone();
+                        dt.extend_from_slice(&d.dt);
+                        Some(DeviceDoge {
+                            input_res: upload_vec(&d.input_res)?,
+                            post_res: upload_vec(&d.post_res)?,
+                            dt: Arc::new(dt),
+                            cdmoe: if d.router.is_empty() { None } else { Some((upload_vec(&d.router)?, upload_vec(&d.down)?, upload_vec(&d.up)?)) },
+                        })
+                    }
+                    _ => None,
+                },
                 attn_norm_gate: match &layer.attn_norm_gate {
                     Some(g) => Some((upload_linear(&format!("blk.{i}.attn_norm_gate_fc1"), &g.0)?, upload_linear(&format!("blk.{i}.attn_norm_gate_fc2"), &g.1)?)),
                     None => None,
@@ -5611,6 +5644,10 @@ impl RustDecoder {
             if let Some(g) = &dev_layer.attn_norm_gate {
                 Self::device_norm_gate(&mut **stream, &mut scratch, g, &mut normed_buf, rows)?;
             }
+            // Doge: the residual stream is scaled per channel before the attention output joins it
+            if let Some(dd) = &dev_layer.doge {
+                stream.channel_scale(&mut x_buf, &dd.input_res, rows, hidden).map_err(err)?;
+            }
             if i == 0 {
                 debug_sum(&mut **stream, "attn_norm-0", &normed_buf);
             }
@@ -6137,6 +6174,8 @@ impl RustDecoder {
                         let sel = self.q4_select_device(&mut **stream, &mut scratch, ix, step, &dev_weights.rope[layer.rope_table], &normed_buf, (i, &positions, &slots, tables, lengths))?;
                         stream.dsa_attention(&mut attn_buf, &q_buf, dev_kv, tables, read_layer, &sel, width, &attn_params).map_err(err)?;
                         scratch.recycle(sel);
+                    } else if let (Some(dd), Some(dc)) = (&dev_layer.doge, cfg.doge.as_ref()) {
+                        stream.doge_attention(&mut attn_buf, &q_buf, dev_kv, tables, lengths, read_layer, &attn_params, &dd.dt, dc.keep).map_err(err)?;
                     } else {
                         stream
                             .attention_paged(&mut attn_buf, &q_buf, dev_kv, tables, lengths, read_layer, &attn_params)
@@ -6414,6 +6453,18 @@ impl RustDecoder {
             }
             if let Some(g) = &dev_layer.ffn_norm_gate {
                 Self::device_norm_gate(&mut **stream, &mut scratch, g, &mut ffn_normed, rows)?;
+            }
+            // Doge: the stream is scaled per channel, then the routed experts join it (the shared expert is added by the down projection below)
+            if let (Some(dd), Some(dc)) = (&dev_layer.doge, cfg.doge.as_ref()) {
+                stream.channel_scale(&mut x_buf, &dd.post_res, rows, hidden).map_err(err)?;
+                if let Some((router, down, up)) = &dd.cdmoe {
+                    let keys = (dc.experts as f64).sqrt().floor() as usize;
+                    let mut routed = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                    let act = u32::from(cfg.activation == Activation::GeluTanh);
+                    stream.doge_cdmoe(&mut routed, &ffn_normed, router, down, up, rows, hidden, keys, dc.top_k, dc.norm_topk, act).map_err(err)?;
+                    stream.residual_add(&mut x_buf, &routed, 1.0).map_err(err)?;
+                    scratch.recycle(routed);
+                }
             }
             if let Some(branch) = deferred_branch.take() {
                 stream.residual_add(&mut x_buf, &branch, cfg.residual_scale).map_err(err)?;

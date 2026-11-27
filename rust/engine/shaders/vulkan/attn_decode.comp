@@ -23,6 +23,12 @@
 #define DMAX 512
 #endif
 #define ACC (DMAX / 64)
+// DOGE = 1 (f16 cache, one split): Doge's dynamic mask attention. Per key the decay dt = exp(A[kh] * softplus(w[kh] . value row of all kv heads)) is added to the score and only
+// the `keep` (= window field) keys with the largest dt (ties: lower position) are attended to. `bias` holds A (kv_heads floats) then w (kv_heads x kv_heads * dv); at most DOGE_N keys.
+#ifndef DOGE
+#define DOGE 0
+#endif
+#define DOGE_N 4096
 layout(local_size_x = WG) in;
 
 layout(std430, binding = 0) readonly buffer QBuf { float q[]; };
@@ -71,6 +77,10 @@ layout(push_constant) uniform P {
 #endif
 
 shared float qs[DMAX];
+#if DOGE
+shared float dt_s[DOGE_N];
+shared uint red_u[WG];
+#endif
 shared float sc_s[WG];
 shared uint slot_s[WG];
 
@@ -139,6 +149,38 @@ float val_at(uint slot, uint c) {
 #endif
 }
 
+#if DOGE
+// number of keys of the row whose decay bits are >= bits (all lanes call it together)
+uint doge_count_ge(uint bits, uint n, uint lane) {
+    uint c = 0u;
+    for (uint t = lane; t < n; t += WG) c += floatBitsToUint(dt_s[t]) >= bits ? 1u : 0u;
+    red_u[lane] = c;
+    barrier();
+    for (uint st = WG / 2u; st > 0u; st >>= 1u) {
+        if (lane < st) red_u[lane] += red_u[lane + st];
+        barrier();
+    }
+    const uint r = red_u[0];
+    barrier();
+    return r;
+}
+
+// number of keys at positions <= cut whose decay bits equal bits
+uint doge_count_eq_upto(uint bits, int cut, uint n, uint lane) {
+    uint c = 0u;
+    for (uint t = lane; t < n; t += WG) c += (floatBitsToUint(dt_s[t]) == bits && int(t) <= cut) ? 1u : 0u;
+    red_u[lane] = c;
+    barrier();
+    for (uint st = WG / 2u; st > 0u; st >>= 1u) {
+        if (lane < st) red_u[lane] += red_u[lane + st];
+        barrier();
+    }
+    const uint r = red_u[0];
+    barrier();
+    return r;
+}
+#endif
+
 void main() {
     const uint lane = gl_LocalInvocationID.x;
     const uint split = gl_WorkGroupID.x;
@@ -147,11 +189,15 @@ void main() {
     const uint kh = h / (p.heads / p.kv_heads);
     const uint n = uint(meta[r]);
     uint start = 0u;
+#if DOGE
+    // (window carries `keep`: no sliding window)
+#else
     if (p.chunk != 0u) {
         start = (n - 1u) / p.chunk * p.chunk;
     } else if (p.window != 0u && n > p.window) {
         start = n - p.window;
     }
+#endif
     uint lo = start;
     uint hi = n;
     if (p.nsplit > 1u) {
@@ -175,6 +221,40 @@ void main() {
     const bool use_alibi = (p.flags & 2u) != 0u;
     const float slope = use_alibi ? bias_tab[p.heads + h] : 0.0;
     const uint tab = p.rows_total + r * p.stride;
+#if DOGE
+    const uint kvdv = p.kv_heads * p.dv;
+    for (uint t = lane; t < n; t += WG) {
+        const uint slot0 = uint(meta[tab + t / p.block_size]) * p.block_size + t % p.block_size;
+        const uint wbase = p.kv_heads + kh * kvdv;
+        float logit = 0.0;
+        for (uint c = 0u; c < kvdv; c++) logit += bias_tab[wbase + c] * val_at(slot0, c);
+        const float spv = logit > 20.0 ? logit : log(1.0 + exp(logit));
+        dt_s[t] = exp(bias_tab[kh] * spv);
+    }
+    barrier();
+    const bool select_keys = n > p.window;
+    uint thr_bits = 0u;
+    int cut = 0x7FFFFFFF;
+    if (select_keys) {
+        uint lo_b = 0u;
+        uint hi_b = 0x7F800001u;
+        while (hi_b - lo_b > 1u) {
+            const uint mid = lo_b + (hi_b - lo_b) / 2u;
+            if (doge_count_ge(mid, n, lane) >= p.window) lo_b = mid;
+            else hi_b = mid;
+        }
+        thr_bits = lo_b;
+        const uint need = p.window - doge_count_ge(thr_bits + 1u, n, lane);
+        int lo_c = -1;
+        int hi_c = int(n) - 1;
+        while (hi_c - lo_c > 1) {
+            const int mid = lo_c + (hi_c - lo_c) / 2;
+            if (doge_count_eq_upto(thr_bits, mid, n, lane) >= need) hi_c = mid;
+            else lo_c = mid;
+        }
+        cut = hi_c;
+    }
+#endif
     float m = NEG;
     float l = 0.0;
     float acc[ACC];
@@ -183,12 +263,19 @@ void main() {
     for (uint t0 = lo; t0 < hi; t0 += WG) {
         const uint pos = t0 + lane;
         float sc = NEG;
+        bool inc = true;
         if (pos < hi) {
             const uint slot = uint(meta[tab + pos / p.block_size]) * p.block_size + pos % p.block_size;
             slot_s[lane] = slot;
             sc = key_dot(slot, kh) * p.scale;
             if (use_alibi) sc += slope * (float(pos) - float(n - 1u));
             if (p.softcap != 0.0) sc = p.softcap * tanh(clamp(sc / p.softcap, -15.0, 15.0));
+#if DOGE
+            sc += dt_s[pos];
+            const uint bits = floatBitsToUint(dt_s[pos]);
+            inc = !select_keys || bits > thr_bits || (bits == thr_bits && int(pos) <= cut);
+            if (!inc) sc = NEG;
+#endif
         }
         sc_s[lane] = sc;
         barrier();
@@ -197,7 +284,7 @@ void main() {
         for (uint j = 0u; j < count; j++) tmax = max(tmax, sc_s[j]);
         const float m_new = max(m, tmax);
         const float corr = exp(m - m_new);
-        const float e = pos < hi ? exp(sc - m_new) : 0.0;
+        const float e = (pos < hi && inc) ? exp(sc - m_new) : 0.0;
         barrier();  // every lane has read the scores
         sc_s[lane] = e;
         barrier();

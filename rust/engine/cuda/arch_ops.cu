@@ -195,3 +195,118 @@ int fllm_diff_attn_mix_launch(cudaStream_t s, float *out, const float *attn, siz
     diff_attn_mix_kernel<<<(unsigned)(rows * (heads / 2)), 256, 0, s>>>(attn, out, heads, width, lambda, scale, eps);
     return fllm_check_launch("diff_attn_mix");
 }
+
+// Doge: x[i] *= scale[i % width]
+__global__ void channel_scale_kernel(float *__restrict__ x, const float *__restrict__ scale, size_t n, int width) {
+    const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] *= scale[i % width];
+}
+int fllm_channel_scale_launch(cudaStream_t s, float *x, const float *scale, size_t rows, int width) {
+    const size_t n = rows * width;
+    if (n == 0) return 0;
+    channel_scale_kernel<<<arch_grid(n), 256, 0, s>>>(x, scale, n, width);
+    return fllm_check_launch("channel_scale");
+}
+
+// Doge's routed experts (product-key lookup), one block per row; mirrors doge_cdmoe.comp (see the shader for the algorithm). keys <= 128, top_k <= 16.
+#define DC_BLOCK 256
+__global__ void __launch_bounds__(DC_BLOCK) doge_cdmoe_kernel(const float *__restrict__ xv, const float *__restrict__ router, const float *__restrict__ down_e,
+                                                              const float *__restrict__ up_e, float *__restrict__ outv, int hidden, int keys, int top_k,
+                                                              int norm, int act) {
+    __shared__ float logit[256];
+    __shared__ unsigned order_x[128], order_y[128];
+    __shared__ float sorted_x[128], sorted_y[128];
+    __shared__ float red_v[DC_BLOCK];
+    __shared__ unsigned red_g[DC_BLOCK];
+    __shared__ unsigned chosen_g[16];
+    __shared__ float chosen_s[16], coef[16];
+    __shared__ unsigned chosen_e[16];
+    const int tid = threadIdx.x;
+    const size_t row = blockIdx.x;
+    const float *x = xv + row * hidden;
+    if (tid < 2 * keys) {
+        float acc = 0.f;
+        for (int i = 0; i < hidden; i++) acc += router[(size_t)tid * hidden + i] * x[i];
+        logit[tid] = acc;
+    }
+    __syncthreads();
+    if (tid < 2 * keys) {
+        const int half_index = tid / keys, e = tid % keys;
+        const float v = logit[tid];
+        unsigned rank = 0;
+        for (int f = 0; f < keys; f++) {
+            const float w = logit[half_index * keys + f];
+            if (w > v || (w == v && f < e)) rank++;
+        }
+        if (half_index == 0) { order_x[rank] = e; sorted_x[rank] = v; }
+        else { order_y[rank] = e; sorted_y[rank] = v; }
+    }
+    __syncthreads();
+    for (int round = 0; round < top_k; round++) {
+        float best = -3.0e38f;
+        unsigned best_g = 0xFFFFFFFFu;
+        for (int g = tid; g < keys * keys; g += DC_BLOCK) {
+            bool taken = false;
+            for (int c = 0; c < round; c++) taken = taken || chosen_g[c] == (unsigned)g;
+            if (taken) continue;
+            const float s = sorted_x[g / keys] + sorted_y[g % keys];
+            if (s > best || (s == best && (unsigned)g < best_g)) { best = s; best_g = g; }
+        }
+        red_v[tid] = best;
+        red_g[tid] = best_g;
+        __syncthreads();
+        for (int st = DC_BLOCK / 2; st > 0; st >>= 1) {
+            if (tid < st) {
+                const float ov = red_v[tid + st];
+                const unsigned og = red_g[tid + st];
+                if (ov > red_v[tid] || (ov == red_v[tid] && og < red_g[tid])) { red_v[tid] = ov; red_g[tid] = og; }
+            }
+            __syncthreads();
+        }
+        if (tid == 0) { chosen_g[round] = red_g[0]; chosen_s[round] = red_v[0]; }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        float mx = chosen_s[0];
+        for (int j = 1; j < top_k; j++) mx = fmaxf(mx, chosen_s[j]);
+        float sum = 0.f;
+        for (int j = 0; j < top_k; j++) { coef[j] = expf(chosen_s[j] - mx); sum += coef[j]; }
+        float total = 0.f;
+        for (int j = 0; j < top_k; j++) { coef[j] = coef[j] / sum; total += coef[j]; }
+        if (norm) for (int j = 0; j < top_k; j++) coef[j] = coef[j] / total;
+        for (int j = 0; j < top_k; j++) {
+            const unsigned g = chosen_g[j];
+            chosen_e[j] = order_x[g / keys] * keys + order_y[g % keys];
+        }
+    }
+    __syncthreads();
+    for (int j = 0; j < top_k; j++) {
+        const size_t e = chosen_e[j];
+        float part = 0.f;
+        for (int i = tid; i < hidden; i += DC_BLOCK) part += down_e[e * hidden + i] * x[i];
+        red_v[tid] = part;
+        __syncthreads();
+        for (int st = DC_BLOCK / 2; st > 0; st >>= 1) {
+            if (tid < st) red_v[tid] += red_v[tid + st];
+            __syncthreads();
+        }
+        if (tid == 0) {
+            const float d = red_v[0];
+            const float a = act == 0 ? d / (1.f + expf(-d)) : 0.5f * d * (1.f + tanhf(0.7978846f * (d + 0.044715f * d * d * d)));
+            coef[j] = a * coef[j];
+        }
+        __syncthreads();
+    }
+    for (int i = tid; i < hidden; i += DC_BLOCK) {
+        float acc = 0.f;
+        for (int j = 0; j < top_k; j++) acc += coef[j] * up_e[(size_t)chosen_e[j] * hidden + i];
+        outv[row * hidden + i] = acc;
+    }
+}
+int fllm_doge_cdmoe_launch(cudaStream_t s, float *out, const float *x, const float *router, const float *down, const float *up, size_t rows, int hidden, int keys,
+                           int top_k, int norm, int act) {
+    if (rows == 0) return 0;
+    if (keys > 128 || top_k > 16 || top_k < 1) return fllm_set_error("doge experts: keys %d / top_k %d outside 1..128 / 1..16", keys, top_k);
+    doge_cdmoe_kernel<<<(unsigned)rows, DC_BLOCK, 0, s>>>(x, router, down, up, out, hidden, keys, top_k, norm, act);
+    return fllm_check_launch("doge_cdmoe");
+}
