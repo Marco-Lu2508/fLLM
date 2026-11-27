@@ -12004,6 +12004,7 @@ impl RustDecoder {
             }
             out[r * hidden..(r + 1) * hidden].copy_from_slice(&self.embedding.row(id as usize)?);
         }
+        let mut wanted: Vec<Vec<(usize, usize)>> = vec![Vec::new(); ng.tables.len()];
         let mut store = self.ngram_store.lock().map_err(|_| "state lock poisoned")?;
         for (start, end, first, position) in self.q4_runs(tables, lengths) {
             store.clock += 1;
@@ -12027,7 +12028,6 @@ impl RustDecoder {
             for t in 0..end - start {
                 let at = base + t;
                 let shifted = |s: usize| if at >= s && !tokens[at - s..at].contains(&eos) { tokens[at - s] } else { 0 };
-                let row = &mut out[(start + t) * hidden..(start + t + 1) * hidden];
                 for order in 2..=n {
                     for j in 0..k {
                         let index = (order - 2) * k + j;
@@ -12035,14 +12035,27 @@ impl RustDecoder {
                         for kk in 2..=order {
                             v += shifted(kk - 1) * ng.mods[index][kk - 2];
                         }
-                        let id = v.rem_euclid(ng.rows[index]) as usize;
-                        let projected = ng.projs[index].forward(&ng.tables[index].row(id)?)?;
-                        row.iter_mut().zip(&projected).for_each(|(a, b)| *a += b);
+                        wanted[index].push((start + t, v.rem_euclid(ng.rows[index]) as usize));
                     }
                 }
             }
             entry.1 += end - start;
             entry.2 = tokens[tokens.len().saturating_sub(n - 1)..].to_vec();
+        }
+        // one projection per table over all the rows of the batch instead of one per token
+        for (index, rows) in wanted.iter().enumerate() {
+            if rows.is_empty() {
+                continue;
+            }
+            let table = &ng.tables[index];
+            let mut gathered = Vec::with_capacity(rows.len() * table.cols);
+            for &(_, id) in rows {
+                gathered.extend_from_slice(&table.row(id)?);
+            }
+            let projected = ng.projs[index].forward(&gathered)?;
+            for (&(r, _), values) in rows.iter().zip(projected.chunks_exact(hidden)) {
+                out[r * hidden..(r + 1) * hidden].iter_mut().zip(values).for_each(|(a, b)| *a += b);
+            }
         }
         let scale = 1.0 / (1 + k * (n - 1)) as f32;
         out.iter_mut().for_each(|v| *v *= scale);
