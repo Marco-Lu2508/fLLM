@@ -816,3 +816,7 @@ Q8_0 with 32 users, short prompt (T4, Qwen2.5-1.5B, 2 / 4 / 8 / 16 / 32 users, t
 instead of two 16-token tiles gave 284 / 477 / 712 / 1221 / 1373 against 299 / 493 / 730 / 1284 / 1418, so the 17 to 32 token step on 8-bit weights is not limited by
 re-reading the weights (a step takes about 32 ms, slower than the FP16 model's at the same batch size: the dequantizing tensor-core GEMM is limited by its own
 conversion work on Turing). Not kept.
+
+Q8_0 prompts of 16 or more tokens on the int8 tensor cores (`FLLM_INT8_GEMM=1`, `int8_gemm.cu`), T4, Qwen2.5-1.5B, short prompt, total tokens per second with 2 / 4 / 8 / 16 / 32
+users: 292 / 483 / 699 / 882 / 1129 against 299 / 493 / 730 / 1284 / 1418 with the default kernels; the generated text is correct, the path is slower on Turing and
+stays off.
