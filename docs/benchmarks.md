@@ -747,3 +747,7 @@ Follow-up on the same T4: the tensor-core GEMV for up to 8 tokens now uses 16 wa
 with 1 / 4 / 8 / 16 / 32 requests: 16 warps 180 / 651 / 1285 / 2404 / 3719, 8 warps 180 to 183 / 629 to 636 / 1231 to 1237 / 2309 to 2354 / 3683 to 3736; 4 warps
 and 2 warps are slower (8 requests: 1159 and 1044). Against vLLM (174 / 682 / 1231 / 2113 / 3371): 4 % ahead at 8 requests, 14 % at 16, 10 % at 32, 5 % behind at 4. T4 runs vary by
 about 2 % from session to session.
+
+Second follow-up (new T4 session, 16 warps, slabs in flight per warp `FLLM_CUDA_SKINNY_UF`, two runs each): 1 slab 681 / 673 tokens/s with 4 requests and 1330 / 1303 with 8,
+2 slabs 665 / 659 and 1302 / 1293, 4 slabs 660 / 651 and 1292 / 1262. One slab in flight is now the default on Turing; the 4-request gap to vLLM (682) is closed
+(the session itself is about 3 % faster than the earlier one, so only comparisons inside this table are meaningful). A100 and newer keep four slabs.
