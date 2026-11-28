@@ -73,8 +73,6 @@ int fllm_mmvq_x_maxb();
 // Q2_K, Q3_K and IQ1_S .. IQ3_S with int8 activations (mmvq_x.cuh)
 int fllm_mmvq_x_try(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias, int rows, int cols,
                     int batch, void *scratch, size_t scratch_bytes);
-int fllm_q8_batch_try(cudaStream_t s, const void *W, const float *X, float *Y, const float *bias, int rows, int cols, int batch, void *scratch,
-                      size_t scratch_bytes);
 int fllm_mmvq_leg_try(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias, int rows,
                       int cols, int batch, void *scratch, size_t scratch_bytes);
 // When set, the activation conversion of the next GEMM reads `gate` (its X argument) and `up` and computes the GLU
