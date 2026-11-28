@@ -159,7 +159,7 @@ std::atomic_bool g_failed{false};  // a plan or call failed once: stay with the 
 int mode() {
     const int forced = g_mode.load();
     if (forced >= 0) return forced;
-    // unset = auto: on from compute capability 8.0 for 9 tokens and more (measured on an A100); FLLM_CUBLASLT=0 switches it off
+    // unset = auto: on from compute capability 8.0 for 9 tokens and more (measured on an A100), for FP16 weights from 7.5 (Tesla T4: see docs); FLLM_CUBLASLT=0 switches it off
     static const int env = [] {
         const char *v = getenv("FLLM_CUBLASLT");
         return v == nullptr || *v == 0 ? -1 : fllm_env_tri("FLLM_CUBLASLT");
@@ -210,7 +210,8 @@ bool make_plan(const Api &api, Context &ctx, Plan &p, int rows, int cols, int ba
 }  // namespace
 
 void *fllm_cublaslt_x16_buffer(cudaStream_t s, size_t bytes) {
-    if (mode() == 0 || g_failed.load() || fllm_exact_math() || fllm_cc() < 80) return nullptr;
+    // Turing (sm_75) takes FP16 weights too: its FP16 tensor cores are what cuBLASLt picks there (BF16 needs sm_80)
+    if (mode() == 0 || g_failed.load() || fllm_exact_math() || fllm_cc() < 75) return nullptr;
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess) return nullptr;
     Context &ctx = context_for(dev);
@@ -314,7 +315,7 @@ void fllm_cublaslt_set_mode(int mode_value) { g_mode.store(mode_value < -1 || mo
 // Returns 0 when the product was computed, -1 when the caller has to use another kernel, > 0 on a launch error.
 int fllm_cublaslt_gemm_try(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias, int rows, int cols, int batch) {
     const int m = mode();
-    if (m == 0 || g_failed.load() || (kind != KIND_F16 && kind != KIND_BF16) || fllm_exact_math() || fllm_cc() < 80) return -1;
+    if (m == 0 || g_failed.load() || (kind != KIND_F16 && kind != KIND_BF16) || fllm_exact_math() || fllm_cc() < 75 || (fllm_cc() < 80 && kind == KIND_BF16)) return -1;
     if (batch < 9 || rows <= 0 || cols <= 0 || (cols & 7) != 0 || (rows & 3) != 0) return -1;
     // a pending gated activation (X = gate, fllm_glu_up = up) is folded into the conversion of the activations; the caller computes it itself when this
     // function declines or fails (the pending state stays set until the product has been launched)
