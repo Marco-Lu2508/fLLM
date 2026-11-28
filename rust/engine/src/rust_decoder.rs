@@ -12337,19 +12337,16 @@ impl RustDecoder {
             .get_or_init(|| {
                 let cfg = &self.cfg;
                 let emb = &self.embedding;
-                // a quantized embedding (Q4_K_M and Q8_0 checkpoints quantize it too) is expanded once to an F16 table on the device (at most 1 GiB), so that
-                // the steps launched ahead of time and the prompt chunks can look the ids up there as well; `FLLM_ASYNC_EMBED_EXPAND=0` keeps the old behaviour
-                let expand_ok = !matches!(std::env::var("FLLM_ASYNC_EMBED_EXPAND").ok().as_deref(), Some("0" | "off" | "false"));
-                let (width, expand) = match emb.kind {
-                    0 => (4, false),
-                    1 | 30 => (2, false),
-                    _ => (2, expand_ok),
+                let width = match emb.kind {
+                    0 => 4,
+                    1 | 30 => 2,
+                    _ => 0,
                 };
-                let why = if width == 0 || (expand && emb.rows.saturating_mul(emb.cols).saturating_mul(2) > (1usize << 30)) {
+                let why = if width == 0 {
                     Some("the token embedding is not F32, F16 or BF16")
                 } else if self.par.is_some() || emb.first_row != 0 || emb.held != emb.rows {
                     Some("the embedding is split over ranks")
-                } else if emb.cols != cfg.hidden || (!expand && (emb.row_bytes != cfg.hidden * width || emb.data.len() != emb.rows * emb.row_bytes)) {
+                } else if emb.cols != cfg.hidden || emb.row_bytes != cfg.hidden * width || emb.data.len() != emb.rows * emb.row_bytes {
                     Some("the embedding rows are not plain")
                 } else if self.position_table.is_some() || self.zaya_input.is_some() || self.embd_norm.is_some() || cfg.embedding_norm || self.ple.is_some() || self.altup.is_some() {
                     Some("the model adds to or normalizes the embedding")
@@ -12362,17 +12359,6 @@ impl RustDecoder {
                 }
                 let mut upload = || -> Result<crate::backend::DeviceBuffer, String> {
                     let backend = self.backend.as_ref().ok_or("no backend")?;
-                    if expand {
-                        let mut halves: Vec<u8> = Vec::with_capacity(emb.rows * emb.cols * 2);
-                        for id in 0..emb.rows {
-                            for v in emb.row(id)? {
-                                halves.extend_from_slice(&half::f16::from_f32(v).to_bits().to_le_bytes());
-                            }
-                        }
-                        let mut table = backend.allocate_buffer(halves.len()).map_err(|e| e.to_string())?;
-                        stream.upload(&mut table, &halves[..]).map_err(|e| e.to_string())?;
-                        return Ok(table);
-                    }
                     let mut table = backend.allocate_buffer(emb.data.len()).map_err(|e| e.to_string())?;
                     stream.upload(&mut table, &emb.data[..]).map_err(|e| e.to_string())?;
                     Ok(table)
@@ -12381,9 +12367,9 @@ impl RustDecoder {
                     Ok(table) => {
                         eprintln!(
                             "[fllm-rs] token embedding of {} MiB on the device (asynchronous decode scheduling and prompt chunks use it; FLLM_ASYNC_SCHEDULING=0 and FLLM_PREFILL_DEVICE_EMBED=0 switch them off)",
-                            if expand { emb.rows * emb.cols * 2 >> 20 } else { emb.data.len() >> 20 }
+                            emb.data.len() >> 20
                         );
-                        Some(AheadEmbed { table, kind: if expand { 1 } else { emb.kind }, scale: cfg.embedding_scale })
+                        Some(AheadEmbed { table, kind: emb.kind, scale: cfg.embedding_scale })
                     }
                     Err(e) => {
                         eprintln!("[fllm-rs] asynchronous decode scheduling: off (the embedding does not fit on the device: {e})");
