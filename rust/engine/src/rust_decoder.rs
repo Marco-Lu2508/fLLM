@@ -12381,7 +12381,7 @@ impl RustDecoder {
                     Ok(table) => {
                         eprintln!(
                             "[fllm-rs] token embedding of {} MiB on the device (asynchronous decode scheduling and prompt chunks use it; FLLM_ASYNC_SCHEDULING=0 and FLLM_PREFILL_DEVICE_EMBED=0 switch them off)",
-                            if expand { emb.rows * emb.cols * 2 >> 20 } else { emb.data.len() >> 20 }
+                            if expand { (emb.rows * emb.cols * 2) >> 20 } else { emb.data.len() >> 20 }
                         );
                         Some(AheadEmbed { table, kind: if expand { 1 } else { emb.kind }, scale: cfg.embedding_scale })
                     }
