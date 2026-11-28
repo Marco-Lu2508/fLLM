@@ -245,8 +245,16 @@ gemv_dense_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, fl
 template <bool BF16>
 __device__ __forceinline__ void mma_dense16(float c[4], const uint32_t a[4], uint32_t b0, uint32_t b1) {
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800)
-    // (Turing has no m16n8k16: the host never launches the kernel below compute capability 8.0, `fllm_cc() < 80` in dense_skinny_try)
-    (void)c; (void)a; (void)b0; (void)b1;
+    // Turing has no m16n8k16 and no BF16 tensor cores: FP16 runs as two m16n8k8 (k 0-7 with a0, a1, b0; k 8-15 with a2, a3, b1: the same fragments and the
+    // same accumulators); the host never launches the BF16 kernel below compute capability 8.0
+    if (!BF16) {
+        asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};\n"
+                     : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+                     : "r"(a[0]), "r"(a[1]), "r"(b0));
+        asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};\n"
+                     : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+                     : "r"(a[2]), "r"(a[3]), "r"(b1));
+    }
 #else
     if (BF16) {
         asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
@@ -453,7 +461,7 @@ int fllm_dense_skinny_variant(int rows, int cols, int batch) {
     }();
     const int forced = g_dense_skinny_mode.load();
     const int mode = forced >= 0 ? forced : env;
-    if (mode == 0 || batch < 1 || batch > 16 || (cols & 31) != 0 || rows <= 0 || fllm_exact_math() || fllm_cc() < 80) return 0;
+    if (mode == 0 || batch < 1 || batch > 16 || (cols & 31) != 0 || rows <= 0 || fllm_exact_math() || fllm_cc() < 75) return 0;
     if (mode < 0 && (batch < FLLM_DENSE_SKINNY_MIN_BATCH || batch > FLLM_DENSE_SKINNY_MAX_BATCH)) return 0;
     // automatic choice for 9-16 tokens, measured on an A100 (bf16, 16 tokens, GB/s of weights; one tile per warp / two tiles / cuBLASLt):
     //   3584 x 3584: 1161 / 1053 / 869,  18944 x 3584: 1005 / 1145 / 1046,  3584 x 18944: 808 / 824 / 1167,  512 x 3584: 253 / 315 / 282.
@@ -470,6 +478,7 @@ int fllm_dense_skinny_variant(int rows, int cols, int batch) {
 
 template <bool bf16, bool XN, bool YN>
 static bool dense_skinny_launch(cudaStream_t s, const uint8_t *W, const void *X, void *Y, const float *bias, int rows, int cols, int batch) {
+    if (bf16 && fllm_cc() < 80) return false;  // no BF16 tensor cores before Ampere
     const int variant = fllm_dense_skinny_variant(rows, cols, batch);
     if (variant == 0) return false;
     if ((reinterpret_cast<uintptr_t>(W) & 15) != 0 || (reinterpret_cast<uintptr_t>(X) & 15) != 0) return false;
@@ -527,6 +536,7 @@ bool fllm_dense_skinny_narrow_try(cudaStream_t s, bool bf16, const void *W, cons
 bool fllm_dense_skinny_group_try(cudaStream_t s, uint32_t kind, int n, const void *const *W, void *const *Y, const void *const *bias, const int *rows, int cols,
                                  int batch, const float *X) {
     if (n < 2 || n > 3 || (kind != KIND_BF16 && kind != KIND_F16) || (reinterpret_cast<uintptr_t>(X) & 15) != 0) return false;
+    if (kind == KIND_BF16 && fllm_cc() < 80) return false;
     int variant = 2;
     for (int i = 0; i < n; i++) {
         const int v = fllm_dense_skinny_variant(rows[i], cols, batch);
