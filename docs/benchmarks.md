@@ -723,3 +723,8 @@ The same MoE model with its weights re-encoded while loading (`--quant`), measur
 (single, 4, 8 parallel) and 8.5k prefill; Q8_0 282 / 536 / 1074 and 8.0k prefill, so the decode of the MoE layers follows the bytes read (twice as fast at half the
 weight size) and the slow FP16-expert kernel only matters for unquantized MoE checkpoints. Q4_K_M was not measured: re-encoding 2.5 GB on the two CPU cores of the
 runtime took longer than the run could wait.
+
+A larger model on the same Tesla T4 (build of commit b4c0b57): Qwen2.5-7B-Instruct Q4_K_M (4.68 GB file), single stream 48.7 tokens/s, 4 parallel 134.8,
+8 parallel 271.2 (aggregate), prefill 1129 tokens/s (about 16 TFLOP/s). The weights are read once per decoded token, so the bandwidth bound of the card
+(320 GB/s nominal, roughly 250 GB/s reachable) is 53 to 68 tokens/s; the single-stream figure is about 90 % of the reachable bound. One run, no other
+engine measured on this model.
