@@ -1675,7 +1675,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         speculative_suffix = true;
     }
     if speculative_suffix {
-        let tokens = num_speculative_tokens.unwrap_or(6);
+        // CUDA: ten draft tokens (Tesla T4, Qwen2.5-0.5B: repeating text 659 -> 787 tokens/s, summary 698 -> 836, code and a free story unchanged within 1 %)
+        let tokens = num_speculative_tokens.unwrap_or(if selected_backend == "cuda" { 10 } else { 6 });
         runtime.enable_suffix(
             tokens,
             fllm_engine::speculative::SuffixConfig { min_match: speculative_min_match, token_budget: speculative_cache_tokens },

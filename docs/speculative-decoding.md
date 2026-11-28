@@ -16,7 +16,7 @@ were added with it. Test levels are stated per feature in [changes/spec.md](chan
 | `eagle`, `eagle3`, `medusa` | | | not implemented: the flags are rejected with an explanation |
 
 Other flags: `--num-speculative-tokens N` (1 to 32, the largest number of draft tokens per verification; default 5 for `ngram` and
-`draft`, 6 for `suffix`), `--speculative-min-match N` and `--speculative-cache-tokens N` (suffix source), `--speculative-window W`
+`draft`, 6 for `suffix`, 10 for `suffix` on CUDA), `--speculative-min-match N` and `--speculative-cache-tokens N` (suffix source), `--speculative-window W`
 (n-gram index window). `FLLM_SPEC_ADAPTIVE=0` switches the adaptive draft length off (default on: every sequence shrinks and grows
 its draft length between 1 and the configured maximum from its recent acceptance rate).
 
