@@ -718,3 +718,8 @@ m16n8k8 instead of one m16n8k16) from two tokens. Generated text with and withou
 vLLM's number for the MoE model is far below what its own dense run suggests and looks like a slow fallback path of that version on this GPU; it is
 reported as measured, not as vLLM's best. For the MoE model the decode time is dominated by `moe_tc_kernel` (about 3 times the weight-bandwidth bound per
 layer), which is the next target.
+
+The same MoE model with its weights re-encoded while loading (`--quant`), measured in a second run on the same kind of machine: FP16 138 / 279 / 552 tokens/s
+(single, 4, 8 parallel) and 8.5k prefill; Q8_0 282 / 536 / 1074 and 8.0k prefill, so the decode of the MoE layers follows the bytes read (twice as fast at half the
+weight size) and the slow FP16-expert kernel only matters for unquantized MoE checkpoints. Q4_K_M was not measured: re-encoding 2.5 GB on the two CPU cores of the
+runtime took longer than the run could wait.
