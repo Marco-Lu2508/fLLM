@@ -181,6 +181,10 @@ pub struct SchedulerConfig {
     pub speculative_window: usize,
     /// Shrink and grow the draft length per sequence from the acceptance rate.
     pub speculative_adaptive: bool,
+    /// Draft tokens are proposed only while at most this many sequences run: with more users the verification passes cost more compute than the
+    /// accepted tokens save (measured on a T4 with a 0.5B model: 4 users 22 % and 8 users 27 % less aggregate throughput with lookup drafts).
+    /// `FLLM_SPEC_MAX_RUNNING` (0 = no limit).
+    pub speculative_max_running: usize,
     pub policy: SchedulingPolicy,
     /// A new sequence is admitted only when this many blocks stay free for the running ones to grow (0 when nothing runs).
     pub watermark_blocks: usize,
@@ -236,6 +240,7 @@ impl Default for SchedulerConfig {
             speculative_lookup: 0,
             speculative_window: 0,
             speculative_adaptive: false,
+            speculative_max_running: 0,
             policy: SchedulingPolicy::Fcfs,
             watermark_blocks: 0,
             max_partial_prefills: 0,
@@ -429,7 +434,8 @@ impl Scheduler {
                     continue;
                 }
                 let remaining = seq.remaining_max();
-                let mut draft = if seq.can_speculate() {
+                let crowded = self.cfg.speculative_max_running > 0 && self.running.len() > self.cfg.speculative_max_running;
+                let mut draft = if seq.can_speculate() && !crowded {
                     if let Some(tokens) = self.external_drafts.get(&sid) {
                         Some(tokens.clone())
                     } else if self.cfg.speculative_lookup > 0 {

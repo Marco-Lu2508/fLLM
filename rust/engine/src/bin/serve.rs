@@ -1658,7 +1658,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     // Conversation lookup is on unless the user chose something else: it costs nothing when it finds no match and about doubles the speed on
     // text that repeats (code edits, summaries, quotes, agent loops), with the same text as without. Only where it has been run: the
-    // processor and the Vulkan / DirectX chips (the CUDA, HIP and Metal verification kernels have not been run on hardware yet), and not
+    // processor, CUDA (a Tesla T4: same text as without on three prompt kinds, up to twice the speed on repeating text) and the Vulkan / DirectX chips (the HIP and Metal verification kernels have not been run on hardware yet), and not
     // by default for models with a recurrent state: they can speculate when asked (`--speculative suffix|ngram|draft`, the state is copied
     // before each verification pass and put back after a rejection), but that copy costs time that has not been measured on real models.
     // `--speculative off` or FLLM_SPECULATIVE_DEFAULT=off keeps it away.
@@ -1669,7 +1669,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         && !parallel.is_parallel()
         && !speculative_suffix
         && !runtime.model.is_stateful()
-        && matches!(selected_backend.as_str(), "cpu" | "vulkan" | "dx12" | "wgpu-vulkan" | "wgpu-dx12" | "wgpu")
+        && matches!(selected_backend.as_str(), "cpu" | "cuda" | "vulkan" | "dx12" | "wgpu-vulkan" | "wgpu-dx12" | "wgpu")
         && !env::var("FLLM_SPECULATIVE_DEFAULT").is_ok_and(|v| matches!(v.trim(), "off" | "0" | "false"))
     {
         speculative_suffix = true;

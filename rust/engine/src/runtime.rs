@@ -218,6 +218,7 @@ impl InferenceRuntime {
                 speculative_window
             },
             speculative_adaptive: !matches!(std::env::var("FLLM_SPEC_ADAPTIVE").as_deref(), Ok("0")),
+            speculative_max_running: std::env::var("FLLM_SPEC_MAX_RUNNING").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(2),
             // the share of the pool that may be pinned (percent); 0 switches pinning off
             pin_max_percent: std::env::var("FLLM_PIN_MAX_PERCENT").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(50, |v| v.min(100)),
             ..SchedulerConfig::default()
@@ -2255,6 +2256,12 @@ impl InferenceRuntime {
             self.scheduler.bm.ensure_blocks(*sid, 1).ok()?;
         }
         Some(crate::scheduler::ScheduledStep { prefill: Vec::new(), decode, verify: Vec::new() })
+    }
+
+    /// The most sequences that may run while drafts are proposed (0: no limit; default 2, `FLLM_SPEC_MAX_RUNNING`).
+    #[cfg(test)]
+    pub(crate) fn set_speculative_max_running(&mut self, limit: usize) {
+        self.scheduler.cfg.speculative_max_running = limit;
     }
 
     /// One round: schedule (or take the given batch), run the forward pass, sample, commit.

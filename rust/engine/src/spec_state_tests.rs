@@ -37,6 +37,8 @@ pub(crate) fn runtime(gguf: &Path) -> InferenceRuntime {
     let model = GgufModel::load(gguf.to_str().unwrap(), 64, 4, 2).unwrap();
     let mut rt = InferenceRuntime::with_speculative(model, 4, 64, Vec::new(), 0, 0).unwrap();
     rt.attach_compute("cpu").unwrap();
+    // the scripted drafts of several sequences at once are the point of these tests: no limit on the sequences that may speculate
+    rt.set_speculative_max_running(0);
     rt
 }
 
