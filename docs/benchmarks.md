@@ -751,3 +751,36 @@ about 2 % from session to session.
 Second follow-up (new T4 session, 16 warps, slabs in flight per warp `FLLM_CUDA_SKINNY_UF`, two runs each): 1 slab 681 / 673 tokens/s with 4 requests and 1330 / 1303 with 8,
 2 slabs 665 / 659 and 1302 / 1293, 4 slabs 660 / 651 and 1292 / 1262. One slab in flight is now the default on Turing; the 4-request gap to vLLM (682) is closed
 (the session itself is about 3 % faster than the earlier one, so only comparisons inside this table are meaningful). A100 and newer keep four slabs.
+
+### fLLM against vLLM over quantization, users and context length (Tesla T4, 2026-11-28)
+
+Same Colab T4 session for every cell, Qwen2.5-1.5B-Instruct (dense) and granite-3.0-1b-a400m-instruct (MoE), vLLM 0.34.0 (`--dtype float16`, prefix
+caching off, `--max-num-seqs 32`), fLLM `--max-seqs 32` with speculation off. Each cell: N parallel requests, each with a prompt of about `ctx` tokens and 96
+generated tokens, best of two runs, **total tokens per second (prompt + generated) of the whole batch**, fLLM / vLLM. The 4-bit weights are different
+formats (fLLM Q4_K_M re-encoded from the FP16 checkpoint; vLLM AWQ and GPTQ-Int4 checkpoints), the 8-bit weights too (Q8_0 against GPTQ-Int8): the comparison
+is by size class, not by identical numbers. Contexts of 3000 tokens with 32 users were not run (96k tokens of prompt).
+
+| model, quantization | ctx 32, 1 user | 4 | 16 | 32 | ctx 1024, 1 | 4 | 16 | 32 | ctx 3000, 1 | 4 | 16 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Dense FP16 | 105 / 95 | 379 / 365 | 1097 / 1244 | 1941 / 1850 | 771 / 617 | 2142 / 1524 | 3875 / 2461 | 4631 / 2683 | 1633 / 859 | 3370 / 1268 | 4551 / 1453 |
+| Dense 8 bit (Q8_0 / GPTQ-Int8) | 161 / 147 | 493 / 562 | 1292 / 1742 | **373** / 2477 | 1011 / 839 | 1971 / 1779 | 2877 / 2437 | **1707** / 2511 | 1718 / 962 | 2496 / 1264 | 3089 / 1404 |
+| Dense 4 bit (Q4_K_M / AWQ) | 206 / 190 | 610 / 719 | 1612 / 2124 | 2226 / 2882 | 1399 / 1009 | 2545 / 2044 | 3600 / 2754 | 3795 / 2760 | 2281 / 1074 | 3203 / 1336 | 3734 / 1460 |
+| Dense 4 bit (Q4_K_M / GPTQ-Int4) | 206 / 183 | 610 / 699 | 1612 / 2079 | 2226 / 2805 | 1399 / 1004 | 2545 / 2020 | 3600 / 2618 | 3795 / 2686 | 2281 / 1070 | 3203 / 1346 | 3734 / 1454 |
+| MoE FP16 | 177 / 15 | 532 / 30 | 1501 / 83 | 1961 / 99 | not run for vLLM | | | | | | |
+
+What the table says:
+
+- **Long prompts: fLLM is far ahead in every quantization** (prefill is 1.3 to 3.1 times faster; at 3000 tokens of context 2.1 to 3.2 times faster in total
+  throughput), also with one user.
+- **One user: fLLM is ahead by 8 to 14 % in every quantization**, also with a short prompt.
+- **Short prompts with 4 to 32 users on quantized weights: fLLM is behind vLLM by 12 to 26 %** (4 bit: 4 users -15 %, 16 users -24 %, 32 users -23 %; 8 bit: -12 %
+  and -26 % up to 16 users). This is the decode of 4 to 32 simultaneous sequences with the Marlin / AWQ kernels of vLLM against the dequantizing GEMMs of fLLM
+  (mmvq up to 16 tokens, qgemm above): not closed. With FP16 weights the two are level (+4 % to -12 %).
+- **The 8-bit cliff at 32 users was a bug, fixed in this session:** the Q8_0 GEMM for 17 to 32 tokens needed 67584 bytes of shared memory, Turing has 65536, so
+  the call declined and the projection ran in the generic FP32 kernel (32 users: 373 tokens/s against 1292 with 16). It now falls back to two 16-token tiles
+  (commit `bfa5478`): 32 users with a short prompt 373 -> 1465 tokens/s, with 1024 tokens of context 1707 -> 3152 (vLLM 2477 and 2511). Still behind vLLM
+  with short prompts (-41 %), ahead with a 1024-token context (+25 %).
+- **MoE (granite-3.0-1b-a400m, FP16):** vLLM 0.34.0 runs this model at 15 to 99 tokens/s on this GPU, a slow fallback path of that version and not its best,
+  so the ratio (12 to 21 times) says little about a tuned vLLM; fLLM with Q8_0 experts is 1.3 to 2 times faster again than its FP16 (365 / 789 / 1681 / 1513
+  tokens/s with 1 / 4 / 16 / 32 users, short prompt).
+- Not measured: other models and sizes, contexts between 1k and 3k, real chat templates, A100 and newer GPUs.
