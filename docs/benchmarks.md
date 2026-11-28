@@ -820,3 +820,10 @@ conversion work on Turing). Not kept.
 Q8_0 prompts of 16 or more tokens on the int8 tensor cores (`FLLM_INT8_GEMM=1`, `int8_gemm.cu`), T4, Qwen2.5-1.5B, short prompt, total tokens per second with 2 / 4 / 8 / 16 / 32
 users: 292 / 483 / 699 / 882 / 1129 against 299 / 493 / 730 / 1284 / 1418 with the default kernels; the generated text is correct, the path is slower on Turing and
 stays off.
+
+A dp4a kernel for Q8_0 with 5 to 32 tokens (activations of a 256-column chunk staged in shared memory, 16 tokens per pass over the weights) measured on the T4
+(Qwen2.5-1.5B, short prompt, total tokens per second with 2 / 4 / 8 / 16 / 32 users): 301 / 502 / 749 / 969 / 977 against 295 / 496 / 731 / 1300 / 1446 with the
+tensor-core GEMM it would replace. It is slower from 16 users on, and because it quantizes the activations to int8 the generated text differs from the FP16-activation
+GEMM in a third of the requests of a batch (24 greedy tokens), so it was reverted. The estimate that made it look promising (about 7 ms per pass from bandwidth and
+issue rate) did not hold: the shared-memory staging with a barrier per 256 columns and the register pressure of 16 tokens x 2 rows per lane cost more than the
+re-read of the weights they save.
