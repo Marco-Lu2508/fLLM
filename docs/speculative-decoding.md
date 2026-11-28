@@ -20,6 +20,16 @@ Other flags: `--num-speculative-tokens N` (1 to 32, the largest number of draft 
 (n-gram index window). `FLLM_SPEC_ADAPTIVE=0` switches the adaptive draft length off (default on: every sequence shrinks and grows
 its draft length between 1 and the configured maximum from its recent acceptance rate).
 
+## On by default
+
+`--speculative suffix` is the default on the processor, on CUDA and on the Vulkan / DirectX chips for models without recurrent layers
+(`--speculative off` or `FLLM_SPECULATIVE_DEFAULT=off` keeps it away), and drafts are only proposed while at most two sequences run
+(`FLLM_SPEC_MAX_RUNNING`, 0 = no limit): with more users the verification passes cost more than the accepted tokens save. Measured on
+a Tesla T4 with Qwen2.5-0.5B Q4_K_M (greedy, 256 new tokens, the same text with and without in all three cases): text that repeats
+309.6 -> 651.8 tokens/s, code 304.0 -> 441.2, a free story 303.3 -> 328.9; one request 306 -> 322 tokens/s, two at once 621 -> 898, eight at
+once 1854 -> 1856 (four at once fell from 1146 to 994 in that run; the runs vary by about 10 %). Before the limit existed, lookup drafts
+made four users 22 % and eight users 27 % slower in aggregate.
+
 ## Models with recurrent layers
 
 **The suffix cache survives a restart.** With `FLLM_SUFFIX_DIR=<dir>` the finished generations are written to `<dir>/suffix-<model digest>.bin`
