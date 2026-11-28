@@ -489,7 +489,8 @@ static bool dense_skinny_launch(cudaStream_t s, const uint8_t *W, const void *X,
     // two row tiles per warp and sixteen warps per block
     const int tiles = batch > 8 && variant == 2 ? (rows + 31) / 32 : (rows + 15) / 16;
     // few tiles: split the columns so that about a thousand blocks of equal size are launched (never less than four slabs of 32 columns per part)
-    static const bool no_split = getenv("FLLM_CUDA_NO_SKINNY_SPLIT") != nullptr;
+    // Turing (40 SMs on a T4) is about 5 % faster without the column split for 4 to 16 tokens (Qwen2.5-0.5B FP16: 1187 -> 1248 tokens/s at 8 parallel requests)
+    static const bool no_split = getenv("FLLM_CUDA_NO_SKINNY_SPLIT") != nullptr || (fllm_cc() < 80 && getenv("FLLM_CUDA_SKINNY_SPLIT") == nullptr);
     int splits = 1;
     if (!no_split && tiles < 512 && fllm_skinny_part != nullptr) {
         splits = 1024 / tiles;
