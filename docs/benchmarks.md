@@ -784,3 +784,18 @@ What the table says:
   so the ratio (12 to 21 times) says little about a tuned vLLM; fLLM with Q8_0 experts is 1.3 to 2 times faster again than its FP16 (365 / 789 / 1681 / 1513
   tokens/s with 1 / 4 / 16 / 32 users, short prompt).
 - Not measured: other models and sizes, contexts between 1k and 3k, real chat templates, A100 and newer GPUs.
+
+Two things tried for the short-prompt, 4 to 32 users gap on quantized weights (T4, Qwen2.5-1.5B, total tokens per second with 2 / 4 / 8 / 16 / 32 users, short prompt),
+both without gain and not kept:
+
+| variant | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|
+| Q4_K_M, default (`FLLM_CUDA_MMVQ_MAXB=4`) | 413 | 599 | 938 | 1658 | 2315 |
+| Q4_K_M, integer-dot kernel up to 8 tokens | 331 | 599 | 859 | 1554 | 2279 |
+| Q4_K_M, integer-dot kernel up to 16 tokens | 411 | 647 | 810 | 1032 | 2252 |
+| Q4_K_M, asynchronous decode scheduling also for the quantized embedding (F16 copy on the device, 445 MiB) | 332 | 602 | 954 | 1576 | 2239 |
+| Q8_0, default | 299 | 493 | 730 | 1284 | 1418 |
+| Q8_0, asynchronous decode scheduling with the F16 embedding copy | 300 | 489 | 727 | 1279 | 1440 |
+
+The decode of 4 to 32 sequences on quantized weights is limited by the GPU kernels, not by the host: the remaining gap to vLLM's Marlin / AWQ kernels needs a
+kernel-level change, not a scheduling one.
