@@ -770,8 +770,8 @@ is by size class, not by identical numbers. Contexts of 3000 tokens with 32 user
 
 What the table says:
 
-- **Long prompts: fLLM is far ahead in every quantization** (prefill is 1.3 to 3.1 times faster; at 3000 tokens of context 2.1 to 3.2 times faster in total
-  throughput), also with one user.
+- **Long prompts: fLLM is ahead in every quantization.** With 3000 tokens of context 1.9 to 3.1 times (FP16), 1.8 to 2.2 times (8 bit) and 2.1 to 2.6 times
+  (4 bit) the total throughput of vLLM; with 1024 tokens 1.25 to 1.7 times (FP16), 1.1 to 1.2 times (8 bit, up to 16 users) and 1.25 to 1.4 times (4 bit).
 - **One user: fLLM is ahead by 8 to 14 % in every quantization**, also with a short prompt.
 - **Short prompts with 4 to 32 users on quantized weights: fLLM is behind vLLM by 12 to 26 %** (4 bit: 4 users -15 %, 16 users -24 %, 32 users -23 %; 8 bit: -12 %
   and -26 % up to 16 users). This is the decode of 4 to 32 simultaneous sequences with the Marlin / AWQ kernels of vLLM against the dequantizing GEMMs of fLLM
