@@ -1919,6 +1919,23 @@ impl Backend for CudaBackend {
         cols: usize,
         bias: Option<&[f32]>,
     ) -> Result<DeviceWeight, BackendError> {
+        // GPUs below sm_80 have no BF16 tensor cores: the BF16 GEMM there is a generic kernel (Tesla T4, Qwen2.5-0.5B: 2.2k tokens/s prefill against 10k with
+        // quantized weights). Like vLLM does for `--dtype auto` on such GPUs, the weights are stored as FP16 (round to nearest, saturating at +-65504; weights of
+        // language models are far inside that range). `FLLM_BF16_AS_F16=0` keeps BF16.
+        if quant_type == QuantType::BF16
+            && !self.rocm
+            && self.cc < 80
+            && raw_bytes.len() == rows * cols * 2
+            && !std::env::var("FLLM_BF16_AS_F16").is_ok_and(|v| v.trim() == "0")
+        {
+            log_once("cuda-bf16-as-f16", &format!("BF16 weights are stored as FP16 on this GPU (compute capability {} has no BF16 tensor cores; first: {name}); FLLM_BF16_AS_F16=0 keeps BF16", self.cc));
+            let mut halves = Vec::with_capacity(raw_bytes.len());
+            for pair in raw_bytes.chunks_exact(2) {
+                let v = half::bf16::from_bits(u16::from_le_bytes([pair[0], pair[1]])).to_f32().clamp(-65504.0, 65504.0);
+                halves.extend_from_slice(&half::f16::from_f32(v).to_bits().to_le_bytes());
+            }
+            return self.upload_weight(name, &halves, QuantType::F16, rows, cols, bias);
+        }
         let kind = quant_type.to_gguf_type_id();
         if fllm_gguf_probe::fp8b_type(kind) {
             return hopper_fp8::upload_fp8_block(self, name, raw_bytes, kind, rows, cols, bias);
