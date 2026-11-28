@@ -462,6 +462,8 @@ int fllm_dense_skinny_variant(int rows, int cols, int batch) {
     const int forced = g_dense_skinny_mode.load();
     const int mode = forced >= 0 ? forced : env;
     if (mode == 0 || batch < 1 || batch > 16 || (cols & 31) != 0 || rows <= 0 || fllm_exact_math() || fllm_cc() < 75) return 0;
+    // Turing: one token is faster with the bandwidth-bound GEMV below (Tesla T4, Qwen2.5-0.5B FP16: 184 against 158 tokens/s), two and more with the tensor cores
+    if (mode < 0 && fllm_cc() < 80 && batch < 2) return 0;
     if (mode < 0 && (batch < FLLM_DENSE_SKINNY_MIN_BATCH || batch > FLLM_DENSE_SKINNY_MAX_BATCH)) return 0;
     // automatic choice for 9-16 tokens, measured on an A100 (bf16, 16 tokens, GB/s of weights; one tile per warp / two tiles / cuBLASLt):
     //   3584 x 3584: 1161 / 1053 / 869,  18944 x 3584: 1005 / 1145 / 1046,  3584 x 18944: 808 / 824 / 1167,  512 x 3584: 253 / 315 / 282.
