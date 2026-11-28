@@ -247,6 +247,7 @@ __device__ __forceinline__ void mma_dense16(float c[4], const uint32_t a[4], uin
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800)
     // Turing has no m16n8k16 and no BF16 tensor cores: FP16 runs as two m16n8k8 (k 0-7 with a0, a1, b0; k 8-15 with a2, a3, b1: the same fragments and the
     // same accumulators); the host never launches the BF16 kernel below compute capability 8.0
+#if __CUDA_ARCH__ >= 750  // (sm_61 / sm_70 have neither instruction; the host never launches the kernel below compute capability 7.5)
     if (!BF16) {
         asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};\n"
                      : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
@@ -255,6 +256,7 @@ __device__ __forceinline__ void mma_dense16(float c[4], const uint32_t a[4], uin
                      : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
                      : "r"(a[2]), "r"(a[3]), "r"(b1));
     }
+#endif
 #else
     if (BF16) {
         asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
