@@ -742,3 +742,8 @@ prefix caching off, same Colab T4 session, one run each):
 fLLM is 7 % ahead with one request and 2 to 9 % ahead from 8 requests on, and 6 % behind with 4. This is parity-plus, not a large lead. The last change was
 to stop splitting the columns of the tensor-core GEMV on Turing (about 5 % at 8 requests). At 8 requests the GPU is busy 90 % of the time and the dense
 GEMV reaches about 70 % of the card's bandwidth, so the remaining room is in that kernel, not in scheduling.
+
+Follow-up on the same T4: the tensor-core GEMV for up to 8 tokens now uses 16 warps per block on Turing (`FLLM_CUDA_SKINNY_WARPS`, 8 elsewhere). Aggregate tokens/s
+with 1 / 4 / 8 / 16 / 32 requests: 16 warps 180 / 651 / 1285 / 2404 / 3719, 8 warps 180 to 183 / 629 to 636 / 1231 to 1237 / 2309 to 2354 / 3683 to 3736; 4 warps
+and 2 warps are slower (8 requests: 1159 and 1044). Against vLLM (174 / 682 / 1231 / 2113 / 3371): 4 % ahead at 8 requests, 14 % at 16, 10 % at 32, 5 % behind at 4. T4 runs vary by
+about 2 % from session to session.
