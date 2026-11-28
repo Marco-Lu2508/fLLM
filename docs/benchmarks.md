@@ -693,3 +693,28 @@ Llama-3.2-3B as the same 4-bit AWQ checkpoint, `scripts/bench_compare.py --promp
 | SGLang | 3541 / 96.8 | 5659 / 94.9 | 352 / 646 | 276 / **432** |
 
 Reading: with one request fLLM is ahead of both on prompt and decode speed. With four and eight simultaneous requests the three are within a few percent of each other (fLLM leads with short prompts, SGLang is 1.5 % ahead with eight medium prompts). One card, one model, short runs: differences of 3 % or less are noise.
+
+## Tesla T4, FP16 checkpoints against vLLM (2026-11-28)
+
+One Colab Tesla T4 (sm_75, 15 GB), fLLM built from commit 19d41d4 and vLLM 0.34.0 (`--dtype float16`, prefix caching off, `--max-num-seqs 8`), both
+serving the Hugging Face checkpoint as it is (no GGUF), 4096 tokens of context, requests of exactly N new tokens (`ignore_eos`, `min_tokens`), greedy.
+Single stream: median of three 256-token generations. Aggregate: 4 and 8 parallel requests of 200 tokens. Prefill: median of three prompts of 2211
+(2341) tokens. One run per cell, the runs of a shared Colab machine vary by about 5 %.
+
+| Qwen2.5-0.5B-Instruct, FP16 | single decode | 4 parallel | 8 parallel | prefill |
+|---|---|---|---|---|
+| fLLM before (BF16 weights, generic prompt GEMM) | 164 to 169 tokens/s | 296 | 592 to 601 | 2.2k to 2.3k tokens/s |
+| fLLM now | 184 | 566 | 1152 | 17.3k |
+| vLLM 0.34.0 | 167.5 | 650 | 1196 | 4.9k |
+
+| granite-3.0-1b-a400m-instruct (MoE, 32 experts, top 8) | single decode | 4 parallel | 8 parallel | prefill |
+|---|---|---|---|---|
+| fLLM now | 133 | 265 | 529 | 8.0k |
+| vLLM 0.34.0 | 10.8 | 17.6 | 25.5 | 103 |
+
+What changed for the first table: BF16 weights are stored as FP16 on GPUs below sm_80 (`FLLM_BF16_AS_F16=0` keeps BF16); cuBLASLt takes dense FP16
+weights from sm_75 (96 % of the GPU time of a prefill was the generic FP32 kernel); the tensor-core GEMV for dense FP16 weights runs on Turing too (two
+m16n8k8 instead of one m16n8k16) from two tokens. Generated text with and without the tensor-core GEMV: identical for 60 tokens on four prompts.
+vLLM's number for the MoE model is far below what its own dense run suggests and looks like a slow fallback path of that version on this GPU; it is
+reported as measured, not as vLLM's best. For the MoE model the decode time is dominated by `moe_tc_kernel` (about 3 times the weight-bandwidth bound per
+layer), which is the next target.
