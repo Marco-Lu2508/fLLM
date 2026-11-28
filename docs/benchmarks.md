@@ -799,3 +799,9 @@ both without gain and not kept:
 
 The decode of 4 to 32 sequences on quantized weights is limited by the GPU kernels, not by the host: the remaining gap to vLLM's Marlin / AWQ kernels needs a
 kernel-level change, not a scheduling one.
+
+GPU profile of the quantized decode at 4 users (Tesla T4, Qwen2.5-1.5B Q4_K_M, `FLLM_CUDA_PROFILE=1`, CUDA graphs off): the Q4_K projections of 1 to 4 tokens take
+0.032 ms per call on average (128k calls, 4.1 s in total, 997 GMAC/s, about 140 GB/s of weights, 56 % of the roughly 250 GB/s the card reaches) and the Q6_K ones
+0.047 ms (594 GMAC/s, about 120 GB/s). The projections of this 1.5B model are small (hidden size 1536), so each call is closer to its launch and ramp-up latency
+than to the memory bandwidth: the lever is fewer and fatter launches (fusing neighbouring projections) or a faster small-batch kernel, not the scheduling.
+Not built; the numbers above are the baseline for it.
