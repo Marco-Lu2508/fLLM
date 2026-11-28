@@ -728,3 +728,17 @@ A larger model on the same Tesla T4 (build of commit b4c0b57): Qwen2.5-7B-Instru
 8 parallel 271.2 (aggregate), prefill 1129 tokens/s (about 16 TFLOP/s). The weights are read once per decoded token, so the bandwidth bound of the card
 (320 GB/s nominal, roughly 250 GB/s reachable) is 53 to 68 tokens/s; the single-stream figure is about 90 % of the reachable bound. One run, no other
 engine measured on this model.
+
+### Parallel requests on the Tesla T4 (Qwen2.5-0.5B FP16, build of commit 2aa005e)
+
+Aggregate generated tokens/s with N simultaneous requests of 150 tokens each (best of two passes, `--max-seqs 32`, speculation off, vLLM 0.34.0 with
+prefix caching off, same Colab T4 session, one run each):
+
+| parallel requests | 1 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|
+| vLLM 0.34.0 | 174 | 682 | 1231 | 2113 | 3371 |
+| fLLM | 186 | 642 | 1256 | 2277 | 3679 |
+
+fLLM is 7 % ahead with one request and 2 to 9 % ahead from 8 requests on, and 6 % behind with 4. This is parity-plus, not a large lead. The last change was
+to stop splitting the columns of the tensor-core GEMV on Turing (about 5 % at 8 requests). At 8 requests the GPU is busy 90 % of the time and the dense
+GEMV reaches about 70 % of the card's bandwidth, so the remaining room is in that kernel, not in scheduling.
