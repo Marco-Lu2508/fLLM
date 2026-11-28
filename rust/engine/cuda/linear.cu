@@ -518,7 +518,8 @@ static bool dense_skinny_launch(cudaStream_t s, const uint8_t *W, const void *X,
     } else if (batch <= 8) {
         // FLLM_CUDA_SKINNY_WARPS=4|2: fewer warps per block (more blocks per SM and a shorter last wave for small hidden sizes); 8 is the default
         static const int warps = [] { const char *v = getenv("FLLM_CUDA_SKINNY_WARPS"); return v ? atoi(v) : 8; }();
-        if (warps == 4) dense_skinny_kernel<bf16, 1, 4, 1, dense_uf(1), XN, YN><<<dim3((rows + 15) / 16), 128, 0, s>>>(W, X, Y, bias, rows, cols, batch);
+        if (warps == 16) dense_skinny_kernel<bf16, 1, 16, 1, dense_uf(1), XN, YN><<<dim3((rows + 15) / 16), 512, 0, s>>>(W, X, Y, bias, rows, cols, batch);
+        else if (warps == 4) dense_skinny_kernel<bf16, 1, 4, 1, dense_uf(1), XN, YN><<<dim3((rows + 15) / 16), 128, 0, s>>>(W, X, Y, bias, rows, cols, batch);
         else if (warps == 2) dense_skinny_kernel<bf16, 1, 2, 1, dense_uf(1), XN, YN><<<dim3((rows + 15) / 16), 64, 0, s>>>(W, X, Y, bias, rows, cols, batch);
         else dense_skinny_kernel<bf16, 1, 8, 1, dense_uf(1), XN, YN><<<dim3((rows + 15) / 16), 256, 0, s>>>(W, X, Y, bias, rows, cols, batch);
     } else {
