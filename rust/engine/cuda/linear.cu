@@ -518,7 +518,10 @@ static bool dense_skinny_launch(cudaStream_t s, const uint8_t *W, const void *X,
     } else if (batch <= 8) {
         // FLLM_CUDA_SKINNY_WARPS=4|2: fewer warps per block (more blocks per SM and a shorter last wave for small hidden sizes); default 16 on Turing (Tesla T4, Qwen2.5-0.5B FP16, 8 requests: 1231 -> 1285 tokens/s), 8 elsewhere (not measured on Ampere or newer)
         static const int warps = [] { const char *v = getenv("FLLM_CUDA_SKINNY_WARPS"); return v ? atoi(v) : (fllm_cc() < 80 ? 16 : 8); }();
-        if (warps == 16) dense_skinny_kernel<bf16, 1, 16, 1, dense_uf(1), XN, YN><<<dim3((rows + 15) / 16), 512, 0, s>>>(W, X, Y, bias, rows, cols, batch);
+        static const int uf = [] { const char *v = getenv("FLLM_CUDA_SKINNY_UF"); return v ? atoi(v) : 4; }();
+        if (warps == 16 && uf == 1) dense_skinny_kernel<bf16, 1, 16, 1, 1, XN, YN><<<dim3((rows + 15) / 16), 512, 0, s>>>(W, X, Y, bias, rows, cols, batch);
+        else if (warps == 16 && uf == 2) dense_skinny_kernel<bf16, 1, 16, 1, 2, XN, YN><<<dim3((rows + 15) / 16), 512, 0, s>>>(W, X, Y, bias, rows, cols, batch);
+        else if (warps == 16) dense_skinny_kernel<bf16, 1, 16, 1, dense_uf(1), XN, YN><<<dim3((rows + 15) / 16), 512, 0, s>>>(W, X, Y, bias, rows, cols, batch);
         else if (warps == 4) dense_skinny_kernel<bf16, 1, 4, 1, dense_uf(1), XN, YN><<<dim3((rows + 15) / 16), 128, 0, s>>>(W, X, Y, bias, rows, cols, batch);
         else if (warps == 2) dense_skinny_kernel<bf16, 1, 2, 1, dense_uf(1), XN, YN><<<dim3((rows + 15) / 16), 64, 0, s>>>(W, X, Y, bias, rows, cols, batch);
         else dense_skinny_kernel<bf16, 1, 8, 1, dense_uf(1), XN, YN><<<dim3((rows + 15) / 16), 256, 0, s>>>(W, X, Y, bias, rows, cols, batch);
