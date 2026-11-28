@@ -805,3 +805,9 @@ GPU profile of the quantized decode at 4 users (Tesla T4, Qwen2.5-1.5B Q4_K_M, `
 0.047 ms (594 GMAC/s, about 120 GB/s). The projections of this 1.5B model are small (hidden size 1536), so each call is closer to its launch and ramp-up latency
 than to the memory bandwidth: the lever is fewer and fatter launches (fusing neighbouring projections) or a faster small-batch kernel, not the scheduling.
 Not built; the numbers above are the baseline for it.
+
+Also without gain (same T4, same model, short prompt, total tokens per second with 2 / 4 / 8 / 16 / 32 users): FP16 activations for the quantized models
+(`FLLM_ACT_DTYPE=f16`; the merged q/k/v and gate/up matrices of `FLLM_MERGE_PROJ` need Marlin 4-bit weights, which the K-quants are not): Q4_K_M 404 / 632 / 921 /
+1479 / 2164 against 413 / 599 / 938 / 1658 / 2315 with FP32 activations, Q8_0 291 / 478 / 716 / 1278 / 1383 against 299 / 493 / 730 / 1284 / 1418. Merging the projections
+of a Q4_K_M model would also fail on the weight types, which differ between q, k and v (attn_v is Q6_K in Q4_K_M). The only open way to close the 12 to 26 %
+is a faster small-batch kernel for the K-quants (or a grouped launch that takes different weight types), not built.
