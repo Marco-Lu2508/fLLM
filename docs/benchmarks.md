@@ -811,3 +811,8 @@ Also without gain (same T4, same model, short prompt, total tokens per second wi
 1479 / 2164 against 413 / 599 / 938 / 1658 / 2315 with FP32 activations, Q8_0 291 / 478 / 716 / 1278 / 1383 against 299 / 493 / 730 / 1284 / 1418. Merging the projections
 of a Q4_K_M model would also fail on the weight types, which differ between q, k and v (attn_v is Q6_K in Q4_K_M). The only open way to close the 12 to 26 %
 is a faster small-batch kernel for the K-quants (or a grouped launch that takes different weight types), not built.
+
+Q8_0 with 32 users, short prompt (T4, Qwen2.5-1.5B, 2 / 4 / 8 / 16 / 32 users, total tokens per second): a 32-row, 32-token tile that reads the weights once
+instead of two 16-token tiles gave 284 / 477 / 712 / 1221 / 1373 against 299 / 493 / 730 / 1284 / 1418, so the 17 to 32 token step on 8-bit weights is not limited by
+re-reading the weights (a step takes about 32 ms, slower than the FP16 model's at the same batch size: the dequantizing tensor-core GEMM is limited by its own
+conversion work on Turing). Not kept.
