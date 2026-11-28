@@ -319,6 +319,8 @@ int fllm_qgemm8_try(cudaStream_t s, const void *W, const float *X, float *Y, con
         // 17..32 tokens: the 32-token tile needs 67584 bytes of shared memory with two stages, more than the 64 KB of Turing (it declines there and the
         // projection would fall back to the generic FP32 kernel: Tesla T4, Q8_0 1.5B, 32 users: 260 against 903 tokens/s with 16): two 16-token tiles
         if (const int rc = q8_launch<64, 32, 4, 1, 2, true>(s, w, x16, Y, bias, rows, cols, batch, part, part_bytes)) return rc;
+        // 32 rows per block (50176 bytes with two stages): every token of the batch in one pass over the weights
+        if (const int rc = q8_launch<32, 32, 2, 1, 2, true>(s, w, x16, Y, bias, rows, cols, batch, part, part_bytes)) return rc;
         return q8_launch<64, 16, 4, 1, 3, true>(s, w, x16, Y, bias, rows, cols, batch, part, part_bytes);
     }
     if (batch <= 64) return q8_launch<128, 64, 4, 1, 3, false>(s, w, x16, Y, bias, rows, cols, batch, part, part_bytes);
