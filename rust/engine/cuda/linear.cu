@@ -677,6 +677,11 @@ static int launch_kind(cudaStream_t s, const uint8_t *W, const float *X, float *
             if (dense_skinny_try<KIND>(s, W, X, Y, bias, rows, cols, batch)) return fllm_check_launch("linear");
         }
     }
+    // Q8_0, 5..32 tokens: integer dot products with the activations of a chunk in shared memory (mmvq.cu; FLLM_CUDA_NO_Q8_BATCH=1 keeps the GEMM below)
+    if (KIND == KIND_Q8_0 && batch >= 5 && batch <= 32 && !fllm_exact_math()) {
+        X = glu_recover(s, X, batch, cols);
+        if (fllm_q8_batch_try(s, W, X, Y, bias, rows, cols, batch, x16, x16_bytes)) return fllm_check_launch("linear");
+    }
     // (the int8 GEMM below does not fold a gated activation into its input)
     if (KIND == KIND_Q8_0 && batch >= 16) X = glu_recover(s, X, batch, cols);
     // dense 16-bit weights, prompt batches: cuBLASLt loaded at run time (cublaslt_gemm.cu; Hopper / Blackwell kernels), which folds a pending gated

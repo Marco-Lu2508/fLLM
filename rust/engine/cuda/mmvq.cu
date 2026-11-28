@@ -544,6 +544,114 @@ int fllm_mmvq_leg_try(cudaStream_t s, const void *W, int kind, const float *X, f
 }
 
 // ---------------------------------------------------------------------------------------------
+// Q8_0, 5..32 tokens (several concurrent users): the int8 activations of one 256-column chunk of NB tokens are staged in shared memory once per block, a
+// lane takes 8 weights of a 32-weight block (two dp4a per token) and multiplies by the scale of its block, so the weights are read once per pass of NB tokens
+// and the activations come from shared memory (the kernel above reads them from the cache once per weight block and token).
+// ---------------------------------------------------------------------------------------------
+template <int NB, int R>
+__global__ void __launch_bounds__(128)
+mmvq_q8_batch_kernel(const uint8_t *__restrict__ W, const int8_t *__restrict__ Xq, const float2 *__restrict__ Xs, float *__restrict__ Y,
+                     const float *__restrict__ bias, int rows, int cols, int batch) {
+    __shared__ __align__(16) int8_t xs8[NB][256];
+    __shared__ float xsc[NB][8];
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int blk_in = lane >> 2, part = lane & 3;
+    const int row0 = (blockIdx.x * 4 + warp) * R;
+    const int nb = cols >> 5, nbp = pad256(cols) >> 5;
+    const size_t rowb = (size_t)nbp * kind_block_bytes(KIND_Q8_0);
+    const size_t qs_off = (size_t)nbp * 2;
+    const uint8_t *rp[R];
+#pragma unroll
+    for (int r = 0; r < R; r++) rp[r] = W + (size_t)min(row0 + r, rows - 1) * rowb;
+    float acc[R][NB];
+#pragma unroll
+    for (int r = 0; r < R; r++)
+#pragma unroll
+        for (int b = 0; b < NB; b++) acc[r][b] = 0.f;
+    for (int c0 = 0; c0 < cols; c0 += 256) {
+        const int blk = (c0 >> 5) + blk_in;
+        const bool live = blk < nb;
+        uint2 wq[R];
+        float d[R];
+#pragma unroll
+        for (int r = 0; r < R; r++) {
+            wq[r] = make_uint2(0u, 0u);
+            d[r] = 0.f;
+            if (live) {
+                wq[r] = __ldg(reinterpret_cast<const uint2 *>(rp[r] + qs_off + (size_t)blk * 32 + part * 8));
+                d[r] = h2f_bits(ld16(rp[r] + (size_t)blk * 2));
+            }
+        }
+        __syncthreads();
+        for (int i = threadIdx.x; i < NB * 16; i += 128) {
+            const int b = i >> 4, q = i & 15, k = c0 + q * 16;
+            uint4 v = make_uint4(0u, 0u, 0u, 0u);
+            if (b < batch && k < cols) v = __ldg(reinterpret_cast<const uint4 *>(Xq + (size_t)b * cols + k));
+            *reinterpret_cast<uint4 *>(&xs8[b][q * 16]) = v;
+        }
+        for (int i = threadIdx.x; i < NB * 8; i += 128) {
+            const int b = i >> 3, j = i & 7, bg = (c0 >> 5) + j;
+            xsc[b][j] = (b < batch && bg < nb) ? __ldg(Xs + (size_t)b * nb + bg).x : 0.f;
+        }
+        __syncthreads();
+        if (live) {
+#pragma unroll
+            for (int b = 0; b < NB; b++) {
+                if (b >= batch) break;
+                const uint2 xv = *reinterpret_cast<const uint2 *>(&xs8[b][blk_in * 32 + part * 8]);
+                const float sx = xsc[b][blk_in];
+#pragma unroll
+                for (int r = 0; r < R; r++) {
+                    int dot = __dp4a((int)wq[r].x, (int)xv.x, 0);
+                    dot = __dp4a((int)wq[r].y, (int)xv.y, dot);
+                    acc[r][b] += d[r] * (sx * (float)dot);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < R; r++)
+#pragma unroll
+        for (int b = 0; b < NB; b++) acc[r][b] = warp_sum(acc[r][b]);
+    if (lane == 0) {
+#pragma unroll
+        for (int r = 0; r < R; r++) {
+            if (row0 + r >= rows) break;
+            const float bv = bias ? bias[row0 + r] : 0.f;
+#pragma unroll
+            for (int b = 0; b < NB; b++)
+                if (b < batch) Y[(size_t)b * rows + row0 + r] = acc[r][b] + bv;
+        }
+    }
+}
+
+int fllm_q8_batch_try(cudaStream_t s, const void *W, const float *X, float *Y, const float *bias, int rows, int cols, int batch, void *scratch,
+                      size_t scratch_bytes) {
+    static const bool disabled = getenv("FLLM_CUDA_NO_Q8_BATCH") != nullptr;
+    if (disabled || batch < 5 || batch > 32 || (cols & 31) != 0 || rows <= 0 || fllm_exact_math()) return 0;
+    const size_t xq_bytes = ((size_t)batch * cols + 255) & ~size_t(255);
+    const size_t need = xq_bytes + (size_t)batch * (cols / 32) * sizeof(float2);
+    if ((reinterpret_cast<uintptr_t>(X) & 15) != 0 || (reinterpret_cast<uintptr_t>(W) & 15) != 0 || need > scratch_bytes) return 0;
+    fllm_x16_filled = false;
+    int8_t *xq = static_cast<int8_t *>(scratch);
+    float2 *xs = reinterpret_cast<float2 *>(static_cast<char *>(scratch) + xq_bytes);
+    fllm_x8_filled = true;
+    if (!fllm_x8_reuse) {
+        const size_t groups = (size_t)batch * cols / 32;
+        quantize_x8_kernel<<<(unsigned)((groups * 32 + 255) / 256), 256, 0, s>>>(X, xq, xs, groups);
+    }
+    const uint8_t *w = static_cast<const uint8_t *>(W);
+    const int nb = cols >> 5;
+    const unsigned grid = (unsigned)((rows + 7) / 8);
+    for (int b0 = 0; b0 < batch; b0 += 16) {
+        const int n = batch - b0 < 16 ? batch - b0 : 16;
+        if (n <= 8) mmvq_q8_batch_kernel<8, 2><<<grid, 128, 0, s>>>(w, xq + (size_t)b0 * cols, xs + (size_t)b0 * nb, Y + (size_t)b0 * rows, bias, rows, cols, n);
+        else mmvq_q8_batch_kernel<16, 2><<<grid, 128, 0, s>>>(w, xq + (size_t)b0 * cols, xs + (size_t)b0 * nb, Y + (size_t)b0 * rows, bias, rows, cols, n);
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Mixture-of-experts: y[slot] = W[ids[slot]] x[slot / xdiv] for Q4_K / Q5_K / Q6_K / Q4Z / legacy experts whose device weights are
 // listed in a pointer table; the int8 activations are quantized once per input vector.
 // ---------------------------------------------------------------------------------------------
